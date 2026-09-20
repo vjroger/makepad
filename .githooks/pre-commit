@@ -1,0 +1,30 @@
+#!/bin/sh
+# Refuse to record a commit under an identity that does not belong to this project.
+#
+# Enable in a fresh clone with:
+#     git config core.hooksPath .githooks
+#
+# Bypassing this hook with --no-verify is not a fix. Set the right identity:
+#     git config user.name  "Your Name"
+#     git config user.email "you@example.com"
+
+banned='qogni\.com$'
+
+author=$(git var GIT_AUTHOR_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+committer=$(git var GIT_COMMITTER_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+
+for who in "author:$author" "committer:$committer"; do
+	role=${who%%:*}
+	mail=${who#*:}
+	if printf '%s' "$mail" | grep -qiE "$banned"; then
+		echo "pre-commit: refusing to commit — $role email <$mail> is not a makepad identity." >&2
+		echo "pre-commit: fix it with: git config user.email \"you@example.com\"" >&2
+		exit 1
+	fi
+	if [ -z "$mail" ]; then
+		echo "pre-commit: refusing to commit — $role email is empty." >&2
+		exit 1
+	fi
+done
+
+exit 0

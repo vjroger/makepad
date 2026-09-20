@@ -6,6 +6,33 @@
 > It replaces `screencapture -l`, `winid.swift`, CGEvent scripting and the
 > studio websocket bridge for all agent work. Full spec: [App Remote Control](#app-remote-control---remote).
 
+## Commit Identity
+
+Commits in this repository — and in every makepad checkout, staging
+clones included — are authored as **`vjroger <vjroger@gmail.com>`**.
+Nothing else.
+
+Never commit as `r.deleeuw@qogni.com`. That address belongs to an unrelated
+project and must never appear as the author or committer of a makepad commit.
+
+Before your first commit in a fresh clone:
+
+```bash
+git config user.name  "vjroger"
+git config user.email "vjroger@gmail.com"
+git config core.hooksPath .githooks   # enables the guard below
+```
+
+`.githooks/pre-commit` refuses any commit whose author or committer email is
+a banned address or empty. Do not pass `--no-verify` to get around it — fix
+the identity instead. If a commit has already been recorded under the wrong
+address, rewrite it before pushing:
+
+```bash
+git commit --amend --reset-author --no-edit          # the last commit
+git rebase -i --exec 'git commit --amend --reset-author --no-edit' <base>
+```
+
 ## Execution Policy
 - Launch UI programs as standalone release binaries from this checkout. Do
   not use the Studio remote bridge, `ObserveMount`, `RunItem`, or any
