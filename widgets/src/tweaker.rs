@@ -109,7 +109,7 @@ use crate::{
 };
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, MixGroup, PinnedTheme, ThemeLab};
-use crate::theme_builder::{all_suggestions, Applied as Built, BuilderParams, Harmony, Suggestion, ThemeBuilder, OWN_LABEL};
+use crate::theme_builder::{all_suggestions, Applied as Built, BuilderParams, Harmony, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
@@ -9085,12 +9085,14 @@ pub struct Tweaker {
     /// round the colour wheel reports per frame.
     #[rust]
     tb_suggest_due: bool,
-    /// Whether the harmony picker has been given its list. The six harmonies
-    /// never change, so the labels go on once -- but the sidebar is rebuilt
-    /// whenever the panel's palette moves and takes the picker with it, so
-    /// this is cleared there rather than merely set here.
+    /// The list the harmony picker was last given. Kept and compared rather
+    /// than written every draw, because writing labels asks for a redraw and a
+    /// draw that asks for a draw never stops -- and the list is no longer a
+    /// constant: it grows a seventh entry while a palette off the strip is in
+    /// force. Emptied when the sidebar is rebuilt and takes the picker with
+    /// it, because a new picker has no list in it.
     #[rust]
-    tb_harmony_listed: bool,
+    tb_harmony_listed: Vec<String>,
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -9553,7 +9555,7 @@ impl Tweaker {
             // The harmony picker goes with the sidebar, and a new one has no
             // list in it. Said here rather than trusted to the draw, because
             // a picker that believes it has been filled shows six blank rows.
-            self.tb_harmony_listed = false;
+            self.tb_harmony_listed.clear();
             self.sidebar = None;
         }
         if self.theme_colors.is_empty() {
@@ -11199,17 +11201,30 @@ impl Tweaker {
                                 flow: Right
                                 spacing: 3
                                 align: Align{x: 0.0 y: 0.5}
-                                // Named nowhere and addressed by nothing: it
-                                // says one word and never changes it, and an
-                                // id is a route the panel would then owe a
+                                // Named nowhere and addressed by nothing: they
+                                // say one word each and never change it, and
+                                // an id is a route the panel would then owe a
                                 // reason for.
+                                //
+                                // The harmony gets a word in front of it for
+                                // the same reason the colour does: a bare list
+                                // box at the end of a row reads as a field
+                                // somebody typed into, and the word is what
+                                // says it is a choice. Both are as narrow as
+                                // the words allow, because what is left over
+                                // goes to the list -- which has to hold
+                                // "Complementary" at the sidebar's own width.
                                 PanelLabelSmall {
-                                    width: 58
-                                    text: "Favourite"
+                                    width: 32
+                                    text: "Color"
                                 }
                                 tb_favourite := FabColorPick {
                                     width: 34
                                     height: 18
+                                }
+                                PanelLabelSmall {
+                                    width: 48
+                                    text: "Harmony"
                                 }
                                 tb_harmony := PanelDropDown {
                                     width: Fill
@@ -18936,16 +18951,8 @@ impl Tweaker {
                 pick.set_rgba(cx, rgba_of(params.favourite));
             }
         }
-        let harmony = seed_row.child(live_id!(tb_harmony));
-        self.tb_harmony_uid = harmony.widget_uid().0;
-        if !self.tb_harmony_listed {
-            self.tb_harmony_listed = true;
-            harmony
-                .as_drop_down()
-                .set_labels(cx, Harmony::ALL.iter().map(|h| h.label().to_string()).collect());
-        }
-        let chosen = Harmony::ALL.iter().position(|h| *h == params.harmony).unwrap_or(0);
-        harmony.as_drop_down().set_selected_item(cx, chosen);
+        self.tb_harmony_uid = seed_row.child(live_id!(tb_harmony)).widget_uid().0;
+        self.draw_the_harmony_picker(cx, &seed_row);
         self.draw_the_suggestion_strip(cx, &body);
         let row = body.child(live_id!(tb_appearance_row));
         let dark = row.child(live_id!(tb_dark));
@@ -18993,6 +19000,47 @@ impl Tweaker {
         }
         let reading = self.tb_reading.clone();
         body.child(live_id!(tb_read)).set_text(cx, &reading);
+    }
+
+    /// The harmony picker: what is in the list, and which of it is showing.
+    ///
+    /// Six harmonies, and a seventh place that exists only while a palette off
+    /// the strip is in force that is in no harmony the library names -- one of
+    /// the built-in combinations, or one of the person's own. Those are chosen
+    /// by pressing a chip and not by picking a harmony, so the picker has
+    /// nothing true to show for them, and a picker left showing the harmony
+    /// that happened to be set before is a control saying the theme is
+    /// something it is not. The seventh entry says what the chip says.
+    ///
+    /// It is an entry and not a caption over the top because a dropdown shows
+    /// its selected entry and nothing else. Choosing it does nothing: the
+    /// press handler asks `Harmony::ALL` for the index it was given, and the
+    /// seventh place is past the end -- which is also what leaves every real
+    /// entry doing exactly what it did, chip and all.
+    fn draw_the_harmony_picker(&mut self, cx: &mut Cx, seed_row: &WidgetRef) {
+        let borrowed = self
+            .tb_chosen_index()
+            .map(|index| &self.tb_suggestions[index])
+            .filter(|offer| offer.harmony.is_none())
+            .map(|offer| offer.label.clone());
+        let mut labels: Vec<String> = Harmony::ALL.iter().map(|h| h.label().to_string()).collect();
+        labels.extend(borrowed.clone());
+        let picker = seed_row.child(live_id!(tb_harmony));
+        if self.tb_harmony_listed != labels {
+            self.tb_harmony_listed = labels.clone();
+            picker.as_drop_down().set_labels(cx, labels);
+        }
+        // After the labels and never before: the picker clamps what it is
+        // told to the list it has, so a seventh place asked for over a list of
+        // six would land on the sixth harmony.
+        let shown = match borrowed {
+            Some(_) => Harmony::ALL.len(),
+            None => {
+                let harmony = self.tb_builder.params().harmony;
+                Harmony::ALL.iter().position(|which| *which == harmony).unwrap_or(0)
+            }
+        };
+        picker.as_drop_down().set_selected_item(cx, shown);
     }
 
     /// The row of palettes on offer, and the line that says what it is.
@@ -19081,11 +19129,22 @@ impl Tweaker {
             None => {
                 let total = self.tb_suggestions.len();
                 let mut idle = format!(
-                    "{total} {} for this colour",
+                    "{total} {} for this color",
                     if total == 1 { "palette" } else { "palettes" }
                 );
-                // The person's own only where there are some: a count of
-                // nought is a line about a file they have never made.
+                // Where the strip is longer than the rule alone would make
+                // it, what the extra is: the combinations this colour turned
+                // up in, and the person's own schemes that hold it. Each only
+                // where there are some -- a count of nought is a line about a
+                // book this colour is not in, or a file they have never made.
+                let combinations = self
+                    .tb_suggestions
+                    .iter()
+                    .filter(|offer| offer.label.starts_with(COMBINATION_LABEL))
+                    .count();
+                if combinations > 0 {
+                    idle.push_str(&format!(" \u{00b7} {combinations} combinations"));
+                }
                 let own = self
                     .tb_suggestions
                     .iter()
@@ -25298,6 +25357,117 @@ line two");
             panel.tb_suggestions.iter().all(|offer| offer.label != OWN_LABEL),
             "a scheme from a file that no longer exists is still on the strip"
         );
+    }
+
+    /// The harmony picker says what is in force, and a palette that is in no
+    /// harmony is not left looking like one.
+    ///
+    /// A combination out of the book and one of the person's own are chosen by
+    /// pressing a chip, not by picking a harmony, so the picker has nothing
+    /// true to show for them and would otherwise go on showing whichever name
+    /// happened to be set before. It shows the chip's name instead, out of a
+    /// seventh place in the list that exists only while that palette stands --
+    /// and picking a real harmony takes the place away again along with the
+    /// chip, which is what the seventh place must not quietly break.
+    #[test]
+    fn the_harmony_picker_names_a_palette_that_is_in_no_harmony() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let picker = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(live_id!(tb_harmony))
+            .as_drop_down();
+        // Nothing off the strip yet: six harmonies and the one that is set.
+        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len());
+        assert_eq!(picker.selected_label(), panel.tb_builder.params().harmony.label());
+
+        // A colour lifted out of the book, so that the strip has a
+        // combination on it to press.
+        let harmony = panel.tb_builder.params().harmony;
+        panel.tb_set_seed(crate::theme_combinations::COMBINATIONS[0][0], harmony);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        let at = panel
+            .tb_suggestions
+            .iter()
+            .position(|offer| offer.label.starts_with(COMBINATION_LABEL))
+            .expect("a colour out of the book found no combination");
+        let named = panel.tb_suggestions[at].label.clone();
+        assert!(
+            panel.tb_strip_reading().contains("combinations"),
+            "the line under the strip does not count the combinations: {}",
+            panel.tb_strip_reading()
+        );
+        panel.tb_page = at / TB_CHIP_IDS.len();
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
+        assert_eq!(panel.tb_chosen_index(), Some(at));
+        the_palette_lands(&mut cx, &mut panel, 2.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(picker.selected_label(), named, "the picker is not showing the combination that is in force");
+        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len() + 1);
+        assert!(
+            panel.tb_strip_reading().starts_with(&named),
+            "the line under the strip does not name it either: {}",
+            panel.tb_strip_reading()
+        );
+
+        // The seventh place is a name and not a choice: picking it changes
+        // nothing at all.
+        let uid = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(live_id!(tb_harmony))
+            .widget_uid();
+        let was = panel.tb_builder.params();
+        let actions = cx.capture_actions(|cx| {
+            cx.widget_action(uid, DropDownAction::Select(Harmony::ALL.len()));
+        });
+        panel.handle_sidebar_actions(&mut cx, &actions);
+        assert_eq!(panel.tb_builder.params(), was, "the picker's own name was pickable");
+        assert_eq!(panel.tb_chosen_index(), Some(at));
+
+        // A real harmony, which lets the palette's companions go: the chip
+        // goes out, the seventh place goes with it, and the picker is back to
+        // naming a harmony.
+        let actions = cx.capture_actions(|cx| {
+            cx.widget_action(uid, DropDownAction::Select(2));
+        });
+        panel.handle_sidebar_actions(&mut cx, &actions);
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_chosen_index(), None);
+        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len(), "the borrowed name outlived the chip");
+        assert_eq!(picker.selected_label(), Harmony::ALL[2].label());
+
+        // And one of the person's own does what a combination does. The
+        // section is left and entered again to read the file, which puts the
+        // controls back on the house settings -- so the scheme is built round
+        // the favourite those have.
+        let favourite = BuilderParams::house(true).favourite;
+        std::fs::write(
+            _store.dir.join(crate::theme_store::PALETTES_FILE),
+            format!("#{:06X} #E08A2A #2AE0A0 #6A6E5A\r\n", favourite >> 8),
+        )
+        .expect("a palette file to read back");
+        panel.toggle_theme_builder(&mut cx);
+        panel.toggle_theme_builder(&mut cx);
+        assert_eq!(panel.tb_builder.params().favourite, favourite, "the section came back on some other colour");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let at = panel
+            .tb_suggestions
+            .iter()
+            .position(|offer| offer.label == OWN_LABEL)
+            .expect("the scheme built round the favourite was not offered");
+        panel.tb_page = at / TB_CHIP_IDS.len();
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
+        the_palette_lands(&mut cx, &mut panel, 4.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(picker.selected_label(), OWN_LABEL);
     }
 
     /// "Save as" while a built theme is in force saves THAT theme.

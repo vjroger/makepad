@@ -427,9 +427,15 @@ impl Harmony {
     ];
 
     /// What a picker shows.
+    ///
+    /// [`Harmony::House`] is shown as "Default" and not under its own name: a
+    /// person reading a list of schemes wants to know which one they get for
+    /// doing nothing, and "house" is a word about where the offsets came from
+    /// rather than about what the entry does. The variant keeps its name,
+    /// because inside the library that is still what it is.
     pub fn label(self) -> &'static str {
         match self {
-            Harmony::House => "House",
+            Harmony::House => "Default",
             Harmony::Single => "Single hue",
             Harmony::Analogous => "Analogous",
             Harmony::Complementary => "Complementary",
