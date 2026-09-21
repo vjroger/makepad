@@ -881,6 +881,44 @@ pub fn script_mod(vm: &mut ScriptVm) {
             gap: 2.0
         }
 
+        // ---- one whole palette, pressable ----
+        set_type_default() do #(DrawFabPaletteChip::script_shader(vm)){
+            ..mod.draw.DrawQuad
+            band_0: vec4(0.0, 0.0, 0.0, 1.0)
+            band_1: vec4(0.0, 0.0, 0.0, 1.0)
+            band_2: vec4(0.0, 0.0, 0.0, 1.0)
+            band_3: vec4(0.0, 0.0, 0.0, 1.0)
+            hover: 0.0
+            cur: 0.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.0)
+                // The band under this fragment, chosen by three steps rather
+                // than by branching: a chip is small and every fragment of it
+                // takes this path.
+                let y = self.pos.y
+                let mut band = self.band_0
+                band = band.mix(self.band_1, step(0.25, y))
+                band = band.mix(self.band_2, step(0.5, y))
+                band = band.mix(self.band_3, step(0.75, y))
+                sdf.fill_keep(vec4(band.xyz, 1.0))
+                // The ring is how the chip in force is told from the rest,
+                // so it thickens as well as lights: a row of chips at this
+                // size is mostly colour, and a hue alone does not carry a
+                // one-pixel difference in an edge.
+                let ring = fab.color_border.mix(fab.color_focus_ring, max(self.hover, self.cur))
+                sdf.stroke(ring, 1.0 + self.cur)
+                return sdf.result
+            }
+        }
+        mod.widgets.FabPaletteChipBase = #(FabPaletteChip::register_widget(vm))
+        /** A whole palette in one pressable block: four colours stacked, the
+         * first on top, outlined while it is the one in force. */
+        mod.widgets.FabPaletteChip = set_type_default() do mod.widgets.FabPaletteChipBase{
+            width: Fill
+            height: 36
+        }
+
         mod.widgets.FabColorPickBase = #(FabColorPick::register_widget(vm))
         mod.widgets.FabColorPick = set_type_default() do mod.widgets.FabColorPickBase{
             width: fab.swatch_width
@@ -4349,6 +4387,184 @@ impl Widget for FabPaletteStrip {
 }
 
 // ===========================================================================
+// FabPaletteChip — a whole palette as one pressable stack of colour bands.
+// Four colours in a single quad, hit-tested as one thing; the host writes the
+// bands and says which chip is the one in force, and a press comes back.
+// ===========================================================================
+
+/// Four colours stacked in one quad, rounded as a whole.
+///
+/// One quad and not four: a chip is one thing to a hand -- it is pressed, it
+/// is outlined, it is the palette -- and four boxes with a corner each would
+/// have to be rounded outside-only and kept in step. The bands are chosen in
+/// the shader off the fragment's own height.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawFabPaletteChip {
+    #[deref]
+    draw_super: DrawQuad,
+    /// Top band first, the way the colours are read down the chip.
+    #[live]
+    pub band_0: Vec4f,
+    #[live]
+    pub band_1: Vec4f,
+    #[live]
+    pub band_2: Vec4f,
+    #[live]
+    pub band_3: Vec4f,
+    #[live]
+    pub hover: f32,
+    /// The chip the host is wearing: a ring that stays on without a pointer.
+    #[live]
+    pub cur: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum FabPaletteChipAction {
+    /// Pressed. There is nothing else a chip does.
+    Pick,
+    #[default]
+    None,
+}
+
+/// One palette, pressable.
+///
+/// Its own control rather than a button with a colour written into it: what a
+/// chip has to show is four colours at once, and what it has to do is take a
+/// press. A button shows one colour and a row of coloured boxes takes none.
+#[derive(Script, ScriptHook, Widget)]
+pub struct FabPaletteChip {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[live]
+    draw_chip: DrawFabPaletteChip,
+    #[walk]
+    walk: Walk,
+    /// Whether it is showing a palette at all.
+    ///
+    /// A hidden chip claims NOTHING, and that is the point of it: a strip of
+    /// these holds a fixed row of slots dividing the row's width between
+    /// them, and a slot whose chip has gone still holds its share. Hiding the
+    /// slot instead would hand its width to its neighbours and a page with
+    /// one palette on it would be one chip a whole row wide.
+    #[live(true)]
+    #[visible]
+    pub visible: bool,
+    #[rust]
+    hover: bool,
+    #[rust]
+    current: bool,
+}
+
+impl FabPaletteChip {
+    /// The four colours, top band first.
+    ///
+    /// Silent when nothing moved, for [`FabDiagonalLabel::set_text`]'s
+    /// reason: a strip of these is written whole on every draw, and a setter
+    /// that dirtied the draw list each time would redraw the panel forever.
+    pub fn set_colors(&mut self, cx: &mut Cx, colors: [Vec4f; 4]) {
+        let bands = [
+            self.draw_chip.band_0,
+            self.draw_chip.band_1,
+            self.draw_chip.band_2,
+            self.draw_chip.band_3,
+        ];
+        if bands == colors {
+            return;
+        }
+        self.draw_chip.band_0 = colors[0];
+        self.draw_chip.band_1 = colors[1];
+        self.draw_chip.band_2 = colors[2];
+        self.draw_chip.band_3 = colors[3];
+        self.redraw(cx);
+    }
+
+    /// Whether this is the chip the host is wearing.
+    pub fn set_current(&mut self, cx: &mut Cx, current: bool) {
+        if self.current == current {
+            return;
+        }
+        self.current = current;
+        self.redraw(cx);
+    }
+
+    /// What it is showing, for a test that has to read the bands back off the
+    /// widget rather than off the state that wrote them.
+    pub fn colors(&self) -> [Vec4f; 4] {
+        [
+            self.draw_chip.band_0,
+            self.draw_chip.band_1,
+            self.draw_chip.band_2,
+            self.draw_chip.band_3,
+        ]
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.current
+    }
+}
+
+impl Widget for FabPaletteChip {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            // Nothing drawn and no box claimed. The slot round it keeps its
+            // share of the row all the same, which is the whole point.
+            self.hover = false;
+            return DrawStep::done();
+        }
+        self.draw_chip.hover = if self.hover { 1.0 } else { 0.0 };
+        self.draw_chip.cur = if self.current { 1.0 } else { 0.0 };
+        self.draw_chip.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+
+    /// Through `hits`, so that a press anywhere else in the host holds the
+    /// pointer and this chip neither lights nor answers while it does; and
+    /// the press it does take holds the pointer against everything else.
+    ///
+    /// The choice is made on the release and over the chip, the way every
+    /// button is: a hand that came down on a palette and slid off it before
+    /// letting go has chosen nothing, and a strip of these is a row of small
+    /// targets side by side where that happens.
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_chip.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                if !self.hover {
+                    self.hover = true;
+                    self.redraw(cx);
+                }
+            }
+            Hit::FingerHoverOut(_) => {
+                if self.hover {
+                    self.hover = false;
+                    self.redraw(cx);
+                }
+            }
+            // Taken, and nothing said: what it buys is the pointer, which is
+            // what stops the chip beside it answering the release.
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.hover = true;
+                self.redraw(cx);
+            }
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                if fe.is_over {
+                    cx.widget_action(uid, FabPaletteChipAction::Pick);
+                } else if self.hover {
+                    self.hover = false;
+                    self.redraw(cx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ===========================================================================
 // FabColorPick — a swatch that opens a self-managed popover (wheel + RGBA
 // rows + hex). No shell bus: the popover draws in an overlay draw list
 // anchored at the swatch, outside-click commits, Escape reverts.
@@ -5851,6 +6067,51 @@ mod tests {
             label.matches("text_style:").count(),
             label.matches("text_style: fab.font{").count(),
             "a text style on the header is not built from `fab.font`"
+        );
+    }
+
+    /// The chip is the one control in the kit that is MEANT to be a colour
+    /// the panel knows nothing about: its four bands are the theme being
+    /// offered, and a chip drawn from the panel's table would show the panel
+    /// instead of the palette. So the reading is the other way round -- the
+    /// bands come off the host, and everything the panel owns, which is the
+    /// ring that says which chip is hovered and which is in force, comes off
+    /// the fab table like everything else.
+    #[test]
+    fn the_palette_chip_shows_the_hosts_colours_and_wears_the_panels_ring() {
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let chip = src
+            .split("do #(DrawFabPaletteChip::script_shader(vm)){")
+            .nth(1)
+            .expect("the file declares the chip's shader");
+        let chip = &chip[..chip
+            .find("mod.widgets.FabColorPickBase")
+            .expect("the chip is followed by the colour picker")];
+        assert!(
+            chip.contains("mod.widgets.FabPaletteChip = "),
+            "the reading stops short of the chip's template"
+        );
+        assert!(!chip.contains("#x"), "the chip writes a colour of its own");
+        assert!(
+            !chip.contains("theme.") && !chip.contains("mod.theme"),
+            "the chip reads the app's theme"
+        );
+        for band in ["self.band_0", "self.band_1", "self.band_2", "self.band_3"] {
+            assert!(chip.contains(band), "the chip no longer paints `{band}`");
+        }
+        for ink in ["fab.color_border", "fab.color_focus_ring"] {
+            assert!(chip.contains(ink), "the chip's ring no longer comes from `{ink}`");
+        }
+        // The one colour written out is the band's own opacity: a palette
+        // holding a translucent colour must still show as a solid block, or
+        // a chip becomes a reading of the panel's ground through it.
+        assert_eq!(
+            chip.matches("vec4(").count(),
+            chip.matches("vec4(0.0, 0.0, 0.0, 1.0)").count() + chip.matches("vec4(band.xyz, 1.0)").count(),
+            "the chip's face writes a colour that is neither a band nor a band's opacity"
         );
     }
 
