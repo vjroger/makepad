@@ -64,6 +64,23 @@
 //! clears both the seam and the edits, which is more than a slider move has
 //! any business doing.
 //!
+//! # The older tokens
+//!
+//! A palette that only moved the roles moved almost nothing a person could
+//! see. Two thirds of the widget files read no role at all, and the classic
+//! controls -- the check box, the radio, the text field, the tab, the drop
+//! down, the scroll bar -- read none between them, so a theme grown from an
+//! orange favourite came out with an orange page, grey controls and the one
+//! focus blue both base theme files have always had. [`ACCENTED`] is the
+//! mapping that fixes it: a table from the built roles to the older tokens
+//! those controls do read, with all three brand families spent deliberately
+//! -- the primary on the value and the main action, the secondary on what is
+//! selected or on, the tertiary on what is being pointed out -- so that an
+//! ordinary screen of ordinary controls shows the palette rather than one
+//! colour of it. Read that table's own doc for what is in it and what is
+//! not. None of it touches a widget file: which token a widget reads is not
+//! this panel's to change.
+//!
 //! # What the globals cost
 //!
 //! A theme whose spacing, roundness, type or ground tint has moved is built
@@ -78,9 +95,9 @@ use crate::desktop_style::{self, DesktopStyle, StyleSheet};
 use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
 use crate::theme_combinations::COMBINATIONS;
 use crate::theme_tokens::{
-    base_theme_keys, ground_tint, held_pairs, hsl_to_rgb, reads_on, rgb_to_hsl, roles_from_seed_tuned,
+    base_theme_keys, ground_tint, held_pairs, hsl_to_rgb, over, reads_on, rgb_to_hsl, roles_from_seed_tuned,
     theme_module_script, theme_script_body, theme_source_with_globals, token_spec, Appearance, BlendTheme,
-    FamilyTargets, RoleSource, DERIVED_ROLES, KEPT_ERROR, KEPT_WARNING,
+    FamilyTargets, RoleSource, DERIVED_ROLES, KEPT_ERROR, KEPT_WARNING, LEGIBLE, READABLE,
 };
 use crate::BaseTheme;
 use std::collections::BTreeMap;
@@ -487,6 +504,751 @@ fn grounds(scheme: Scheme, tint: u32, amount: f64) -> (u32, u32) {
     (ground(bg), ground(fg))
 }
 
+/// What a base theme's file says one of its colour keys is, worked out from
+/// the file's own text.
+///
+/// The builder never moves these tokens -- until this mapping nothing in a
+/// built theme touched one at all -- so they are not values that have to be
+/// PREDICTED. They are values that have to be KNOWN, and for two reasons.
+/// They are the grounds a check mark, a value fill or a caret lands on, and
+/// an accent chosen without looking at the ground under it can come out
+/// invisible. And they are the bar a new colour has to clear: a control that
+/// reads WORSE than the grey it replaced is not an improvement, and the grey
+/// it replaced is exactly what this function says.
+///
+/// Three forms cover the colour half of both files -- a literal, an alias to
+/// another key, and `mix`, whose amount is either a plain number or the
+/// `pow(fraction, theme.color_contrast)` the translucent ladder is built
+/// with. That is enough for every name [`ACCENTED`] uses, and a gate test
+/// says so in both files. Anything else -- `theme.color_d_3 * 0.8`, or the
+/// two page colours, which run over several lines -- comes back as `None`,
+/// and a row that needs a value and gets none simply leaves its token alone.
+///
+/// `known` is the build's own answers so far, and it is consulted before the
+/// file is: the page and the roles have already been worked out here, under
+/// a tint the file knows nothing about, and reading them off the file again
+/// would answer with the untinted theme.
+fn file_value(scheme: Scheme, key: &str, known: &BTreeMap<String, u32>) -> Option<u32> {
+    file_key(scheme, key, known, 0)
+}
+
+/// [`file_value`] on a key, with the hop count that stops a file whose
+/// aliases somehow come round in a circle from hanging the builder.
+fn file_key(scheme: Scheme, key: &str, known: &BTreeMap<String, u32>, depth: u32) -> Option<u32> {
+    if depth > 8 {
+        return None;
+    }
+    if let Some(rgba) = known.get(key) {
+        return Some(*rgba);
+    }
+    file_expr(scheme, &file_stated(scheme, key)?, known, depth + 1)
+}
+
+/// What a file writes after one of its top-level keys, comment and
+/// surrounding space taken off: `color_inset: theme.color_d_1` is
+/// `theme.color_d_1`.
+fn file_stated(scheme: Scheme, key: &str) -> Option<String> {
+    let opening = format!("        {key}: ");
+    scheme
+        .source()
+        .lines()
+        .find_map(|line| line.strip_prefix(&opening))
+        .map(|rest| rest.split("//").next().unwrap_or(rest).trim().to_string())
+}
+
+/// One of the three forms, worked out the way the VM will work it out --
+/// `vm_mix` and not `mix_rgb`, because a reading of a built theme has to be
+/// a reading of the theme the VM will actually make.
+fn file_expr(scheme: Scheme, text: &str, known: &BTreeMap<String, u32>, depth: u32) -> Option<u32> {
+    if depth > 8 {
+        return None;
+    }
+    let text = text.trim();
+    if let Some(alias) = text.strip_prefix("theme.") {
+        return alias.chars().all(is_key_char).then(|| file_key(scheme, alias, known, depth))?;
+    }
+    if text.starts_with('#') {
+        return hash_color(text);
+    }
+    let inside = text.strip_prefix("mix(")?.strip_suffix(')')?;
+    let parts = commas(inside)?;
+    let [a, b, t] = parts[..] else { return None };
+    let a = file_expr(scheme, a, known, depth + 1)?;
+    let b = file_expr(scheme, b, known, depth + 1)?;
+    Some(vm_mix(a, b, file_amount(scheme, t)?))
+}
+
+/// A `mix`'s third argument: a number, or the power of the contrast global
+/// that every rung of the translucent ladder is spaced by.
+fn file_amount(scheme: Scheme, text: &str) -> Option<f64> {
+    let text = text.trim();
+    let Some(inside) = text.strip_prefix("pow(").and_then(|rest| rest.strip_suffix(')')) else {
+        return text.parse::<f64>().ok();
+    };
+    let (base, exponent) = inside.split_once(',')?;
+    if exponent.trim() != "theme.color_contrast" {
+        return None;
+    }
+    let contrast = file_number(scheme, "color_contrast").unwrap_or(1.0);
+    Some(base.trim().parse::<f64>().ok()?.powf(contrast))
+}
+
+/// An argument list split on its own commas, leaving any inside a nested
+/// call where they are. `None` for anything that is not three arguments,
+/// which is the only shape `mix` has.
+fn commas(text: &str) -> Option<Vec<&str>> {
+    let mut out = Vec::new();
+    let (mut depth, mut from) = (0i32, 0usize);
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&text[from..at]);
+                from = at + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&text[from..]);
+    (out.len() == 3).then_some(out)
+}
+
+/// A colour literal as the script's own parser reads one: `#x` or `#`, then
+/// one, three, four, six or eight hex digits, the short forms doubling each
+/// digit. `#F` is white and `#0` is black, which is how both files write the
+/// ends of the opaque ladder.
+fn hash_color(text: &str) -> Option<u32> {
+    let digits = text.trim().strip_prefix('#')?.trim_start_matches('x');
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let widened: String = match digits.len() {
+        1 | 3 | 4 => digits.chars().flat_map(|c| [c, c]).collect(),
+        6 | 8 => digits.to_string(),
+        _ => return None,
+    };
+    let widened = match widened.len() {
+        2 => format!("{widened}{widened}{widened}FF"),
+        6 => format!("{widened}FF"),
+        8 => widened,
+        _ => return None,
+    };
+    u32::from_str_radix(&widened, 16).ok()
+}
+
+/// Which member of which family a row of [`ACCENTED`] draws on.
+///
+/// All three brand families are spent here, and that is the point of the
+/// table. A library that gave every coloured thing the primary would answer
+/// "pick a colour, get a theme" with a screen in one colour, which is what
+/// the panel used to do and what a person looking at it said out loud: the
+/// palette had three colours in it and the interface showed one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Source {
+    /// The accent itself, the colour a person picked.
+    Primary,
+    /// The accent as something to stand ON.
+    PrimaryContainer,
+    /// What the palette already decided reads on that container, and so the
+    /// second thing to try where the accent itself is too close to a ground.
+    OnPrimaryContainer,
+    Secondary,
+    SecondaryContainer,
+    OnSecondaryContainer,
+    Tertiary,
+    TertiaryContainer,
+    OnTertiaryContainer,
+}
+
+impl Source {
+    fn of(self, roles: &ColorRoles) -> u32 {
+        match self {
+            Source::Primary => roles.primary.base,
+            Source::PrimaryContainer => roles.primary.container,
+            Source::OnPrimaryContainer => roles.primary.on_container,
+            Source::Secondary => roles.secondary.base,
+            Source::SecondaryContainer => roles.secondary.container,
+            Source::OnSecondaryContainer => roles.secondary.on_container,
+            Source::Tertiary => roles.tertiary.base,
+            Source::TertiaryContainer => roles.tertiary.container,
+            Source::OnTertiaryContainer => roles.tertiary.on_container,
+        }
+    }
+}
+
+/// How a row's source reaches its tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Reaches {
+    /// Straight, because nothing draws the token: it is one of the names the
+    /// library keeps the accent itself under, for a sheet to be regrown from.
+    Named,
+    /// As something drawn ON the grounds named -- a mark, a ring, a caret, a
+    /// value fill. The source where it stands clear of every one of them,
+    /// `alt` where only that does, and failing both the plainer of black and
+    /// white. `need` is the bar: a graphic answers to `LEGIBLE`, words to
+    /// `READABLE`.
+    Ink { alt: Source, on: &'static [&'static str], need: f64 },
+    /// As a ground something else is drawn on. The source where `ink` still
+    /// reads on it, `alt` where only that does, and the base theme's own
+    /// value where neither does -- a selection a person cannot read the text
+    /// in is worse than a selection with no colour in it.
+    ///
+    /// Where `ink` is itself a token this table pins, the question does not
+    /// arise and the source is taken outright: the ink is chosen against
+    /// this ground afterwards, in the second pass, so a ground that gave way
+    /// to an ink that was about to move anyway would have given way for
+    /// nothing.
+    Ground { alt: Source, ink: &'static str, need: f64 },
+    /// As the source at the token's own alpha: a wash over whatever is under
+    /// it rather than a colour in front of it. What a drop target is -- it
+    /// has to be seen through, so it cannot be a colour that covers.
+    Veil,
+    /// As a lean: the token's own value carried `most` of the way toward the
+    /// source, at the token's OWN alpha, and given back as far as it has to
+    /// be for `ink` to go on reading on the result, so a fill can never
+    /// swallow its own label.
+    ///
+    /// `waits` is whether the lean is a matter of degree. A control's ground
+    /// is: it waits on [`control_ground_lean`] and is nothing at all at the
+    /// near end. A selection is not -- it lands at once, like every other
+    /// accent -- and leans rather than taking the family's container outright
+    /// only where the base theme's own ground is DARKER than the container,
+    /// so that taking it would cost the words on it the contrast the base
+    /// theme gave them.
+    ///
+    /// The alpha is what makes this safe, and it is not a detail. Nearly
+    /// every control ground in both files is plain white or plain black at
+    /// some percentage -- the ladder is one colour at nine weights -- so a
+    /// mix that carried the alpha across would swap a fifteen-per-cent wash
+    /// for a half-opaque fill and rewrite the whole depth of the interface
+    /// on the way to tinting it. Kept, the wash stays a wash and only its
+    /// colour moves.
+    Lean { most: f64, ink: &'static str, need: f64, waits: bool },
+}
+
+/// One row of the mapping.
+struct Accented {
+    /// The older tokens this row pins. More than one where a family of
+    /// states is the same thing drawn in the same place: a slider's value
+    /// fill is `color_val` plain, hovered, focused and dragged, and a fill
+    /// that took the accent only while the pointer was elsewhere would be a
+    /// control that changes colour under the hand.
+    ///
+    /// A state is also listed where the FILE aliases it to one that moves.
+    /// `color_inset_focus` is `color_inset_hover` is `color_inset`; a pin
+    /// lands on the object after it has derived, so pinning the hover and
+    /// leaving the focus would give one control two grounds.
+    tokens: &'static [&'static str],
+    from: Source,
+    reaches: Reaches,
+}
+
+/// FROM the built roles TO the older tokens the classic controls actually
+/// draw from. The other direction of `theme_tokens::derived_roles` with
+/// `RoleGrowth::FromAccent`, which grows the roles from a style sheet's older
+/// accent; here the roles exist and it is the older tokens that are still the
+/// base theme's greys.
+///
+/// # Why a table and not a pin per control
+///
+/// Only 35 of the 109 widget files that read a theme colour read a ROLE at
+/// all, and the classic ones read none. `check_box`, `radio_button`,
+/// `text_input`, `tab`, `tab_bar`, `drop_down`, `scroll_bar` and
+/// `link_label` between them read zero; `slider` reads one. They draw from
+/// `theme_desktop_dark` / `theme_desktop_light`, where every one of these
+/// tokens is a grey or the one fixed focus blue (`color_focus: #x7aa2f7`).
+/// So a theme grown from an orange favourite had an orange-leaning page and
+/// grey controls with a blue focus ring, and "pick a colour, get a theme"
+/// was not true. It is fixed here rather than in those files because several
+/// of them are the upstream library's, and which token a widget reads is not
+/// this panel's to change.
+///
+/// # Which family a thing wears
+///
+/// Three voices, and a control kind always wears the same one, so that the
+/// colour says what a thing IS and not merely that somebody chose a palette:
+///
+/// * The primary is the main action and the VALUE: value fills, check and
+///   radio marks, and the focus ring, which is the app saying where you are.
+/// * The secondary is SELECTION and the on-state: the ground under a ticked
+///   box, a chosen radio, a selected row in a menu, a drop down or a file
+///   tree, the label on the tab you are on -- and, as the saturation slider
+///   rises, the grounds of the controls themselves.
+/// * The tertiary POINTS THINGS OUT: selected text, the caret, and the
+///   preview of where a drag would land.
+///
+/// # What a style sheet colours, and what it leaves
+///
+/// Reading the twelve sheets under `widgets/themes` for the tokens they
+/// assign their own accent to gives `color_focus`, `color_ctrl_selected`,
+/// `color_ctrl_active`, the four numbered focus bevels, `color_outset_active`
+/// and the two highlight grounds -- and that list is not a guess about what
+/// CAN carry an accent, it is twelve independent answers to the question.
+/// The marks, the value fills, the text selection and the caret are added to
+/// it, because a sheet leaves those at the base theme's greys and the
+/// complaint was exactly that the controls stayed grey.
+///
+/// What is deliberately NOT in it:
+///
+/// * Links. `link_label` draws from `color_label_inner`, the same token every
+///   button's label draws from, so there is no colour to give a link that is
+///   not also given to every label in the app. It needs a token of its own
+///   before it can have a colour of its own, and that is a change to a widget
+///   file and to both theme files, not a change to this table.
+/// * The slider's handle. It sits ON the value fill; both in the primary
+///   would be a thumb that disappears into the colour it is meant to mark
+///   the end of.
+/// * The two tracks, `color_inset_1` and `color_inset_2`. A track is the part
+///   of a value that is not there yet; tinting it eats the fill that is.
+/// * The rungs themselves -- `color_u_3`, `color_opaque_u_2` and the rest.
+///   A rung is shared by the things that must STAY neutral, so the table pins
+///   the TOKEN and never the rung it happens to alias.
+/// * `color_bg_highlight`, although every sheet colours it. In this library
+///   it is the ground behind a block quote, a code span and a table header in
+///   `markdown`, `html`, `text_flow` and `code_block` -- three block grounds
+///   sharing one name, none of them a highlight and none of them a control.
+/// * The word beside a control. `color_label_outer_active` is the text next
+///   to a ticked check box; that is body text that happens to sit by
+///   something ticked, and colouring it would say the label is the accent.
+/// * The disabled states, and the hover INKS. Nothing is selected, focused
+///   or on in any of them.
+/// * The categorical palettes, `color_map_*` and `color_syntax_*`. Those are
+///   told apart BY their colours; a palette that leant on them would make two
+///   directories or two token kinds the same thing.
+const ACCENTED: &[Accented] = {
+    use Reaches::{Ground, Ink, Lean, Named, Veil};
+    use Source::{
+        OnPrimaryContainer, OnSecondaryContainer, OnTertiaryContainer, Primary, Secondary,
+        SecondaryContainer, Tertiary,
+    };
+    /// Where a focus ring is seen: against the page, and against the panel
+    /// ground a control more often sits on.
+    const PAGES: &[&str] = &["color_bg_app", "color_fg_app"];
+    /// The box behind a check mark or a radio dot, in the two states a mark
+    /// is visible in.
+    const BOXES: &[&str] = &["color_inset_active", "color_inset_focus"];
+    /// The three grounds a value fill is drawn along.
+    const TRACKS: &[&str] = &["color_inset", "color_inset_1", "color_inset_2"];
+    /// Everything the label of a selected thing lands on: the four selected
+    /// grounds below, and the page itself, because a tab draws its active
+    /// label straight onto the page while a menu row draws it on the fill.
+    const SELECTED: &[&str] = &[
+        "color_outset_active",
+        "color_outset_1_active",
+        "color_outset_2_active",
+        "color_highlight",
+        "color_bg_app",
+    ];
+    &[
+        // ------------------------------------------------ THE PRIMARY: the
+        // main action, and the value.
+        //
+        // The accent under the two names the base themes keep it under.
+        // Nothing draws these. `color_ctrl_selected` is `SHEET_ACCENT`, the
+        // token a style sheet's roles are regrown from, so a sheet exported
+        // from an orange theme that left this at the base theme's blue would
+        // come back blue. (`color_ctrl_active` is the third name and is NOT
+        // here: only the sheets declare it, and a token no base theme has is
+        // a token this mapping cannot pin -- the gate test says so.)
+        Accented { tokens: &["color_focus", "color_ctrl_selected"], from: Primary, reaches: Named },
+        // The focus ring, on every control that draws one: the plain bevel
+        // and the four numbered ones, which is what the sheets set and what
+        // `button`, `check_box`, `radio_button`, `slider`, `text_input` and
+        // `drop_down` read between them. A ring is a graphic.
+        Accented {
+            tokens: &[
+                "color_bevel_focus",
+                "color_bevel_inset_1_focus",
+                "color_bevel_inset_2_focus",
+                "color_bevel_outset_1_focus",
+                "color_bevel_outset_2_focus",
+            ],
+            from: Primary,
+            reaches: Ink { alt: OnPrimaryContainer, on: PAGES, need: LEGIBLE },
+        },
+        // The mark: a check box's tick, a radio's dot, a menu row's tick.
+        Accented {
+            tokens: &["color_mark_active", "color_mark_active_hover", "color_mark_focus", "color_mark_down"],
+            from: Primary,
+            reaches: Ink { alt: OnPrimaryContainer, on: BOXES, need: LEGIBLE },
+        },
+        // The value fill: a slider's filled part, a progress bar, the wheel
+        // and time pickers' amount.
+        Accented {
+            tokens: &[
+                "color_val", "color_val_hover", "color_val_focus", "color_val_drag",
+                "color_val_1", "color_val_1_hover", "color_val_1_focus", "color_val_1_drag",
+                "color_val_2", "color_val_2_hover", "color_val_2_focus", "color_val_2_drag",
+            ],
+            from: Primary,
+            reaches: Ink { alt: OnPrimaryContainer, on: TRACKS, need: LEGIBLE },
+        },
+        // ---------------------------------------------- THE SECONDARY: what
+        // is selected, and what is on.
+        //
+        // The ground of a ticked box and a chosen radio. Its ink is the mark
+        // above, which this table also chooses, so the ground is taken
+        // outright and the mark follows it.
+        Accented {
+            tokens: &["color_inset_active"],
+            from: SecondaryContainer,
+            reaches: Ground { alt: Secondary, ink: "color_mark_active", need: LEGIBLE },
+        },
+        // The ground under a selected row: a drop down's chosen item, a menu
+        // row, a combo box, a file tree's selected file, and the on-state of
+        // anything built out of a radio. `color_highlight` is the file
+        // tree's own name for the same thing.
+        Accented {
+            tokens: &["color_outset_active", "color_outset_1_active", "color_outset_2_active", "color_highlight"],
+            from: SecondaryContainer,
+            reaches: Ground { alt: Secondary, ink: "color_label_inner_active", need: READABLE },
+        },
+        // The ink on those grounds, and the one thing a tab has to say it is
+        // the one you are on -- `tab` draws this label straight onto the
+        // page, so it is held to the page as well as to the fills.
+        Accented {
+            tokens: &["color_label_inner_active"],
+            from: Secondary,
+            reaches: Ink { alt: OnSecondaryContainer, on: SELECTED, need: READABLE },
+        },
+        // The fills a pointer or a press puts up. These are not selection,
+        // so they lean rather than land.
+        Accented {
+            tokens: &[
+                "color_outset_hover", "color_outset_down", "color_outset_drag",
+                "color_outset_1_hover", "color_outset_1_down", "color_outset_1_drag",
+                "color_outset_2_hover", "color_outset_2_down", "color_outset_2_drag",
+            ],
+            from: SecondaryContainer,
+            reaches: Lean { most: 0.45, ink: "color_label_inner_hover", need: READABLE, waits: true },
+        },
+        Accented {
+            tokens: &["color_inset_hover", "color_inset_down", "color_inset_drag"],
+            from: SecondaryContainer,
+            reaches: Lean { most: 0.45, ink: "color_text", need: READABLE, waits: true },
+        },
+        // And the controls at rest. This is the far end of the saturation
+        // slider and nothing else: at the near end a theme is its accents
+        // and a page with no colour in it, and a button that came out
+        // coloured there would be a theme OF buttons rather than a theme
+        // with an accent.
+        Accented {
+            tokens: &[
+                "color_outset", "color_outset_focus",
+                "color_outset_1", "color_outset_1_focus",
+                "color_outset_2", "color_outset_2_focus",
+            ],
+            from: SecondaryContainer,
+            reaches: Lean { most: 0.30, ink: "color_label_inner", need: READABLE, waits: true },
+        },
+        // `color_icon_inactive` and `color_mark_empty` are here because both
+        // files say they ARE the inset -- an icon with nothing behind it and
+        // a mark with nothing in it are the field they sit in. A theme that
+        // leant the inset and left those two would be a theme whose exported
+        // FILE re-derived them off the lean while the pins over the base
+        // object did not, which is one theme with two answers.
+        Accented {
+            tokens: &[
+                "color_inset", "color_inset_focus", "color_inset_empty",
+                "color_icon_inactive", "color_mark_empty",
+            ],
+            from: SecondaryContainer,
+            reaches: Lean { most: 0.30, ink: "color_text", need: READABLE, waits: true },
+        },
+        // ----------------------------------------------- THE TERTIARY: what
+        // is being pointed out.
+        //
+        // The ground behind selected TEXT: a text field's selection, and the
+        // one inside a slider's editable value. The words on it are
+        // `color_text`, one token for the whole app, so the ground is what
+        // has to give way here -- and it gives way as far as the base
+        // theme's own selection, never further.
+        // The ground behind selected TEXT: a text field's selection, and the
+        // one inside a slider's editable value.
+        //
+        // A wash and not a fill, which is the whole of why this is a lean.
+        // A text input draws its selection OVER the glyphs, so the base
+        // theme's white-at-a-quarter lets the words through; an opaque
+        // colour in the same place is a coloured block with the text gone
+        // under it. Every readability sweep passed that block -- the words
+        // were still a bar clear of the ground they were no longer on -- and
+        // the screen showed it in one glance, which is what the screen is
+        // for. So the alpha is the base theme's and only the colour moves.
+        //
+        // The family's BASE and not its container, because the base is the
+        // member that follows the page: light in a dark theme, dark in a
+        // light one, which is the same way round as the wash it replaces.
+        // And no waiting on the slider -- a selection is a selection as soon
+        // as there is a palette.
+        Accented {
+            tokens: &[
+                "color_selection_hover",
+                "color_selection_focus",
+                "color_selection_down",
+                "color_bg_highlight_inline",
+            ],
+            from: Tertiary,
+            reaches: Lean { most: 0.85, ink: "color_text", need: READABLE, waits: false },
+        },
+        // The caret, in a text field and in a slider's editable value.
+        Accented {
+            tokens: &["color_text_cursor"],
+            from: Tertiary,
+            reaches: Ink { alt: OnTertiaryContainer, on: &["color_inset", "color_bg_app"], need: LEGIBLE },
+        },
+        // Where a drag would land, in a dock and on a board. Drawn over the
+        // content it would replace, so it keeps the base theme's alpha and
+        // takes only the hue.
+        Accented { tokens: &["color_drag_target_preview"], from: Tertiary, reaches: Veil },
+    ]
+};
+
+/// Every ground the mapping reads and every ink it protects, so that a build
+/// can resolve them once and the gate test can hold every one of them to the
+/// theme files.
+fn accent_grounds() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    let mut want = |key: &'static str| {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    };
+    for row in ACCENTED {
+        match row.reaches {
+            Reaches::Ink { on, .. } => on.iter().for_each(|key| want(key)),
+            Reaches::Ground { ink, .. } | Reaches::Lean { ink, .. } => want(ink),
+            Reaches::Named | Reaches::Veil => {}
+        }
+    }
+    out
+}
+
+/// Whether the settings say anything about COLOUR that the house theme does
+/// not: a favourite, a harmony, a suggestion's companions, or either of the
+/// two character sliders.
+///
+/// The whole of the mapping hangs off this. Somebody who opened the panel and
+/// dragged the spacing did not ask for coloured controls and does not get
+/// them; somebody who moved nothing at all still installs nothing at all,
+/// which is what [`ThemeBuilder::apply`] promises and what the three house
+/// tests hold it to.
+fn palette_moved(params: &BuilderParams) -> bool {
+    let house = BuilderParams::house(params.dark);
+    (params.favourite | 0xFF) != (house.favourite | 0xFF)
+        || params.harmony != house.harmony
+        || params.seeds.is_some()
+        || (params.saturation - house.saturation).abs() > 1e-9
+        || (params.brightness - house.brightness).abs() > 1e-9
+}
+
+/// How far the GROUNDS of the controls lean toward the palette: none of the
+/// way at nought, all of a row's `most` at one.
+///
+/// The accents themselves do not ask this. A mark, a value fill, a focus
+/// ring, a selection, a caret -- those are the palette showing up at all,
+/// and they land in full the moment the palette moves, because a person who
+/// picked a colour and got grey controls has been told the control does
+/// nothing. What is a matter of degree is the colour in the BACKGROUNDS of
+/// the controls, which is the same thing the page's own tint is a matter of
+/// degree about, and it is the one question the saturation slider answers
+/// today.
+///
+/// It is one function and it is named after the question rather than after
+/// the slider, because the slider is about to stop being the answer.
+fn control_ground_lean(params: &BuilderParams) -> f64 {
+    params.clamped().saturation
+}
+
+/// How an ink reads on the ground it does worst on. One token, several
+/// grounds, and the worst of them decides -- the same shape as
+/// [`settle_ink`] and for the same reason.
+fn worst_reading(grounds: &[u32], ink: u32) -> f64 {
+    grounds.iter().map(|g| reads_on(*g, ink)).fold(f64::INFINITY, f64::min)
+}
+
+/// The bar a colour this mapping chooses has to clear: the row's own, or
+/// what the base theme's value for that token manages on the same grounds,
+/// whichever is LOWER.
+///
+/// Without the second half the mapping would mostly refuse to do anything.
+/// The base themes' own controls do not meet the library's bars: the dark
+/// theme's check mark is white at 35% on a box that is black at 15% over the
+/// page, which reads 2.7 against a graphic bar of 3, and its text selection
+/// reads 1.9 against a text bar of 4.5. Held to the stated bar, every accent
+/// would be rejected in favour of a fallback and the controls would stay
+/// grey -- which is the defect. Held to this bar, a colour is taken whenever
+/// it is no worse to read than leaving the token alone, and the stated bar
+/// still applies wherever the base theme meets it.
+///
+/// The twentieth is there because "no worse" cannot be decided in the third
+/// decimal. At the far end of the saturation slider the base theme's own
+/// text selection reads 3.23 and the palette's reads 3.22, a difference no
+/// eye has ever seen, and without the allowance the selection would lose its
+/// colour at exactly that point on the slider and nowhere else.
+fn accent_bar(need: f64, base_reading: Option<f64>) -> f64 {
+    match base_reading {
+        Some(reading) if reading * 0.95 < need => reading * 0.95,
+        _ => need,
+    }
+}
+
+/// What to draw on every ground a token lands on: the accent where it stands
+/// clear of all of them, the second choice where only that does, and failing
+/// both whichever of black and white does best on the ground it does worst
+/// on.
+fn ink_over(grounds: &[u32], first: u32, second: u32, bar: f64) -> u32 {
+    if grounds.is_empty() {
+        return first;
+    }
+    if worst_reading(grounds, first) >= bar {
+        first
+    } else if worst_reading(grounds, second) >= bar {
+        second
+    } else if worst_reading(grounds, WHITE) >= worst_reading(grounds, BLACK) {
+        WHITE
+    } else {
+        BLACK
+    }
+}
+
+/// What the mapping came to.
+#[derive(Default)]
+struct Accents {
+    /// The tokens it pinned, as the script will write them.
+    pins: Vec<(String, u32)>,
+    /// Every ground a pin was chosen against that the theme does not already
+    /// carry, as the VM will resolve it and not as it was composited --
+    /// `color_inset_1` is a translucent rung, and it goes into the built
+    /// theme's colours so that `what_build_predicts_is_what_the_vm_resolves`
+    /// holds the file reading to the VM along with everything else.
+    grounds: Vec<(String, u32)>,
+    /// Every pair the mapping created, as `(ground, ink, bar)` in the units
+    /// [`read_pairs`] measures in: the mark on the box it is drawn in, the
+    /// value fill along its track, the focus ring against the page, the text
+    /// selection under the words it holds, and each leaning fill under its
+    /// own label. The bar is the one the choice was actually made against,
+    /// [`accent_bar`] and not the row's stated `need`, or the reading would
+    /// report as a failure the very case the bar was lowered for.
+    ///
+    /// Kept here and not folded into `theme_tokens::held_pairs`, which is the
+    /// list the library holds EVERY theme and sheet to: these pairs only
+    /// exist where a palette put an accent on a control, and a base theme
+    /// whose check mark is grey on grey is not a theme that fails -- it is a
+    /// theme with no accent in it, which is what a base theme is.
+    pairs: Vec<(String, String, f64)>,
+}
+
+/// The colours the mapping pins. Empty where the palette has not moved.
+///
+/// Two passes, because the grounds have to exist before what stands on them
+/// can be chosen: the rows that make a ground go first, and the rows that put
+/// an ink on one read the answers.
+fn accent_pins(params: &BuilderParams, roles: &ColorRoles, colors: &BTreeMap<String, u32>) -> Accents {
+    let mut out = Accents::default();
+    if !palette_moved(params) {
+        return out;
+    }
+    let scheme = params.scheme();
+    let page = colors.get("color_bg_app").copied().unwrap_or(BLACK);
+    let lean = control_ground_lean(params);
+    let mut pinned: BTreeMap<&'static str, u32> = BTreeMap::new();
+    // What a token is worth right now: a pin if this build has made one yet,
+    // otherwise the theme's own value.
+    let raw = |pinned: &BTreeMap<&'static str, u32>, key: &str| -> Option<u32> {
+        pinned.get(key).copied().or_else(|| file_value(scheme, key, colors))
+    };
+    // The same, as a GROUND: laid over the page, because half of these are
+    // translucent and a colour chosen against the black that `color_inset`
+    // really is, rather than against the grey it makes on the page, is
+    // chosen against something nobody ever sees. An ink is never composited
+    // this way -- its alpha is what lets it read on whatever it lands on,
+    // and `reads_on` spends it against the right ground.
+    let ground = |pinned: &BTreeMap<&'static str, u32>, key: &str| raw(pinned, key).map(|rgba| over(page, rgba));
+    // Whether the mapping also chooses what goes ON a token, in which case a
+    // ground does not have to protect its ink: the ink is chosen against the
+    // ground in the second pass.
+    let repaired = |key: &str| ACCENTED.iter().any(|row| row.tokens.contains(&key));
+    for inks_pass in [false, true] {
+        for row in ACCENTED {
+            if matches!(row.reaches, Reaches::Ink { .. }) != inks_pass {
+                continue;
+            }
+            let source = row.from.of(roles);
+            for token in row.tokens {
+                let base = file_value(scheme, token, colors);
+                let value = match row.reaches {
+                    Reaches::Named => source,
+                    Reaches::Veil => {
+                        let Some(base) = base else { continue };
+                        (source & 0xFFFF_FF00) | (base & 0xFF)
+                    }
+                    Reaches::Ink { alt, on, need } => {
+                        let grounds: Vec<u32> = on.iter().filter_map(|key| ground(&pinned, key)).collect();
+                        let bar = accent_bar(need, base.map(|base| worst_reading(&grounds, base)));
+                        let chosen = ink_over(&grounds, source, alt.of(roles), bar);
+                        for key in on {
+                            if ground(&pinned, key).is_some() {
+                                out.pairs.push((key.to_string(), token.to_string(), bar));
+                            }
+                        }
+                        chosen
+                    }
+                    Reaches::Ground { alt, ink, need } => {
+                        let Some(ink_rgba) = raw(&pinned, ink) else { continue };
+                        let bar = accent_bar(need, base.map(|base| reads_on(over(page, base), ink_rgba)));
+                        let chosen = if repaired(ink) || reads_on(over(page, source), ink_rgba) >= bar {
+                            source
+                        } else if reads_on(over(page, alt.of(roles)), ink_rgba) >= bar {
+                            alt.of(roles)
+                        } else {
+                            continue;
+                        };
+                        if !repaired(ink) {
+                            out.pairs.push((token.to_string(), ink.to_string(), bar));
+                        }
+                        chosen
+                    }
+                    Reaches::Lean { most, ink, need, waits } => {
+                        let (Some(base), Some(ink_rgba)) = (base, raw(&pinned, ink)) else { continue };
+                        let leant = |amount: f64| (vm_mix(base, source, amount) & 0xFFFF_FF00) | (base & 0xFF);
+                        let bar = accent_bar(need, Some(reads_on(over(page, base), ink_rgba)));
+                        // As far as the lean asks, and then back off a
+                        // twentieth at a time until the label on the fill
+                        // reads again. A lean that ended at nothing is not
+                        // pinned at all: the token is already its base value.
+                        let mut amount = if waits { most * lean } else { most };
+                        while amount > 0.0 && reads_on(over(page, leant(amount)), ink_rgba) < bar {
+                            amount -= 0.05;
+                        }
+                        if amount <= 0.0 {
+                            continue;
+                        }
+                        if !repaired(ink) {
+                            out.pairs.push((token.to_string(), ink.to_string(), bar));
+                        }
+                        leant(amount)
+                    }
+                };
+                pinned.insert(token, value);
+            }
+        }
+    }
+    // The grounds and the inks, where the theme does not already carry one:
+    // a token this mapping measured on is a token the VM will be held to.
+    let wanted = accent_grounds().into_iter().chain(ACCENTED.iter().flat_map(|row| row.tokens.iter().copied()));
+    for key in wanted {
+        if colors.contains_key(key) || pinned.contains_key(key) || out.grounds.iter().any(|(k, _)| k == key) {
+            continue;
+        }
+        if let Some(rgba) = file_value(scheme, key, colors) {
+            out.grounds.push((key.to_string(), rgba));
+        }
+    }
+    out.pins = pinned.into_iter().map(|(key, rgba)| (key.to_string(), rgba)).collect();
+    out
+}
+
 /// A theme ready to install, measure or export. Made by [`build`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuiltTheme {
@@ -811,7 +1573,18 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
         }
     }
 
-    let readability = read_pairs(&colors);
+    // And the older tokens the classic controls actually draw from, where the
+    // palette moved at all. See `ACCENTED`: without this a theme grown from
+    // an orange favourite had an orange page and grey controls.
+    let accents = accent_pins(&params, &roles, &colors);
+    for (key, rgba) in accents.grounds.iter().chain(accents.pins.iter()) {
+        colors.insert(key.clone(), *rgba);
+    }
+    for (key, rgba) in &accents.pins {
+        overrides.push((key.clone(), TokenValue::Color(*rgba)));
+    }
+
+    let readability = read_pairs(&colors, &accents.pairs, bg);
     let mut built = BuiltTheme {
         params,
         scheme,
@@ -849,26 +1622,37 @@ fn settle_ink(colors: &BTreeMap<String, u32>, ink_key: &str, chosen: u32) -> u32
     }
 }
 
-/// How a set of colours reads over every pair the library holds a theme to,
-/// reported the way `ThemeLab::readability` reports a mix: each ink laid over
-/// its ground before it is measured, failures worst first, and the tightest
-/// pair named whether or not it fails.
-fn read_pairs(colors: &BTreeMap<String, u32>) -> Readability {
+/// How a set of colours reads over every pair the library holds a theme to
+/// AND every pair the accent mapping created, reported the way
+/// `ThemeLab::readability` reports a mix: each ink laid over its ground
+/// before it is measured, failures worst first, and the tightest pair named
+/// whether or not it fails.
+///
+/// The two kinds of pair differ in one thing. A held pair names roles, which
+/// are opaque; an accent pair can name a rung of the translucent ladder --
+/// the box a check mark sits in is black at fifteen per cent -- so its ground
+/// is laid over the page before anything is measured on it. A mark measured
+/// against that black rather than against the grey it actually makes would be
+/// held to a ground nobody ever sees.
+fn read_pairs(colors: &BTreeMap<String, u32>, accents: &[(String, String, f64)], page: u32) -> Readability {
     let mut out = Readability::default();
     let mut margin: Option<f64> = None;
     let mut failures: Vec<(f64, String)> = Vec::new();
-    for (ground, ink, need) in held_pairs() {
-        let (Some(g), Some(i)) = (colors.get(*ground), colors.get(*ink)) else {
+    let held = held_pairs().iter().map(|(g, i, need)| (g.to_string(), i.to_string(), *need, false));
+    let accents = accents.iter().map(|(g, i, need)| (g.clone(), i.clone(), *need, true));
+    for (ground, ink, need, composite) in held.chain(accents) {
+        let (Some(g), Some(i)) = (colors.get(&ground), colors.get(&ink)) else {
             continue;
         };
-        let stands = reads_on(*g | 0xFF, *i);
+        let g = if composite { over(page, *g) } else { *g | 0xFF };
+        let stands = reads_on(g, *i);
         let line = format!("{ink} on {ground} = {stands:.2}, wants {need}");
         out.measured += 1;
         if margin.is_none_or(|best| stands - need < best) {
             margin = Some(stands - need);
             out.tightest = line.clone();
         }
-        if stands < *need {
+        if stands < need {
             failures.push((stands - need, line));
         }
     }
@@ -2098,7 +2882,12 @@ mod theme_builder_tests {
                                 ..BuilderParams::house(dark)
                             };
                             let built = build(&params);
-                            assert_eq!(built.readability.measured, held_pairs().len(), "{params:?}");
+                            // Every pair the library holds a theme to, and
+                            // the ones this palette's own mapping created on
+                            // top of them: a favourite that is not the house
+                            // one moves the palette, so the controls are
+                            // coloured here and measured where they are drawn.
+                            assert!(built.readability.measured > held_pairs().len(), "{params:?}");
                             assert!(built.readability.holds(), "{params:?}: {:#?}", built.readability.failures);
                             assert!(built.readability.margin >= 0.0);
                             built_themes += 1;
@@ -2151,13 +2940,410 @@ mod theme_builder_tests {
         // ones, so neither reads everywhere and white is the less bad.
         assert_eq!(settle_ink(&ladder, "color_on_surface", grey), WHITE);
         // And the reading that comes back says so when nothing can be done.
-        let reading = read_pairs(&ladder.into_iter().chain([("color_on_surface".to_string(), grey)]).collect());
+        let reading =
+            read_pairs(&ladder.into_iter().chain([("color_on_surface".to_string(), grey)]).collect(), &[], BLACK);
         assert!(!reading.holds());
         assert!(reading.failures[0].starts_with("color_on_surface on color_surface_bright = "), "{:?}", reading.failures);
         assert_eq!(reading.tightest, reading.failures[0]);
         assert!(reading.margin < 0.0);
     }
 
+    /// The defect the mapping is for, in the three places it showed worst.
+    ///
+    /// A theme grown from an orange favourite used to come out with an orange
+    /// page and grey controls: the slider's value fill was `color_opaque_u_2`
+    /// -- the page mixed toward white -- the check mark was `color_u_5`, a
+    /// translucent white, and the focus ring was `#x7aa2f7`, the one fixed
+    /// blue in both base theme files. Every one of them is written here as
+    /// the base theme's own value, so this test fails on the theme the
+    /// builder made before the mapping and cannot pass by accident.
+    #[test]
+    fn an_orange_theme_does_not_leave_the_controls_grey_and_the_focus_blue() {
+        const ORANGE: u32 = 0xE8730CFF;
+        for dark in [true, false] {
+            let params = BuilderParams { favourite: ORANGE, ..BuilderParams::house(dark) };
+            let built = build(&params);
+            let scheme = built.scheme;
+            let at = |key: &str| built.color(key).unwrap_or_else(|| panic!("{key} is not a colour the build knows"));
+            let page: BTreeMap<String, u32> = ["color_bg_app", "color_fg_app"]
+                .iter()
+                .map(|key| (key.to_string(), at(key)))
+                .collect();
+            let stated = |key: &str| file_value(scheme, key, &page);
+            // The one fixed blue, gone in both appearances.
+            assert_eq!(stated("color_focus"), Some(if dark { 0x7AA2F7FF } else { 0x0067C0FF }));
+            for key in ["color_focus", "color_ctrl_selected", "color_bevel_inset_1_focus", "color_bevel_outset_1_focus"] {
+                assert_ne!(Some(at(key)), stated("color_focus"), "{key} is still the base theme's blue");
+            }
+            // The mark, the value fill, the selected row and the selection,
+            // off the greys the files derive.
+            for key in [
+                "color_mark_active",
+                "color_val",
+                "color_val_1",
+                "color_val_2",
+                "color_text_cursor",
+                "color_inset_active",
+                "color_outset_active",
+                "color_selection_focus",
+            ] {
+                assert_ne!(Some(at(key)), stated(key), "{key} is still the base theme's own grey");
+            }
+            // And what they are instead is the colour that was picked. The
+            // two the library keeps the accent under are the accent itself;
+            // the mark and the fill are whichever member of the primary
+            // family reads where they are drawn, and in the light theme that
+            // is the deeper one, because an accent at the lightness a light
+            // theme gives it cannot be told from a field that is nearly the
+            // page. Both are the favourite's hue, which is the part a person
+            // sees.
+            for key in ["color_focus", "color_ctrl_selected"] {
+                assert_eq!(at(key), at("color_primary"), "{key} is not the accent");
+            }
+            let hue = rgb_to_hsl(ORANGE).0;
+            for key in ["color_mark_active", "color_val", "color_val_2", "color_bevel_focus"] {
+                assert!(apart(rgb_to_hsl(at(key)).0, hue) < 12.0, "{key} is not the favourite's hue");
+            }
+            // Pinned, not merely predicted: the script carries them.
+            for (key, _) in &built.overrides {
+                assert!(base_theme_keys().contains(&key.as_str()), "{key} is not a token");
+            }
+            for key in ["color_focus", "color_mark_active", "color_val"] {
+                let want = TokenValue::Color(at(key));
+                assert!(built.overrides.iter().any(|(k, v)| k == key && *v == want), "{key} is not pinned");
+            }
+            assert!(built.readability.holds(), "{:#?}", built.readability.failures);
+        }
+    }
+
+    /// What the operator said, after paging through every widget page with a
+    /// palette chosen: "it looks like everything just uses the first color, I
+    /// don't see any of the nice palettes in the interface".
+    ///
+    /// So: all three brand families reach the older tokens, and each kind of
+    /// thing wears the one it is supposed to. A triadic harmony puts the
+    /// three families 120 degrees apart, which is what makes this measurable
+    /// -- the value fill has to be in the favourite's hue, the selected row
+    /// in the second, the text selection in the third, and a mapping that
+    /// drove everything from the primary fails on the second assertion.
+    #[test]
+    fn all_three_families_reach_the_older_tokens() {
+        for dark in [true, false] {
+            let params = BuilderParams {
+                favourite: 0xE8730CFF,
+                harmony: Harmony::Triadic,
+                saturation: 1.0,
+                ..BuilderParams::house(dark)
+            };
+            let built = build(&params);
+            let at = |key: &str| built.color(key).unwrap_or_else(|| panic!("{key} is not a colour the build knows"));
+            let family = |key: &str| {
+                let hue = rgb_to_hsl(at(key)).0;
+                let near = |of: &str| apart(rgb_to_hsl(at(of)).0, hue);
+                match (near("color_primary"), near("color_secondary"), near("color_tertiary")) {
+                    (p, s, t) if p <= s && p <= t => "primary",
+                    (_, s, t) if s <= t => "secondary",
+                    _ => "tertiary",
+                }
+            };
+            // The main action and the value.
+            for key in ["color_focus", "color_bevel_focus", "color_mark_active", "color_val", "color_val_2"] {
+                assert_eq!(family(key), "primary", "{key} on dark={dark}");
+            }
+            // Selection, the on-state, and the grounds that lean with them.
+            for key in [
+                "color_inset_active",
+                "color_outset_active",
+                "color_outset_1_active",
+                "color_highlight",
+                "color_label_inner_active",
+                "color_outset_hover",
+                "color_outset",
+                "color_inset",
+            ] {
+                assert_eq!(family(key), "secondary", "{key} on dark={dark}");
+            }
+            // What is being pointed out.
+            for key in ["color_selection_focus", "color_bg_highlight_inline", "color_text_cursor"] {
+                assert_eq!(family(key), "tertiary", "{key} on dark={dark}");
+            }
+            // And all three are genuinely different colours, so that the
+            // three assertions above are three answers and not one.
+            let hue_of = |key: &str| rgb_to_hsl(at(key)).0;
+            assert!(apart(hue_of("color_val"), hue_of("color_outset_active")) > 60.0);
+            assert!(apart(hue_of("color_val"), hue_of("color_selection_focus")) > 60.0);
+            assert!(apart(hue_of("color_outset_active"), hue_of("color_selection_focus")) > 60.0);
+        }
+    }
+
+    /// A token spelt wrong pins nothing, moves nothing and fails no other
+    /// test: the script would set a key the base theme does not have, the VM
+    /// would carry it along beside the one that is really drawn, and the
+    /// control would stay grey. So every name the mapping uses -- the tokens
+    /// it pins, the grounds it measures on and the inks it protects -- has to
+    /// be a key BOTH base theme files declare, and one this module can read a
+    /// value for.
+    #[test]
+    fn every_name_the_mapping_uses_is_a_token_both_base_themes_declare() {
+        let named: Vec<&str> = ACCENTED
+            .iter()
+            .flat_map(|row| row.tokens.iter().copied())
+            .chain(accent_grounds())
+            .collect();
+        assert!(named.len() > 40, "only {} names", named.len());
+        // The page is the one pair of names this module works out for itself
+        // rather than reading, and the opaque ladder is derived off it, so a
+        // reading of the file is a reading that has already been given one.
+        let page: BTreeMap<String, u32> =
+            [("color_bg_app".to_string(), BLACK), ("color_fg_app".to_string(), 0x303030FF)].into_iter().collect();
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let keys = crate::theme_tokens::theme_keys(scheme.source());
+            for key in &named {
+                assert!(keys.contains(key), "{key} is not a key of {}", scheme.theme_name());
+                let read = file_value(scheme, key, &page).is_some();
+                assert!(read, "{key} has no value in {}", scheme.theme_name());
+            }
+        }
+        // And no token is claimed by two rows, which would make the answer
+        // depend on the order the table happens to be written in.
+        let mut once: Vec<&str> = Vec::new();
+        for key in ACCENTED.iter().flat_map(|row| row.tokens.iter().copied()) {
+            assert!(!once.contains(&key), "{key} is in the table twice");
+            once.push(key);
+        }
+        // Every lean is an amount of a mix.
+        for row in ACCENTED {
+            if let Reaches::Lean { most, .. } = row.reaches {
+                assert!((0.0..=1.0).contains(&most));
+            }
+        }
+    }
+
+    /// A theme has two forms -- pins over the base object, and a whole file
+    /// with the pins written into it -- and they have to be the same theme.
+    /// They part the moment the mapping pins a token some OTHER key derives
+    /// from: over the object that other key keeps the base value, while in
+    /// the file it is worked out again off the pin.
+    ///
+    /// `color_icon_inactive` is `theme.color_inset`, and leaning the inset
+    /// without leaning it too made the exported file disagree with the theme
+    /// on the screen -- which `the_exported_theme_is_the_built_theme_as_a
+    /// _file` caught, in one token, at the far end of a long test. This says
+    /// the same thing about every token in the table at once, and says it in
+    /// the file's own words.
+    #[test]
+    fn nothing_the_mapping_leaves_alone_is_derived_from_a_token_it_pins() {
+        let pinned: Vec<&str> = ACCENTED.iter().flat_map(|row| row.tokens.iter().copied()).collect();
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let mut owner = "";
+            for line in scheme.source().lines() {
+                if let Some((key, _)) = line.strip_prefix("        ").and_then(|rest| rest.split_once(':')) {
+                    if !key.is_empty() && key.chars().all(is_key_char) {
+                        owner = key;
+                    }
+                }
+                for key in &pinned {
+                    assert!(
+                        !mentions(line, key) || pinned.contains(&owner),
+                        "{owner} derives from {key} in {} and is not pinned with it",
+                        scheme.theme_name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The accents land the moment the palette moves; the control GROUNDS
+    /// are the only thing the saturation slider is asked about.
+    ///
+    /// That is the whole of the reading of the slider this stage is written
+    /// against. A person who picked a colour and left both sliders alone has
+    /// a coloured mark, value fill, focus ring, selection and caret, because
+    /// a control that did nothing would say the panel did nothing; and the
+    /// buttons and fields keep the page's own grey until the slider is asked
+    /// for colour in them.
+    #[test]
+    fn the_accents_land_at_once_and_only_the_grounds_wait_for_the_slider() {
+        for dark in [true, false] {
+            let at = |saturation: f64| {
+                let params = BuilderParams { favourite: BLUE, saturation, ..BuilderParams::house(dark) };
+                build(&params)
+            };
+            let (low, middle, top) = (at(0.0), at(0.5), at(1.0));
+            let pinned = |built: &BuiltTheme, key: &str| built.overrides.iter().any(|(k, _)| k == key);
+            for key in [
+                "color_focus",
+                "color_mark_active",
+                "color_val",
+                "color_selection_focus",
+                "color_text_cursor",
+                "color_inset_active",
+                "color_outset_active",
+                "color_label_inner_active",
+            ] {
+                assert!(pinned(&low, key), "{key} does not arrive with the accents");
+            }
+            // In full, at every place on the slider: each of these IS a
+            // member of its family and not a step toward one, so the slider
+            // moves the family and never how far the token went toward it.
+            // Which member is not fixed -- an accent that cannot be told
+            // from the ground it lands on gives way to the family's own
+            // container ink, which is the point of having one -- so the test
+            // asks for the family and the readability sweep asks the rest.
+            for (key, family) in [
+                ("color_focus", "primary"),
+                ("color_mark_active", "primary"),
+                ("color_val", "primary"),
+                ("color_inset_active", "secondary"),
+                ("color_outset_active", "secondary"),
+                ("color_label_inner_active", "secondary"),
+                ("color_text_cursor", "tertiary"),
+            ] {
+                for built in [&low, &middle, &top] {
+                    let members = [
+                        format!("color_{family}"),
+                        format!("color_{family}_container"),
+                        format!("color_on_{family}_container"),
+                    ];
+                    let is = members.iter().any(|role| built.color(role) == built.color(key));
+                    assert!(is, "{key} is not one of {members:?} outright");
+                }
+            }
+            // The resting and state grounds wait, and then lean further the
+            // higher the slider goes.
+            for key in ["color_outset", "color_outset_hover", "color_inset"] {
+                assert!(!pinned(&low, key), "{key} leaned before it was asked");
+                assert!(pinned(&top, key), "{key} never leans");
+            }
+            // And further the higher the slider goes, measured as plain
+            // distance from the grey the file states: the container the lean
+            // is toward moves with the slider too, so anything measured
+            // against THAT would be measuring two things at once.
+            let page: BTreeMap<String, u32> = ["color_bg_app", "color_fg_app"]
+                .iter()
+                .map(|key| (key.to_string(), low.color(key).unwrap()))
+                .collect();
+            let moved = |built: &BuiltTheme, key: &str| {
+                let base = file_value(built.scheme, key, &page).unwrap();
+                let pinned = built.color(key).unwrap();
+                let channel = |shift: u32| ((base >> shift) & 0xFF) as f64 - ((pinned >> shift) & 0xFF) as f64;
+                (channel(24).powi(2) + channel(16).powi(2) + channel(8).powi(2)).sqrt()
+            };
+            for key in ["color_outset", "color_outset_hover", "color_inset"] {
+                assert_eq!(moved(&low, key), 0.0, "{key} moved with the slider at nought");
+                assert!(moved(&middle, key) > 0.0, "{key} never leans");
+                assert!(moved(&top, key) > moved(&middle, key), "{key} does not follow the slider");
+            }
+            // The two washes lean as well, and they do NOT wait: a selection
+            // is a selection as soon as there is a palette. They keep the
+            // base theme's alpha through all of it, because a text input
+            // draws its selection over the words.
+            for key in ["color_selection_focus", "color_bg_highlight_inline"] {
+                assert!(moved(&low, key) > 0.0, "{key} waited for the slider");
+                for built in [&low, &middle, &top] {
+                    let base = file_value(built.scheme, key, &page).unwrap();
+                    assert_eq!(built.color(key).unwrap() & 0xFF, base & 0xFF, "{key} stopped being a wash");
+                }
+            }
+            // The one function stage two re-points, and what it answers now.
+            let of = |saturation: f64| {
+                control_ground_lean(&BuilderParams { saturation, ..BuilderParams::house(dark) })
+            };
+            assert_eq!((of(0.0), of(0.5), of(1.0)), (0.0, 0.5, 1.0));
+        }
+    }
+
+    /// Somebody who moved the spacing did not ask for coloured controls. The
+    /// mapping hangs off the palette alone, and a build whose colour settings
+    /// are the house ones pins exactly what it pinned before there was a
+    /// mapping -- which is what keeps the three house tests true.
+    #[test]
+    fn only_a_moved_palette_colours_the_controls() {
+        for dark in [true, false] {
+            let house = BuilderParams::house(dark);
+            assert!(!palette_moved(&house));
+            let roomier = BuilderParams { spacing: house.spacing + 4.0, font_size: 14.0, ..house };
+            assert!(!palette_moved(&roomier));
+            let built = build(&roomier);
+            assert_eq!(built.overrides.len(), 27, "a spacing drag coloured something: {:?}", built.overrides);
+            assert_eq!(built.readability.measured, held_pairs().len());
+            assert!(!built.globals.is_empty(), "the spacing did not move at all");
+            // Each of the four colour settings on its own is enough.
+            for moved in [
+                BuilderParams { favourite: BLUE, ..house },
+                BuilderParams { harmony: Harmony::Triadic, ..house },
+                BuilderParams { saturation: 0.3, ..house },
+                BuilderParams { brightness: 0.7, ..house },
+            ] {
+                assert!(palette_moved(&moved), "{moved:?}");
+                assert!(build(&moved).overrides.len() > 27, "{moved:?}");
+            }
+            // An alpha on the favourite is not a colour setting: `seed`
+            // ignores it, so a build that pinned on it would pin on nothing.
+            assert!(!palette_moved(&BuilderParams { favourite: house.favourite & !0xFF, ..house }));
+        }
+    }
+
+    /// The values the mapping measures on are read off the theme files, and
+    /// this is what fails when a file moves one. `what_build_predicts_is_what
+    /// _the_vm_resolves` holds the same reading to the VM for every colour a
+    /// build now predicts; this holds the parsing itself, including the hops
+    /// through the aliases that stand between a control's token and the rung
+    /// it ends on.
+    #[test]
+    fn the_values_the_mapping_reads_are_the_ones_the_files_state() {
+        let nothing = BTreeMap::new();
+        let dark = |key: &str| file_value(Scheme::Dark, key, &nothing);
+        // Black at fifteen per cent, four aliases down: `color_inset_active`
+        // is `color_inset_hover` is `color_inset` is `color_d_1`.
+        assert_eq!(dark("color_d_1"), Some(0x00000026));
+        assert_eq!(dark("color_inset_active"), Some(0x00000026));
+        // White at thirty-five per cent, which is the dark theme's body ink.
+        assert_eq!(dark("color_text"), Some(0xFFFFFFA5));
+        assert_eq!(file_value(Scheme::Light, "color_inset", &nothing), Some(0x00000019));
+        // A literal, in both of the two ways a file writes one.
+        assert_eq!(dark("color_focus"), Some(0x7AA2F7FF));
+        assert_eq!(dark("color_w"), Some(0xFFFFFFFF));
+        // The opaque ladder, which the value fill and the handles live on:
+        // the inverse page mixed toward white. It needs the page, and the
+        // page is the build's, not the file's.
+        let page: BTreeMap<String, u32> = [("color_fg_app".to_string(), 0x303030FF)].into_iter().collect();
+        assert_eq!(file_value(Scheme::Dark, "color_opaque_u_2", &page), Some(vm_mix(0x303030FF, WHITE, 0.25)));
+        assert_eq!(file_value(Scheme::Dark, "color_val", &page), Some(vm_mix(0x303030FF, WHITE, 0.25)));
+        // A value already worked out beats the file, or a tinted page would
+        // be measured against the untinted one.
+        assert_eq!(file_value(Scheme::Dark, "color_fg_app", &page), Some(0x303030FF));
+        // A token the file derives some other way comes back as nothing
+        // rather than as a wrong answer.
+        assert_eq!(dark("color_bg_container"), None);
+        assert_eq!(dark("color_nothing_at_all"), None);
+        // Every name the mapping uses resolves in both files, or the reading
+        // it takes is taken against a ground it guessed.
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let page: BTreeMap<String, u32> =
+                [("color_bg_app".to_string(), BLACK), ("color_fg_app".to_string(), 0x303030FF)]
+                    .into_iter()
+                    .collect();
+            for key in accent_grounds() {
+                assert!(file_value(scheme, key, &page).is_some(), "{key} in {}", scheme.theme_name());
+            }
+        }
+    }
+
+    /// A colour literal as the script's own parser reads one, which is how
+    /// the opaque ladder's ends and the one fixed focus blue are written.
+    #[test]
+    fn a_colour_literal_is_read_the_way_the_script_reads_one() {
+        assert_eq!(hash_color("#F"), Some(0xFFFFFFFF));
+        assert_eq!(hash_color("#0"), Some(0x000000FF));
+        assert_eq!(hash_color("#FA0"), Some(0xFFAA00FF));
+        assert_eq!(hash_color("#x7aa2f7"), Some(0x7AA2F7FF));
+        assert_eq!(hash_color("#FFFFFF00"), Some(0xFFFFFF00));
+        assert_eq!(hash_color("#xE6A294FF"), Some(0xE6A294FF));
+        // Two digits is not a colour in this language, and neither is a word.
+        assert_eq!(hash_color("#FF"), None);
+        assert_eq!(hash_color("#zz"), None);
+    }
     /// A harmony chosen on the panel is the harmony the palette comes out
     /// in: the three brand families of the built theme sit where the offsets
     /// say, read off the colours the script pins.
@@ -2901,7 +4087,7 @@ mod theme_builder_tests {
                 let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
                 for suggestion in suggestions(favourite, dark) {
                     let built = build(&suggestion.params(BuilderParams::house(dark)));
-                    assert_eq!(built.readability.measured, held_pairs().len());
+                    assert!(built.readability.measured > held_pairs().len());
                     assert!(
                         built.readability.holds(),
                         "{} for {favourite:08X} on dark={dark}: {:#?}",
@@ -3132,7 +4318,7 @@ mod theme_builder_tests {
                 let favourite = hsl_to_rgb(step as f64 * 10.0, 0.55, 0.5);
                 for suggestion in book(&all_suggestions(favourite, dark, &[])) {
                     let built = build(&suggestion.params(BuilderParams::house(dark)));
-                    assert_eq!(built.readability.measured, held_pairs().len());
+                    assert!(built.readability.measured > held_pairs().len());
                     assert!(
                         built.readability.holds(),
                         "{} for {favourite:08X} on dark={dark}: {:#?}",
