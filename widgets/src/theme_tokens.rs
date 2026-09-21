@@ -705,6 +705,12 @@ impl Default for RoleTuning {
 /// How much of the grounds' colour a fully saturated `neutral` may ask for,
 /// as the theme's `color_tint_amount`.
 ///
+/// The theme builder no longer goes this way. A multiply over the file's
+/// page can only cast a colour over the page's own grey, never make the page
+/// a colour at a lightness somebody chose, so the builder writes the page
+/// itself (`theme_builder::page_of`). This stays the rule for a seed that
+/// names a neutral and nothing else.
+///
 /// Two numbers because the tint is a MULTIPLY. The theme files take the
 /// page's grey and multiply it by a colour mixed this far from white, so a
 /// light page -- which is nearly white -- comes out nearly that colour, and a
@@ -1125,6 +1131,91 @@ pub fn roles_from_seed_tuned(seed: &SeedColors, scheme: Scheme, tuning: &RoleTun
         success: f(5),
         info: f(6),
         inverse_primary,
+    }
+}
+
+/// One brand family grown from a colour somebody named, rather than from a
+/// hue the rule brings its own saturation and lightness to.
+///
+/// The colour IS the base, byte for byte, wherever it can be: a person who
+/// picked a colour and got a different one back has been told their choice
+/// was a suggestion. It moves for one reason only, which is that it cannot
+/// be seen: a base that does not stand `LEGIBLE` off `page` is carried along
+/// the lightness axis away from the page, a hundredth at a time, until it
+/// does -- the hue and the saturation exactly as they were given, because
+/// the hue is what a person recognises their colour by. What is drawn ON it
+/// needs no such move: one of black and white clears `READABLE` on any
+/// ground there is, and `readable_on` falls to it.
+///
+/// `page` is the page the family is made to stand off. A caller that wants
+/// its accents to stay put while its page moves passes a page that does not
+/// move -- which is what the theme builder does -- and holds the real page
+/// to what is drawn on it separately.
+///
+/// The container and the inks follow from the base the way the rule's own
+/// families do: the container at the scheme's house container lightness in
+/// the base's hue, and every ink put through `readable_on`, so a family made
+/// here reads exactly as well as one the rule grew.
+pub fn family_from_color(scheme: Scheme, color: u32, page: u32) -> RoleFamily {
+    let color = color | 0xFF;
+    let (hue, sat, light) = rgb_to_hsl(color);
+    let away = match scheme {
+        Scheme::Light => -0.01,
+        _ => 0.01,
+    };
+    let mut base = color;
+    let mut at = light;
+    while contrast(base, page | 0xFF) < LEGIBLE && (0.0..=1.0).contains(&(at + away)) {
+        at += away;
+        base = hsl_to_rgb(hue, sat, at);
+    }
+    let tuning = RoleTuning::HOUSE;
+    match scheme {
+        Scheme::Light => {
+            let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), tuning.light.container);
+            let ink = hsl_to_rgb(hue, sat, tuning.light.ink);
+            RoleFamily {
+                base,
+                on_base: readable_on(base, WHITE, ink),
+                container,
+                on_container: readable_on(container, ink, WHITE),
+            }
+        }
+        _ => {
+            let container = hsl_to_rgb(hue, sat * 0.7, tuning.dark.container);
+            let ink = hsl_to_rgb(hue, sat, tuning.dark.ink);
+            let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), tuning.light.container);
+            RoleFamily {
+                base,
+                on_base: readable_on(base, ink, pale),
+                container,
+                on_container: readable_on(container, pale, ink),
+            }
+        }
+    }
+}
+
+/// The accent roles of a scheme whose three brand families are colours
+/// somebody named: each through [`family_from_color`], standing off `page`,
+/// and the four intents exactly as the house rule grows them. How loudly a
+/// theme says "error" is not a matter of which colours a person likes.
+///
+/// `color_inverse_primary` is the primary drawn for the OTHER scheme's page,
+/// as the rule's own is: the named colour at the other scheme's house base
+/// lightness, in its own hue and saturation.
+pub fn roles_from_colors(colors: [u32; 3], scheme: Scheme, page: u32) -> ColorRoles {
+    let house = roles_for(scheme);
+    let (hue, sat, _) = rgb_to_hsl(colors[0] | 0xFF);
+    let inverse_primary = match scheme {
+        Scheme::Light => hsl_to_rgb(hue, sat, RoleTuning::HOUSE.dark.base),
+        _ => hsl_to_rgb(hue, sat, RoleTuning::HOUSE.light.base),
+    };
+    ColorRoles {
+        primary: family_from_color(scheme, colors[0], page),
+        secondary: family_from_color(scheme, colors[1], page),
+        tertiary: family_from_color(scheme, colors[2], page),
+        inverse_primary,
+        ..house
     }
 }
 
@@ -1878,6 +1969,45 @@ mod tuning_tests {
             }
         }
         assert_eq!(checked, 2 * 6 * 36 * 4 * 7 * 7);
+    }
+
+
+    /// A family grown from a colour somebody named is that colour, byte for
+    /// byte, wherever it stands off the page; where it does not, only its
+    /// lightness moves, away from the page, and only until it does. Its inks
+    /// read on it and on its container whatever the colour, and the intents
+    /// are the house rule's.
+    #[test]
+    fn a_named_colour_is_the_family_base_moved_only_to_be_seen() {
+        let dark_page = 0x4C4C4CFF;
+        let light_page = 0xD8D8D8FF;
+        let mut checked = 0;
+        for (scheme, page) in [(Scheme::Dark, dark_page), (Scheme::Light, light_page)] {
+            for step in 0..36 {
+                for (sat, light) in [(0.9, 0.5), (0.5, 0.2), (0.4, 0.85), (0.0, 0.5), (1.0, 0.05), (1.0, 0.97)] {
+                    let color = hsl_to_rgb(step as f64 * 10.0, sat, light);
+                    let family = family_from_color(scheme, color, page);
+                    if contrast(color, page) >= LEGIBLE {
+                        assert_eq!(family.base, color, "{color:08X} in {}", scheme.theme_name());
+                    } else {
+                        let (h, s, _) = rgb_to_hsl(color);
+                        let (bh, bs, _) = rgb_to_hsl(family.base);
+                        if s > 0.05 && bs > 0.05 {
+                            assert!(apart(h, bh) < 3.0, "{color:08X} turned to {:08X}", family.base);
+                        }
+                        assert!(contrast(family.base, page) >= LEGIBLE, "{color:08X} still cannot be seen");
+                    }
+                    assert!(contrast(family.on_base, family.base) >= READABLE);
+                    assert!(contrast(family.on_container, family.container) >= READABLE);
+                    checked += 1;
+                }
+            }
+            let roles = roles_from_colors([0x2060E0FF, 0x20A040FF, 0xC03080FF], scheme, page);
+            let house = roles_for(scheme);
+            assert_eq!((roles.error, roles.warning, roles.success, roles.info), (house.error, house.warning, house.success, house.info));
+            assert!(unreadable(&roles).is_empty(), "{:?}", unreadable(&roles));
+        }
+        assert_eq!(checked, 2 * 36 * 6);
     }
 
     /// The neutral is a hue to lean toward and its saturation is how far,

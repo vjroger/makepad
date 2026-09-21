@@ -8169,7 +8169,7 @@ impl BuildRow {
     fn shown(self, params: &BuilderParams) -> f64 {
         match self {
             BuildRow::Saturation => params.saturation * 100.0,
-            BuildRow::Brightness => params.brightness * 100.0,
+            BuildRow::Brightness => params.lightness * 100.0,
             BuildRow::Spacing => params.spacing,
             BuildRow::Roundness => params.roundness,
             BuildRow::FontSize => params.font_size,
@@ -8183,7 +8183,7 @@ impl BuildRow {
     fn moved(self, params: BuilderParams, shown: f64) -> BuilderParams {
         match self {
             BuildRow::Saturation => BuilderParams { saturation: shown / 100.0, ..params },
-            BuildRow::Brightness => BuilderParams { brightness: shown / 100.0, ..params },
+            BuildRow::Brightness => BuilderParams { lightness: shown / 100.0, ..params },
             BuildRow::Spacing => BuilderParams { spacing: shown, ..params },
             BuildRow::Roundness => BuilderParams { roundness: shown, ..params },
             BuildRow::FontSize => BuilderParams { font_size: shown, ..params },
@@ -8196,7 +8196,7 @@ impl BuildRow {
     /// which is the slider's own reset -- and it resets THIS setting rather
     /// than the whole theme, because the name that was clicked names one row.
     fn house(self, params: BuilderParams) -> BuilderParams {
-        let house = BuilderParams::house(params.dark);
+        let house = BuilderParams::house(params.dark());
         self.moved(params, self.shown(&house))
     }
 }
@@ -18534,8 +18534,8 @@ impl Tweaker {
         let light = row.child(live_id!(tb_light));
         self.tb_dark_uid = dark.widget_uid().0;
         self.tb_light_uid = light.widget_uid().0;
-        set_button_fill(cx, dark, params.dark);
-        set_button_fill(cx, light, !params.dark);
+        set_button_fill(cx, dark, params.dark());
+        set_button_fill(cx, light, !params.dark());
         // Sharing the row and taking no fill from it: the surprise leaves
         // you in neither rung, so there is nothing for it to light.
         self.tb_random_uid = row.child(live_id!(tb_random)).widget_uid().0;
@@ -18767,7 +18767,7 @@ impl Tweaker {
     /// either of them alone.
     fn tb_suggest_again(&mut self) {
         let params = self.tb_builder.params();
-        self.tb_suggestions = all_suggestions(params.favourite, params.dark, &self.tb_own_schemes);
+        self.tb_suggestions = all_suggestions(params.favourite, params.dark(), &self.tb_own_schemes);
         if self.tb_page >= self.tb_pages() {
             self.tb_page = 0;
         }
@@ -18989,7 +18989,7 @@ impl Tweaker {
     /// The offers go with it: a palette that reads on a dark page is not the
     /// same palette on a light one, and the swatch has the ground in it.
     fn tb_set_appearance(&mut self, dark: bool) {
-        self.tb_builder.set(BuilderParams { dark, ..self.tb_builder.params() });
+        self.tb_builder.set(self.tb_builder.params().with_dark(dark));
         self.tb_suggest_due = true;
         self.tb_built_changed();
     }
@@ -24094,14 +24094,14 @@ line two");
 
         // One setting out and back again. Out is a theme; back is the entry
         // theme, sheet and all, and not a house theme installed over it.
-        panel.tb_gesture_ended(BuildRow::Saturation, 100.0);
+        panel.tb_gesture_ended(BuildRow::Brightness, 20.0);
         panel.tb_settle(&mut cx, 2.0);
         the_build_reload_lands(&mut cx, &mut panel, 2.0);
         assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the setting never reached the app");
-        panel.tb_row_cleared(BuildRow::Saturation);
+        panel.tb_row_cleared(BuildRow::Brightness);
         assert_eq!(
-            panel.tb_builder.params().saturation,
-            0.0,
+            panel.tb_builder.params().lightness,
+            BuilderParams::house(true).lightness,
             "a click on the name did not put the setting back to the house value"
         );
         panel.tb_settle(&mut cx, 3.0);
@@ -24260,13 +24260,13 @@ line two");
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         open_the_build_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
-        let dark = panel.tb_builder.params().dark;
+        let dark = panel.tb_builder.params().dark();
 
         panel.tb_seed = 9;
         panel.tb_surprise();
         let once = panel.tb_builder.params();
         assert_ne!(once, BuilderParams::house(dark), "the surprise moved nothing at all");
-        assert_eq!(once.dark, dark, "the surprise turned the page over");
+        assert_eq!(once.dark(), dark, "the surprise turned the page over");
 
         panel.tb_surprise();
         let twice = panel.tb_builder.params();
@@ -24445,7 +24445,9 @@ line two");
         one_press_on(&mut cx, &mut panel, &head, &row);
         let after = panel.tb_builder.params().saturation;
         assert_ne!(after, before, "the press never reached the builder");
-        assert!(after > before, "the thumb landed right of where it was and the setting went down");
+        // The saturation opens at its top, so a press anywhere on the track
+        // lands left of the thumb.
+        assert!(after < before, "the thumb landed left of where it was and the setting went up");
         assert!(panel.tb_apply_due, "a moved setting owes the app an install and asked for none");
     }
 
@@ -24598,6 +24600,7 @@ line two");
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = the_builder_drawn(&mut cx, &mut panel);
         let offered = panel.tb_suggestions[2].clone();
+        let before = panel.tb_builder.params();
 
         one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 2));
         assert_eq!(
@@ -24605,8 +24608,11 @@ line two");
             Some(offered.seeds),
             "the press never reached the builder, or reached it without the palette's companions"
         );
-        assert_eq!(panel.tb_builder.params().saturation, offered.saturation);
-        assert_eq!(panel.tb_builder.params().brightness, offered.brightness);
+        // A chip is a palette: the two background sliders stay where the
+        // person put them, and so does the colour they picked.
+        assert_eq!(panel.tb_builder.params().saturation, before.saturation, "the chip moved the saturation");
+        assert_eq!(panel.tb_builder.params().lightness, before.lightness, "the chip moved the lightness");
+        assert_eq!(panel.tb_builder.params().favourite, before.favourite, "the chip moved the colour picked");
         assert_eq!(panel.tb_chosen_index(), Some(2), "the chip that was pressed is not the one marked");
         // A press and not a drag: it does not wait out the settle.
         assert!(panel.tb_apply_at_once, "the palette is waiting for a settle nobody is dragging");
@@ -24621,7 +24627,7 @@ line two");
         // dimensions they set are not part of it.
         assert_eq!(
             panel.tb_builder.params().spacing,
-            BuilderParams::house(panel.tb_builder.params().dark).spacing,
+            BuilderParams::house(panel.tb_builder.params().dark()).spacing,
             "picking a palette moved the spacing"
         );
     }
@@ -24729,14 +24735,15 @@ line two");
         let _store = a_store_of_its_own(&mut panel);
         let head = the_builder_drawn(&mut cx, &mut panel);
 
-        // One the rule grew, which is its harmony and its mood.
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 2));
+        // One the rule grew, which is its harmony and its mood: the first
+        // six are the plain harmonies, so the seventh is the first mood.
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 6));
         the_palette_lands(&mut cx, &mut panel, 0.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let was = panel.tb_chosen.clone().expect("a palette was chosen");
         assert!(was.harmony.is_some() && was.mood.is_some(), "the chip pressed was not one the rule grew");
 
-        let dark = panel.tb_builder.params().dark;
+        let dark = panel.tb_builder.params().dark();
         panel.tb_set_appearance(!dark);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
@@ -24774,7 +24781,7 @@ line two");
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(panel.tb_chosen_index(), Some(at));
 
-        let dark = panel.tb_builder.params().dark;
+        let dark = panel.tb_builder.params().dark();
         panel.tb_set_appearance(!dark);
         the_palette_lands(&mut cx, &mut panel, 4.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
@@ -24818,7 +24825,7 @@ line two");
         orphan.mood = None;
         panel.tb_chosen = Some(orphan);
 
-        let dark = panel.tb_builder.params().dark;
+        let dark = panel.tb_builder.params().dark();
         panel.tb_set_appearance(!dark);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
