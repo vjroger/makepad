@@ -11262,19 +11262,42 @@ impl Tweaker {
                             // The button is beside the line and not over it
                             // because a page is turned far more often than
                             // it is read about.
+                            //
+                            // Where the page stands is on the BUTTON's side
+                            // of the row and not in the line, because it is
+                            // about the button: it appears and goes with it,
+                            // it is the answer to the press, and a colour
+                            // with combinations in it gave the line more
+                            // than a sidebar's width to say without it. The
+                            // wrapper is what carries `visible` for the two
+                            // together -- a Label is not a View and answers
+                            // `set_visible` with nothing at all.
                             tb_sugg_row := View {
                                 width: Fill
                                 height: Fit
                                 flow: Right
                                 spacing: 4
                                 align: Align{x: 0.0 y: 0.5}
-                                tb_more := PanelButton {
+                                tb_more_wrap := View {
                                     width: Fit
-                                    height: 18
-                                    padding: Inset{left: 7 right: 7 top: 1 bottom: 1}
-                                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                                    text: "more"
-                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 4
+                                    align: Align{x: 0.0 y: 0.5}
+                                    visible: false
+                                    tb_more := PanelButton {
+                                        width: Fit
+                                        height: 18
+                                        padding: Inset{left: 7 right: 7 top: 1 bottom: 1}
+                                        margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                        text: "more"
+                                        draw_text +: { text_style +: { font_size: 7.5 } }
+                                    }
+                                    tb_page_read := PanelLabelSmall {
+                                        width: Fit
+                                        text: ""
+                                        max_lines: 1
+                                    }
                                 }
                                 tb_sugg_read := PanelLabelSmall {
                                     width: Fill
@@ -12753,7 +12776,7 @@ impl Tweaker {
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(tb_fold)], "grow a whole theme from one colour you like \u{00b7} palette, spacing and type together"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_favourite)], "the colour everything is grown from \u{00b7} its hue is what is read, and the pick button samples the app"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_harmony)], "where the other two brand hues stand to the favourite"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_sugg_row), live_id!(tb_more)], "the next handful of palettes for this colour \u{00b7} round to the first again at the end"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_sugg_row), live_id!(tb_more_wrap), live_id!(tb_more)], "the next handful of palettes for this colour \u{00b7} round to the first again at the end"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_appearance_row), live_id!(tb_dark)], "grow the theme for a dark page"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_appearance_row), live_id!(tb_light)], "grow the theme for a light page"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_appearance_row), live_id!(tb_random)], "a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
@@ -19080,14 +19103,19 @@ impl Tweaker {
             self.tb_chip_uids[slot] = chip.widget_uid().0;
         }
         let row = body.child(live_id!(tb_sugg_row));
-        let more = row.child(live_id!(tb_more));
+        let wrap = row.child(live_id!(tb_more_wrap));
         // One page is every palette there is, and a button that turns to the
-        // page it is on is a button that does nothing. Its route goes with
-        // it: a press cannot reach what is not drawn, but a uid standing on
-        // a hidden control is the fault the fold has to clear either way.
+        // page it is on is a button that does nothing. Where it stands goes
+        // with it, for the same reason: "1 of 1" is a count of a thing nobody
+        // is counting. Its route goes too -- a press cannot reach what is not
+        // drawn, but a uid standing on a hidden control is the fault the fold
+        // has to clear either way.
         let pages = self.tb_pages();
-        more.as_button().set_visible(cx, pages > 1);
+        wrap.set_visible(cx, pages > 1);
+        let more = wrap.child(live_id!(tb_more));
         self.tb_more_uid = if pages > 1 { more.widget_uid().0 } else { 0 };
+        wrap.child(live_id!(tb_page_read))
+            .set_text(cx, &format!("{} of {pages}", self.tb_page + 1));
         let line = self.tb_strip_reading();
         row.child(live_id!(tb_sugg_read)).set_text(cx, &line);
     }
@@ -19123,15 +19151,16 @@ impl Tweaker {
 
     /// What the line under the strip says: the palette that was taken off
     /// it, or else what the strip is.
+    ///
+    /// One thing and not two. Where in the pages the strip is standing used
+    /// to be tacked on here, and at the panel's own 280 a colour with
+    /// combinations in it ran the line onto a second one; it sits beside the
+    /// "more" button now, which is what it is about anyway.
     fn tb_strip_reading(&self) -> String {
-        let mut line = match self.tb_chosen_index() {
+        match self.tb_chosen_index() {
             Some(index) => self.tb_suggestions[index].label.clone(),
             None => {
                 let total = self.tb_suggestions.len();
-                let mut idle = format!(
-                    "{total} {} for this color",
-                    if total == 1 { "palette" } else { "palettes" }
-                );
                 // Where the strip is longer than the rule alone would make
                 // it, what the extra is: the combinations this colour turned
                 // up in, and the person's own schemes that hold it. Each only
@@ -19142,29 +19171,34 @@ impl Tweaker {
                     .iter()
                     .filter(|offer| offer.label.starts_with(COMBINATION_LABEL))
                     .count();
-                if combinations > 0 {
-                    idle.push_str(&format!(" \u{00b7} {combinations} combinations"));
-                }
                 let own = self
                     .tb_suggestions
                     .iter()
                     .filter(|offer| offer.label == OWN_LABEL)
                     .count();
+                // "for this color" only where the count is the whole line.
+                // The words are true either way, but the colour they point at
+                // is in the row directly above and the strip under that is
+                // grown from it, so they are the line's least-paying words --
+                // and at the panel's own 280 a colour that turns up
+                // combinations needs every point of the row to say the counts
+                // on one line, which is the line's whole job.
+                let mut idle = format!(
+                    "{total} {}",
+                    if total == 1 { "palette" } else { "palettes" }
+                );
+                if combinations == 0 && own == 0 {
+                    idle.push_str(" for this color");
+                }
+                if combinations > 0 {
+                    idle.push_str(&format!(" \u{00b7} {combinations} combinations"));
+                }
                 if own > 0 {
                     idle.push_str(&format!(" \u{00b7} {own} of your own"));
                 }
                 idle
             }
-        };
-        // Where in the offers the strip is standing, chosen or not: turning
-        // a page is the one gesture here that changes nothing else, and a
-        // person who has just turned one is owed the answer to where they
-        // are.
-        let pages = self.tb_pages();
-        if pages > 1 {
-            line.push_str(&format!(" \u{00b7} page {} of {pages}", self.tb_page + 1));
         }
-        line
     }
 
     /// Grow the offers again, for the favourite and the page that are set.
@@ -21773,7 +21807,9 @@ mod tests {
             ("tb_chip_7", "TbChipT"),
             ("tb_chip", "FabPaletteChip"),
             ("tb_sugg_row", "View"),
+            ("tb_more_wrap", "View"),
             ("tb_more", "PanelButton"),
+            ("tb_page_read", "PanelLabelSmall"),
             ("tb_sugg_read", "PanelLabelSmall"),
             ("tb_appearance_row", "View"),
             ("tb_dark", "PanelButton"),
@@ -25146,17 +25182,27 @@ line two");
             assert_eq!(showing, wanted, "chip {slot} is showing a palette that is not the one it stands for");
         }
         let row = head.child(live_id!(tb_body)).child(live_id!(tb_sugg_row));
+        let wrap = row.child(live_id!(tb_more_wrap));
         for (name, part) in [
-            ("tb_more", row.child(live_id!(tb_more))),
+            ("tb_more", wrap.child(live_id!(tb_more))),
+            ("tb_page_read", wrap.child(live_id!(tb_page_read))),
             ("tb_sugg_read", row.child(live_id!(tb_sugg_read))),
         ] {
             let rect = part.area().rect(&mut cx);
             assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "`{name}` drew nothing");
         }
         assert_ne!(panel.tb_more_uid, 0, "the page button draws and is routed nowhere");
+        // Where in the pages the strip stands is beside the button and not
+        // in the line: the line at the panel's own width has the palette
+        // counts to say and no room to spare.
+        assert_eq!(
+            wrap.child(live_id!(tb_page_read)).text(),
+            format!("1 of {}", panel.tb_pages()),
+            "the page count is not beside the button"
+        );
         assert!(
-            panel.tb_strip_reading().contains("page 1 of"),
-            "the line under the strip does not say which page it is showing: {}",
+            !panel.tb_strip_reading().contains("page"),
+            "the page count is in the line as well: {}",
             panel.tb_strip_reading()
         );
 
@@ -25166,6 +25212,34 @@ line two");
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(panel.tb_chip_uids, [0; 8]);
         assert_eq!(panel.tb_more_uid, 0);
+    }
+
+    /// The line under the strip says which colour the count is about only
+    /// where the count is the whole line.
+    ///
+    /// The words are true whatever else the line says, but the colour they
+    /// point at is in the row directly above and the strip between them is
+    /// grown from it, so they are the line's least-paying words -- and at the
+    /// panel's own width a colour that turns up combinations has no room for
+    /// them and the counts both. Counts on one line is what the line is for;
+    /// this is what pays for it.
+    #[test]
+    fn the_line_says_which_colour_only_where_the_count_is_the_whole_line() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        // The house favourite is in the book, so the line has a count to add.
+        let line = panel.tb_strip_reading();
+        assert!(line.contains("combinations"), "the house favourite turns up none, so the line is untested: {line}");
+        assert!(!line.contains("for this color"), "the line spends its width on the colour beside it: {line}");
+
+        // And a strip with nothing to add says what the count is about.
+        panel.tb_suggestions.retain(|offer| offer.harmony.is_some());
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let line = panel.tb_strip_reading();
+        assert!(line.ends_with(" palettes for this color"), "a count on its own says nothing about what of: {line}");
     }
 
     /// A press on a chip, taken the whole way a hand takes it, puts that
@@ -25419,11 +25493,15 @@ line two");
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = the_builder_drawn(&mut cx, &mut panel);
-        let more = head.child(live_id!(tb_body)).child(live_id!(tb_sugg_row)).child(live_id!(tb_more));
+        let wrap = head.child(live_id!(tb_body)).child(live_id!(tb_sugg_row)).child(live_id!(tb_more_wrap));
+        let more = wrap.child(live_id!(tb_more));
         let pages = panel.tb_pages();
         assert!(pages > 1, "the house favourite offers one page, so paging is untested");
 
-        // Every page in turn, and round to the first again at the end.
+        // Every page in turn, and round to the first again at the end. The
+        // count beside the button is the answer to the press: it is the only
+        // thing that changes, so a press that did not move it did nothing a
+        // person can see.
         for page in 1..pages {
             one_press_on(&mut cx, &mut panel, &head, &more);
             assert_eq!(panel.tb_page, page, "the page button did not turn the page");
@@ -25432,6 +25510,11 @@ line two");
                 panel.tb_offer_at(0),
                 Some(page * TB_CHIP_IDS.len()),
                 "the first slot of the page is not the palette that follows the page before it"
+            );
+            assert_eq!(
+                wrap.child(live_id!(tb_page_read)).text(),
+                format!("{} of {pages}", page + 1),
+                "the count beside the button did not follow the page"
             );
         }
         one_press_on(&mut cx, &mut panel, &head, &more);
@@ -25467,9 +25550,16 @@ line two");
             (short - full).abs() < 0.5,
             "a short page stretched its chips: {short} where a full page is {full}"
         );
-        // And nothing to turn to, so nothing to turn it with.
+        // And nothing to turn to, so nothing to turn it with -- the count
+        // goes with the button, because "1 of 1" is a count of a thing
+        // nobody is counting.
         assert_eq!(panel.tb_pages(), 1);
         assert_eq!(panel.tb_more_uid, 0, "one page of palettes still offers a button to leave it by");
+        assert_eq!(
+            wrap.child(live_id!(tb_page_read)).area().rect(&mut cx).size.x,
+            0.0,
+            "one page of palettes still says which page it is"
+        );
 
         // A press on an empty slot chooses nothing whatever it is aimed at.
         let was = panel.tb_chosen.clone();
