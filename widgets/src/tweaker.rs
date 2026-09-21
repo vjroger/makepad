@@ -19173,15 +19173,75 @@ impl Tweaker {
     /// colour that offers fewer palettes than the one before it can leave the
     /// strip showing a page that no longer exists, and an empty strip says
     /// there is nothing to choose when there are eight things to choose.
+    ///
+    /// The chosen palette is carried over where the new list has the same
+    /// palette in it -- see [`Tweaker::tb_equivalent_offer`] -- and let go
+    /// whole where it does not: the outline off AND the named companions off
+    /// the controls, because a chip and a theme that disagree are worse than
+    /// either of them alone.
     fn tb_suggest_again(&mut self) {
         let params = self.tb_builder.params();
         self.tb_suggestions = all_suggestions(params.favourite, params.dark, &self.tb_own_schemes);
         if self.tb_page >= self.tb_pages() {
             self.tb_page = 0;
         }
-        if self.tb_chosen_index().is_none() {
-            self.tb_chosen = None;
+        if self.tb_chosen_index().is_some() {
+            return;
         }
+        // Whether the app is STILL WEARING what was chosen, which is the one
+        // question that separates a strip grown for the other page from a
+        // control that moved the palette out from under it. The harmony
+        // picker, a new favourite and the surprise all let the companions go
+        // on their way through; the dark and light buttons do not, and this
+        // is the only door a palette comes back through.
+        let worn = self
+            .tb_chosen
+            .as_ref()
+            .is_some_and(|chosen| params.seeds == Some(chosen.seeds));
+        match worn.then(|| self.tb_equivalent_offer()).flatten() {
+            Some(offer) => {
+                // On the controls as well as under the outline. The other
+                // page's palette is not the same colours -- the ground is in
+                // it, and a grown one's companions are clamped to the page's
+                // band -- so leaving the old seeds standing would mark a chip
+                // the theme is not built from.
+                self.tb_builder.set(offer.params(params));
+                self.tb_chosen = Some(offer);
+            }
+            None => {
+                self.tb_chosen = None;
+                if worn {
+                    self.tb_builder.set(BuilderParams { seeds: None, ..params });
+                }
+            }
+        }
+    }
+
+    /// The same palette as the chosen one in the list as it stands now, if
+    /// the list has one.
+    ///
+    /// What "the same" means is what a palette IS rather than what it looks
+    /// like: a palette the rule grew is its harmony and its mood, and one off
+    /// a list -- the book's, or a person's own file -- is the name it is
+    /// offered under, because that is all there is to go on. The colours are
+    /// no use here, since it is exactly the colours that have moved.
+    ///
+    /// Several of a person's own schemes share the one name, so the
+    /// companions break the tie where they can: a scheme of three colours or
+    /// more names the same two whichever page it is grown for, and only a
+    /// short scheme, which borrows what it lacks from the page, falls through
+    /// to the first of that name.
+    fn tb_equivalent_offer(&self) -> Option<Suggestion> {
+        let chosen = self.tb_chosen.as_ref()?;
+        let alike = |offer: &&Suggestion| match chosen.harmony {
+            Some(_) => offer.harmony == chosen.harmony && offer.mood == chosen.mood,
+            None => offer.harmony.is_none() && offer.label == chosen.label,
+        };
+        self.tb_suggestions
+            .iter()
+            .find(|offer| alike(offer) && offer.seeds == chosen.seeds)
+            .or_else(|| self.tb_suggestions.iter().find(alike))
+            .cloned()
     }
 
     /// The person's own colour schemes, off the same folder the saves go to.
@@ -25222,6 +25282,132 @@ line two");
             !panel.tb_suggestions.contains(&chosen),
             "a new favourite grew the same palettes, so nothing about dropping it was tested"
         );
+    }
+
+    /// Growing the theme for the other page keeps the chip and the theme
+    /// saying the same thing.
+    ///
+    /// The dark and light buttons leave the palette's named companions
+    /// standing -- the app goes on wearing that palette -- but the strip is
+    /// grown again for the other page, and a palette's fourth colour IS the
+    /// page, so the offer that was chosen is no longer in the list. What the
+    /// section keeps is the equivalent one: the same harmony and mood for a
+    /// palette the rule grew, the same name for one out of the book or off a
+    /// person's own list. It goes on the controls as well as under the
+    /// outline, so that the marked chip and the worn theme are one palette
+    /// and not two.
+    ///
+    /// Without that, the outline came off a palette that was still in force
+    /// and the harmony picker dropped back to naming a harmony the theme was
+    /// not in -- the exact lie the seventh place exists to prevent.
+    #[test]
+    fn the_other_page_marks_the_palette_that_is_still_in_force() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        let head = the_builder_drawn(&mut cx, &mut panel);
+
+        // One the rule grew, which is its harmony and its mood.
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 2));
+        the_palette_lands(&mut cx, &mut panel, 0.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let was = panel.tb_chosen.clone().expect("a palette was chosen");
+        assert!(was.harmony.is_some() && was.mood.is_some(), "the chip pressed was not one the rule grew");
+
+        let dark = panel.tb_builder.params().dark;
+        panel.tb_set_appearance(!dark);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(!panel.tb_suggestions.contains(&was), "the other page grew the same palette, so nothing was tested");
+        let at = panel.tb_chosen_index().expect("the other page left no chip marked at all");
+        let now = panel.tb_suggestions[at].clone();
+        assert_eq!((now.harmony, now.mood), (was.harmony, was.mood), "some other palette took the outline");
+        assert_eq!(
+            panel.tb_builder.params().seeds,
+            Some(now.seeds),
+            "the chip that is marked and the theme that is worn are two different palettes"
+        );
+        assert!(at < TB_CHIP_IDS.len(), "the equivalent landed off the page the strip is showing");
+        assert!(
+            a_chip_of(&head, at).borrow::<FabPaletteChip>().expect("a chip").is_current(),
+            "the marked palette is not the one wearing the outline"
+        );
+
+        // And one out of the book, which is its name -- the name the picker
+        // borrows for its seventh place.
+        let harmony = panel.tb_builder.params().harmony;
+        panel.tb_set_seed(crate::theme_combinations::COMBINATIONS[0][0], harmony);
+        the_palette_lands(&mut cx, &mut panel, 2.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let at = panel
+            .tb_suggestions
+            .iter()
+            .position(|offer| offer.label.starts_with(COMBINATION_LABEL))
+            .expect("a colour out of the book found no combination");
+        let named = panel.tb_suggestions[at].label.clone();
+        panel.tb_page = at / TB_CHIP_IDS.len();
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_chosen_index(), Some(at));
+
+        let dark = panel.tb_builder.params().dark;
+        panel.tb_set_appearance(!dark);
+        the_palette_lands(&mut cx, &mut panel, 4.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let at = panel.tb_chosen_index().expect("the other page left the combination unmarked");
+        let now = panel.tb_suggestions[at].clone();
+        assert_eq!(now.label, named, "some other palette took the outline");
+        assert_eq!(panel.tb_builder.params().seeds, Some(now.seeds));
+        let picker = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(live_id!(tb_harmony))
+            .as_drop_down();
+        assert_eq!(
+            picker.selected_label(),
+            named,
+            "the picker went back to naming a harmony the theme is not in"
+        );
+        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len() + 1);
+    }
+
+    /// A palette the other page has no equivalent for is let go outright:
+    /// the outline comes off AND the named companions go with it, so the
+    /// chip and the theme cannot be left disagreeing the other way round.
+    #[test]
+    fn a_palette_the_other_page_does_not_offer_is_let_go_whole() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 1));
+        the_palette_lands(&mut cx, &mut panel, 0.0);
+        assert!(panel.tb_chosen_index().is_some());
+
+        // A palette that stands for nothing in any list: the equivalent is
+        // looked for by what a palette IS, so a made-up harmony and mood
+        // pair is one the other page cannot answer.
+        let mut orphan = panel.tb_chosen.clone().expect("a palette was chosen");
+        orphan.label = "Nowhere, nohow".to_string();
+        orphan.harmony = None;
+        orphan.mood = None;
+        panel.tb_chosen = Some(orphan);
+
+        let dark = panel.tb_builder.params().dark;
+        panel.tb_set_appearance(!dark);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(panel.tb_chosen.is_none(), "a palette nothing offers is still remembered as the chosen one");
+        assert_eq!(
+            panel.tb_builder.params().seeds,
+            None,
+            "the outline came off a palette whose companions are still on the controls"
+        );
+        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len(), "the borrowed name outlived the chip");
     }
 
     /// "more" walks the pages round, and a page that cannot fill the strip

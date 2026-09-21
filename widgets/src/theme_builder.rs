@@ -1381,11 +1381,25 @@ pub fn adjust_scheme(favourite: u32, scheme: &[u32]) -> Vec<u32> {
         if lowest >= 0.0 && highest <= 1.0 {
             return l;
         }
-        let (low, high) = (lowest.clamp(0.0, 1.0), highest.clamp(0.0, 1.0));
-        if highest - lowest <= f64::EPSILON {
+        let (mut low, mut high) = (lowest.clamp(0.0, 1.0), highest.clamp(0.0, 1.0));
+        let span = highest - lowest;
+        if span <= f64::EPSILON {
             return low;
         }
-        low + (l - lowest) * (high - low) / (highest - lowest)
+        // A scheme that went WHOLLY past one end clamps to a single point,
+        // and a rescale onto a point is every member on the one lightness:
+        // two or three colours somebody wrote down handed back as one. So
+        // where the clamped range is empty the scheme is slid back inside
+        // instead, keeping as much of its own spacing as the range has room
+        // for, hard against the end it went over.
+        if high - low <= f64::EPSILON {
+            if high <= 0.0 {
+                high = span.min(1.0);
+            } else {
+                low = 1.0 - span.min(1.0);
+            }
+        }
+        low + (l - lowest) * (high - low) / span
     };
     // `hsl_to_rgb` takes the hue round the circle for itself.
     moved.into_iter().map(|(h, s, l)| hsl_to_rgb(h, s, scale(l))).collect()
@@ -2997,6 +3011,36 @@ mod theme_builder_tests {
         // Nothing out of range is nothing moved.
         let inside = adjust_scheme(at(0.50), &[at(0.40), at(0.60)]);
         assert_eq!(inside[0], at(0.50));
+    }
+
+    /// A scheme that went wholly past one end comes back whole, and not as
+    /// one colour repeated.
+    ///
+    /// The rescale lays the moved lightnesses over the range they land in
+    /// once it is clamped, and a scheme entirely below nought clamps to the
+    /// single point nought -- so every member is mapped onto it and two or
+    /// three colours a person wrote down come back as one. The strip then
+    /// offers a chip of identical bands under their own name.
+    #[test]
+    fn a_scheme_that_went_past_the_end_comes_back_whole() {
+        let at = |light: f64| hsl_to_rgb(200.0, 0.6, light);
+        let light = |rgba: u32| rgb_to_hsl(rgba).2;
+        // Offsets of nought, -0.10 and -0.20 laid on a favourite at nought:
+        // every one of them wants to be below the floor.
+        let under = adjust_scheme(at(0.0), &[at(0.30), at(0.20), at(0.10)]);
+        assert!(under.iter().all(|c| (0.0..=1.0).contains(&light(*c))));
+        assert!(light(under[0]) > light(under[1]) && light(under[1]) > light(under[2]));
+        assert!((light(under[2]) - 0.0).abs() < 0.01, "{}", light(under[2]));
+        // The spacing it was written with, kept: a scheme that fits inside
+        // the range once it is slid back in has nothing to be squeezed for.
+        assert!((light(under[0]) - 0.20).abs() < 0.01, "{}", light(under[0]));
+        assert!((light(under[1]) - 0.10).abs() < 0.01, "{}", light(under[1]));
+        // And the other end, where the whole scheme wants to be over one.
+        let over = adjust_scheme(at(1.0), &[at(0.60), at(0.70), at(0.80)]);
+        assert!(over.iter().all(|c| (0.0..=1.0).contains(&light(*c))));
+        assert!(light(over[0]) < light(over[1]) && light(over[1]) < light(over[2]));
+        assert!((light(over[0]) - 0.80).abs() < 0.01, "{}", light(over[0]));
+        assert!((light(over[2]) - 1.0).abs() < 0.01, "{}", light(over[2]));
     }
 
     /// A person's own schemes come after the ones the rule grew, labelled as

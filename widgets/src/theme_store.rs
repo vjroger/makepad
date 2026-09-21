@@ -835,6 +835,13 @@ pub fn read_palettes_in(dir: &Path) -> (Vec<Vec<u32>>, usize) {
     };
     let mut schemes = Vec::new();
     let mut skipped = 0;
+    // The byte order mark an editor may have put at the head of the file,
+    // off before anything looks at a line. It is not whitespace by Rust's
+    // reckoning, so a trim leaves it welded to the first word, and the first
+    // scheme in the file would be read as a line that is not colours -- the
+    // one line in forty that fails, which looks like nothing so much as a
+    // typo the person cannot find.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line == "#" || line.starts_with("# ") || line.starts_with("//") {
@@ -1677,6 +1684,37 @@ mod palette_tests {
         assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
         std::fs::write(dir.join(PALETTES_FILE), "# nothing but a note\r\n\r\n").unwrap();
         assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file an editor put a byte order mark on is still a palettes file,
+    /// and the first line of it is still a scheme.
+    ///
+    /// The mark is not whitespace, so a trim leaves it welded to the first
+    /// word; the word is then not a comment and not hex, and the scheme goes
+    /// down as a line that is not colours. It is the FIRST line every time,
+    /// which makes the loss look arbitrary to somebody whose other forty
+    /// lines read perfectly.
+    #[test]
+    fn a_byte_order_mark_does_not_cost_the_first_scheme() {
+        let dir = scratch("bom-palettes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(PALETTES_FILE),
+            "\u{FEFF}#1e90ff #ffa500 #2f4f4f\r\n#f0a #0b3\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_palettes_in(&dir),
+            (
+                vec![vec![0x1E90FFFF, 0xFFA500FF, 0x2F4F4FFF], vec![0xFF00AAFF, 0x00BB33FF]],
+                0
+            )
+        );
+        // And a mark over a file whose first line is a note leaves the note
+        // a note rather than making it the one line that is not colours.
+        std::fs::write(dir.join(PALETTES_FILE), "\u{FEFF}// from the notebook\r\n#f0a #0b3\r\n").unwrap();
+        assert_eq!(read_palettes_in(&dir), (vec![vec![0xFF00AAFF, 0x00BB33FF]], 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
