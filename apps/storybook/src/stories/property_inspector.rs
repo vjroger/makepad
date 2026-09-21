@@ -38,6 +38,38 @@ script_mod! {
         draw_bg +: {color: mod.fab.color_area}
     }
 
+    // The ground a header row and its matrix stand on. Nothing inside it
+    // clips: the names are MEANT to cross their neighbours' boxes, and the
+    // padding is the room the overflow wants at the end it leans over --
+    // about three quarters of the longest name, both sides here because the
+    // page shows both leans.
+    let DiagGround = SolidView{
+        width: Fit
+        height: Fit
+        flow: Down
+        spacing: 0.
+        padding: Inset{left: 44 right: 44 top: 8 bottom: 8}
+        clip_x: false
+        clip_y: false
+        draw_bg +: {color: mod.fab.color_area}
+    }
+
+    let DiagRow = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 0.
+        clip_x: false
+        clip_y: false
+    }
+
+    let KnobRow = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 0.
+    }
+
     mod.stories.PropertyInspectorOverview = StoryPage{
         StoryNote{text: "A panel of an object's properties: a name on the left, an editor on the right, and a heading over each family of them. Nothing here is declared row by row — the host hands over a list of properties and the panel decides what each one needs."}
 
@@ -133,6 +165,84 @@ script_mod! {
             }
             KnobGround{
                 FabKnob{width: 28 height: 28 show_readout: false value: 50.0 enabled: false}
+            }
+        }
+
+        StoryHeading{text: "Naming the columns"}
+        StoryNote{text: "A column 26 points across cannot hold the word Omarchy, let alone Windows 2000, so the name is turned on its side and let out over its neighbours. That is safe because the names are parallel: at 45 degrees a pitch of 26 leaves 18 points between one name and the next across the line, and a line of the panel's small face is ten, so however long they get they never touch. Each name stands on the middle of its own column's bottom edge, right above the knob it names."}
+        StoryNote{text: "Fall hangs the name over the LEFT and is the default: over a matrix that is the empty corner above the row names, so the last column is never cut in half by the panel's edge. Rise is the spreadsheet convention and hangs over the right instead, which a host has to leave room for. The ink is meant to leave its own box, so nothing between the label and the panel's own frame may clip."}
+        StoryRow{
+            DiagGround{
+                DiagRow{
+                    FabDiagonalLabel{width: 26 text: "Dark"}
+                    FabDiagonalLabel{width: 26 text: "Omarchy"}
+                    FabDiagonalLabel{width: 26 text: "macOS dark"}
+                    FabDiagonalLabel{width: 26 text: "Windows 2000"}
+                    FabDiagonalLabel{width: 26 text: "Android dark"}
+                    FabDiagonalLabel{width: 26 text: "Black orange"}
+                    FabDiagonalLabel{width: 26 text: "NeXTSTEP"}
+                    FabDiagonalLabel{width: 26 text: "Skeleton"}
+                }
+                KnobRow{
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 20.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 40.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 60.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 80.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 100.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 50.0}
+                }
+            }
+        }
+        StoryRow{
+            DiagGround{
+                DiagRow{
+                    FabDiagonalLabel{width: 26 text: "Dark" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Omarchy" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "macOS dark" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Windows 2000" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Android dark" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Black orange" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "NeXTSTEP" lean: DiagonalLean.Rise}
+                    FabDiagonalLabel{width: 26 text: "Skeleton" lean: DiagonalLean.Rise}
+                }
+                KnobRow{
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 20.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 40.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 60.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 80.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 100.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 26 height: 26 show_readout: false value: 50.0}
+                }
+            }
+        }
+
+        StoryNote{text: "The same names over a roomier column. At a pitch of 44 the names stand 31 points apart across the line against a line of ten, so they are much further apart than they need to be — this is what a panel that has the width looks like, and about where a plain horizontal label starts to be the better answer."}
+        StoryRow{
+            DiagGround{
+                DiagRow{
+                    FabDiagonalLabel{width: 44 text: "Dark"}
+                    FabDiagonalLabel{width: 44 text: "Omarchy"}
+                    FabDiagonalLabel{width: 44 text: "macOS dark"}
+                    FabDiagonalLabel{width: 44 text: "Windows 2000"}
+                    FabDiagonalLabel{width: 44 text: "Android dark"}
+                    FabDiagonalLabel{width: 44 text: "Black orange"}
+                    FabDiagonalLabel{width: 44 text: "NeXTSTEP"}
+                    FabDiagonalLabel{width: 44 text: "Skeleton"}
+                }
+                KnobRow{
+                    FabKnob{width: 44 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 20.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 40.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 60.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 80.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 100.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 0.0}
+                    FabKnob{width: 44 height: 26 show_readout: false value: 50.0}
+                }
             }
         }
 
@@ -270,7 +380,7 @@ pub const STORIES: &[Story] = &[Story {
     component: "PropertyInspector",
     also: &[
         "FabColorPick", "FabColorWheel", "FabLabel", "FabPaletteStrip", "FabValueInput", "Panel",
-        "FabSection", "FabPropRow", "FabSearch", "FabKnob",
+        "FabSection", "FabPropRow", "FabSearch", "FabKnob", "FabDiagonalLabel",
     ],
     name: "Overview",
     dsl: "PropertyInspectorOverview",
@@ -356,6 +466,18 @@ The controls the rows are made of, each usable on its own. They are shaped for a
 **It reports the way the rest of the kit does.** `Changed` follows a gesture live and `Ended` fires once when it is over: at the release of a drag, at the release of a held arrow, when the wheel has been still for a third of a second, and at once for a double click, which also says `Reset`. A press that turned nothing commits nothing. `set_value` and `set_value_and_readout` say nothing at all, so a host can fill a matrix without hearing its own numbers back.
 
 **Nought reads as off.** The arc is out and the tick and the number are dimmed, because most cells of a matrix stand at nought. Every colour comes from the panel's own table, so the knob looks the same under every theme the app can wear.
+
+### The diagonal header
+
+`FabDiagonalLabel` is a name written across the corner of the box it names, for a column too narrow to hold it flat. A matrix of knobs comes down to about 26 points a column and a theme's name runs to two and a half times that, so the name is turned — `angle`, 45 degrees by default — and let out over its neighbours. Parallel names never collide: at 45 degrees a pitch of 26 puts 18 points between one and the next across the line, and a line of the panel's small face is ten.
+
+**One end always stands on its own column.** The anchor is the box's bottom centre in both leans, so the name is over the thing it names whatever length it is. `lean: Fall` — the default — *ends* there, having begun up and to the left, and hangs over the LEFT; over a matrix that is the empty corner above the row names, so the last column is never cut in half by the panel's edge. `lean: Rise` *starts* there and rises to the upper right, the spreadsheet convention, and the host owes its last column that much room.
+
+**Nothing may clip it.** The ink leaves the widget's own box on purpose, which is why the widget opens no turtle of its own; the row it stands in needs `clip_x: false`, and the ground the overflow lands on has to be inside whatever does clip. A header row that looks like it is losing letters is a clip somewhere above it, not the label.
+
+**How tall the row has to be.** `text_width x sin(angle) + line_height x cos(angle)` — the name along the hypotenuse plus its line across it. `diagonal_row_height` in Rust is that sum, and `FabDiagonalLabel::row_height_for(cx, longest)` shapes a name and applies it, so a host fixes its header once at the longest name it will ever write. At 45 degrees with the panel's small face the longest theme name the library ships wants 56.5 points, which is where the template's default of 60 comes from.
+
+**It is a label.** No hit, no focus, no actions. `set_text` holds the name and asks for a frame, and says nothing when the name has not changed, because a matrix writes every header into a fixed slot on every draw.
 
 ### The labels
 

@@ -22,6 +22,10 @@
 //!   Shift a tenth of the speed), the wheel and the arrows step it once it
 //!   has the keyboard, a double click takes it back to zero. Same fields,
 //!   same actions and same ref helpers as the slider.
+//! * `mod.widgets.FabDiagonalLabel` — the name over a column too narrow to
+//!   hold it: a matrix header, turned 45 degrees and let out over its
+//!   neighbours. `lean` picks which side it hangs over. It draws OUTSIDE its
+//!   own box on purpose, so the row it stands in wants `clip_x: false`.
 //! * `mod.widgets.FabColorWheel` — hue ring around a saturation/value
 //!   square, pointer-captured drags, arrow-key nudges.
 //! * `mod.widgets.FabColorPick` — a swatch that opens a self-managed
@@ -37,8 +41,8 @@
 use crate::button::ButtonAction;
 use crate::widget_tree::CxWidgetExt;
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig, makepad_draw::*,
-    text_input::*, view::View, widget::*,
+    animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig,
+    makepad_draw::text::geom::Point, makepad_draw::*, text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
 
@@ -688,6 +692,39 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 color: fab.color_text_header
                 text_style: fab.font{
                     font_size: fab.font_size_header
+                }
+            }
+        }
+
+        // The name over a column that cannot hold it flat. Kept here among
+        // the labels because that is what it is; what makes it its own
+        // control is that the ink is MEANT to leave the box.
+        let DiagonalLean = set_type_default() do #(DiagonalLean::script_api(vm))
+        mod.widgets.DiagonalLean = DiagonalLean
+        mod.widgets.FabDiagonalLabelBase = #(FabDiagonalLabel::register_widget(vm))
+        /** A name written across the corner of the box it names, for a
+         * column too narrow to hold it flat: a matrix header. The ink
+         * overflows its own box on purpose, so the row these stand in wants
+         * `clip_x: false` and room at the end they lean over. */
+        mod.widgets.FabDiagonalLabel = set_type_default() do mod.widgets.FabDiagonalLabelBase{
+            // Fill so a header row divides itself between its columns the
+            // way the matrix under it does. 60 down is measured and not
+            // guessed: the longest theme name the library ships takes 56.5
+            // points of height at 45 degrees in the panel's small face, and
+            // a host that knows its own longest name should fix this for
+            // itself with `diagonal_row_height`.
+            width: Fill
+            height: 60
+            text: ""
+            /** how far from the horizontal the name is turned, in degrees 0..90 step 5 */
+            angle: 45.0
+            /** Fall hangs the name over the LEFT, Rise over the right */
+            lean: DiagonalLean.Fall
+
+            draw_text +: {
+                color: fab.color_text_dim
+                text_style: fab.font{
+                    font_size: fab.font_size_small
                 }
             }
         }
@@ -3698,6 +3735,296 @@ fn knob_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
 }
 
 // ===========================================================================
+// FabDiagonalLabel — the name over a column too narrow to hold it.
+//
+// The Theme tab is a matrix of knobs, ten rows by up to eight columns, in a
+// sidebar 280 wide: a column comes out around 26 points across, and the
+// theme names the panel has to write over them run to two and a half times
+// that. So the name is turned on its side and let out over its neighbours,
+// which is safe
+// for the reason parallel lines are safe: at 45 degrees a pitch of 26 puts
+// 26 * sin(45) = 18 points between one name and the next ACROSS the line,
+// and a line of the panel's small face is ten, so however long the names get
+// they never touch — only the empty ground beside them is crossed.
+//
+// The widget therefore draws OUTSIDE its own box on purpose. The box is an
+// anchor and not a frame, and nothing here opens a turtle, because a turtle
+// is exactly what would cut the name off: a begun turtle pushes its rect
+// onto the clip stack, the align pass stamps that rect onto every instance
+// drawn inside it, and `DrawText` discards the pixels outside it
+// (`draw/src/turtle.rs`, `clip_and_shift_align_list`; the clip note at the
+// top of `draw/src/shader/draw_text.rs`). The host owes the other half of
+// that bargain: the row these stand in carries `clip_x: false`, and the
+// ground the ink spills onto has to be inside whatever DOES clip.
+//
+// Where the baseline starts is the one thing that has to be exact — a name
+// standing over the wrong column names the wrong column — so that is pure
+// arithmetic, settled and tested without a window.
+// ===========================================================================
+
+/// Which way a diagonal name runs across the column it names.
+///
+/// Both are wanted, and what the choice really decides is which edge of the
+/// panel the ink hangs over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum DiagonalLean {
+    /// The name ENDS on its column's bottom centre, having begun up and to
+    /// the left, and reads downward to the right. The overflow is to the
+    /// LEFT, and over a matrix that is the empty corner above the row-name
+    /// column — so the LAST column's name is never cut in half by the
+    /// panel's right edge. That is why it is the default.
+    #[pick]
+    Fall = 0,
+    /// The name STARTS on its column's bottom centre and rises to the upper
+    /// right: the spreadsheet convention. The overflow is to the RIGHT, so a
+    /// host that picks this owes its last column that much room.
+    Rise = 1,
+}
+
+/// Where a diagonal name's baseline runs, and the box its ink takes.
+///
+/// Every coordinate is absolute, in the same space as the box handed in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiagonalRun {
+    /// The first glyph's pen point.
+    pub start: DVec2,
+    /// One advance past the last glyph's: where the baseline stops.
+    pub end: DVec2,
+    /// The rotation every glyph is turned by, in radians and in SCREEN
+    /// terms — y points down, so a `Fall` is positive and a `Rise`
+    /// negative.
+    pub angle: f64,
+    /// Everything the ink covers. Normally wider than the box and usually
+    /// taller: it is what must NOT be clipped, and what a host measures a
+    /// header row against.
+    pub bounds: Rect,
+}
+
+/// How tall a header row has to be to hold a name of `text_width` turned by
+/// `angle_deg`, in points.
+///
+/// The name lies along the hypotenuse and its line stands across it, so the
+/// row needs both: `text_width * sin(angle) + line_height * cos(angle)`. It
+/// is the same for either lean — they differ in which way the ink leans, not
+/// in how much room it takes. A host that cannot ask the widget (a height
+/// written in the DSL) can do this sum with a ruler: at 45 degrees it is
+/// about 0.71 of the longest name plus 0.71 of a line.
+pub fn diagonal_row_height(text_width: f64, line_height: f64, angle_deg: f64) -> f64 {
+    let rad = angle_deg.clamp(0.0, 90.0).to_radians();
+    text_width.max(0.0) * rad.sin() + line_height.max(0.0) * rad.cos()
+}
+
+/// Where the name goes over the box it names.
+///
+/// The anchor is the box's BOTTOM CENTRE in both leans, and that is the
+/// whole point of the control: whatever the name is, one end of it stands on
+/// the middle of its own column, right above whatever the column holds. What
+/// changes with the lean is WHICH end, and so which side the rest hangs over.
+///
+/// At nought degrees this degenerates to a plain horizontal label sitting on
+/// the box's bottom edge — a `Fall` ending on the centre, a `Rise` starting
+/// there — which is the honest answer rather than a special case: a column
+/// wide enough not to need the trick does not need a different control.
+pub fn diagonal_run(
+    box_: Rect,
+    text_width: f64,
+    line_height: f64,
+    angle_deg: f64,
+    lean: DiagonalLean,
+) -> DiagonalRun {
+    let rad = angle_deg.clamp(0.0, 90.0).to_radians();
+    let (sin, cos) = (rad.sin(), rad.cos());
+    let width = text_width.max(0.0);
+    let line = line_height.max(0.0);
+    let anchor = dvec2(box_.pos.x + box_.size.x * 0.5, box_.pos.y + box_.size.y);
+    // The glyph band lies from the baseline UP by one line, so the rotated
+    // band reaches `width * sin + line * cos` above the anchor either way.
+    let top = anchor.y - width * sin - line * cos;
+    let (angle, start, end, left, right) = match lean {
+        DiagonalLean::Fall => {
+            let start = dvec2(anchor.x - width * cos, anchor.y - width * sin);
+            // Leaning down to the right, the band's far corner is the one
+            // that reaches furthest right; the pen point is the left edge.
+            (rad, start, anchor, start.x, start.x + width * cos + line * sin)
+        }
+        DiagonalLean::Rise => {
+            let end = dvec2(anchor.x + width * cos, anchor.y - width * sin);
+            // Leaning up to the right, the band hangs back over the pen.
+            (-rad, anchor, end, anchor.x - line * sin, anchor.x + width * cos)
+        }
+    };
+    DiagonalRun {
+        start,
+        end,
+        angle,
+        bounds: Rect {
+            pos: dvec2(left, top),
+            size: dvec2(right - left, anchor.y - top),
+        },
+    }
+}
+
+/// A name written across the corner of the box it names, for a column too
+/// narrow to hold it flat. No gesture, no focus, no actions: it is a label.
+#[derive(Script, ScriptHook, Widget)]
+pub struct FabDiagonalLabel {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[live]
+    draw_text: DrawRotatedText,
+    #[walk]
+    walk: Walk,
+
+    /// The name.
+    #[live]
+    text: String,
+    /// How far from the horizontal the name is turned, in degrees, 0 to 90.
+    #[live(45.0)]
+    angle: f64,
+    /// Which way it leans, and so which side it hangs over.
+    #[live]
+    lean: DiagonalLean,
+
+    /// The claimed box, kept so a set of the name can ask for the frame that
+    /// shows it. The glyphs are not it: a label with nothing in it draws no
+    /// glyphs and would then have no area to redraw from, which is exactly
+    /// the moment a host fills the header in.
+    #[redraw]
+    #[rust]
+    area: Area,
+    /// Scratch for one name's glyphs, kept so a wall of these does not
+    /// allocate once a frame each.
+    #[rust]
+    glyphs: Vec<PathGlyphInstance>,
+    /// Where the last draw actually put the ink. A host that wants to know
+    /// whether its row is tall enough can read it back rather than guess.
+    #[rust]
+    last_run: Option<DiagonalRun>,
+}
+
+impl FabDiagonalLabel {
+    /// Where the last draw put the name, or `None` before it has drawn one.
+    pub fn last_run(&self) -> Option<DiagonalRun> {
+        self.last_run
+    }
+
+    /// How tall a header row has to be for `longest` at this label's angle
+    /// and face, in points.
+    ///
+    /// The host asks once, with the longest name it will ever write, and
+    /// fixes the row at the answer; every shorter name then hangs from the
+    /// same bottom line. See [`diagonal_row_height`] for the sum itself,
+    /// which a DSL can do without a widget.
+    pub fn row_height_for(&self, cx: &mut Cx2d, longest: &str) -> f64 {
+        match self.draw_text.prepare_single_line_run(cx, longest) {
+            Some(run) => diagonal_row_height(
+                run.width_in_lpxs as f64,
+                (run.ascender_in_lpxs - run.descender_in_lpxs) as f64,
+                self.angle,
+            ),
+            None => 0.0,
+        }
+    }
+}
+
+impl Widget for FabDiagonalLabel {
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Emits nothing, and says nothing when the name has not changed: the
+    /// matrix writes every header into a fixed slot on every draw, and a
+    /// setter that dirtied the draw list each time would redraw the panel
+    /// forever.
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.text == v {
+            return;
+        }
+        self.text.clear();
+        self.text.push_str(v);
+        self.redraw(cx);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // The box is CLAIMED and then drawn over, never drawn in: no turtle
+        // is begun here, so this widget pushes no clip of its own and the
+        // name is free to cross its neighbours. See the note above.
+        let rect = cx.walk_turtle(walk);
+        cx.add_aligned_rect_area(&mut self.area, rect);
+        self.last_run = None;
+        // A Fill on an axis nothing has sized is a NaN box; there is no
+        // centre to stand a name on, so nothing is drawn rather than a name
+        // at nowhere.
+        if self.text.is_empty() || !rect.size.x.is_finite() || !rect.size.y.is_finite() {
+            return DrawStep::done();
+        }
+        let Some(run) = self.draw_text.prepare_single_line_run(cx, &self.text) else {
+            return DrawStep::done();
+        };
+        let placed = diagonal_run(
+            rect,
+            run.width_in_lpxs as f64,
+            (run.ascender_in_lpxs - run.descender_in_lpxs) as f64,
+            self.angle,
+            self.lean,
+        );
+        // A straight baseline is one direction for every glyph, so the walk
+        // along it is the run's own pen advances and nothing else: the
+        // rotation origin is the pen point, the ink sits one bearing along
+        // from it, and every glyph turns by the same angle.
+        let dir = dvec2(placed.angle.cos(), placed.angle.sin());
+        let mut glyphs = std::mem::take(&mut self.glyphs);
+        glyphs.clear();
+        for glyph in &run.glyphs {
+            if glyph.advance_in_lpxs <= 0.0 {
+                continue;
+            }
+            let pen = placed.start + dir * glyph.pen_x_in_lpxs as f64;
+            let ink = pen + dir * glyph.offset_x_in_lpxs as f64;
+            glyphs.push(PathGlyphInstance {
+                glyph_origin: Point::new(ink.x as f32, ink.y as f32),
+                rotation_origin: Point::new(pen.x as f32, pen.y as f32),
+                font_size_in_lpxs: glyph.font_size_in_lpxs,
+                rasterized: glyph.rasterized,
+                angle: placed.angle as f32,
+            });
+        }
+        // One draw call for the whole name rather than one per letter. The
+        // camera, warp and fade uniforms this shader carries for the map are
+        // left where their defaults are — identity, no fold, no fade — so
+        // what is drawn is the placement above and nothing on top of it.
+        self.draw_text.begin_glyph_batch(cx);
+        self.draw_text.draw_path_glyphs(cx, &glyphs);
+        self.draw_text.end_glyph_batch(cx);
+        self.glyphs = glyphs;
+        self.last_run = Some(placed);
+        DrawStep::done()
+    }
+}
+
+impl FabDiagonalLabelRef {
+    pub fn text(&self) -> String {
+        self.borrow().map_or_else(String::new, |inner| inner.text())
+    }
+
+    /// Emits nothing. See [`FabDiagonalLabel::set_text`].
+    pub fn set_text(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text(cx, text);
+        }
+    }
+
+    /// Where the last draw put the name. See
+    /// [`FabDiagonalLabel::last_run`].
+    pub fn last_run(&self) -> Option<DiagonalRun> {
+        self.borrow().and_then(|inner| inner.last_run())
+    }
+}
+
+// ===========================================================================
 // FabColorWheel
 // ===========================================================================
 
@@ -4737,6 +5064,11 @@ mod tests {
         // its box is its own two numbers, under every sheet.
         let knob = built(cx, "FabKnob");
         out.push(("FabKnob", shape(knob.walk(cx))));
+
+        // The matrix's column header, which is a box like any other even
+        // though its ink is not.
+        let header = built(cx, "FabDiagonalLabel");
+        out.push(("FabDiagonalLabel", shape(header.walk(cx))));
         out
     }
 
@@ -4767,7 +5099,7 @@ mod tests {
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
         let plain = fab_geometry(&mut cx);
-        assert_eq!(plain.len(), 7, "a control was dropped from the reading");
+        assert_eq!(plain.len(), 8, "a control was dropped from the reading");
         for style in DesktopStyle::ALL {
             for dark in [false, true] {
                 if dark && !style.supports_dark() {
@@ -5035,6 +5367,7 @@ mod tests {
                 crate::script_eval!(vm, {mod.widgets.FabLabel.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabLabelSmall.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabHeaderLabel.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabDiagonalLabel.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabSearch.input.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabColorPick.popover.hex_row.hex.draw_text.text_style}),
             ];
@@ -5116,6 +5449,7 @@ mod tests {
             ("FabLabel.draw_text", 8.5),
             ("FabLabelSmall.draw_text", 7.5),
             ("FabHeaderLabel.draw_text", 9.0),
+            ("FabDiagonalLabel.draw_text", 7.5),
             ("FabSearch.input.draw_text", 8.5),
             ("FabColorPick.popover.hex_row.hex.draw_text", 8.5),
         ];
@@ -5375,6 +5709,148 @@ mod tests {
             knob.matches("text_style:").count(),
             knob.matches("text_style: fab.font{").count(),
             "a text style on the knob is not built from `fab.font`"
+        );
+    }
+
+    /// A 26 point column of the Theme tab's matrix, 48 down.
+    fn column() -> Rect {
+        Rect {
+            pos: dvec2(100.0, 40.0),
+            size: dvec2(26.0, 48.0),
+        }
+    }
+
+    /// The anchor, which is the whole control: one end of the name stands on
+    /// the middle of its own column's bottom edge, so a name is always over
+    /// the thing it names however long it is. A `Fall` ENDS there, a `Rise`
+    /// STARTS there.
+    #[test]
+    fn a_name_stands_on_the_bottom_centre_of_its_own_column() {
+        let b = column();
+        let centre = dvec2(b.pos.x + 13.0, b.pos.y + 48.0);
+        for name_width in [10.0, 50.0, 120.0] {
+            let fall = diagonal_run(b, name_width, 10.0, 45.0, DiagonalLean::Fall);
+            assert!(
+                (fall.end - centre).length() < 1e-9,
+                "a fall of {name_width} ends at {:?}, not {centre:?}",
+                fall.end
+            );
+            let rise = diagonal_run(b, name_width, 10.0, 45.0, DiagonalLean::Rise);
+            assert!(
+                (rise.start - centre).length() < 1e-9,
+                "a rise of {name_width} starts at {:?}, not {centre:?}",
+                rise.start
+            );
+            // ...and the other end is one name away along the slope.
+            assert!(((fall.end - fall.start).length() - name_width).abs() < 1e-9);
+            assert!(((rise.end - rise.start).length() - name_width).abs() < 1e-9);
+        }
+    }
+
+    /// The two leans hang over OPPOSITE sides, which is the reason both
+    /// exist: over a matrix, `Fall` spills into the empty corner above the
+    /// row names and `Rise` spills past the last column into the panel's
+    /// edge.
+    #[test]
+    fn the_two_leans_hang_over_opposite_sides_of_the_column() {
+        let b = column();
+        let fall = diagonal_run(b, 50.0, 10.0, 45.0, DiagonalLean::Fall);
+        let rise = diagonal_run(b, 50.0, 10.0, 45.0, DiagonalLean::Rise);
+        assert!(fall.bounds.pos.x < b.pos.x, "a fall hangs over the left");
+        assert!(
+            fall.bounds.pos.x + fall.bounds.size.x <= b.pos.x + b.size.x + 1e-9,
+            "a fall stays off the right"
+        );
+        assert!(
+            rise.bounds.pos.x + rise.bounds.size.x > b.pos.x + b.size.x,
+            "a rise hangs over the right"
+        );
+        assert!(rise.bounds.pos.x >= b.pos.x - 10.0, "a rise barely hangs left");
+        // Both sit ON the column's bottom edge, whichever way they lean.
+        for run in [fall, rise] {
+            let bottom = run.bounds.pos.y + run.bounds.size.y;
+            assert!((bottom - (b.pos.y + b.size.y)).abs() < 1e-9);
+        }
+        // ...and a name too long for the row it is in leaves the top of it
+        // rather than shrinking or being cut: the row's height is the host's
+        // to get right, and `diagonal_row_height` is how.
+        let over = diagonal_run(b, 90.0, 10.0, 45.0, DiagonalLean::Fall);
+        assert!(over.bounds.size.y > b.size.y);
+        assert!(over.bounds.pos.y < b.pos.y, "the name stayed inside a box too short for it");
+    }
+
+    /// Nought degrees is a plain horizontal label on the box's bottom edge,
+    /// not a special case: a column wide enough not to need the trick does
+    /// not need a different control.
+    #[test]
+    fn a_turn_of_nothing_is_a_plain_horizontal_label() {
+        let b = column();
+        for lean in [DiagonalLean::Fall, DiagonalLean::Rise] {
+            let run = diagonal_run(b, 50.0, 10.0, 0.0, lean);
+            assert_eq!(run.angle, 0.0);
+            assert!((run.start.y - run.end.y).abs() < 1e-9, "the baseline is level");
+            assert!((run.start.y - (b.pos.y + b.size.y)).abs() < 1e-9, "on the bottom edge");
+            assert!((run.bounds.size.y - 10.0).abs() < 1e-9, "one line tall");
+        }
+        assert!(
+            (diagonal_row_height(50.0, 10.0, 0.0) - 10.0).abs() < 1e-9,
+            "a level row is a line tall whatever the name is"
+        );
+    }
+
+    /// A longer name needs a taller row, and the widget's bounds and the
+    /// number a host fixes its row with are the same number.
+    #[test]
+    fn a_longer_name_needs_a_taller_header_row() {
+        let short = diagonal_row_height(20.0, 10.0, 45.0);
+        let long = diagonal_row_height(60.0, 10.0, 45.0);
+        assert!(long > short + 20.0, "{short} -> {long}");
+        // The sum itself: the name along the hypotenuse, the line across it.
+        let want = 60.0 * std::f64::consts::FRAC_1_SQRT_2 + 10.0 * std::f64::consts::FRAC_1_SQRT_2;
+        assert!((long - want).abs() < 1e-9, "{long} is not {want}");
+        // ...and a steeper turn needs more room still.
+        assert!(diagonal_row_height(60.0, 10.0, 60.0) > long);
+        // What the helper says and what the run takes are one number.
+        for lean in [DiagonalLean::Fall, DiagonalLean::Rise] {
+            let run = diagonal_run(column(), 60.0, 10.0, 45.0, lean);
+            assert!((run.bounds.size.y - long).abs() < 1e-9);
+        }
+    }
+
+    /// The panel's own palette and the panel's own face, on the header as on
+    /// everything else the kit draws. Read off the SOURCE, so a colour token
+    /// borrowed from the app's theme fails here rather than on the day
+    /// somebody installs a sheet. The same reading the knob gets, for the
+    /// same reason.
+    #[test]
+    fn the_diagonal_header_names_only_the_panels_own_palette() {
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let label = src
+            .split("mod.widgets.FabDiagonalLabelBase = ")
+            .nth(1)
+            .expect("the file declares the diagonal header");
+        let label = &label[..label
+            .find("// ---- the search well ----")
+            .expect("the diagonal header is followed by the search well")];
+        assert!(
+            label.contains("mod.widgets.FabDiagonalLabel = "),
+            "the reading stops short of the header's template"
+        );
+        assert!(!label.contains("#x"), "the header writes a colour of its own");
+        assert!(
+            !label.contains("theme.") && !label.contains("mod.theme"),
+            "the header reads the app's theme"
+        );
+        for token in ["fab.color_text_dim", "fab.font_size_small"] {
+            assert!(label.contains(token), "the header no longer draws from `{token}`");
+        }
+        assert_eq!(
+            label.matches("text_style:").count(),
+            label.matches("text_style: fab.font{").count(),
+            "a text style on the header is not built from `fab.font`"
         );
     }
 
@@ -6731,5 +7207,219 @@ mod fab_knob_gestures {
         // Nought is drawn as off, and the travel is what says so.
         assert_eq!(inner.draw_bg.travel, 0.0);
         assert_eq!(cell.borrow::<FabKnob>().unwrap().draw_bg.travel, 0.5);
+    }
+}
+
+/// The header, drawn. What the arithmetic says about where a name goes is
+/// only worth something if that is where the widget actually put it, and a
+/// name written in by a host has to reach the screen.
+#[cfg(test)]
+mod fab_diagonal_label_draw {
+    #![allow(dead_code)]
+    use super::fab_slider_gestures::Target;
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+
+    /// A header row the way the matrix wants one: columns at the pitch a 280
+    /// wide sidebar comes down to, leaning both ways, and one with no theme
+    /// behind it.
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    View{
+                        width: Fit
+                        height: Fit
+                        flow: Right
+                        clip_x: false
+                        clip_y: false
+                        first := FabDiagonalLabel{width: 26. text: "Windows 2000"}
+                        second := FabDiagonalLabel{width: 26. text: "Dark"}
+                        rising := FabDiagonalLabel{width: 26. text: "Windows 2000" lean: DiagonalLean.Rise}
+                        blank := FabDiagonalLabel{width: 26.}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, Target) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        (root, target)
+    }
+
+    fn run_of(widget: &WidgetRef) -> DiagonalRun {
+        widget
+            .borrow::<FabDiagonalLabel>()
+            .expect("it is a FabDiagonalLabel")
+            .last_run()
+            .expect("it drew a name")
+    }
+
+    fn box_of(widget: &WidgetRef, cx: &Cx) -> Rect {
+        let area = widget
+            .borrow::<FabDiagonalLabel>()
+            .expect("it is a FabDiagonalLabel")
+            .area;
+        area.rect(cx)
+    }
+
+    /// `row_height_for` shapes the name, and shaping wants a live `Cx2d`
+    /// even though nothing is drawn with it.
+    fn measure(cx: &mut Cx, widget: &WidgetRef, text: &str) -> f64 {
+        let pass = DrawPass::new(cx);
+        let mut draw_list = DrawList2d::new(cx);
+        pass.set_size(cx, SIZE);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        let height = widget
+            .borrow::<FabDiagonalLabel>()
+            .expect("it is a FabDiagonalLabel")
+            .row_height_for(&mut cx2d, text);
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+        height
+    }
+
+    /// The drawn name lands where the pure placement says it does, its ink
+    /// leaves its own 26 point box, and the box it claimed is still only 26
+    /// wide — which together is the whole claim: the widget takes a column
+    /// and paints across the panel.
+    #[test]
+    fn the_drawn_name_stands_on_its_own_column_and_leaves_its_box() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = start(&mut cx);
+        let first = root.widget(&cx, ids!(first));
+        let box_ = box_of(&first, &cx);
+        assert_eq!(box_.size.x, 26.0, "the claimed box is one column");
+        let run = run_of(&first);
+        // The baseline ends on the middle of the claimed box's bottom edge.
+        let centre = dvec2(box_.pos.x + box_.size.x * 0.5, box_.pos.y + box_.size.y);
+        assert!((run.end - centre).length() < 1e-6, "{:?} is not {centre:?}", run.end);
+        assert!(run.angle > 0.0, "a fall turns clockwise on screen");
+        // The ink is wider than the column, which is the reason to have it.
+        assert!(run.bounds.size.x > 26.0, "the name stayed inside its box");
+        assert!(run.bounds.pos.x < box_.pos.x, "the name did not hang left");
+        // ...and no taller than the row the template ships: the default
+        // height holds the longest theme name the library carries, which is
+        // the name in this scene.
+        assert!(
+            run.bounds.size.y <= box_.size.y,
+            "the template's {} is too short for {}",
+            box_.size.y,
+            run.bounds.size.y
+        );
+    }
+
+    /// The rise leans the other way: the same anchor, the opposite side.
+    #[test]
+    fn a_rising_name_starts_where_a_falling_one_ends() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = start(&mut cx);
+        let rising = root.widget(&cx, ids!(rising));
+        let box_ = box_of(&rising, &cx);
+        let run = run_of(&rising);
+        let centre = dvec2(box_.pos.x + box_.size.x * 0.5, box_.pos.y + box_.size.y);
+        assert!((run.start - centre).length() < 1e-6);
+        assert!(run.angle < 0.0, "a rise turns anticlockwise on screen");
+        assert!(
+            run.bounds.pos.x + run.bounds.size.x > box_.pos.x + box_.size.x,
+            "the name did not hang right"
+        );
+    }
+
+    /// A shorter name takes less room, and one with nothing in it draws
+    /// nothing — the matrix leaves columns it has no theme for blank, and
+    /// they still have to keep their place in the row.
+    #[test]
+    fn a_shorter_name_takes_less_room_and_an_empty_one_takes_none() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = start(&mut cx);
+        let long = run_of(&root.widget(&cx, ids!(first)));
+        let short = run_of(&root.widget(&cx, ids!(second)));
+        assert!(
+            short.bounds.size.y < long.bounds.size.y,
+            "a short name wants less height: {} vs {}",
+            short.bounds.size.y,
+            long.bounds.size.y
+        );
+        let blank = root.widget(&cx, ids!(blank));
+        assert!(
+            blank
+                .borrow::<FabDiagonalLabel>()
+                .unwrap()
+                .last_run()
+                .is_none(),
+            "an empty header drew something"
+        );
+        assert_eq!(box_of(&blank, &cx).size.x, 26.0, "it still claimed its column");
+    }
+
+    /// The name a host writes in is the name that is drawn, and asking for
+    /// it asks for the frame that shows it. Writing the same name again is
+    /// silent: the matrix fills every header on every draw, and a setter
+    /// that dirtied the list each time would redraw the panel forever.
+    #[test]
+    fn a_written_name_is_held_and_asks_for_the_frame_that_shows_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let first = root.widget(&cx, ids!(first));
+        assert_eq!(
+            first.borrow::<FabDiagonalLabel>().unwrap().text(),
+            "Windows 2000"
+        );
+        let was = run_of(&first).bounds.size.y;
+
+        cx.new_draw_event = Default::default();
+        first
+            .borrow_mut::<FabDiagonalLabel>()
+            .unwrap()
+            .set_text(&mut cx, "Windows 2000");
+        assert!(
+            !cx.new_draw_event.will_redraw(),
+            "the same name asked for a frame"
+        );
+
+        first
+            .borrow_mut::<FabDiagonalLabel>()
+            .unwrap()
+            .set_text(&mut cx, "NeXTSTEP");
+        assert!(cx.new_draw_event.will_redraw(), "a new name asked for no frame");
+        assert_eq!(first.borrow::<FabDiagonalLabel>().unwrap().text(), "NeXTSTEP");
+
+        // ...and the next frame draws it, shorter than what it replaced.
+        target.draw(&mut cx, &root);
+        assert!(run_of(&first).bounds.size.y < was);
+    }
+
+    /// The row height a host fixes its header at is the height the longest
+    /// name it will write actually needs.
+    #[test]
+    fn the_widget_can_say_how_tall_the_header_row_has_to_be() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = start(&mut cx);
+        let first = root.widget(&cx, ids!(first));
+        let drawn = run_of(&first).bounds.size.y;
+        let asked = measure(&mut cx, &first, "Windows 2000");
+        assert!((asked - drawn).abs() < 1e-6, "asked {asked}, drew {drawn}");
+        // A longer name than any theme carries wants a taller row.
+        assert!(measure(&mut cx, &first, "Windows 2000 dark") > asked);
     }
 }
