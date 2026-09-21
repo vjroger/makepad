@@ -316,7 +316,22 @@ impl SavedTheme {
     /// evaluates [`crate::theme_tokens::ThemeBlend::script`] -- with the
     /// sheet from [`SavedTheme::sheet`] installed first -- and follow it with
     /// `cx.request_script_reapply()`.
+    ///
+    /// A theme whose DIMENSIONS moved -- its spacing, its roundness, its type
+    /// size -- and that has no sheet under it derives from the base built
+    /// again with those numbers in place, rather than from the base object:
+    /// the insets and the text styles are objects the base file derives, a
+    /// pin cannot carry one, and without this a theme saved roomy came back
+    /// with the library's margins. See
+    /// [`crate::theme_builder::rederived_pin_script`].
     pub fn script(&self) -> String {
+        if self.sheet.is_none() {
+            if let Some(script) =
+                crate::theme_builder::rederived_pin_script(&self.name, self.base, &self.overrides)
+            {
+                return script;
+            }
+        }
         theme_module_script(&self.name, self.base.theme_name(), &self.overrides)
     }
 

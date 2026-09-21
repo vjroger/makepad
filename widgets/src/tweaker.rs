@@ -17710,6 +17710,20 @@ impl Tweaker {
         }
         log!("TWEAK theme: {}", theme.name);
         let script = theme.script();
+        // Over a bare base theme the tokens ride the reload at the seam as
+        // well, the way the lab hands a saved theme back (`install_entry`).
+        // Landed after the reload and nowhere else, they arrive once every
+        // template has been built from the base: a colour a widget reads on
+        // the re-apply still moves, and a dimension does not -- a theme saved
+        // at twice the spacing and three times the type came back on screen
+        // at the library's sizes with the right numbers written in it. Under
+        // a SHEET the seam is no use, because the sheet's own script runs
+        // after it and points `mod.theme` back at its base; there the landing
+        // below is still the only way on.
+        if theme.sheet.is_none() {
+            let pinned = PinnedTheme::new(&theme.name, &script);
+            crate::set_theme_mix(cx, Some(pinned.script().to_string()));
+        }
         self.theme_name_seed = Some(theme.name.clone());
         // Spent once, by the next `Event::LiveEdit`...
         self.pending_theme_script = Some((theme.name.clone(), script.clone()));
@@ -24377,6 +24391,51 @@ line two");
         assert_eq!(panel.tb_builder.params(), once, "the same press from the same place differed");
         panel.tb_surprise();
         assert_eq!(panel.tb_builder.params(), twice);
+    }
+
+    /// A saved theme with its own spacing is on the app after the reload that
+    /// carries it, rungs and all, and comes off again with the next pick.
+    ///
+    /// It was not, once, and nothing failed. The tokens were landed after the
+    /// reload and nowhere else, by which time every template had been built
+    /// from the base: a theme saved at twice the spacing came back on screen
+    /// at the library's sizes with the right number written in it, and the
+    /// save-as test beside this one could not tell, because it read the
+    /// numbers and the numbers were right.
+    ///
+    /// So what is read here is read after the RELOAD and before any landing:
+    /// the global, which says the pins rode the seam, and a rung derived from
+    /// it, which says the base was built again under them and not pinned over.
+    #[test]
+    fn a_picked_theme_with_its_own_spacing_rides_the_reload_onto_the_app() {
+        use crate::theme_store::SavedTheme;
+        use crate::theme_tokens::{Scheme, TokenValue};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(theme_value(&mut cx, "space_2"), Some(6.0), "the library's own spacing moved");
+
+        let mut roomy = SavedTheme::new("roomy", Scheme::Dark);
+        roomy.overrides = vec![("space_factor".to_string(), TokenValue::Num(12.0))];
+        crate::theme_store::save_in(&panel.themes_dir(), &roomy).expect("a theme in the store");
+        panel.apply_saved_theme(&mut cx, "roomy");
+        assert_eq!(panel.theme_saved(), Some("roomy"), "{}", panel.theme_msg);
+
+        // The reload, and nothing after it: no live edit, no landing.
+        assert!(std::mem::take(&mut cx.pending_style_reload), "the pick asked for no reload");
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(theme_value(&mut cx, "space_factor"), Some(12.0), "the pins did not ride the reload");
+        assert_eq!(theme_value(&mut cx, "space_2"), Some(12.0), "the rungs stayed where the library put them");
+
+        // And the next pick takes it off: a theme that outlived the picker
+        // naming another one would be a theme nobody could get out of.
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(theme_value(&mut cx, "space_factor"), Some(6.0), "the saved theme outlived the pick");
     }
 
     /// The builder's colour popover keeps its claim on the pointer across

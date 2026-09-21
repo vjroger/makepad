@@ -327,6 +327,68 @@ fn file_number(scheme: Scheme, key: &str) -> Option<f64> {
     })
 }
 
+/// A script for a set of pins whose DIMENSIONS moved, or `None` where none
+/// of them did and plain pins say everything.
+///
+/// A pin can carry a colour and a number and nothing else. That is the whole
+/// of a palette, and it is most of a layout -- `space_1..6` and every type
+/// size are numbers -- but the insets and the text styles are OBJECTS the
+/// base file derives from those numbers, and a pin on `space_factor` over
+/// the base object leaves every one of them where the library put it. So a
+/// theme saved with its spacing at twelve came back with twelve written on
+/// it and six in every margin, which is a different theme from the one on
+/// screen when the button was pressed.
+///
+/// The answer is the one [`BuiltTheme::script_as`] already gives: build the
+/// base again from its own source with the moved dimensions in place of the
+/// file's, carry the installed fonts across by name, and pin over THAT. Only
+/// the four dimensions are asked about. The other globals are colour knobs,
+/// and a set of pins that came from a snapshot names every colour outright.
+///
+/// For a theme with no sheet under it only: a sheet assigns into the base
+/// object by name, fonts and all, and a base built again under another name
+/// is one the sheet never wrote to. The caller checks.
+pub(crate) fn rederived_pin_script(
+    name: &str,
+    scheme: Scheme,
+    pins: &[(String, TokenValue)],
+) -> Option<String> {
+    let moved: Vec<(String, TokenValue)> = DIMENSIONS
+        .iter()
+        .filter_map(|key| {
+            let (_, value) = pins.iter().find(|(pinned, _)| pinned == key)?;
+            // A number however it was held: a theme read back from its file
+            // has `Num` where the one that was written had `Raw`, and the two
+            // are one theme and must be one script.
+            let number = match value {
+                TokenValue::Num(number) => *number,
+                TokenValue::Raw(text) => text.trim().parse::<f64>().ok()?,
+                _ => return None,
+            };
+            match file_number(scheme, key) {
+                Some(house) if (house - number).abs() < 1e-9 => None,
+                _ => Some((key.to_string(), TokenValue::Num(number))),
+            }
+        })
+        .collect();
+    if moved.is_empty() {
+        return None;
+    }
+    let source_name = format!("{name}_source");
+    let source = theme_source_with_globals(&source_name, scheme.source(), &moved);
+    let mut out = theme_script_body(&source);
+    let mut over: Vec<(String, TokenValue)> = CARRIED_FONTS
+        .iter()
+        .map(|font| {
+            let carried = format!("mod.themes.{}.{font}", scheme.theme_name());
+            (font.to_string(), TokenValue::Raw(carried))
+        })
+        .collect();
+    over.extend(pins.iter().cloned());
+    out.push_str(&theme_module_script(name, &source_name, &over));
+    Some(out)
+}
+
 /// A colour a base theme's file gives one of its top-level keys as an `#x`
 /// literal, which is how every role the library generated is written.
 fn file_color(scheme: Scheme, key: &str) -> Option<u32> {
@@ -1657,6 +1719,56 @@ mod theme_builder_tests {
                     assert!(at(vm, source) != at(vm, base), "{font} needed no carrying, so this test proves nothing");
                 }
             }
+        });
+    }
+
+    /// A theme saved with its dimensions moved comes back with its margins
+    /// and its text styles moved, and not only the numbers that say so.
+    ///
+    /// The store keeps colours and numbers. Pinned over the base OBJECT they
+    /// left `mspace_2` and `font_title_l` -- objects the base file derives --
+    /// at the library's sizes under a `space_factor` that read twelve.
+    #[test]
+    fn a_saved_theme_whose_dimensions_moved_brings_its_margins_back_with_it() {
+        use crate::theme_store::SavedTheme;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let mut saved = SavedTheme::new("roomy_saved", Scheme::Dark);
+            saved.overrides = vec![
+                ("color_primary".to_string(), TokenValue::Color(0x112233FF)),
+                ("font_size_base".to_string(), TokenValue::Num(12.0)),
+                ("space_factor".to_string(), TokenValue::Num(12.0)),
+            ];
+            evaluate(vm, "roomy_saved", saved.script());
+            let (theme, base) = (filed(vm, "roomy_saved"), filed(vm, "dark"));
+            assert_eq!(token(vm, theme, "space_factor"), Some(TokenValue::Num(12.0)));
+            // The object a pin cannot carry, and the whole point.
+            assert_eq!(inner(vm, theme, "mspace_2", "left"), Some(12.0));
+            assert_eq!(inner(vm, base, "mspace_2", "left"), Some(6.0), "the library's own theme moved");
+            let title = inner(vm, theme, "font_title_l", "font_size");
+            assert_ne!(title, inner(vm, base, "font_title_l", "font_size"), "the title kept the library's size");
+            match token(vm, theme, "type_title_l_size") {
+                Some(TokenValue::Num(size)) => assert_eq!(title, Some(size), "the style and its size part company"),
+                other => panic!("type_title_l_size is {other:?}"),
+            }
+            // The pins still go on over the top of it.
+            assert_eq!(color(vm, theme, "color_primary"), Some(0x112233FF));
+
+            // Nothing moved, nothing re-derived: the script is the plain pins
+            // it always was, and a palette-only theme pays for no rebuild.
+            let mut plain = SavedTheme::new("plain_saved", Scheme::Dark);
+            plain.overrides = vec![
+                ("color_primary".to_string(), TokenValue::Color(0x112233FF)),
+                ("space_factor".to_string(), TokenValue::Num(6.0)),
+            ];
+            assert!(!plain.script().contains("plain_saved_source"));
+
+            // Under a sheet the base object is the one the sheet wrote its
+            // fonts and its skins into, so it stays the thing derived from.
+            let mut sheeted = saved.clone();
+            sheeted.sheet = Some((crate::desktop_style::DesktopStyle::Omarchy, false));
+            assert!(!sheeted.script().contains("roomy_saved_source"));
         });
     }
 
