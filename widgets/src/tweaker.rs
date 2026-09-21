@@ -9227,6 +9227,15 @@ pub struct Tweaker {
     /// there (the input-side mirror of app < outlines < panel < popups).
     #[rust]
     open_popup: Option<Rect>,
+    /// The builder's colour popover, measured this frame and not yet
+    /// claimed. The builder is drawn up in the head, BEFORE the rows start
+    /// the frame's popups over, so a rect it wrote straight into
+    /// `open_popup` was gone again before any event could read it: a press
+    /// on the wheel went on to fold the section header under it, and a
+    /// spin scrolled the token list behind. It is parked here instead and
+    /// `popups_start_over` carries it across.
+    #[rust]
+    tb_popup: Option<Rect>,
     /// Linked-toggle state of the two box editors (margin, padding): a
     /// change to one leg applies to all four.
     #[rust]
@@ -14422,8 +14431,7 @@ impl Tweaker {
 
         self.composite_fields.clear();
         self.composite_clicks.clear();
-        self.open_popup = None;
-        session().lock().unwrap().popup = None;
+        self.popups_start_over();
         let entries_all = self.build_visible();
         let shader_entries = self.shader_entries.clone();
         let mut visible_rects: Vec<VisRow> = Vec::with_capacity(entries_all.len());
@@ -18687,6 +18695,21 @@ impl Tweaker {
         }
     }
 
+    /// Start the frame's popups over, keeping the one the head has already
+    /// measured.
+    ///
+    /// The rows name their open popover as they are walked, so the slate is
+    /// wiped just before the walk. The builder's colour control is not a row:
+    /// it is drawn in the head, ahead of the wipe, and parks its rect in
+    /// `tb_popup`. Taken here rather than read, so a popover that closed, a
+    /// section that folded and a tab that was left all come to nothing on the
+    /// next frame without anybody having to say so.
+    fn popups_start_over(&mut self) {
+        let kept = self.tb_popup.take();
+        self.open_popup = kept;
+        session().lock().unwrap().popup = kept;
+    }
+
     /// The builder section, drawn from the builder and from nothing else.
     ///
     /// Everything the mix's draw says applies here word for word: the
@@ -18736,8 +18759,8 @@ impl Tweaker {
             if pick.is_open() {
                 let rect = pick.popover_rect();
                 if rect.size.x > 0.0 {
-                    self.open_popup = Some(rect);
-                    session().lock().unwrap().popup = Some(rect);
+                    // Parked, not written: see `tb_popup`.
+                    self.tb_popup = Some(rect);
                 }
             } else {
                 pick.set_rgba(cx, rgba_of(params.favourite));
@@ -24339,6 +24362,32 @@ line two");
         assert_eq!(panel.tb_builder.params(), once, "the same press from the same place differed");
         panel.tb_surprise();
         assert_eq!(panel.tb_builder.params(), twice);
+    }
+
+    /// The builder's colour popover keeps its claim on the pointer across
+    /// the wipe that starts the rows' popups over.
+    ///
+    /// It did not, once. The builder is drawn in the head, ahead of the
+    /// wipe, and wrote its rect straight into `open_popup`; the wipe then
+    /// took it away before any event could read it. A press on the wheel
+    /// folded the section header under the popover, two presses reset a
+    /// token nobody had touched, and a spin scrolled the list behind.
+    #[test]
+    fn the_builders_popover_outlives_the_wipe_that_starts_the_rows_over() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let rect = Rect { pos: dvec2(12.0, 80.0), size: dvec2(180.0, 160.0) };
+
+        // What the head leaves behind on a frame with the popover up.
+        panel.tb_popup = Some(rect);
+        panel.popups_start_over();
+        assert_eq!(panel.open_popup, Some(rect), "the wipe took the builder's popover with it");
+
+        // The next frame the popover is shut, and nobody says so: the head
+        // simply parks nothing. The claim has to lapse on its own.
+        panel.popups_start_over();
+        assert_eq!(panel.open_popup, None, "a popover that closed still holds the pointer");
     }
 
     /// A press on the fold opens a section that really draws.
