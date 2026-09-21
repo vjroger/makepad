@@ -800,6 +800,92 @@ pub fn delete(name: &str) -> Result<(), StoreError> {
 }
 
 // ---------------------------------------------------------------------------
+// A person's own colour schemes
+// ---------------------------------------------------------------------------
+
+/// The file a person's own colour schemes go in, beside their saved themes.
+///
+/// A plain text file and not a theme file, because it holds none of a theme:
+/// a line is two, three or four colours that somebody liked together, and
+/// what the builder does with them is grow a palette from whichever of them
+/// is nearest the colour that was picked. Plain text so that a list copied
+/// out of a notebook, a screenshot or somebody else's page can be pasted
+/// straight in.
+pub const PALETTES_FILE: &str = "palettes.txt";
+
+/// The schemes written in `dir`'s palettes file, and how many lines were
+/// meant to be schemes and were not.
+///
+/// One scheme to a line: two to four colours as hex, separated by spaces or
+/// commas, with or without a leading `#`. Three, six and eight hex digits are
+/// all read; an alpha is dropped, because a palette colour is a hue and a
+/// strength and a theme draws its accents solid. A blank line is nothing, and
+/// a line opening `# ` or `//` is a note to the reader -- `#` before a hex
+/// digit is a colour, which is why the comment form needs its space.
+///
+/// Nothing here is an error. A file that is not there is a person who has not
+/// written one, and hands back no schemes; a line that does not parse is
+/// skipped and counted, so a panel can say "three lines were not colours"
+/// without the other forty being lost behind the first typo. That is the
+/// whole reason this returns a count rather than a `Result`: the schemes are
+/// what the caller wants and one bad line must never cost them.
+pub fn read_palettes_in(dir: &Path) -> (Vec<Vec<u32>>, usize) {
+    let Ok(text) = std::fs::read_to_string(dir.join(PALETTES_FILE)) else {
+        return (Vec::new(), 0);
+    };
+    let mut schemes = Vec::new();
+    let mut skipped = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "#" || line.starts_with("# ") || line.starts_with("//") {
+            continue;
+        }
+        match parse_palette(line) {
+            Some(scheme) => schemes.push(scheme),
+            None => skipped += 1,
+        }
+    }
+    (schemes, skipped)
+}
+
+/// [`read_palettes_in`] in [`themes_dir`], which `MAKEPAD_THEME_DIR`
+/// redirects like everything else in the folder.
+pub fn read_palettes() -> (Vec<Vec<u32>>, usize) {
+    read_palettes_in(&themes_dir())
+}
+
+/// One line of the palettes file. `None` for a line that is not two to four
+/// colours, whether because one word was not a colour or because there were
+/// too few or too many of them.
+fn parse_palette(line: &str) -> Option<Vec<u32>> {
+    let mut out: Vec<u32> = Vec::new();
+    for word in line.split([' ', '\t', ',', ';']).filter(|word| !word.is_empty()) {
+        out.push(parse_hex_color(word)?);
+    }
+    (2..=4).contains(&out.len()).then_some(out)
+}
+
+/// One colour as somebody writes one: `#1e90ff`, `1e90ff`, `#1EF`, or eight
+/// digits with an alpha that is dropped.
+fn parse_hex_color(word: &str) -> Option<u32> {
+    let digits = word.strip_prefix('#').unwrap_or(word);
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    match digits.len() {
+        // Each digit doubled, the way every short hex colour is read.
+        3 => {
+            let wide = |shift: u32| ((value >> shift) & 0xF) * 0x11;
+            Some((wide(8) << 24) | (wide(4) << 16) | (wide(0) << 8) | 0xFF)
+        }
+        6 => Some((value << 8) | 0xFF),
+        8 => Some(value | 0xFF),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Taking a snapshot of what is in force
 // ---------------------------------------------------------------------------
 
@@ -887,7 +973,7 @@ mod tests {
     /// A directory of this test's own, so the tests need no environment
     /// variable, cannot tread on each other under a parallel runner, and
     /// never go near the person's own theme folder.
-    fn scratch(tag: &str) -> PathBuf {
+    pub(super) fn scratch(tag: &str) -> PathBuf {
         static COUNT: AtomicUsize = AtomicUsize::new(0);
         let n = COUNT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("makepad-theme-store-{tag}-{}-{n}", std::process::id()));
@@ -1531,5 +1617,66 @@ token	space_factor	1.25
         for bad in ["theme.color_text", "#xZZZZZZZZ", "#xFFF", "inf", "NaN", "", "1.0 } x"] {
             assert!(parse_value(bad).is_none(), "{bad:?} should not parse");
         }
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::tests::scratch;
+    use super::*;
+
+    /// A person's own schemes, written the several ways a person writes
+    /// them: hashes or not, commas or spaces, three digits or six or eight.
+    /// The lines that are not schemes are counted and stepped over, and the
+    /// forty that are do not go down with them.
+    #[test]
+    fn palettes_are_read_a_line_at_a_time() {
+        let dir = scratch("palettes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(PALETTES_FILE),
+            "# my own, from the notebook\r\n\
+             \r\n\
+             #1e90ff #ffa500 #2f4f4f\r\n\
+             1E90FF, FFA500\r\n\
+             #f0a, 0b3, 39c, ccc\r\n\
+             // the next one has an alpha on it\r\n\
+             #1e90ff80 #ffa50040\r\n\
+             #\r\n\
+             not a colour at all\r\n\
+             #1e90ff\r\n\
+             112233 445566 778899 aabbcc ddeeff\r\n\
+             #1e90ff #gggggg\r\n",
+        )
+        .unwrap();
+        let (schemes, skipped) = read_palettes_in(&dir);
+        assert_eq!(
+            schemes,
+            vec![
+                vec![0x1E90FFFF, 0xFFA500FF, 0x2F4F4FFF],
+                vec![0x1E90FFFF, 0xFFA500FF],
+                vec![0xFF00AAFF, 0x00BB33FF, 0x3399CCFF, 0xCCCCCCFF],
+                // An alpha is dropped: a palette colour is a hue and a
+                // strength, and a theme draws its accents solid.
+                vec![0x1E90FFFF, 0xFFA500FF],
+            ]
+        );
+        // One colour, five colours, a word, a bad digit -- four lines that
+        // were meant to be schemes; the comments and the blank were not.
+        assert_eq!(skipped, 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No file is no schemes and no complaint: it is where everybody starts,
+    /// and a builder that offered nothing of its own would be right.
+    #[test]
+    fn no_palettes_file_is_no_schemes() {
+        let dir = scratch("no-palettes");
+        assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        std::fs::write(dir.join(PALETTES_FILE), "# nothing but a note\r\n\r\n").unwrap();
+        assert_eq!(read_palettes_in(&dir), (Vec::new(), 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -176,6 +176,27 @@ pub struct BuilderParams {
     /// Where the secondary and tertiary families sit round the hue circle
     /// from the favourite.
     pub harmony: Harmony,
+    /// The companion colours a [`Suggestion`] was picked with, naming the
+    /// secondary, the tertiary and the page's lean outright rather than
+    /// leaving all three to the harmony.
+    ///
+    /// `None` is the default and is every setting the controls alone can
+    /// reach, so a build that names nothing here is the theme the builder
+    /// made before there were suggestions, byte for byte.
+    ///
+    /// A seed named outright beats the harmony -- which is what `SeedColors`
+    /// has always said of one -- so choosing a harmony by hand has to let
+    /// these go or it would do nothing at all. [`BuilderParams::with_harmony`]
+    /// is that move; a panel that writes the `harmony` field itself owes the
+    /// same clearing.
+    ///
+    /// Only the HUE of a named companion is used. The rule brings its own
+    /// saturation and lightness, as it does for a hue it worked out from an
+    /// offset, which is why a suggestion cannot make a theme that fails to
+    /// read. What the mood did to the swatch's saturation and lightness
+    /// reaches the theme through the two character sliders instead, which is
+    /// where a whole palette's colour and brightness live.
+    pub seeds: Option<SuggestionSeeds>,
     /// Accents only at nought, saturated at one. Nought is the house theme:
     /// brand colour at the house strength and a page with no colour in it at
     /// all. Toward one the brand families take on more colour
@@ -212,6 +233,7 @@ impl BuilderParams {
         Self {
             favourite: SeedColors::HOUSE.primary,
             harmony: Harmony::House,
+            seeds: None,
             saturation: 0.0,
             brightness: 0.5,
             dark,
@@ -257,10 +279,25 @@ impl BuilderParams {
     /// once the saturation slider has left nought -- a neutral of the
     /// favourite's hue with the slider's value for its saturation, which is
     /// how `SeedColors::neutral` says how far the grounds lean.
+    ///
+    /// A suggestion's [`seeds`](BuilderParams::seeds) name the two companions
+    /// and which way the page leans instead. The slider goes on saying how
+    /// FAR it leans even then: the named lean is what the page wears at the
+    /// slider's far end, and it is scaled down from there, so the control
+    /// still runs from a page with no colour in it to a page with as much as
+    /// the appearance can take.
     pub fn seed(&self) -> SeedColors {
         let seed = SeedColors::from_favourite(self.favourite, self.harmony);
         let (hue, colour, _) = rgb_to_hsl(self.favourite | 0xFF);
         let saturation = self.clamped().saturation;
+        if let Some(named) = self.seeds {
+            let seed = SeedColors {
+                secondary: Some(named.secondary | 0xFF),
+                tertiary: Some(named.tertiary | 0xFF),
+                ..seed
+            };
+            return seed.with_neutral(leaning(named.neutral, saturation));
+        }
         // A grey favourite has no hue for the page to lean toward, by the
         // same bar the rule uses to decide the brand families are greys.
         if saturation > 0.0 && colour >= 0.08 {
@@ -268,6 +305,17 @@ impl BuilderParams {
         } else {
             seed
         }
+    }
+
+    /// The same settings in another harmony, with any companions a suggestion
+    /// named let go.
+    ///
+    /// Both halves matter. A harmony only decides the hues the rule works out
+    /// for itself, so setting one over a suggestion's named seeds would move
+    /// a picker and leave the palette exactly where it was -- the one thing a
+    /// control must never do.
+    pub fn with_harmony(self, harmony: Harmony) -> Self {
+        Self { harmony, seeds: None, ..self }
     }
 
     /// The numbers the rule is run with. Written so that the house settings
@@ -864,6 +912,8 @@ pub fn random_params(seed: u64) -> BuilderParams {
     BuilderParams {
         favourite,
         harmony,
+        // A surprise is a palette the rule grew, not one off a list.
+        seeds: None,
         saturation,
         brightness,
         dark,
@@ -873,6 +923,421 @@ pub fn random_params(seed: u64) -> BuilderParams {
         font_contrast: stepped(1.5, 3.5),
     }
     .clamped()
+}
+
+// ---------------------------------------------------------------------------
+// Suggestions: several palettes from the one colour
+// ---------------------------------------------------------------------------
+
+/// How loudly a suggestion draws the companions of the favourite colour.
+///
+/// A harmony says WHERE the other two hues sit and nothing else, so the six
+/// of them from one colour are six palettes of the same strength and the same
+/// brightness: a person choosing among them is choosing one decision six
+/// ways. The mood is the other axis, and it is the one somebody points at
+/// when they say they like a palette better -- the same three hues drawn
+/// quietly, or pale, or deep.
+///
+/// It moves three things: how much colour the companions keep beside the
+/// favourite, where they sit on the lightness axis, and how far the page
+/// leans toward the favourite's hue. The last two of those are what the
+/// builder's own character sliders are, so a mood also says where it puts
+/// them, and picking a suggestion moves them there. Without that the swatch
+/// would be drawn at settings the theme was not built at, and the row would
+/// be pointing at something it cannot hand over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Mood {
+    /// The companions as strong as the favourite, at its own lightness, and
+    /// a page that leans well toward it.
+    Vivid,
+    /// Half the colour in the companions and the quietest page of the four.
+    Muted,
+    /// Lighter and softer: the companions lifted off the favourite's
+    /// lightness, and a theme built bright.
+    Pastel,
+    /// Darker and stronger: the companions dropped below the favourite, and
+    /// a theme built dim on a page that leans furthest.
+    Deep,
+}
+
+/// What a mood is, in numbers. Private because these are the kind of numbers
+/// that are argued with by looking at them, not by reading them.
+struct MoodRule {
+    /// The companions' saturation as a share of the favourite's.
+    colour: f64,
+    /// What is added to the companions' lightness.
+    lift: f64,
+    /// Where a pick puts [`BuilderParams::saturation`].
+    saturation: f64,
+    /// Where a pick puts [`BuilderParams::brightness`].
+    brightness: f64,
+    /// How much colour the page's lean carries at the saturation slider's far
+    /// end. The slider scales it down from there.
+    lean: f64,
+}
+
+impl Mood {
+    pub const ALL: [Mood; 4] = [Mood::Vivid, Mood::Muted, Mood::Pastel, Mood::Deep];
+
+    /// The second half of a suggestion's label, in the case it is read in:
+    /// "Triadic, muted".
+    pub fn label(self) -> &'static str {
+        match self {
+            Mood::Vivid => "vivid",
+            Mood::Muted => "muted",
+            Mood::Pastel => "pastel",
+            Mood::Deep => "deep",
+        }
+    }
+
+    fn rule(self) -> MoodRule {
+        match self {
+            Mood::Vivid => MoodRule { colour: 1.0, lift: 0.0, saturation: 0.85, brightness: 0.5, lean: 0.55 },
+            Mood::Muted => MoodRule { colour: 0.5, lift: 0.0, saturation: 0.25, brightness: 0.5, lean: 0.18 },
+            Mood::Pastel => MoodRule { colour: 0.65, lift: 0.18, saturation: 0.45, brightness: 0.78, lean: 0.32 },
+            Mood::Deep => MoodRule { colour: 0.9, lift: -0.18, saturation: 0.7, brightness: 0.22, lean: 0.62 },
+        }
+    }
+}
+
+/// The shares of the primary's colour that the palette rule gives the other
+/// two brand families. Copied from `theme_tokens::family_inputs` so that a
+/// swatch previews the palette the rule will actually grow and not three
+/// equally strong colours it never makes; a drift here costs a swatch that is
+/// a shade off, which is why it is a copy and not a test.
+const SECONDARY_SHARE: f64 = 0.55;
+const TERTIARY_SHARE: f64 = 0.80;
+
+/// Where a companion colour may sit on a page of each appearance. A dark page
+/// cannot show a nearly black accent and a light page cannot show a nearly
+/// white one, however much lift or drop the mood asked for, so the mood is
+/// spent up to these and no further.
+const DARK_COMPANIONS: (f64, f64) = (0.32, 0.88);
+const LIGHT_COMPANIONS: (f64, f64) = (0.20, 0.76);
+
+/// How near two colours have to be before a swatch is saying the same thing
+/// twice: the largest difference on any channel. Measured in bytes and not in
+/// hue, because a hue is a lie about a colour with no colour in it -- two
+/// greys 120 degrees apart are one grey, and a favourite with no colour in it
+/// grows the same palette in every harmony there is.
+const SAME_COLOR: i32 = 8;
+
+/// What a suggestion grown from a person's own list is called.
+pub const OWN_LABEL: &str = "From your palettes";
+
+/// How far a colour in a person's own scheme may stand from the favourite and
+/// still count as the one the scheme was found by. Thirty of the sum of hue
+/// in degrees and saturation and lightness in percent, which is near enough
+/// that the scheme is recognisably about that colour and loose enough that a
+/// colour picked by eye off a screen finds it.
+pub const OWN_TOLERANCE: f64 = 30.0;
+
+/// The companions a suggestion names, in the form [`BuilderParams`] carries
+/// them.
+///
+/// Two colours and a lean. Only the hues are used -- see
+/// [`BuilderParams::seeds`] -- and `neutral` is the lean at the saturation
+/// slider's far end, not at the setting the suggestion sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SuggestionSeeds {
+    pub secondary: u32,
+    pub tertiary: u32,
+    /// Which way the page leans, or `None` for a page left as the theme file
+    /// has it -- which is what a favourite with no colour in it gets.
+    pub neutral: Option<u32>,
+}
+
+/// One palette offered for a favourite colour: what to call it, what it looks
+/// like, and what the builder needs to grow it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suggestion {
+    /// Whole words, the way a person would say it: "Triadic, muted", or
+    /// [`OWN_LABEL`] for one of their own.
+    pub label: String,
+    /// The harmony it was grown in, or `None` for one off a person's own
+    /// list, which is in no harmony the library names.
+    pub harmony: Option<Harmony>,
+    /// The mood it was grown in, or `None` for one of a person's own.
+    pub mood: Option<Mood>,
+    /// The four colours a swatch shows: the favourite, the secondary, the
+    /// tertiary, and the PAGE -- not the lean that makes it, but the ground
+    /// the theme will actually be drawn on, so that a row of swatches shows
+    /// the difference between a tinted theme and an untinted one.
+    pub colors: [u32; 4],
+    pub seeds: SuggestionSeeds,
+    /// Where picking this puts [`BuilderParams::saturation`].
+    pub saturation: f64,
+    /// Where picking this puts [`BuilderParams::brightness`].
+    pub brightness: f64,
+}
+
+impl Suggestion {
+    /// This suggestion over some settings: the favourite, the companions and
+    /// both character sliders come from the suggestion, and the appearance
+    /// and the four dimensions stay as they were, because a person who has
+    /// set their spacing does not lose it by trying another palette.
+    pub fn params(&self, base: BuilderParams) -> BuilderParams {
+        BuilderParams {
+            favourite: self.colors[0],
+            harmony: self.harmony.unwrap_or_default(),
+            seeds: Some(self.seeds),
+            saturation: self.saturation,
+            brightness: self.brightness,
+            ..base
+        }
+    }
+}
+
+/// A row of palettes to choose between, all of them grown from the one
+/// colour: every harmony in every mood, in an order whose every first handful
+/// is varied, with the ones that came out alike dropped.
+///
+/// It is the same list every time for the same colour and appearance. Nothing
+/// is drawn and nothing is read off a clock, because a row of swatches that
+/// reshuffles itself under the pointer is a row nobody can point at twice.
+///
+/// The order is a round robin and not the two loops nested: taking the
+/// harmonies in turn and stepping the mood along with them puts all six
+/// harmonies in the first six places and all four moods in the first four, so
+/// a panel that shows eight of these shows eight different ideas rather than
+/// one idea in four brightnesses followed by the next.
+///
+/// The dropping matters most where it is least expected. A favourite with no
+/// colour in it has no hue for a harmony to turn, so all six grow the same
+/// four greys and twenty-four suggestions are four; without this a person who
+/// picked a grey would be offered twenty-four copies of one swatch.
+pub fn suggestions(favourite: u32, dark: bool) -> Vec<Suggestion> {
+    let mut out: Vec<Suggestion> = Vec::with_capacity(Harmony::ALL.len() * Mood::ALL.len());
+    for round in 0..Mood::ALL.len() {
+        for (step, harmony) in Harmony::ALL.into_iter().enumerate() {
+            let made = grown(favourite, dark, harmony, Mood::ALL[(round + step) % Mood::ALL.len()]);
+            if !out.iter().any(|kept| the_same_palette(kept, &made)) {
+                out.push(made);
+            }
+        }
+    }
+    out
+}
+
+/// [`suggestions`], and then whatever in a person's own list of schemes has
+/// the favourite colour in it, re-anchored on the favourite exactly and put
+/// through the same dropping -- so a scheme of theirs that came out as one
+/// the rule had already offered is not offered twice.
+///
+/// The library ships no list. `own` is read from wherever the caller keeps
+/// one; `theme_store::read_palettes` is where a person's own file is.
+pub fn all_suggestions(favourite: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Suggestion> {
+    let mut out = suggestions(favourite, dark);
+    for scheme in matching_schemes(favourite, own, OWN_TOLERANCE) {
+        let Some(made) = from_own(favourite, dark, &scheme) else {
+            continue;
+        };
+        if !out.iter().any(|kept| the_same_palette(kept, &made)) {
+            out.push(made);
+        }
+    }
+    out
+}
+
+/// How far one colour stands from another for the purpose of finding a scheme
+/// that already holds it: the three parts of a colour added up, the hue in
+/// degrees and the saturation and lightness in percent.
+///
+/// The hue is taken the short way round the circle. A scheme holding a red at
+/// 355 degrees is a scheme holding a red at 5 degrees, and a measure that
+/// called those 350 apart would never find it.
+pub fn color_distance(a: u32, b: u32) -> f64 {
+    let (a_hue, a_colour, a_light) = rgb_to_hsl(a | 0xFF);
+    let (b_hue, b_colour, b_light) = rgb_to_hsl(b | 0xFF);
+    let turn = (a_hue - b_hue).rem_euclid(360.0);
+    turn.min(360.0 - turn) + (a_colour - b_colour).abs() * 100.0 + (a_light - b_light).abs() * 100.0
+}
+
+/// Every scheme in `schemes` that holds a colour within `tolerance` of the
+/// favourite, each one with THAT colour moved to the front and the rest in
+/// the order they were written, nearest scheme first.
+///
+/// The front place is not decoration: it is the colour the scheme is about
+/// as far as this favourite is concerned, and [`adjust_scheme`] reads every
+/// other colour's offsets from it.
+///
+/// Any list: the library ships none, a scheme may hold two colours or four,
+/// and nothing here knows where the list came from.
+pub fn matching_schemes(favourite: u32, schemes: &[Vec<u32>], tolerance: f64) -> Vec<Vec<u32>> {
+    let mut found: Vec<(f64, Vec<u32>)> = Vec::new();
+    for scheme in schemes {
+        let nearest = scheme
+            .iter()
+            .enumerate()
+            .map(|(at, colour)| (at, color_distance(favourite, *colour)))
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let Some((at, distance)) = nearest else {
+            continue;
+        };
+        if distance > tolerance {
+            continue;
+        }
+        let mut ordered = Vec::with_capacity(scheme.len());
+        ordered.push(scheme[at]);
+        ordered.extend(scheme.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, c)| *c));
+        found.push((distance, ordered));
+    }
+    // A stable sort, so two schemes that stand equally near the favourite
+    // stay in the order the person wrote them in.
+    found.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    found.into_iter().map(|(_, scheme)| scheme).collect()
+}
+
+/// A scheme re-anchored on the favourite colour: the same scheme, said as
+/// offsets from its first colour and then read back out from the favourite.
+///
+/// What a scheme knows is the SHAPE of a palette -- this much further round
+/// the circle, this much paler, this much darker -- and that shape is what
+/// survives being moved onto somebody else's colour. So every colour is
+/// rewritten as its distance from the scheme's front colour (which
+/// [`matching_schemes`] has already put there) and laid out again from the
+/// favourite.
+///
+/// Three things happen at the edges, and they are not the same thing:
+///
+/// * A hue wraps, because a circle has no edges. A hue that comes out at -30
+///   is 330, and that is the only answer: mirroring it to 30 -- which is what
+///   subtracting from 360 does -- would turn a scheme the other way round and
+///   quietly hand back a palette nobody wrote.
+/// * A saturation clamps. There is nothing past nought or past full, and a
+///   scheme that asked for more of either is asking for what it already has.
+/// * A lightness cannot simply clamp, because two colours clamped to the same
+///   end become one colour and the scheme loses a member. So when any
+///   lightness leaves the range, the whole scheme's lightnesses are rescaled
+///   into it together, lowest and highest mapped onto where they had to be
+///   brought: the palette keeps its order and its spacing and moves as one.
+///   The front colour moves with it -- it is a member of the scheme like the
+///   others -- so it comes back as the favourite EXACTLY only where nothing
+///   had to be brought in, which is the ordinary case.
+pub fn adjust_scheme(favourite: u32, scheme: &[u32]) -> Vec<u32> {
+    if scheme.is_empty() {
+        return Vec::new();
+    }
+    let (anchor_hue, anchor_colour, anchor_light) = rgb_to_hsl(scheme[0] | 0xFF);
+    let (hue, colour, light) = rgb_to_hsl(favourite | 0xFF);
+    let moved: Vec<(f64, f64, f64)> = scheme
+        .iter()
+        .map(|member| {
+            let (member_hue, member_colour, member_light) = rgb_to_hsl(*member | 0xFF);
+            (
+                hue + (member_hue - anchor_hue),
+                (colour + (member_colour - anchor_colour)).clamp(0.0, 1.0),
+                light + (member_light - anchor_light),
+            )
+        })
+        .collect();
+    let lowest = moved.iter().fold(f64::INFINITY, |low, (_, _, l)| low.min(*l));
+    let highest = moved.iter().fold(f64::NEG_INFINITY, |high, (_, _, l)| high.max(*l));
+    let scale = |l: f64| {
+        if lowest >= 0.0 && highest <= 1.0 {
+            return l;
+        }
+        let (low, high) = (lowest.clamp(0.0, 1.0), highest.clamp(0.0, 1.0));
+        if highest - lowest <= f64::EPSILON {
+            return low;
+        }
+        low + (l - lowest) * (high - low) / (highest - lowest)
+    };
+    // `hsl_to_rgb` takes the hue round the circle for itself.
+    moved.into_iter().map(|(h, s, l)| hsl_to_rgb(h, s, scale(l))).collect()
+}
+
+/// One palette in one harmony and one mood, swatch and seeds together so the
+/// two cannot say different things.
+fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Mood) -> Suggestion {
+    let rule = mood.rule();
+    let (hue, colour, light) = rgb_to_hsl(favourite | 0xFF);
+    let (low, high) = if dark { DARK_COMPANIONS } else { LIGHT_COMPANIONS };
+    let (second, third) = harmony.offsets();
+    let companion = |turn: f64, share: f64| {
+        let colour = (colour * rule.colour * share).clamp(0.0, 1.0);
+        hsl_to_rgb(hue + turn, colour, (light + rule.lift).clamp(low, high))
+    };
+    // A favourite with no colour in it has no hue for the page to lean
+    // toward, by the same bar the palette rule uses to decide the brand
+    // families are greys.
+    let lean = hsl_to_rgb(hue, if colour >= 0.08 { rule.lean } else { 0.0 }, 0.5);
+    let seeds = SuggestionSeeds {
+        secondary: companion(second, SECONDARY_SHARE),
+        tertiary: companion(third, TERTIARY_SHARE),
+        neutral: Some(lean),
+    };
+    Suggestion {
+        label: format!("{}, {}", harmony.label(), mood.label()),
+        harmony: Some(harmony),
+        mood: Some(mood),
+        colors: [favourite | 0xFF, seeds.secondary, seeds.tertiary, page_under(dark, seeds.neutral, rule.saturation)],
+        seeds,
+        saturation: rule.saturation,
+        brightness: rule.brightness,
+    }
+}
+
+/// One of a person's own schemes, already matched and re-anchored, dressed as
+/// a suggestion.
+///
+/// A scheme may be two colours or three, and a suggestion is always four, so
+/// the places it does not fill are filled the plain way -- [`Mood::Vivid`],
+/// companions as strong as the favourite -- because a palette somebody wrote
+/// down by hand is not one to have opinions about. A fourth colour, where
+/// there is one, is what the page leans toward.
+fn from_own(favourite: u32, dark: bool, scheme: &[u32]) -> Option<Suggestion> {
+    let adjusted = adjust_scheme(favourite, scheme);
+    if adjusted.len() < 2 {
+        return None;
+    }
+    let rule = Mood::Vivid.rule();
+    let plain = grown(favourite, dark, Harmony::House, Mood::Vivid);
+    let secondary = adjusted[1];
+    let tertiary = adjusted.get(2).copied().unwrap_or(plain.seeds.tertiary);
+    let neutral = adjusted.get(3).copied().or(plain.seeds.neutral);
+    Some(Suggestion {
+        label: OWN_LABEL.to_string(),
+        harmony: None,
+        mood: None,
+        colors: [adjusted[0], secondary, tertiary, page_under(dark, neutral, rule.saturation)],
+        seeds: SuggestionSeeds { secondary, tertiary, neutral },
+        saturation: rule.saturation,
+        brightness: rule.brightness,
+    })
+}
+
+/// A lean at a saturation slider's setting. The slider is what says how far
+/// the page leans, and it goes on saying it after a suggestion has named
+/// which way: a lean with no colour left in it is no lean at all, which is
+/// what `ground_tint` already makes of one.
+fn leaning(neutral: Option<u32>, saturation: f64) -> Option<u32> {
+    let (hue, colour, _) = rgb_to_hsl(neutral? | 0xFF);
+    Some(hsl_to_rgb(hue, (colour * saturation).clamp(0.0, 1.0), 0.5))
+}
+
+/// The page a theme grown from this lean at this slider setting will have --
+/// `color_bg_app` -- through the same two functions [`build`] takes it
+/// through, so that the fourth swatch and the theme cannot part.
+fn page_under(dark: bool, neutral: Option<u32>, saturation: f64) -> u32 {
+    let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+    let seed = SeedColors::HOUSE.with_neutral(leaning(neutral, saturation));
+    let (tint, amount) = ground_tint(&seed, scheme).unwrap_or((WHITE, 0.0));
+    grounds(scheme, tint, amount).0
+}
+
+/// Do two suggestions show the same four colours? Whole swatch or nothing: a
+/// palette that shares three colours with another and differs in the fourth
+/// is a different palette, and it is the fourth a person is choosing by.
+fn the_same_palette(a: &Suggestion, b: &Suggestion) -> bool {
+    a.colors.iter().zip(b.colors.iter()).all(|(x, y)| near(*x, *y))
+}
+
+fn near(a: u32, b: u32) -> bool {
+    [24, 16, 8].into_iter().all(|shift| {
+        let channel = |rgba: u32| ((rgba >> shift) & 0xFF) as i32;
+        (channel(a) - channel(b)).abs() <= SAME_COLOR
+    })
 }
 
 /// What an [`ThemeBuilder::apply`] did, so that a caller can see its own
@@ -2150,5 +2615,273 @@ mod theme_builder_tests {
                 assert!(errors.is_empty(), "{errors:?}");
             });
         }
+    }
+
+    /// One colour offers a row of palettes and not one answer, the row is the
+    /// same row every time it is asked for, and its front is varied: a panel
+    /// showing the first eight shows every harmony there is and every mood
+    /// there is, rather than one harmony in four brightnesses and then the
+    /// next.
+    #[test]
+    fn a_favourite_offers_a_row_of_palettes_in_a_varied_order() {
+        for dark in [true, false] {
+            let made = suggestions(BLUE, dark);
+            assert_eq!(made.len(), Harmony::ALL.len() * Mood::ALL.len(), "{dark}");
+            assert_eq!(made, suggestions(BLUE, dark), "the same colour asked twice");
+
+            let front = &made[..8];
+            for harmony in Harmony::ALL {
+                assert!(front.iter().any(|s| s.harmony == Some(harmony)), "{harmony:?} is not in the first eight");
+            }
+            for mood in Mood::ALL {
+                assert!(front.iter().any(|s| s.mood == Some(mood)), "{mood:?} is not in the first eight");
+            }
+            // Every pair the rule can make, once each, and named in words.
+            let mut pairs: Vec<(Harmony, Mood)> =
+                made.iter().map(|s| (s.harmony.unwrap(), s.mood.unwrap())).collect();
+            pairs.sort_by_key(|(h, m)| (format!("{h:?}"), format!("{m:?}")));
+            pairs.dedup();
+            assert_eq!(pairs.len(), made.len());
+            let triadic = made.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood == Some(Mood::Muted));
+            assert_eq!(triadic.unwrap().label, "Triadic, muted");
+        }
+    }
+
+    /// A favourite with no colour in it has no hue for a harmony to turn, so
+    /// every harmony grows the same greys and the row would otherwise be two
+    /// dozen copies of one swatch. What is left is the moods that genuinely
+    /// move something, and a black -- which the companion band pins to one
+    /// lightness -- is down to a single palette.
+    #[test]
+    fn a_grey_favourite_collapses_to_a_handful() {
+        for dark in [true, false] {
+            let grey = suggestions(0x808080FF, dark);
+            assert_eq!(grey.len(), 3, "{:?}", grey.iter().map(|s| s.label.clone()).collect::<Vec<_>>());
+            for suggestion in &grey {
+                assert_eq!(suggestion.seeds.neutral.map(|n| rgb_to_hsl(n).1), Some(0.0), "a grey leant the page");
+            }
+            assert_eq!(suggestions(0x000000FF, dark).len(), 1);
+            // And a colour still gets the whole row.
+            assert_eq!(suggestions(BLUE, dark).len(), 24);
+        }
+    }
+
+    /// A suggestion's companions are named outright, and the palette follows
+    /// them and not the harmony field beside them. Choosing a harmony by hand
+    /// lets them go again, which is the only way a harmony picker can mean
+    /// anything once a suggestion has been taken.
+    #[test]
+    fn a_named_seed_beats_the_harmony_and_a_harmony_lets_it_go() {
+        let green = hsl_to_rgb(120.0, 0.7, 0.5);
+        let purple = hsl_to_rgb(285.0, 0.7, 0.5);
+        let named = BuilderParams {
+            harmony: Harmony::House,
+            seeds: Some(SuggestionSeeds { secondary: green, tertiary: purple, neutral: None }),
+            ..blue(true)
+        };
+        let built = build(&named);
+        let hue = |key: &str| rgb_to_hsl(built.color(key).unwrap()).0;
+        assert!(apart(hue("color_secondary"), 120.0) < 4.0, "{}", hue("color_secondary"));
+        assert!(apart(hue("color_tertiary"), 285.0) < 4.0, "{}", hue("color_tertiary"));
+        // The house offsets are +30/-150 off the blue, which is neither.
+        let house = rgb_to_hsl(BLUE).0;
+        assert!(apart(hue("color_secondary"), house + 30.0) > 20.0);
+
+        let let_go = named.with_harmony(Harmony::Triadic);
+        assert_eq!(let_go.seeds, None);
+        let plain = build(&let_go);
+        let turned = |key: &str| rgb_to_hsl(plain.color(key).unwrap()).0;
+        assert!(apart(turned("color_secondary"), house + 120.0) < 4.0, "{}", turned("color_secondary"));
+        assert!(apart(turned("color_tertiary"), house - 120.0) < 4.0);
+        // And nothing named is what every setting the sliders can reach says.
+        assert_eq!(BuilderParams::house(true).seeds, None);
+        assert_eq!(random_params(7).seeds, None);
+    }
+
+    /// The fourth swatch is the page, not a guess at it: the theme a
+    /// suggestion builds is drawn on exactly the ground the row showed. And
+    /// what the person had set that the palette has no business moving --
+    /// the appearance, the four dimensions -- is still set.
+    #[test]
+    fn the_fourth_swatch_is_the_page_the_theme_will_have() {
+        for dark in [true, false] {
+            let base = BuilderParams { spacing: 9.0, font_size: 11.5, ..BuilderParams::house(dark) };
+            for suggestion in suggestions(BLUE, dark) {
+                let params = suggestion.params(base);
+                assert_eq!(params.dark, dark);
+                assert_eq!((params.spacing, params.font_size), (9.0, 11.5));
+                assert_eq!(params.favourite, BLUE);
+                let built = build(&params);
+                assert_eq!(
+                    built.color("color_bg_app"),
+                    Some(suggestion.colors[3]),
+                    "{} on dark={dark}",
+                    suggestion.label
+                );
+                assert_eq!(suggestion.colors[0], BLUE);
+            }
+        }
+    }
+
+    /// The sweep the plain builder goes through, over the suggestions
+    /// instead: every palette offered for a hue at ten degree steps, on both
+    /// pages, and the greys, builds a theme where every pair the library
+    /// holds a theme to meets its bar. A companion named outright cannot
+    /// break this -- the rule takes its hue and brings its own ink -- and
+    /// this is what says so.
+    #[test]
+    fn every_suggested_theme_reads() {
+        let mut checked = 0;
+        for dark in [true, false] {
+            for step in 0..36 {
+                let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
+                for suggestion in suggestions(favourite, dark) {
+                    let built = build(&suggestion.params(BuilderParams::house(dark)));
+                    assert_eq!(built.readability.measured, held_pairs().len());
+                    assert!(
+                        built.readability.holds(),
+                        "{} for {favourite:08X} on dark={dark}: {:#?}",
+                        suggestion.label,
+                        built.readability.failures
+                    );
+                    assert!(built.readability.margin >= 0.0);
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 36 * 24);
+        for favourite in [0x000000FFu32, 0x808080FF, 0xFFFFFFFF] {
+            for dark in [true, false] {
+                for suggestion in suggestions(favourite, dark) {
+                    let built = build(&suggestion.params(BuilderParams::house(dark)));
+                    assert!(built.readability.holds(), "{favourite:08X}: {:#?}", built.readability.failures);
+                }
+            }
+        }
+    }
+
+    /// A scheme is found by whichever of its colours stands nearest the
+    /// favourite, that colour is moved to the front, and the schemes come
+    /// back nearest first. Nothing near enough is no schemes, not a list of
+    /// everything sorted badly.
+    #[test]
+    fn a_scheme_is_found_by_the_colour_it_holds() {
+        let favourite = 0x2E8BF0FF;
+        let schemes = vec![
+            vec![0xFFA500FF, 0x1E90FFFF, 0x2F4F4FFF],
+            vec![0x8B0000FF, 0xFFD700FF],
+            vec![0x111111FF, 0x777777FF, favourite, 0xEEEEEEFF],
+        ];
+        let found = matching_schemes(favourite, &schemes, OWN_TOLERANCE);
+        assert_eq!(found.len(), 2, "{found:X?}");
+        assert_eq!(found[0], vec![favourite, 0x111111FF, 0x777777FF, 0xEEEEEEFF]);
+        assert_eq!(found[1], vec![0x1E90FFFF, 0xFFA500FF, 0x2F4F4FFF]);
+        assert_eq!(color_distance(favourite, favourite), 0.0);
+        // The short way round the circle: two reds either side of nought.
+        assert!(color_distance(hsl_to_rgb(355.0, 0.8, 0.5), hsl_to_rgb(5.0, 0.8, 0.5)) < 11.0);
+        assert!(matching_schemes(0x00FF00FF, &schemes, 5.0).is_empty());
+        assert!(matching_schemes(favourite, &[], OWN_TOLERANCE).is_empty());
+    }
+
+    /// A scheme moved onto a favourite keeps its shape: the front colour
+    /// becomes the favourite itself and every other keeps the distance it
+    /// stood at, in all three parts of a colour.
+    #[test]
+    fn an_adjusted_scheme_starts_on_the_favourite_and_keeps_its_offsets() {
+        let scheme = [0x3366CCFF, 0x66CC33FF, 0xCC3366FF];
+        let favourite = 0xE07020FF;
+        let adjusted = adjust_scheme(favourite, &scheme);
+        assert_eq!(adjusted.len(), 3);
+        assert_eq!(adjusted[0], favourite);
+        let (anchor_hue, anchor_colour, anchor_light) = rgb_to_hsl(scheme[0]);
+        let (hue, colour, light) = rgb_to_hsl(favourite);
+        for (at, member) in scheme.iter().enumerate() {
+            let (was_hue, was_colour, was_light) = rgb_to_hsl(*member);
+            let (now_hue, now_colour, now_light) = rgb_to_hsl(adjusted[at]);
+            assert!(apart(now_hue, hue + (was_hue - anchor_hue)) < 1.0, "{at}: {now_hue}");
+            assert!((now_colour - (colour + (was_colour - anchor_colour))).abs() < 0.01, "{at}: {now_colour}");
+            assert!((now_light - (light + (was_light - anchor_light))).abs() < 0.01, "{at}: {now_light}");
+        }
+        assert!(adjust_scheme(favourite, &[]).is_empty());
+    }
+
+    /// A hue that goes below nought comes back round the way it went. Turning
+    /// it into `360 - h` instead mirrors the scheme -- a step of forty
+    /// degrees back lands forty degrees ON -- and hands back a palette
+    /// nobody wrote, in silence.
+    #[test]
+    fn a_hue_that_went_below_nought_comes_back_round_the_way_it_went() {
+        let at = |degrees: f64| hsl_to_rgb(degrees, 0.8, 0.5);
+        let hue = |rgba: u32| rgb_to_hsl(rgba).0;
+        let scheme = [at(200.0), at(160.0), at(240.0)];
+        let adjusted = adjust_scheme(at(10.0), &scheme);
+        assert!(apart(hue(adjusted[1]), 330.0) < 1.0, "forty degrees back from ten is 330, not {}", hue(adjusted[1]));
+        assert!(apart(hue(adjusted[2]), 50.0) < 1.0, "{}", hue(adjusted[2]));
+        // And the other end of the circle, where a step forward runs past it.
+        let over = adjust_scheme(at(350.0), &scheme);
+        assert!(apart(hue(over[1]), 310.0) < 1.0, "{}", hue(over[1]));
+        assert!(apart(hue(over[2]), 30.0) < 1.0, "{}", hue(over[2]));
+    }
+
+    /// A lightness that leaves the range takes the whole scheme with it
+    /// rather than piling up at the end: the order holds, the spacing holds,
+    /// and everything lands inside nought and one.
+    #[test]
+    fn lightness_that_leaves_the_range_moves_the_whole_scheme_together() {
+        let at = |light: f64| hsl_to_rgb(200.0, 0.6, light);
+        let light = |rgba: u32| rgb_to_hsl(rgba).2;
+        // Offsets of nought, +0.30 and +0.50 laid on a favourite at 0.70
+        // want 0.70, 1.00 and 1.20; the three come back over 0.70..1.00.
+        let adjusted = adjust_scheme(at(0.70), &[at(0.20), at(0.50), at(0.70)]);
+        assert!(light(adjusted[0]) < light(adjusted[1]) && light(adjusted[1]) < light(adjusted[2]));
+        assert!(adjusted.iter().all(|c| (0.0..=1.0).contains(&light(*c))));
+        assert!((light(adjusted[0]) - 0.70).abs() < 0.01, "{}", light(adjusted[0]));
+        assert!((light(adjusted[1]) - 0.88).abs() < 0.01, "{}", light(adjusted[1]));
+        assert!((light(adjusted[2]) - 1.0).abs() < 0.01, "{}", light(adjusted[2]));
+        // The other end, and the front colour moves with the rest: it is a
+        // member of the scheme, not an anchor the scheme hangs off.
+        let below = adjust_scheme(at(0.30), &[at(0.60), at(0.30), at(0.10)]);
+        assert!(below.iter().all(|c| (0.0..=1.0).contains(&light(*c))));
+        assert!(light(below[0]) > light(below[1]) && light(below[1]) > light(below[2]));
+        assert!((light(below[2]) - 0.0).abs() < 0.01, "{}", light(below[2]));
+        // Nothing out of range is nothing moved.
+        let inside = adjust_scheme(at(0.50), &[at(0.40), at(0.60)]);
+        assert_eq!(inside[0], at(0.50));
+    }
+
+    /// A person's own schemes come after the ones the rule grew, labelled as
+    /// theirs, anchored on the colour they picked, and filled out to four
+    /// places however short the line they wrote was -- and they go through
+    /// the same bar and the same dropping as the rest.
+    #[test]
+    fn a_persons_own_palettes_come_after_the_rules() {
+        let favourite = 0x2E8BF0FF;
+        let own = vec![vec![0xFFA500FF, 0x1E90FFFF, 0x2F4F4FFF], vec![0x8B0000FF, 0xFFD700FF]];
+        let grown = suggestions(favourite, true);
+        let all = all_suggestions(favourite, true, &own);
+        assert_eq!(all[..grown.len()], grown[..]);
+        assert_eq!(all.len(), grown.len() + 1, "only the scheme holding the colour is offered");
+        let mine = all.last().unwrap();
+        assert_eq!(mine.label, OWN_LABEL);
+        assert_eq!((mine.harmony, mine.mood), (None, None));
+        assert_eq!(mine.colors[0], favourite);
+        assert!(build(&mine.params(BuilderParams::house(true))).readability.holds());
+
+        // Two colours is a scheme; the other two places are filled for it.
+        let short = all_suggestions(favourite, false, &[vec![0x1E90FFFF, 0x20C020FF]]);
+        let filled = short.last().unwrap();
+        assert_eq!(filled.label, OWN_LABEL);
+        assert!(filled.colors.iter().all(|c| c & 0xFF == 0xFF), "{:08X?}", filled.colors);
+        // The second swatch is their second colour, turned onto the
+        // favourite: the offset they wrote, not a hue the rule chose.
+        let turned = rgb_to_hsl(favourite).0 + (rgb_to_hsl(0x20C020FF).0 - rgb_to_hsl(0x1E90FFFF).0);
+        assert!(apart(rgb_to_hsl(filled.colors[1]).0, turned) < 1.0, "{}", rgb_to_hsl(filled.colors[1]).0);
+        assert_eq!(Some(filled.seeds.tertiary), filled.colors.get(2).copied());
+        assert!(build(&filled.params(BuilderParams::house(false))).readability.holds());
+
+        // And a scheme that says what the rule already said is not said twice.
+        let doubled = all_suggestions(favourite, true, &[vec![favourite, grown[0].colors[1], grown[0].colors[2]]]);
+        assert_eq!(doubled.len(), grown.len(), "a person's copy of a grown palette was offered again");
+        assert!(all_suggestions(favourite, true, &[]).len() == grown.len());
     }
 }
