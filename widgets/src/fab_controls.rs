@@ -16,6 +16,12 @@
 //!   left and the number on its right. The press lands the thumb where the
 //!   pointer is and the drag keeps it there; a click on the name takes the
 //!   row back to zero.
+//! * `mod.widgets.FabKnob` — the slider's number on a dial, for a cell of a
+//!   matrix: 44 by 64 by default and sized by whatever box it is given, down
+//!   to 28 across. Press and pull up for more (the whole range in 150 points,
+//!   Shift a tenth of the speed), the wheel and the arrows step it once it
+//!   has the keyboard, a double click takes it back to zero. Same fields,
+//!   same actions and same ref helpers as the slider.
 //! * `mod.widgets.FabColorWheel` — hue ring around a saturation/value
 //!   square, pointer-captured drags, arrow-key nudges.
 //! * `mod.widgets.FabColorPick` — a swatch that opens a self-managed
@@ -403,6 +409,173 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 color: fab.color_text
                 text_style: fab.font{
                     font_size: fab.font_size_ui
+                }
+            }
+        }
+
+        set_type_default() do #(DrawFabKnob::script_shader(vm)){
+            ..mod.draw.DrawQuad
+
+            // `#[live]` fields on DrawFabKnob, so they are already
+            // instances — see DrawDragNum above.
+            hover: 0.0
+            down: 0.0
+            focus: 0.0
+            disabled: 0.0
+            travel: 0.0
+            label_px: 0.0
+            readout_px: 0.0
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                // Where the face stands in the box: the three lines of
+                // `knob_face`, to the letter. Rust lays the name and the
+                // number out round the same arithmetic, so the words land
+                // above and below the dial and never on it.
+                let rows = self.label_px + self.readout_px
+                let d = max(min(self.rect_size.x, self.rect_size.y - rows), 0.0)
+                let top = max((self.rect_size.y - rows - d) * 0.5, 0.0)
+                let c = vec2(self.rect_size.x * 0.5, top + self.label_px + d * 0.5)
+                let r = d * 0.5
+                let dim = 1.0 - 0.6 * self.disabled
+
+                // Every thickness is a share of the radius over a floor in
+                // pixels. The shares are what a 44 face is drawn with; the
+                // floors are what a 28 face is drawn with, which is the size
+                // a matrix cell comes down to, and under them a groove stops
+                // being a groove and becomes a grey smear.
+                let groove = max(r * 0.18, 2.5)
+                let ring_r = max(r - 1.0 - groove * 0.5, 1.0)
+                let cap_r = max(ring_r - groove * 0.5 - max(r * 0.1, 1.5), 1.0)
+
+                // Sdf2d measures an arc from straight DOWN and turns
+                // clockwise, so an eighth of a turn in is half past seven
+                // and three quarters of a turn on from there is half past
+                // four: the opening sits at the bottom, where a hand expects
+                // the two stops of a dial to be.
+                let start = PI * 0.25
+                let sweep = PI * 1.5
+                let at = start + sweep * self.travel
+
+                // NOUGHT IS OFF, and it has to read as off from across a
+                // matrix in which most of the cells are at nought. So the
+                // lit arc is not drawn at all there -- an arc of no length
+                // still draws its round cap, which is a lamp on the stop and
+                // says "a little" rather than "nothing" -- and the tick goes
+                // down to the muted ink. Anything above nought is on, however
+                // little of it there is: the lamp on the stop is its first
+                // sign.
+                let lit = step(0.0005, self.travel)
+                let lifted = max(self.hover, self.down)
+
+                // The groove does NOT lift under the pointer, where the
+                // slider's well does. A well is a slab with a border round
+                // it; a groove is a line on the panel's own ground, and the
+                // well's hover tone is within a shade of that ground -- the
+                // unlit half of the dial went out at the moment a hand
+                // arrived to turn it. The cap and the arc say hover instead.
+                sdf.arc_round_caps(c.x, c.y, ring_r, start, start + sweep, groove)
+                sdf.fill(vec4(fab.color_num.xyz, fab.color_num.w * dim))
+
+                if lit > 0.5 {
+                    sdf.arc_round_caps(c.x, c.y, ring_r, start, at, groove)
+                    let accent = fab.color_accent.mix(fab.color_accent_hover, lifted)
+                    sdf.fill(vec4(accent.xyz, accent.w * dim))
+                }
+
+                // The cap is the button face of the rest of the kit, and it
+                // answers the hand the way the slider's thumb does. Its edge
+                // is where the keyboard shows: the same ring the wells wear.
+                sdf.circle(c.x, c.y, cap_r)
+                let mut face = fab.color_button.mix(fab.color_button_hover, self.hover).mix(fab.color_button_down, self.down)
+                face = vec4(face.xyz, face.w * dim)
+                sdf.fill_keep(face)
+                let mut edge = fab.color_border.mix(fab.color_focus_ring, self.focus)
+                edge = vec4(edge.xyz, edge.w * dim)
+                sdf.stroke(edge, 1.0 + 0.5 * self.focus)
+
+                // The tick points at the value's own angle, from a third of
+                // the way out to just short of the cap's edge. The arc's
+                // round cap un-rotates to centre + radius * (-sin, cos), so
+                // the tick and the head of the lit arc share one bearing.
+                let dir = vec2(0.0 - sin(at), cos(at))
+                let heel = cap_r * 0.3
+                let tip = max(cap_r - 2.0, heel + 1.0)
+                sdf.move_to(c.x + dir.x * heel, c.y + dir.y * heel)
+                sdf.line_to(c.x + dir.x * tip, c.y + dir.y * tip)
+                let mut ink = fab.color_text_muted.mix(fab.color_text, lit)
+                ink = ink.mix(fab.color_text_active, lifted * lit)
+                sdf.stroke(vec4(ink.xyz, ink.w * dim), max(r * 0.07, 1.0))
+                return sdf.result
+            }
+        }
+
+        mod.widgets.FabKnobBase = #(FabKnob::register_widget(vm))
+        /** The dial: press it and pull up for more or down for less, the
+         * whole range in a hand's width of travel; a double click takes it
+         * back to nought. Sized by the cell it is put in, down to 28 wide. */
+        mod.widgets.FabKnob = set_type_default() do mod.widgets.FabKnobBase{
+            // 44 across and 64 down: a 44 face, the number under it, and the
+            // slack shared above and below. Both are only a default. The face
+            // is the biggest circle the box holds once the two text rows are
+            // taken off its height, so a cell hands over whatever it has --
+            // fixed or Fill, either way -- and the dial fits itself to it.
+            width: 44
+            height: 64
+            flow: Down
+            // Written out, and nought: the face is measured off the WHOLE
+            // box, by the shader and by the layout alike, so padding here
+            // would move the words and leave the dial where it was. A cell
+            // that wants air round its knob asks for it with a margin.
+            padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+            margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
+            spacing: 0
+
+            // No name by default, and then no row for one either: in a
+            // matrix the column and the row headers carry the names, and
+            // twelve pixels of nothing over every face is a row of knobs
+            // fewer on the panel.
+            label: ""
+            label_height: 12.0
+            show_readout: true
+            readout_height: 12.0
+            min: 0.0
+            max: 100.0
+            /** the arrow-key and wheel increment, and the detent a drag lands on 0..25 step 0.5 */
+            step: 1.0
+            /** the shift+arrow and shift+wheel increment 0..50 step 0.5 */
+            big_step: 10.0
+            precision: 0
+            unit: "%"
+            value: 0.0
+            /** how far the pointer travels for the whole range, in points 40..400 step 10 */
+            drag_travel: 150.0
+            wheel_on_hover: false
+            enabled: true
+
+            draw_label +: {
+                ink_centered: true
+                color: fab.color_text_dim
+                text_overflow: TextOverflow.Ellipsis
+                text_style: fab.font{
+                    font_size: fab.font_size_small
+                }
+            }
+            draw_value +: {
+                ink_centered: true
+                color: fab.color_text
+                text_style: fab.font{
+                    font_size: fab.font_size_small
+                }
+            }
+            // The number under a knob standing at nought. A second ink and
+            // not a second size, so a column of cells keeps one baseline and
+            // only the cells that count for something are lit.
+            draw_value_off +: {
+                ink_centered: true
+                color: fab.color_text_muted
+                text_style: fab.font{
+                    font_size: fab.font_size_small
                 }
             }
         }
@@ -2618,6 +2791,913 @@ fn slider_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
 }
 
 // ===========================================================================
+// FabKnob — the slider's number on a dial, for where a row is too much room:
+// a cell of a matrix. It holds, steps and reports exactly as the slider does,
+// so a panel treats the two alike; what differs is the gesture. A dial has no
+// track to press on, so the value is how far the pointer has COME and not
+// where it is, and the law of that is pure for the same reason the slider's
+// is.
+// ===========================================================================
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawFabKnob {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    hover: f32,
+    #[live]
+    down: f32,
+    #[live]
+    focus: f32,
+    #[live]
+    disabled: f32,
+    /// Where the value sits along the sweep, 0..1. Nought is drawn as OFF.
+    #[live]
+    travel: f32,
+    /// The name's row and the number's, in pixels, either of them nought
+    /// where there is no such row. The shader finds the face from these two
+    /// and its own box, by the arithmetic of [`knob_face`].
+    #[live]
+    label_px: f32,
+    #[live]
+    readout_px: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum FabKnobAction {
+    /// The value moved. Live under a drag, under the wheel, and under every
+    /// arrow key including the repeats the keyboard sends while one is held.
+    Changed(f64),
+    /// The gesture that was moving the value is over, and this is the value
+    /// it came to rest on. A commit, as [`FabSliderAction::Ended`] is one: a
+    /// host that rate-limits `Changed` is meant to spend this one at once.
+    ///
+    /// At most ONE per gesture. A release ends a drag; a deliberate key press
+    /// ends itself and the release of a HELD key ends the run of repeats it
+    /// sent; a spin of the wheel ends when the wheel has been still for
+    /// [`KNOB_WHEEL_SETTLE`]; a double click ends itself. Where a run ends
+    /// without its ending -- the keyboard moving on, the knob being switched
+    /// off, the window losing the focus -- what it owes is paid there.
+    ///
+    /// And NONE for a press that moved nothing. A knob is pressed to be given
+    /// the keyboard far more often than a track is, there are a hundred of
+    /// them on the panel this was built for, and a commit is a host dropping
+    /// everything to install what it was handed: a click that changed nothing
+    /// has nothing to install.
+    Ended(f64),
+    /// A double click: the knob is back at nought and the host should take it
+    /// out of whatever it feeds. The slider's reset is a click on its name,
+    /// and a knob in a matrix has no name to click.
+    Reset,
+    #[default]
+    None,
+}
+
+/// How long the wheel has to have been still before a spin of it counts as
+/// over, in seconds. One notch is not a gesture: a hand spins a wheel through
+/// five or ten of them, and a commit for each is the held arrow's thirty
+/// commits by another door.
+pub const KNOB_WHEEL_SETTLE: f64 = 0.35;
+
+/// How far a press has to travel before it is a drag, in points. The number
+/// field's threshold and for the number field's reason: a knob is clicked to
+/// be given the keyboard, and a careless click must not nudge the value it
+/// was only meant to select.
+pub const KNOB_DRAG_SLOP: f64 = 3.0;
+
+/// The turn one knob carries into a gesture: the range it spans, the detent
+/// it lands on, and how far a pointer travels to cross the whole of it.
+///
+/// The mapping is RELATIVE -- the value is how far the pointer has come since
+/// the press, not where it is -- which is the whole difference between this
+/// and [`SliderTravel`]. A dial drawn 28 across has no room for an absolute
+/// law: a quarter of a turn would be eleven pixels. So the travel is a number
+/// of its own and the same for every size of knob, and a hand that has
+/// learned the rate on one has it on all of them.
+///
+/// Kept here, entire and with no `Cx` anywhere, so the law the drag uses is
+/// the law the tests read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnobTurn {
+    pub min: f64,
+    pub max: f64,
+    /// The detent a value lands on; `0` is continuous.
+    pub step: f64,
+    /// The pointer travel that covers the whole range, in points.
+    pub travel: f64,
+}
+
+impl KnobTurn {
+    /// The stops, the detent and the containment are the SLIDER's, borrowed
+    /// whole rather than written again: a number means the same thing in a
+    /// cell of the matrix as in a row of the equalizer, because the matrix is
+    /// the equalizer with its groups pulled apart.
+    fn law(&self) -> SliderTravel {
+        SliderTravel {
+            min: self.min,
+            max: self.max,
+            step: self.step,
+            thumb: 0.0,
+            inset: 0.0,
+        }
+    }
+
+    /// The two stops in order, whichever way round they were written.
+    pub fn stops(&self) -> (f64, f64) {
+        self.law().stops()
+    }
+
+    /// A value onto the detent and inside the stops: where a HAND lands.
+    pub fn settle(&self, v: f64) -> f64 {
+        self.law().settle(v)
+    }
+
+    /// Inside the stops and nowhere near the detent: where a HOST's number
+    /// is held. See [`SliderTravel::contain`].
+    pub fn contain(&self, v: f64) -> f64 {
+        self.law().contain(v)
+    }
+
+    /// Where a value sits along the sweep, 0..1.
+    pub fn travel(&self, v: f64) -> f64 {
+        self.law().travel(v)
+    }
+
+    /// The value a drag is carrying, after the pointer has risen `up` points
+    /// (down is negative) from where it last was.
+    ///
+    /// What goes in and comes out is the RAW value -- what the hand has asked
+    /// for, before the detent -- because a drag that settled on every move
+    /// would round each pixel's worth back to where it started, and a fine
+    /// drag over a coarse detent would never leave it. The caller settles
+    /// what it publishes and keeps this.
+    ///
+    /// Held to the stops, though, and at once: a pointer that has gone a
+    /// hand's width past the top must not have to come all the way back down
+    /// before the value starts to fall. Clamping here moves the anchor with
+    /// the hand, as the number field's scrub does.
+    ///
+    /// `fine` is Shift: a tenth of the speed, so the same travel covers a
+    /// tenth of the range.
+    pub fn carry(&self, raw: f64, up: f64, fine: bool) -> f64 {
+        let (lo, hi) = self.stops();
+        // A travel of nought or less is not a travel. It would divide into
+        // infinity and pin the value to a stop on the first pixel, or run
+        // the drag backwards.
+        let travel = if self.travel > 0.0 { self.travel } else { 150.0 };
+        let rate = if fine { 0.1 } else { 1.0 };
+        (raw + up / travel * (hi - lo) * rate).clamp(lo, hi)
+    }
+}
+
+/// Where the dial stands in its box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnobFace {
+    /// The face's diameter: the biggest circle the box holds once the text
+    /// rows are taken off its height.
+    pub diameter: f64,
+    /// The top of the stack -- name, face, number -- from the top of the
+    /// box. The slack is shared above and below, so a short knob in a tall
+    /// cell sits in the middle of it.
+    pub top: f64,
+}
+
+/// The face a box of `width` by `height` has room for, with `label_px` of
+/// name over it and `readout_px` of number under it (nought for a row that
+/// is not there).
+///
+/// Three lines, and the shader has the same three: this is what lays the
+/// words out and that is what paints the dial, and they agree because they
+/// are one piece of arithmetic written down twice and tested once.
+pub fn knob_face(width: f64, height: f64, label_px: f64, readout_px: f64) -> KnobFace {
+    let rows = label_px + readout_px;
+    let diameter = width.min(height - rows).max(0.0);
+    let top = ((height - rows - diameter) * 0.5).max(0.0);
+    KnobFace { diameter, top }
+}
+
+/// The number under a knob: the slider's readout with the unit hard against
+/// the number. A row has room for the space between them and a cell does not
+/// -- `100 %` in the panel's small face is a point wider than a 28 point
+/// cell, and it is the unit that falls off the end.
+pub fn knob_readout(value: f64, precision: usize, unit: &str) -> String {
+    let mut text = crate::slider::format_readout(value, precision, "");
+    text.push_str(unit);
+    text
+}
+
+/// Is a press at `time` and `abs` the second half of a double click whose
+/// first half was the press in `first`?
+///
+/// Measured press to press, against the platform's own two numbers, and by
+/// the knob itself rather than read off the event's tap count: that count is
+/// kept by the platform's event loop, which a headless run does not have, so
+/// a reset hung off it could be shipped and never once tested.
+pub fn is_double_press(first: Option<(f64, Vec2d)>, time: f64, abs: Vec2d) -> bool {
+    use crate::event::{TAP_COUNT_DISTANCE, TAP_COUNT_TIME};
+    first.is_some_and(|(t, p)| {
+        time - t < TAP_COUNT_TIME && (abs - p).length() < TAP_COUNT_DISTANCE
+    })
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct FabKnob {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[live]
+    draw_bg: DrawFabKnob,
+    #[live]
+    draw_label: DrawText,
+    #[live]
+    draw_value: DrawText,
+    /// The number's ink while the knob stands at nought.
+    #[live]
+    draw_value_off: DrawText,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+
+    /// The name over the face. Empty is no name AND no row for one.
+    #[live]
+    label: String,
+    /// The name's row and the number's, in points. Fixed rather than fitted,
+    /// for the slider's reason: a matrix is a grid of these, and the faces
+    /// have to stand on one line all the way along a row.
+    #[live(12.0)]
+    label_height: f64,
+    /// Whether the number is printed under the face. Off, its row goes too
+    /// and the face takes the room.
+    #[live(true)]
+    show_readout: bool,
+    #[live(12.0)]
+    readout_height: f64,
+    #[live]
+    min: f64,
+    #[live(100.0)]
+    max: f64,
+    /// The arrow-key and wheel increment, and the detent a drag lands on.
+    #[live(1.0)]
+    step: f64,
+    /// Shift+arrow and Shift+wheel. Coarse, as it is on the slider, and for
+    /// the slider's reason: one step is already the small gesture. Under a
+    /// DRAG Shift is fine instead, because a drag is continuous and has
+    /// somewhere smaller to go.
+    #[live(10.0)]
+    big_step: f64,
+    #[live(0)]
+    precision: usize,
+    #[live]
+    unit: String,
+    #[live]
+    value: f64,
+    /// The pointer travel that covers the whole range, in points.
+    #[live(150.0)]
+    drag_travel: f64,
+    /// Whether the wheel turns a knob the pointer is merely OVER.
+    ///
+    /// Off, the wheel turns only the knob that has the keyboard -- the one
+    /// that was last pressed. The panel these sit in scrolls, and it is a
+    /// wall of them: a knob that took every wheel that crossed it would be a
+    /// panel that cannot be scrolled and a column of weights moved by
+    /// accident on the way past. On is for a host whose knobs stand somewhere
+    /// that does not scroll.
+    #[live(false)]
+    wheel_on_hover: bool,
+    /// Off: the knob shows dimmed and nothing answers.
+    #[live(true)]
+    enabled: bool,
+
+    /// Held for the length of a gesture, so Escape and a modal's dismissal
+    /// reach this control rather than whatever it is sitting in.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+    /// A press is down and is this knob's to turn.
+    #[rust]
+    dragging: bool,
+    /// The press has travelled [`KNOB_DRAG_SLOP`] and is turning the knob.
+    #[rust]
+    engaged: bool,
+    /// The drag has said `Changed` at least once, so its release owes a
+    /// commit.
+    #[rust]
+    drag_said: bool,
+    /// What the drag has asked for, before the detent. See
+    /// [`KnobTurn::carry`].
+    #[rust]
+    drag_raw: f64,
+    /// Where the pointer was at the last move. The drag is summed move by
+    /// move rather than measured from the press, so that Shift can come and
+    /// go in the middle of one without the value jumping to where the other
+    /// rate would have had it.
+    #[rust]
+    drag_last_y: f64,
+    /// What the value was when the press landed, for a cancel to put back.
+    #[rust]
+    press_value: f64,
+    /// When and where the last press landed, while it could still be the
+    /// first half of a double click.
+    #[rust]
+    first_press: Option<(f64, Vec2d)>,
+    /// The number this knob PRINTS, where that is not the number it holds.
+    /// See `FabSlider::readout`: a column rounded over the column.
+    #[rust]
+    readout: Option<f64>,
+    #[rust]
+    hovered: bool,
+    /// A keyboard run owes a commit. See `FabSlider::key_commit_due`.
+    #[rust]
+    key_commit_due: bool,
+    /// Wheel travel that has not yet made a whole notch. A trackpad sends a
+    /// notch as a dozen small deltas.
+    #[rust]
+    wheel_carry: f64,
+    /// A spin of the wheel owes a commit, and this is the clock it is paid
+    /// on.
+    #[rust]
+    wheel_commit_due: bool,
+    #[rust]
+    wheel_timer: Timer,
+}
+
+impl FabKnob {
+    fn turn(&self) -> KnobTurn {
+        KnobTurn {
+            min: self.min,
+            max: self.max,
+            step: self.step,
+            travel: self.drag_travel,
+        }
+    }
+
+    /// The two text rows as they stand: nought for the one that is not there.
+    fn text_rows(&self) -> (f64, f64) {
+        (
+            if self.label.is_empty() { 0.0 } else { self.label_height.max(0.0) },
+            if self.show_readout { self.readout_height.max(0.0) } else { 0.0 },
+        )
+    }
+
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// A value pushed in from outside, held EXACTLY as it was handed over and
+    /// clamped to the stops and to nothing else. Emits nothing. Everything
+    /// [`FabSlider::set_value`] says about the detent being the hand's grid
+    /// and never a filter on the host's arithmetic is true here, and for the
+    /// same rows of weights.
+    ///
+    /// Refused mid-drag: a host answering late must not argue with the hand
+    /// that is on the knob.
+    pub fn set_value(&mut self, cx: &mut Cx, v: f64) {
+        if self.dragging {
+            return;
+        }
+        self.hold(cx, v, None);
+    }
+
+    /// The number the knob HOLDS and the number it PRINTS, handed over
+    /// together, for the host whose readout is rounded over a whole column.
+    /// See [`FabSlider::set_value_and_readout`]. Emits nothing; refused
+    /// mid-drag.
+    pub fn set_value_and_readout(&mut self, cx: &mut Cx, v: f64, readout: f64) {
+        if self.dragging {
+            return;
+        }
+        self.hold(cx, v, Some(readout));
+    }
+
+    /// What the knob prints: what a host said to print, or what it holds.
+    pub fn readout(&self) -> f64 {
+        self.readout.unwrap_or(self.value)
+    }
+
+    /// The one door a host's number comes in by. The redraw hangs off the
+    /// PAIR, as the slider's does.
+    fn hold(&mut self, cx: &mut Cx, v: f64, readout: Option<f64>) {
+        let v = self.turn().contain(v);
+        if (v - self.value).abs() > f64::EPSILON || readout != self.readout {
+            self.value = v;
+            self.readout = readout;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The knob's name. Empty takes the name's row away with it.
+    pub fn set_label(&mut self, cx: &mut Cx, text: &str) {
+        if self.label != text {
+            self.label = text.to_string();
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Switching off mid-gesture ends the gesture first, by every hand: the
+    /// pointer is let go and the value the press found put back, and a run
+    /// of the keyboard or of the wheel that has not committed yet pays up. A
+    /// knob nothing can reach will never see what would have ended them.
+    pub fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            let uid = self.widget_uid();
+            self.cancel_drag(cx, uid);
+            self.end_runs(cx, uid);
+            self.hovered = false;
+        }
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Answers whether the value actually moved.
+    fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) -> bool {
+        let moved = (v - self.value).abs() > f64::EPSILON;
+        if moved {
+            self.value = v;
+            // The hand's number is the knob's own; see `FabSlider::publish`.
+            self.readout = None;
+            self.draw_bg.redraw(cx);
+            cx.widget_action(uid, FabKnobAction::Changed(self.value));
+        }
+        if ended {
+            cx.widget_action(uid, FabKnobAction::Ended(self.value));
+        }
+        moved
+    }
+
+    /// One key's worth of movement, and whether it ends anything: a fresh
+    /// press commits where it lands, a repeat says only that the value moved
+    /// and leaves the commit to the release. `FabSlider::key_step`, whole.
+    fn key_step(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, repeat: bool) {
+        let moved = self.publish(cx, uid, v, !repeat);
+        if repeat {
+            self.key_commit_due |= moved;
+        } else {
+            self.key_commit_due = false;
+        }
+    }
+
+    /// The commit a keyboard run still owes.
+    fn end_key_run(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        if self.key_commit_due {
+            self.key_commit_due = false;
+            cx.widget_action(uid, FabKnobAction::Ended(self.value));
+        }
+    }
+
+    /// The commit a spin of the wheel still owes, paid when the wheel has
+    /// been still long enough -- or at whatever ends the spin before that.
+    fn end_wheel_run(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        cx.stop_timer(self.wheel_timer);
+        self.wheel_timer = Timer::default();
+        self.wheel_carry = 0.0;
+        if self.wheel_commit_due {
+            self.wheel_commit_due = false;
+            cx.widget_action(uid, FabKnobAction::Ended(self.value));
+        }
+    }
+
+    /// Both of the runs that end on something other than a release.
+    fn end_runs(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        self.end_key_run(cx, uid);
+        self.end_wheel_run(cx, uid);
+    }
+
+    /// One step's worth, or `big_step`'s; a hundredth of the range where the
+    /// knob is continuous, which is the arrow-key equivalent of one percent.
+    fn increment(&self, big: bool) -> f64 {
+        let step = if big { self.big_step } else { self.step };
+        if step > 0.0 {
+            step
+        } else {
+            (self.max - self.min).abs() * 0.01
+        }
+    }
+
+    /// One step from where the knob actually STANDS, which may be off the
+    /// detent because a host put it there. See `FabSlider::nudge`.
+    fn nudge(&mut self, cx: &mut Cx, uid: WidgetUid, direction: f64, big: bool, repeat: bool) {
+        let v = self.turn().contain(self.value + direction * self.increment(big));
+        self.key_step(cx, uid, v, repeat);
+    }
+
+    /// The wheel, a notch at a time. Up is more. What is left of a notch is
+    /// kept for the next event, so a trackpad's dozen small deltas add up to
+    /// the step a wheel's one click is.
+    fn wheel(&mut self, cx: &mut Cx, uid: WidgetUid, scroll: Vec2d, big: bool) {
+        // Shift turns a wheel sideways on some platforms; it is the same
+        // wheel.
+        let axis = if scroll.y != 0.0 { -scroll.y } else { -scroll.x };
+        self.wheel_carry += axis / 120.0;
+        let notches = self.wheel_carry.trunc();
+        if notches == 0.0 {
+            return;
+        }
+        self.wheel_carry -= notches;
+        let v = self.turn().contain(self.value + notches * self.increment(big));
+        if self.publish(cx, uid, v, false) {
+            self.wheel_commit_due = true;
+        }
+        if self.wheel_commit_due {
+            cx.stop_timer(self.wheel_timer);
+            self.wheel_timer = cx.start_timeout(KNOB_WHEEL_SETTLE);
+        }
+    }
+
+    /// NOUGHT, as the slider's reset is and for its reason: "this one counts
+    /// for nothing" is the same number whichever cell it is asked of. A range
+    /// that never reaches nought takes its nearest stop instead. The commit
+    /// goes out with it, because a double click is over when it lands.
+    fn reset(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let v = self.turn().settle(0.0);
+        self.publish(cx, uid, v, false);
+        cx.widget_action(uid, FabKnobAction::Reset);
+        cx.widget_action(uid, FabKnobAction::Ended(self.value));
+    }
+
+    fn cancel_drag(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        self.cancel_scope = None;
+        if self.dragging {
+            self.dragging = false;
+            self.engaged = false;
+            self.drag_said = false;
+            let back = self.press_value;
+            self.publish(cx, uid, back, false);
+            self.draw_bg.redraw(cx);
+        }
+    }
+}
+
+impl Widget for FabKnob {
+    // The generic switch and the bridge's `enabled` column both come through
+    // here, so what they say is what the knob does.
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.set_enabled(cx, !disabled);
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        !self.enabled
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let (label_px, readout_px) = self.text_rows();
+        self.draw_bg.label_px = label_px as f32;
+        self.draw_bg.readout_px = readout_px as f32;
+        self.draw_bg.travel = self.turn().travel(self.value) as f32;
+        self.draw_bg.hover = if self.hovered && self.enabled { 1.0 } else { 0.0 };
+        self.draw_bg.down = if self.dragging { 1.0 } else { 0.0 };
+        self.draw_bg.focus = if cx.cx.cx.has_key_focus(self.draw_bg.area()) {
+            1.0
+        } else {
+            0.0
+        };
+        self.draw_bg.disabled = if self.enabled { 0.0 } else { 1.0 };
+        // The face is measured off the whole box, so the box is laid out
+        // with no padding whatever the caller wrote: see the template.
+        let layout = Layout {
+            padding: Inset::default(),
+            spacing: 0.0,
+            ..self.layout
+        };
+        self.draw_bg.begin(cx, walk, layout);
+
+        // A box that is Fit on an axis has no size yet. A Fit height comes
+        // out as a square face with its rows round it, which is what the
+        // arithmetic gives for a box exactly as tall as its stack; a Fit
+        // width has nothing to be measured against and takes the default.
+        let size = cx.turtle().rect().size;
+        let width = if size.x.is_finite() { size.x } else { 44.0 };
+        let height = if size.y.is_finite() {
+            size.y
+        } else {
+            width + label_px + readout_px
+        };
+        let face = knob_face(width, height, label_px, readout_px);
+        let row = |h: f64| Walk::new(Size::Fixed(width), Size::Fixed(h));
+
+        if face.top > 0.0 {
+            let _ = cx.walk_turtle(row(face.top));
+        }
+        if label_px > 0.0 {
+            self.draw_label
+                .draw_walk(cx, row(label_px), Align { x: 0.5, y: 0.5 }, &self.label);
+        }
+        // The dial itself is painted by the face underneath; this only
+        // claims the height the shader gives it, so the number lands under
+        // the dial and not on it.
+        let _ = cx.walk_turtle(row(face.diameter));
+        if readout_px > 0.0 {
+            let text = knob_readout(self.readout(), self.precision, &self.unit);
+            let lit = self.turn().travel(self.value) > 0.0005;
+            let ink = if lit {
+                &mut self.draw_value
+            } else {
+                &mut self.draw_value_off
+            };
+            ink.draw_walk(cx, row(readout_px), Align { x: 0.5, y: 0.5 }, &text);
+        }
+
+        self.draw_bg.end(cx);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        // Off: nothing below answers.
+        if !self.enabled {
+            return;
+        }
+        if self.dragging && crate::modal::ModalAction::is_dismissal(event) {
+            self.cancel_drag(cx, uid);
+            return;
+        }
+        // The window going away ends whatever this knob was in the middle
+        // of, by any hand. Ordered as `set_enabled` orders the same things,
+        // so that what is committed is the value the knob is left on. See
+        // the same arm of `FabSlider::handle_event` for why `KeyFocusLost`
+        // does not stand in for this.
+        if let Event::WindowLostFocus(_) = event {
+            self.cancel_drag(cx, uid);
+            self.end_runs(cx, uid);
+            return;
+        }
+        // The wheel has been still long enough: the spin is over.
+        if self.wheel_timer.is_event(event).is_some() {
+            self.end_wheel_run(cx, uid);
+            return;
+        }
+        // Escape, Back or the right button puts back the value the press
+        // found.
+        if self.dragging {
+            match event {
+                Event::KeyDown(ke)
+                    if ke.key_code == KeyCode::Escape
+                        && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+                {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::BackPressed { .. }
+                    if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                        && event.back_pressed() =>
+                {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::MouseDown(me) if me.button.is_secondary() => {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // THE POINTER-CAPTURE RULE. One area, asked plainly: no sweep area
+        // and no capture overload, so the press this takes is the press
+        // nothing else is holding, and `hits` holds it until the release. A
+        // drag that leaves the cell -- and every drag on a 28 point knob
+        // leaves the cell -- goes on turning this knob and lights up nothing
+        // it passes over.
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
+                cx.set_cursor(MouseCursor::NsResize);
+                if !self.hovered {
+                    self.hovered = true;
+                    self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerHoverOut(_) => {
+                self.hovered = false;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                cx.set_key_focus(self.draw_bg.area());
+                // A press is the end of whatever the wheel was doing.
+                self.end_wheel_run(cx, uid);
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
+                if is_double_press(self.first_press, fe.time, fe.abs) {
+                    // The second half of a double click is a command and
+                    // not a grip: it turns nothing, and a third press starts
+                    // the count again.
+                    self.first_press = None;
+                    self.reset(cx, uid);
+                } else {
+                    self.first_press = Some((fe.time, fe.abs));
+                    self.dragging = true;
+                    self.engaged = false;
+                    self.drag_said = false;
+                    self.press_value = self.value;
+                    self.drag_raw = self.value;
+                    self.drag_last_y = fe.abs.y;
+                }
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerMove(fe) => {
+                if !self.dragging {
+                    return;
+                }
+                // Up and down only. A hand pulling a knob up wanders
+                // sideways, and a sideways inch that counted for anything
+                // would make every drag a slightly different one.
+                if !self.engaged {
+                    let come = fe.abs.y - self.drag_last_y;
+                    if come.abs() < KNOB_DRAG_SLOP {
+                        return;
+                    }
+                    // Measured from the EDGE of the slop, so the slop is
+                    // travel the value never sees rather than a jump it takes
+                    // on engaging -- and so whatever the pointer has come
+                    // beyond it counts, however few moves it came in.
+                    self.engaged = true;
+                    self.drag_last_y += come.signum() * KNOB_DRAG_SLOP;
+                    // A press that has travelled is a drag, and a drag is
+                    // not the first half of a double click.
+                    self.first_press = None;
+                }
+                let up = self.drag_last_y - fe.abs.y;
+                self.drag_last_y = fe.abs.y;
+                if up == 0.0 {
+                    return;
+                }
+                let turn = self.turn();
+                self.drag_raw = turn.carry(self.drag_raw, up, fe.modifiers.shift);
+                let v = turn.settle(self.drag_raw);
+                if self.publish(cx, uid, v, false) {
+                    self.drag_said = true;
+                }
+            }
+            Hit::FingerUp(fe) => {
+                self.cancel_scope = None;
+                if self.dragging && self.drag_said {
+                    cx.widget_action(uid, FabKnobAction::Ended(self.value));
+                }
+                self.dragging = false;
+                self.engaged = false;
+                self.drag_said = false;
+                // A drag on a knob ends somewhere else more often than not,
+                // and a release off the knob is the last this area hears of
+                // that pointer: no hover-out follows it, because the hover
+                // was never handed back. Unanswered, the knob stays lit
+                // until the pointer happens to cross it again.
+                self.hovered = fe.is_over && fe.device.has_hovers();
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerScroll(fe)
+                if self.wheel_on_hover || cx.has_key_focus(self.draw_bg.area()) =>
+            {
+                // A hand that is on the knob already has it.
+                if !self.dragging {
+                    self.wheel(cx, uid, fe.scroll, fe.modifiers.shift);
+                }
+                // The wheel a knob took is spent, whether or not the notch
+                // moved it: a knob at its stop still holds the panel, or the
+                // last notch of a spin would turn into a scroll.
+                event.set_scroll_handled(Vec2Index::X);
+                event.set_scroll_handled(Vec2Index::Y);
+            }
+            // Ctrl and Cmd are the accelerator space and belong to whatever
+            // this knob is sitting in; see the same arm of the slider.
+            Hit::KeyDown(ke) if !ke.modifiers.control && !ke.modifiers.logo => {
+                match ke.key_code {
+                    KeyCode::ArrowLeft | KeyCode::ArrowDown => {
+                        self.nudge(cx, uid, -1.0, ke.modifiers.shift, ke.is_repeat)
+                    }
+                    KeyCode::ArrowRight | KeyCode::ArrowUp => {
+                        self.nudge(cx, uid, 1.0, ke.modifiers.shift, ke.is_repeat)
+                    }
+                    // Absolute, both of them, so a key held against the end
+                    // of its own travel goes quiet.
+                    KeyCode::Home => {
+                        let v = self.turn().stops().0;
+                        self.key_step(cx, uid, v, ke.is_repeat);
+                    }
+                    KeyCode::End => {
+                        let v = self.turn().stops().1;
+                        self.key_step(cx, uid, v, ke.is_repeat);
+                    }
+                    _ => {}
+                }
+            }
+            // Letting go of the key that was driving the value ends the
+            // gesture, the way letting go of the mouse button does.
+            Hit::KeyUp(ke)
+                if matches!(
+                    ke.key_code,
+                    KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                        | KeyCode::Home
+                        | KeyCode::End
+                ) =>
+            {
+                self.end_key_run(cx, uid);
+            }
+            Hit::KeyFocus(_) => {
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyFocusLost(_) => {
+                // The keyboard has gone elsewhere, and with it both the
+                // release that would have ended a run of arrows and the
+                // wheel's claim on this knob: what either owes is paid here
+                // or never.
+                self.end_runs(cx, uid);
+                self.draw_bg.redraw(cx);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl FabKnobRef {
+    pub fn changed(&self, actions: &Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FabKnobAction::Changed(v) = item.cast() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    pub fn ended(&self, actions: &Actions) -> Option<f64> {
+        knob_ended_value(actions, self.widget_uid())
+    }
+
+    /// Was the knob double clicked? The value is already back at nought and
+    /// the commit for it is in the same buffer; this is the host's cue to
+    /// drop the cell from whatever ledger it keeps.
+    pub fn was_reset(&self, actions: &Actions) -> bool {
+        actions
+            .filter_widget_actions_cast::<FabKnobAction>(self.widget_uid())
+            .any(|action| matches!(action, FabKnobAction::Reset))
+    }
+
+    /// Emits nothing. See [`FabKnob::set_value`].
+    pub fn set_value(&self, cx: &mut Cx, v: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value(cx, v);
+        }
+    }
+
+    /// Emits nothing. See [`FabKnob::set_value_and_readout`].
+    pub fn set_value_and_readout(&self, cx: &mut Cx, v: f64, readout: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value_and_readout(cx, v, readout);
+        }
+    }
+
+    pub fn value(&self) -> f64 {
+        self.borrow().map_or(0.0, |i| i.value())
+    }
+
+    /// What the knob prints, which is what it holds unless a host said
+    /// otherwise.
+    pub fn readout(&self) -> f64 {
+        self.borrow().map_or(0.0, |i| i.readout())
+    }
+
+    pub fn set_label(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_label(cx, text);
+        }
+    }
+
+    pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_enabled(cx, enabled);
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.borrow().map_or(true, |i| i.enabled())
+    }
+}
+
+/// `Changed` comes before `Ended` in the same buffer, so the commit has to
+/// be looked for rather than found. See `slider_ended_value`.
+fn knob_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
+    for action in actions.filter_widget_actions_cast::<FabKnobAction>(uid) {
+        if let FabKnobAction::Ended(v) = action {
+            return Some(v);
+        }
+    }
+    None
+}
+
+// ===========================================================================
 // FabColorWheel
 // ===========================================================================
 
@@ -3652,6 +4732,11 @@ mod tests {
         assert!(!pick.is_empty(), "the colour popover no longer has a `pick`");
         out.push(("FabColorPick/hex", shape(hex.walk(cx))));
         out.push(("FabColorPick/pick", shape(pick.walk(cx))));
+
+        // The knob nests nothing a sheet can reach, and that is the claim:
+        // its box is its own two numbers, under every sheet.
+        let knob = built(cx, "FabKnob");
+        out.push(("FabKnob", shape(knob.walk(cx))));
         out
     }
 
@@ -3682,7 +4767,7 @@ mod tests {
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
         let plain = fab_geometry(&mut cx);
-        assert_eq!(plain.len(), 6, "a control was dropped from the reading");
+        assert_eq!(plain.len(), 7, "a control was dropped from the reading");
         for style in DesktopStyle::ALL {
             for dark in [false, true] {
                 if dark && !style.supports_dark() {
@@ -3944,6 +5029,9 @@ mod tests {
                 crate::script_eval!(vm, {mod.widgets.FabValueInput.text_input.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabSlider.draw_label.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabSlider.draw_value.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabKnob.draw_label.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabKnob.draw_value.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabKnob.draw_value_off.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabLabel.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabLabelSmall.draw_text.text_style}),
                 crate::script_eval!(vm, {mod.widgets.FabHeaderLabel.draw_text.text_style}),
@@ -4022,6 +5110,9 @@ mod tests {
             ("FabValueInput.text_input.draw_text", 8.5),
             ("FabSlider.draw_label", 8.5),
             ("FabSlider.draw_value", 8.5),
+            ("FabKnob.draw_label", 7.5),
+            ("FabKnob.draw_value", 7.5),
+            ("FabKnob.draw_value_off", 7.5),
             ("FabLabel.draw_text", 8.5),
             ("FabLabelSmall.draw_text", 7.5),
             ("FabHeaderLabel.draw_text", 9.0),
@@ -4246,6 +5337,182 @@ mod tests {
             "the slider's face is drawn from the fab table"
         );
     }
+
+    /// The knob is held to the same table, and ALL of it is: the shader, and
+    /// the template after it with its three inks. The slider's reading stops
+    /// at the shader; this one runs on to the next control's, because a knob
+    /// is put on the panel a hundred at a time and a word of it that took the
+    /// app's ink would be a hundred words changing colour under the hand that
+    /// is blending the app's theme.
+    #[test]
+    fn the_knob_names_only_the_panels_own_palette() {
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let knob = src
+            .split("do #(DrawFabKnob::script_shader(vm)){")
+            .nth(1)
+            .expect("the file declares the knob's shader");
+        let knob = &knob[..knob
+            .find("do #(DrawColorWheel::script_shader(vm)){")
+            .expect("the knob is followed by the colour wheel")];
+        assert!(
+            knob.contains("mod.widgets.FabKnob = "),
+            "the reading stops short of the knob's template"
+        );
+        assert!(!knob.contains("#x"), "the knob writes a colour of its own");
+        assert!(!knob.contains("vec4(0.") && !knob.contains("vec4(1."), "the knob writes a colour of its own");
+        assert!(
+            !knob.contains("theme.") && !knob.contains("mod.theme"),
+            "the knob reads the app's theme"
+        );
+        for ink in ["fab.color_accent", "fab.color_num", "fab.color_button", "fab.color_focus_ring", "fab.color_text_muted"] {
+            assert!(knob.contains(ink), "the knob's face no longer draws from `{ink}`");
+        }
+        // Every text style in it is the kit's own face.
+        assert_eq!(
+            knob.matches("text_style:").count(),
+            knob.matches("text_style: fab.font{").count(),
+            "a text style on the knob is not built from `fab.font`"
+        );
+    }
+
+    fn cell() -> KnobTurn {
+        KnobTurn {
+            min: 0.0,
+            max: 100.0,
+            step: 1.0,
+            travel: 150.0,
+        }
+    }
+
+    /// The whole range in the travel the knob names, up for more -- and the
+    /// same travel whatever size the knob is drawn at, which is the point of
+    /// the number being its own.
+    #[test]
+    fn a_knob_crosses_its_range_in_the_travel_it_names() {
+        let t = cell();
+        assert!((t.carry(0.0, 150.0, false) - 100.0).abs() < 1e-9);
+        assert!((t.carry(0.0, 75.0, false) - 50.0).abs() < 1e-9);
+        assert!((t.carry(50.0, -75.0, false) - 0.0).abs() < 1e-9, "down is less");
+        // Shift is a tenth of the speed: the same travel, a tenth of the way.
+        assert!((t.carry(0.0, 150.0, true) - 10.0).abs() < 1e-9);
+        // A travel that is not one falls back rather than dividing by it.
+        let broken = KnobTurn { travel: 0.0, ..cell() };
+        assert!((broken.carry(0.0, 75.0, false) - 50.0).abs() < 1e-9);
+    }
+
+    /// Past either stop is the stop, AND the anchor goes with the hand: a
+    /// pointer that overshot the top by a mile starts bringing the value down
+    /// on the first pixel of its way back.
+    #[test]
+    fn a_knob_can_never_leave_its_range_and_does_not_wind_up_past_it() {
+        let t = cell();
+        let top = t.carry(90.0, 4000.0, false);
+        assert_eq!(top, 100.0);
+        let back = t.carry(top, -15.0, false);
+        assert!((back - 90.0).abs() < 1e-9, "the overshoot had to be unwound first: {back}");
+        assert_eq!(t.carry(5.0, -4000.0, false), 0.0);
+        assert_eq!(t.settle(1e9), 100.0);
+        assert_eq!(t.contain(-3.0), 0.0);
+        // The host's number keeps its fraction; the hand's lands on the
+        // detent.
+        assert_eq!(t.contain(37.5), 37.5);
+        assert_eq!(t.settle(37.4), 37.0);
+    }
+
+    /// A fine drag over a coarse detent still gets somewhere, because what is
+    /// carried from move to move is what the hand asked for and not what the
+    /// detent made of it.
+    #[test]
+    fn a_fine_drag_is_not_rounded_back_to_where_it_started() {
+        let t = KnobTurn { step: 5.0, ..cell() };
+        let mut raw = 50.0;
+        let mut said = Vec::new();
+        for _ in 0..60 {
+            raw = t.carry(raw, 1.0, true);
+            said.push(t.settle(raw));
+        }
+        // Sixty points at a tenth of the speed is four parts of the range.
+        assert!((raw - 54.0).abs() < 1e-9, "{raw}");
+        assert_eq!(*said.last().unwrap(), 55.0, "the detent swallowed the drag");
+        assert!(said.iter().all(|v| *v == 50.0 || *v == 55.0));
+    }
+
+    /// The face is the biggest circle the box holds once the words have had
+    /// their rows, and the slack is shared above and below.
+    #[test]
+    fn the_face_is_what_the_words_leave_of_the_box() {
+        // The default: 44 by 64 with the number and no name.
+        assert_eq!(knob_face(44.0, 64.0, 0.0, 12.0), KnobFace { diameter: 44.0, top: 4.0 });
+        // A name as well takes the face down to what is left of the height.
+        assert_eq!(knob_face(44.0, 64.0, 12.0, 12.0), KnobFace { diameter: 40.0, top: 0.0 });
+        // The cell the matrix comes down to: the width is what binds.
+        assert_eq!(knob_face(28.0, 64.0, 0.0, 12.0), KnobFace { diameter: 28.0, top: 12.0 });
+        // No words at all, in a square: all face.
+        assert_eq!(knob_face(28.0, 28.0, 0.0, 0.0), KnobFace { diameter: 28.0, top: 0.0 });
+        // A box with no room is a face of nothing, never a negative one.
+        assert_eq!(knob_face(28.0, 10.0, 12.0, 12.0), KnobFace { diameter: 0.0, top: 0.0 });
+    }
+
+    /// ...and the shader finds the face by the same three lines. It cannot be
+    /// run from here, so it is READ: the day somebody changes one copy of the
+    /// arithmetic, this is what says there is another.
+    #[test]
+    fn the_shader_finds_the_face_by_the_same_arithmetic() {
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        for line in [
+            "let rows = self.label_px + self.readout_px",
+            "let d = max(min(self.rect_size.x, self.rect_size.y - rows), 0.0)",
+            "let top = max((self.rect_size.y - rows - d) * 0.5, 0.0)",
+            "let rows = label_px + readout_px;",
+            "let diameter = width.min(height - rows).max(0.0);",
+            "let top = ((height - rows - diameter) * 0.5).max(0.0);",
+        ] {
+            assert!(src.contains(line), "`{line}` is gone: the face is measured two ways now");
+        }
+    }
+
+    /// The unit stands hard against the number, because the cell is 28 wide.
+    #[test]
+    fn a_knobs_number_carries_its_unit_without_a_space() {
+        assert_eq!(knob_readout(100.0, 0, "%"), "100%");
+        assert_eq!(knob_readout(37.5, 0, "%"), "38%");
+        assert_eq!(knob_readout(0.25, 2, ""), "0.25");
+    }
+
+    #[test]
+    fn a_double_press_is_two_presses_close_in_time_and_place() {
+        let first = Some((10.0, dvec2(100.0, 100.0)));
+        assert!(is_double_press(first, 10.2, dvec2(101.0, 99.0)));
+        assert!(!is_double_press(first, 10.7, dvec2(100.0, 100.0)), "too late");
+        assert!(!is_double_press(first, 10.2, dvec2(100.0, 120.0)), "too far");
+        assert!(!is_double_press(None, 10.2, dvec2(100.0, 100.0)), "there was no first");
+    }
+
+    #[test]
+    fn a_knobs_commit_is_found_after_the_change_it_follows() {
+        let uid = WidgetUid(23);
+        let actions: ActionsBuf = vec![
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabKnobAction::Changed(41.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabKnobAction::Ended(42.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+        ];
+        assert_eq!(knob_ended_value(&actions, uid), Some(42.0));
+    }
 }
 
 /// THE POINTER-CAPTURE RULE, as it applies to the track.
@@ -4266,20 +5533,20 @@ mod fab_slider_gestures {
     const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
     const WINDOW: WindowId = WindowId(1, 1);
 
-    struct Target {
+    pub(super) struct Target {
         pass: DrawPass,
         draw_list: DrawList2d,
     }
 
     impl Target {
-        fn new(cx: &mut Cx) -> Self {
+        pub(super) fn new(cx: &mut Cx) -> Self {
             Target {
                 pass: DrawPass::new(cx),
                 draw_list: DrawList2d::new(cx),
             }
         }
 
-        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+        pub(super) fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
             self.pass.set_size(cx, SIZE);
             let event = DrawEvent::default();
             let mut draw = CxDraw::new(cx, &event);
@@ -4294,7 +5561,7 @@ mod fab_slider_gestures {
         }
     }
 
-    fn press(abs: Vec2d, time: f64) -> Event {
+    pub(super) fn press(abs: Vec2d, time: f64) -> Event {
         Event::MouseDown(MouseDownEvent {
             abs,
             button: MouseButton::PRIMARY,
@@ -4305,7 +5572,7 @@ mod fab_slider_gestures {
         })
     }
 
-    fn moved(abs: Vec2d, time: f64) -> Event {
+    pub(super) fn moved(abs: Vec2d, time: f64) -> Event {
         Event::MouseMove(MouseMoveEvent {
             abs,
             lock_delta: Vec2d::default(),
@@ -4316,7 +5583,7 @@ mod fab_slider_gestures {
         })
     }
 
-    fn release(abs: Vec2d, time: f64) -> Event {
+    pub(super) fn release(abs: Vec2d, time: f64) -> Event {
         Event::MouseUp(MouseUpEvent {
             abs,
             button: MouseButton::PRIMARY,
@@ -4326,7 +5593,7 @@ mod fab_slider_gestures {
         })
     }
 
-    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+    pub(super) fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
         cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
     }
 
@@ -4449,7 +5716,7 @@ mod fab_slider_gestures {
         cx.fingers.first_mouse_button = None;
     }
 
-    fn key(key_code: KeyCode, shift: bool) -> Event {
+    pub(super) fn key(key_code: KeyCode, shift: bool) -> Event {
         Event::KeyDown(KeyEvent {
             key_code,
             is_repeat: false,
@@ -4544,7 +5811,7 @@ mod fab_slider_gestures {
         cx.fingers.first_mouse_button = None;
     }
 
-    fn key_repeat(key_code: KeyCode) -> Event {
+    pub(super) fn key_repeat(key_code: KeyCode) -> Event {
         Event::KeyDown(KeyEvent {
             key_code,
             is_repeat: true,
@@ -4553,7 +5820,7 @@ mod fab_slider_gestures {
         })
     }
 
-    fn key_up(key_code: KeyCode) -> Event {
+    pub(super) fn key_up(key_code: KeyCode) -> Event {
         Event::KeyUp(KeyEvent {
             key_code,
             is_repeat: false,
@@ -4562,7 +5829,7 @@ mod fab_slider_gestures {
         })
     }
 
-    fn key_with(key_code: KeyCode, modifiers: KeyModifiers) -> Event {
+    pub(super) fn key_with(key_code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::KeyDown(KeyEvent {
             key_code,
             is_repeat: false,
@@ -4884,5 +6151,585 @@ mod fab_slider_gestures {
             "and nothing else on the row took a second hold of it"
         );
         cx.fingers.first_mouse_button = None;
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to the dial, and the rest of what
+/// a hand can do to one.
+///
+/// The slider's harness, borrowed: a real knob, drawn once so it has an area
+/// a press can land on, taking real events. What a headless run cannot do is
+/// let a digit go -- the release is the platform loop's -- so the capture
+/// outlives each press here, which costs these tests nothing: the knob keeps
+/// its own account of where a press landed and when.
+#[cfg(test)]
+mod fab_knob_gestures {
+    #![allow(dead_code)]
+    use super::fab_slider_gestures::{key, key_repeat, key_up, press, release, send, Target};
+    use super::*;
+    use crate::event::{ScrollEvent, ScrollPhase};
+    use std::cell::Cell;
+
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    /// Four knobs in a row, the way a row of the matrix is: the default cell,
+    /// its neighbour, the narrowest cell there is, and one with a name.
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Right
+                    cell := FabKnob{value: 50.0}
+                    other := FabKnob{value: 20.0}
+                    small := FabKnob{width: 28. height: 28. show_readout: false}
+                    named := FabKnob{label: "mix"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let cell = root.widget(cx, ids!(cell));
+        assert!(!cell.is_empty(), "the scene has a knob in it");
+        (root, cell)
+    }
+
+    fn face_of(knob: &WidgetRef) -> Area {
+        knob.borrow::<FabKnob>().unwrap().draw_bg.area()
+    }
+
+    /// The middle of a knob's box, which is where a hand takes hold of one.
+    fn middle(cx: &Cx, knob: &WidgetRef) -> Vec2d {
+        let rect = face_of(knob).rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "the knob was drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    fn moved_with(abs: Vec2d, time: f64, shift: bool) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers {
+                shift,
+                ..KeyModifiers::default()
+            },
+            handled: Cell::new(Area::Empty),
+            time,
+        })
+    }
+
+    /// `notches` of a real wheel over `abs`, up for positive.
+    fn wheel(abs: Vec2d, notches: f64, shift: bool) -> Event {
+        Event::Scroll(ScrollEvent {
+            window_id: WINDOW,
+            scroll: dvec2(0.0, -120.0 * notches),
+            abs,
+            modifiers: KeyModifiers {
+                shift,
+                ..KeyModifiers::default()
+            },
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: true,
+            time: 0.0,
+            phase: ScrollPhase::Changed,
+        })
+    }
+
+    fn changed(actions: &ActionsBuf, knob: &WidgetRef) -> Option<f64> {
+        knob.as_fab_knob().changed(actions)
+    }
+
+    fn ended(actions: &ActionsBuf, knob: &WidgetRef) -> Option<f64> {
+        knob.as_fab_knob().ended(actions)
+    }
+
+    /// Everything one knob said in one buffer, in the order it said it.
+    fn said(actions: &ActionsBuf, knob: &WidgetRef) -> Vec<String> {
+        actions
+            .filter_widget_actions_cast::<FabKnobAction>(knob.widget_uid())
+            .map(|action| format!("{action:?}"))
+            .collect()
+    }
+
+    fn commits(actions: &ActionsBuf, knob: &WidgetRef) -> usize {
+        actions
+            .filter_widget_actions_cast::<FabKnobAction>(knob.widget_uid())
+            .filter(|action| matches!(action, FabKnobAction::Ended(_)))
+            .count()
+    }
+
+    /// Something for `handle_actions` to carry, and nothing else.
+    #[derive(Debug)]
+    struct Tick;
+
+    /// The keyboard, taken the only way there is to take it: a press on the
+    /// knob and a release that moved nothing. Dispatched rather than
+    /// captured, because `set_key_focus` only records the request.
+    ///
+    /// The focus moves on the cycle behind an event, and the only such cycle
+    /// a headless run can reach is the one `handle_actions` runs when it has
+    /// an action to carry. The slider's press always has one, because a
+    /// press on a track moves the thumb. A press on a knob turns nothing and
+    /// says nothing, so the cycle is given a tick of its own to go round on.
+    fn give_it_the_keyboard(cx: &mut Cx, root: &WidgetRef, knob: &WidgetRef) {
+        let at = middle(cx, knob);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        root.handle_event(cx, &press(at, 0.0), &mut Scope::empty());
+        cx.action(Tick);
+        cx.handle_actions();
+        root.handle_event(cx, &release(at, 0.1), &mut Scope::empty());
+        cx.handle_actions();
+        cx.fingers.first_mouse_button = None;
+        assert!(
+            cx.has_key_focus(face_of(knob)),
+            "the press left the keyboard elsewhere, so the keys below reach nothing"
+        );
+    }
+
+    /// Up is more, the whole range in 150 points, and the gesture says
+    /// `Changed` while it runs and `Ended` once when it is let go. The three
+    /// points of slop are travel the value never sees.
+    #[test]
+    fn a_press_and_a_pull_up_raises_the_value_and_then_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at, 0.0));
+        assert!(said(&actions, &cell).is_empty(), "a press turns nothing: {:?}", said(&actions, &cell));
+
+        let up = dvec2(at.x, at.y - KNOB_DRAG_SLOP - 30.0);
+        let actions = send(&mut cx, &root, &moved_with(up, 0.1, false));
+        assert_eq!(changed(&actions, &cell), Some(70.0), "thirty points up is a fifth of the range");
+        assert_eq!(commits(&actions, &cell), 0, "the hand is still on it");
+
+        let down = dvec2(at.x, up.y + 15.0);
+        let actions = send(&mut cx, &root, &moved_with(down, 0.2, false));
+        assert_eq!(changed(&actions, &cell), Some(60.0), "and down is less");
+
+        let actions = send(&mut cx, &root, &release(down, 0.3));
+        assert_eq!(said(&actions, &cell), vec!["Ended(60.0)".to_string()]);
+        assert_eq!(cell.as_fab_knob().value(), 60.0);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Shift is a tenth of the speed -- and it can come and go in the middle
+    /// of a drag without the value jumping to where the other rate would have
+    /// had it, because the drag is summed move by move.
+    #[test]
+    fn shift_is_a_finer_drag_and_can_change_its_mind() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        let a = dvec2(at.x, at.y - KNOB_DRAG_SLOP - 30.0);
+        let actions = send(&mut cx, &root, &moved_with(a, 0.1, true));
+        assert_eq!(
+            changed(&actions, &cell),
+            Some(52.0),
+            "thirty points with Shift down is a tenth of thirty points without"
+        );
+        // Shift let go: the next thirty points are worth the full twenty,
+        // from where the fine drag left off.
+        let b = dvec2(at.x, a.y - 30.0);
+        let actions = send(&mut cx, &root, &moved_with(b, 0.2, false));
+        assert_eq!(changed(&actions, &cell), Some(72.0));
+        // A fine drag arrives a point at a time, each worth a fifteenth of
+        // the detent. Summed before the detent they add up; rounded on every
+        // move they would each round back to where they started.
+        for point in 1..=45 {
+            send(&mut cx, &root, &moved_with(dvec2(at.x, b.y - point as f64), 0.2, true));
+        }
+        assert_eq!(cell.as_fab_knob().value(), 75.0, "the detent swallowed a fine drag");
+        let b = dvec2(at.x, b.y - 45.0);
+        send(&mut cx, &root, &release(b, 0.3));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Sideways is nothing. A hand pulling up wanders, and a drag that
+    /// counted the wander would be a slightly different drag every time.
+    #[test]
+    fn sideways_travel_turns_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x + 200.0, at.y), 0.1, false));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x - 200.0, at.y + 1.0), 0.2, false));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        // ...and a press that moved nothing has nothing to commit.
+        let actions = send(&mut cx, &root, &release(dvec2(at.x - 200.0, at.y + 1.0), 0.3));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        assert_eq!(cell.as_fab_knob().value(), 50.0);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// A careless click does not nudge the value it was only meant to select:
+    /// under the slop nothing moves, and nothing is committed.
+    #[test]
+    fn a_wobble_under_the_slop_moves_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        // Two and a half points, written out: measured against the constant
+        // this would follow it down to nothing and go on passing. Without a
+        // slop they are a part and two thirds, which the detent calls two.
+        let wobble = dvec2(at.x + 1.0, at.y - 2.5);
+        let actions = send(&mut cx, &root, &moved_with(wobble, 0.05, false));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        let actions = send(&mut cx, &root, &release(wobble, 0.1));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        assert_eq!(cell.as_fab_knob().value(), 50.0);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Past the stop is the stop, under the hand as under the host.
+    #[test]
+    fn the_value_clamps_at_both_ends() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x, at.y - 4000.0), 0.1, false));
+        assert_eq!(changed(&actions, &cell), Some(100.0));
+        // The overshoot is not wound up: the first points of the way back
+        // already count.
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x, at.y - 3985.0), 0.15, false));
+        assert_eq!(changed(&actions, &cell), Some(90.0), "the pointer had a mile to unwind first");
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x, at.y + 4000.0), 0.2, false));
+        assert_eq!(changed(&actions, &cell), Some(0.0));
+        let actions = send(&mut cx, &root, &release(dvec2(at.x, at.y + 4000.0), 0.3));
+        assert_eq!(ended(&actions, &cell), Some(0.0));
+        cx.fingers.first_mouse_button = None;
+
+        let knob = cell.as_fab_knob();
+        knob.set_value(&mut cx, 120.0);
+        assert_eq!(knob.value(), 100.0);
+        knob.set_value(&mut cx, -3.0);
+        assert_eq!(knob.value(), 0.0);
+    }
+
+    /// What a host SETS is what the knob holds -- the detent is the hand's --
+    /// and setting it says nothing to anybody. A panel that pushed a hundred
+    /// weights into a matrix and heard a hundred `Changed` back would install
+    /// the mix it had just installed.
+    #[test]
+    fn a_value_set_from_outside_is_held_exactly_and_emits_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, cell) = start(&mut cx);
+        let knob = cell.as_fab_knob();
+        let actions = cx.capture_actions(|cx| {
+            knob.set_value(cx, 37.5);
+        });
+        assert!(actions.is_empty(), "set_value spoke");
+        assert_eq!(knob.value(), 37.5, "the detent rounded a number nobody dragged");
+        assert_eq!(knob.readout(), 37.5);
+
+        let actions = cx.capture_actions(|cx| {
+            knob.set_value_and_readout(cx, 85.5, 81.0);
+        });
+        assert!(actions.is_empty(), "set_value_and_readout spoke");
+        assert_eq!(knob.value(), 85.5, "the weight the knob stands for");
+        assert_eq!(knob.readout(), 81.0, "the share the column prints");
+        // A plain value takes the readout back with it.
+        knob.set_value(&mut cx, 40.0);
+        assert_eq!(knob.readout(), 40.0);
+    }
+
+    /// A double click is the reset: nought, said as a change, a reset and a
+    /// commit, in that order and on the second PRESS. The first press of the
+    /// pair turned nothing and so committed nothing.
+    #[test]
+    fn a_double_click_resets_the_knob_and_commits_the_nought() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at, 1.0));
+        assert!(said(&actions, &cell).is_empty());
+        let actions = send(&mut cx, &root, &release(at, 1.05));
+        assert!(said(&actions, &cell).is_empty(), "the first click of the pair spoke: {:?}", said(&actions, &cell));
+
+        let actions = send(&mut cx, &root, &press(at, 1.2));
+        assert_eq!(
+            said(&actions, &cell),
+            vec!["Changed(0.0)".to_string(), "Reset".to_string(), "Ended(0.0)".to_string()]
+        );
+        assert!(cell.as_fab_knob().was_reset(&actions));
+        assert_eq!(cell.as_fab_knob().value(), 0.0);
+        // The second press is a command, not a grip: it turns nothing.
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x, at.y - 60.0), 1.25, false));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        let actions = send(&mut cx, &root, &release(at, 1.3));
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Two clicks that are NOT a double click: too far apart in time, and a
+    /// drag followed at once by a press.
+    #[test]
+    fn two_separate_presses_are_not_a_reset() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 1.0));
+        send(&mut cx, &root, &release(at, 1.05));
+        let actions = send(&mut cx, &root, &press(at, 2.0));
+        assert!(!cell.as_fab_knob().was_reset(&actions), "a slow second click reset the knob");
+        // That press becomes a drag that comes back to where it began...
+        send(&mut cx, &root, &moved_with(dvec2(at.x, at.y - 40.0), 2.05, false));
+        send(&mut cx, &root, &moved_with(at, 2.1, false));
+        send(&mut cx, &root, &release(at, 2.15));
+        // ...and a press straight after it, on the same spot, is a new grip.
+        let actions = send(&mut cx, &root, &press(at, 2.2));
+        assert!(!cell.as_fab_knob().was_reset(&actions), "a drag counted as half a double click");
+        send(&mut cx, &root, &release(at, 2.25));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// One press, one owner, and nothing else reacts meanwhile: the drag
+    /// leaves the cell on its way up -- on a 28 point knob every drag does --
+    /// and the knob it passes over neither lights up nor moves.
+    #[test]
+    fn the_knob_holds_its_press_and_the_neighbour_stays_out_of_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let other = root.widget(&cx, ids!(other));
+        let at = middle(&cx, &cell);
+        let over_there = middle(&cx, &other);
+        let face = face_of(&cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        assert!(cx.fingers.is_area_captured(face), "the knob took the pointer");
+        assert!(
+            !cx.fingers.is_mouse_held_outside(&[face]),
+            "and nothing else took a second hold of it"
+        );
+        let actions = send(&mut cx, &root, &moved_with(dvec2(over_there.x, over_there.y - 30.0), 0.1, false));
+        assert!(changed(&actions, &cell).is_some(), "the drag went on turning the knob it began on");
+        assert!(said(&actions, &other).is_empty(), "the neighbour answered a drag that is not its own");
+        assert!(!other.borrow::<FabKnob>().unwrap().hovered, "the neighbour lit up under a held pointer");
+        assert_eq!(other.as_fab_knob().value(), 20.0);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The arrows, once the knob has the keyboard: one step from where it
+    /// stands, Shift the coarse step, and the commit rules of the slider --
+    /// a press commits where it lands, a held key commits at its release.
+    #[test]
+    fn the_arrows_step_a_knob_that_has_the_keyboard() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        // Before it has the keyboard, the keys are somebody else's.
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowUp, false));
+        assert!(said(&actions, &cell).is_empty());
+
+        give_it_the_keyboard(&mut cx, &root, &cell);
+        cell.as_fab_knob().set_value(&mut cx, 37.5);
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowUp, false));
+        assert_eq!(said(&actions, &cell), vec!["Changed(38.5)".to_string(), "Ended(38.5)".to_string()]);
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowDown, false));
+        assert_eq!(changed(&actions, &cell), Some(37.5));
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight, true));
+        assert_eq!(changed(&actions, &cell), Some(47.5), "Shift is the coarse step");
+
+        let mut run = 0;
+        for _ in 0..9 {
+            let actions = send(&mut cx, &root, &key_repeat(KeyCode::ArrowUp));
+            run += commits(&actions, &cell);
+        }
+        assert_eq!(run, 0, "a held arrow committed on its repeats");
+        let actions = send(&mut cx, &root, &key_up(KeyCode::ArrowUp));
+        assert_eq!(said(&actions, &cell), vec!["Ended(56.5)".to_string()]);
+
+        let actions = send(&mut cx, &root, &key(KeyCode::Home, false));
+        assert_eq!(ended(&actions, &cell), Some(0.0));
+        let actions = send(&mut cx, &root, &key(KeyCode::End, false));
+        assert_eq!(ended(&actions, &cell), Some(100.0));
+    }
+
+    /// The wheel steps the knob that has the keyboard and leaves every other
+    /// knob alone, so a wheel crossing the matrix scrolls the panel instead
+    /// of walking a column of weights. A spin is one gesture: every notch
+    /// says `Changed`, and the one commit waits for the wheel to go still.
+    #[test]
+    fn the_wheel_steps_the_knob_that_has_the_keyboard_and_commits_once() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+
+        // Merely under the pointer: not this knob's wheel, and said so by
+        // leaving the event unspent for the scroller around it.
+        let event = wheel(at, 1.0, false);
+        let actions = send(&mut cx, &root, &event);
+        assert!(said(&actions, &cell).is_empty(), "{:?}", said(&actions, &cell));
+        assert!(!event.scroll_handled(Vec2Index::Y), "an idle knob ate the panel's wheel");
+
+        give_it_the_keyboard(&mut cx, &root, &cell);
+        let mut heard = Vec::new();
+        for _ in 0..3 {
+            let event = wheel(at, 1.0, false);
+            let actions = send(&mut cx, &root, &event);
+            heard.extend(said(&actions, &cell));
+            assert!(event.scroll_handled(Vec2Index::Y), "the knob's wheel also scrolled the panel");
+        }
+        assert_eq!(heard, vec!["Changed(51.0)", "Changed(52.0)", "Changed(53.0)"]);
+        let actions = send(&mut cx, &root, &wheel(at, -1.0, true));
+        assert_eq!(said(&actions, &cell), vec!["Changed(43.0)".to_string()], "Shift is the coarse step");
+
+        // A trackpad's notch arrives in pieces, and the pieces add up.
+        let mut heard = Vec::new();
+        for _ in 0..4 {
+            let actions = send(&mut cx, &root, &wheel(at, 0.25, false));
+            heard.extend(said(&actions, &cell));
+        }
+        assert_eq!(heard, vec!["Changed(44.0)"]);
+
+        // The wheel goes still, and the spin is over.
+        let timer = cell.borrow::<FabKnob>().unwrap().wheel_timer;
+        assert_ne!(timer.0, 0, "nothing is waiting to commit the spin");
+        let settle = Event::Timer(TimerEvent {
+            time: None,
+            timer_id: timer.0,
+        });
+        let actions = send(&mut cx, &root, &settle);
+        assert_eq!(said(&actions, &cell), vec!["Ended(44.0)".to_string()]);
+        // ...once. What is owed is owed once.
+        let actions = send(&mut cx, &root, &settle);
+        assert!(said(&actions, &cell).is_empty());
+
+        // At the stop the wheel still belongs to the knob, and says nothing.
+        cell.as_fab_knob().set_value(&mut cx, 100.0);
+        let event = wheel(at, 1.0, false);
+        let actions = send(&mut cx, &root, &event);
+        assert!(said(&actions, &cell).is_empty());
+        assert!(event.scroll_handled(Vec2Index::Y));
+    }
+
+    /// A spin the keyboard walks out on still commits, as a run of arrows
+    /// does: the timer it was waiting on belongs to a knob that no longer
+    /// has the wheel.
+    #[test]
+    fn a_spin_the_keyboard_walks_out_on_still_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        give_it_the_keyboard(&mut cx, &root, &cell);
+        send(&mut cx, &root, &wheel(at, 2.0, false));
+        let actions = send(
+            &mut cx,
+            &root,
+            &Event::KeyFocus(KeyFocusEvent {
+                prev: face_of(&cell),
+                focus: Area::Empty,
+            }),
+        );
+        assert_eq!(said(&actions, &cell), vec!["Ended(52.0)".to_string()]);
+        let actions = send(&mut cx, &root, &Event::WindowLostFocus(WINDOW));
+        assert!(said(&actions, &cell).is_empty(), "the spin was paid for twice");
+    }
+
+    /// `wheel_on_hover` is the host saying its knobs stand somewhere that
+    /// does not scroll.
+    #[test]
+    fn a_knob_told_to_takes_the_wheel_it_is_merely_under() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        cell.borrow_mut::<FabKnob>().unwrap().wheel_on_hover = true;
+        let event = wheel(middle(&cx, &cell), 1.0, false);
+        let actions = send(&mut cx, &root, &event);
+        assert_eq!(changed(&actions, &cell), Some(51.0));
+        assert!(event.scroll_handled(Vec2Index::Y));
+    }
+
+    /// Switched off, a knob answers nothing -- and switching it off in the
+    /// middle of a drag puts back what the press found.
+    #[test]
+    fn a_knob_switched_off_lets_go_and_goes_quiet() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        send(&mut cx, &root, &moved_with(dvec2(at.x, at.y - 63.0), 0.1, false));
+        assert_eq!(cell.as_fab_knob().value(), 90.0);
+        let actions = cx.capture_actions(|cx| cell.as_fab_knob().set_enabled(cx, false));
+        assert_eq!(
+            cell.as_fab_knob().changed(&actions),
+            Some(50.0),
+            "the drag that was cut short left its value behind"
+        );
+        let actions = send(&mut cx, &root, &moved_with(dvec2(at.x, at.y - 120.0), 0.2, false));
+        assert!(said(&actions, &cell).is_empty());
+        assert_eq!(cell.as_fab_knob().value(), 50.0);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// A drag that is let go somewhere else leaves the knob unlit. No
+    /// hover-out follows a release off the area, so a knob that waited for
+    /// one stayed lit until the pointer happened to cross it again -- seen in
+    /// a running window, on the first drag that was ever tried on one.
+    #[test]
+    fn a_drag_let_go_off_the_knob_does_not_leave_it_lit() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let at = middle(&cx, &cell);
+        send(&mut cx, &root, &moved_with(at, 0.0, false));
+        assert!(cell.borrow::<FabKnob>().unwrap().hovered, "the pointer arrived and nothing lit");
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.1));
+        let away = dvec2(at.x, at.y - 200.0);
+        send(&mut cx, &root, &moved_with(away, 0.2, false));
+        send(&mut cx, &root, &release(away, 0.3));
+        cx.fingers.first_mouse_button = None;
+        assert!(!cell.borrow::<FabKnob>().unwrap().hovered, "the knob is still lit with the pointer gone");
+
+        // ...and one let go ON the knob keeps the light the pointer earns it.
+        send(&mut cx, &root, &moved_with(at, 0.4, false));
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 1.5));
+        send(&mut cx, &root, &release(at, 1.6));
+        cx.fingers.first_mouse_button = None;
+        assert!(cell.borrow::<FabKnob>().unwrap().hovered);
+    }
+
+    /// The box is whatever the cell says, the face is what the words leave of
+    /// it, and a knob with no name has no row for one.
+    #[test]
+    fn the_knob_takes_the_size_of_its_cell_and_drops_the_rows_it_has_no_words_for() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, cell) = start(&mut cx);
+        let small = root.widget(&cx, ids!(small));
+        let named = root.widget(&cx, ids!(named));
+        assert_eq!(face_of(&cell).rect(&cx).size, dvec2(44.0, 64.0), "the default box");
+        assert_eq!(face_of(&small).rect(&cx).size, dvec2(28.0, 28.0), "the cell's box");
+        assert_eq!(cell.borrow::<FabKnob>().unwrap().text_rows(), (0.0, 12.0));
+        assert_eq!(small.borrow::<FabKnob>().unwrap().text_rows(), (0.0, 0.0));
+        assert_eq!(named.borrow::<FabKnob>().unwrap().text_rows(), (12.0, 12.0));
+        // What the shader was handed is what the layout measured with.
+        let inner = named.borrow::<FabKnob>().unwrap();
+        assert_eq!((inner.draw_bg.label_px, inner.draw_bg.readout_px), (12.0, 12.0));
+        // Nought is drawn as off, and the travel is what says so.
+        assert_eq!(inner.draw_bg.travel, 0.0);
+        assert_eq!(cell.borrow::<FabKnob>().unwrap().draw_bg.travel, 0.5);
     }
 }

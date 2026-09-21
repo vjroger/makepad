@@ -2,7 +2,9 @@
 //! how a row decides what kind of editor it is, and the row controls the
 //! panel is built from.
 use crate::makepad_widgets::property_inspector::{Prop, PropertyInspectorWidgetRefExt};
-use crate::makepad_widgets::fab_controls::{FabColorPickWidgetRefExt, FabValueInputWidgetRefExt};
+use crate::makepad_widgets::fab_controls::{
+    FabColorPickWidgetRefExt, FabKnobWidgetRefExt, FabValueInputWidgetRefExt,
+};
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -19,6 +21,21 @@ script_mod! {
         padding: theme.mspace_2
         show_bg: true
         draw_bg +: {color: theme.color_surface_container_low}
+    }
+
+    // The ground the dev panel itself stands on, read off the panel's own
+    // table rather than off the app's theme: the knob is drawn to be read
+    // against this and against nothing else, and it is the one ground on this
+    // page that does not change when the page's theme does. A SolidView and
+    // not a View with show_bg: a bare View's draw_bg paints nothing.
+    let KnobGround = SolidView{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 6.
+        padding: 8.
+        align: Align{y: 1.0}
+        draw_bg +: {color: mod.fab.color_area}
     }
 
     mod.stories.PropertyInspectorOverview = StoryPage{
@@ -80,6 +97,43 @@ script_mod! {
                 }
             }
             picked := Label{text: "no colour chosen"}
+        }
+
+        StoryHeading{text: "The knob"}
+        StoryNote{text: "A number on a dial, for where a row is too much room: a cell of a matrix. Press it and pull up for more or down for less. The whole range is a hundred and fifty points of travel whatever size the knob is drawn at, Shift slows the drag to a tenth, and sideways counts for nothing. A double click takes it back to nought. Once it has been pressed it has the keyboard, and then the arrows and the wheel step it; a knob that is merely under the pointer lets the wheel go by, so a panel full of them still scrolls. Here at nought, at half and at full, and one with a name over it."}
+        StoryRow{
+            KnobGround{
+                knob_off := FabKnob{value: 0.0}
+                knob_half := FabKnob{value: 50.0}
+                knob_full := FabKnob{value: 100.0}
+                knob_named := FabKnob{label: "mix" value: 35.0}
+            }
+            View{
+                width: Fit height: Fit flow: Down spacing: theme.space_1
+                turned := Label{text: "nothing turned yet"}
+                settled := Label{text: "nothing settled yet" draw_text +: {color: theme.color_text_meta}}
+            }
+        }
+
+        StoryHeading{text: "Nought is off"}
+        StoryNote{text: "Most cells of a matrix stand at nought, so nought has to read as off from across the panel: the arc is out, the tick and the number go down to the muted ink, and the first part above nought lights a lamp on the stop. The knob is drawn from the panel's own table and never from the app's theme, so switching this page's theme changes the page and leaves the knobs exactly as they were."}
+
+        StoryHeading{text: "Down to a matrix cell"}
+        StoryNote{text: "The face is the biggest circle the box holds once the words have had their rows, so a knob takes the size of the cell it is put in. These are 28 points across, the narrowest column an eight-column matrix comes down to in the panel: first with the number under them, then square and bare, the way a cell looks when the headers carry the names and a tooltip carries the number."}
+        StoryRow{
+            KnobGround{
+                FabKnob{width: 28 value: 0.0}
+                FabKnob{width: 28 value: 50.0}
+                FabKnob{width: 28 value: 100.0}
+            }
+            KnobGround{
+                FabKnob{width: 28 height: 28 show_readout: false value: 0.0}
+                FabKnob{width: 28 height: 28 show_readout: false value: 50.0}
+                FabKnob{width: 28 height: 28 show_readout: false value: 100.0}
+            }
+            KnobGround{
+                FabKnob{width: 28 height: 28 show_readout: false value: 50.0 enabled: false}
+            }
         }
 
         StoryHeading{text: "Row labels"}
@@ -181,6 +235,27 @@ fn fab_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             &format!("r {:.2}  g {:.2}  b {:.2}  a {:.2}", c.x, c.y, c.z, c.w),
         );
     }
+
+    for (name, id) in [
+        ("the first knob", ids!(knob_off)),
+        ("the second knob", ids!(knob_half)),
+        ("the third knob", ids!(knob_full)),
+        ("mix", ids!(knob_named)),
+    ] {
+        let knob = root.fab_knob(cx, id);
+        if let Some(v) = knob.changed(actions) {
+            root.label(cx, ids!(turned))
+                .set_text(cx, &format!("{name} is at {v:.0}"));
+        }
+        // The same two reports as the field above, and a third: a double
+        // click says it was a reset as well as where it landed, for a host
+        // that keeps a ledger of which cells count for anything.
+        if let Some(v) = knob.ended(actions) {
+            let how = if knob.was_reset(actions) { "reset" } else { "settled" };
+            root.label(cx, ids!(settled))
+                .set_text(cx, &format!("{name} {how} at {v:.0}"));
+        }
+    }
 }
 
 /// The page's one handler: the inspector panels, then the row controls.
@@ -195,7 +270,7 @@ pub const STORIES: &[Story] = &[Story {
     component: "PropertyInspector",
     also: &[
         "FabColorPick", "FabColorWheel", "FabLabel", "FabPaletteStrip", "FabValueInput", "Panel",
-        "FabSection", "FabPropRow", "FabSearch",
+        "FabSection", "FabPropRow", "FabSearch", "FabKnob",
     ],
     name: "Overview",
     dsl: "PropertyInspectorOverview",
@@ -267,6 +342,20 @@ The controls the rows are made of, each usable on its own. They are shaped for a
 ### The swatch
 
 `FabColorPick` is a colour that opens its own picker over the page: a wheel, a strip of recent choices, and hex entry, which is what `FabColorWheel` and `FabPaletteStrip` are for. It reports the same way: live while you move inside it, and again when it closes.
+
+### The knob
+
+`FabKnob` is a number on a dial, for where a row is too much room: a cell of a matrix. It is 44 by 64 unless told otherwise and takes whatever box it is given, fixed or `Fill`; the face is the biggest circle that box holds once the two text rows are taken off its height, and it is drawn to stay legible 28 points across. `label` is the name over the face, and an empty one takes its row away too. `show_readout` is the number under it. `min`, `max`, `step`, `big_step`, `precision`, `unit`, `value` and `enabled` mean what they mean on the panel's slider, so a host treats the two alike.
+
+**Pull up for more.** A press takes the pointer and keeps it until the release; the value is how far the pointer has come since, not where it is, because a dial 28 points across has no room for the other law. `drag_travel` is the travel that covers the whole range, 150 points, and it is the same at every size. Shift is a tenth of the speed, sideways counts for nothing, and three points of travel pass before a press becomes a drag, so a click that was only meant to select a knob does not nudge it.
+
+**A double click is the reset.** It goes to nought, as the slider's name does when it is clicked; a knob in a matrix has no name to click.
+
+**The wheel is for the knob that has the keyboard.** A press gives a knob the keyboard, and then the arrows step it, Shift takes `big_step`, Home and End go to the stops, and the wheel steps it a notch at a time. A knob that is merely under the pointer lets the wheel go by: the panel these sit in scrolls and is a wall of them. `wheel_on_hover: true` is for a host whose knobs stand somewhere that does not.
+
+**It reports the way the rest of the kit does.** `Changed` follows a gesture live and `Ended` fires once when it is over: at the release of a drag, at the release of a held arrow, when the wheel has been still for a third of a second, and at once for a double click, which also says `Reset`. A press that turned nothing commits nothing. `set_value` and `set_value_and_readout` say nothing at all, so a host can fill a matrix without hearing its own numbers back.
+
+**Nought reads as off.** The arc is out and the tick and the number are dimmed, because most cells of a matrix stand at nought. Every colour comes from the panel's own table, so the knob looks the same under every theme the app can wear.
 
 ### The labels
 
