@@ -458,7 +458,7 @@ mod tests {
             "Collections",
             &[
                 ("Lists", &["Overview", "List item"]),
-                ("Table", &["Overview"]),
+                ("Table", &["Overview", "Diagonal headings"]),
                 ("Tree", &["Overview", "Files"]),
                 ("DataGrid", &["Overview", "List"]),
                 ("TileList", &["Overview", "Item grid"]),

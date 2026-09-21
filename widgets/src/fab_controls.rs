@@ -39,10 +39,18 @@
 //!   panels are assembled from (the tweaker's sidebar is the first tenant).
 
 use crate::button::ButtonAction;
+// `diagonal_run` is named only by the tests down the file, which check this
+// control's arithmetic where it now lives — and the attribute rather than a
+// test-only import because one of those tests reads this file down to where
+// the tests begin, and a second such marker up here would cut it short.
+#[allow(unused_imports)]
+use crate::diagonal_text::{
+    diagonal_row_height, diagonal_run, draw_diagonal_name, DiagonalLean, DiagonalRun,
+};
 use crate::widget_tree::CxWidgetExt;
 use crate::{
     animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig,
-    makepad_draw::text::geom::Point, makepad_draw::*, text_input::*, view::View, widget::*,
+    makepad_draw::*, text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
 
@@ -699,8 +707,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
         // The name over a column that cannot hold it flat. Kept here among
         // the labels because that is what it is; what makes it its own
         // control is that the ink is MEANT to leave the box.
-        let DiagonalLean = set_type_default() do #(DiagonalLean::script_api(vm))
-        mod.widgets.DiagonalLean = DiagonalLean
+        // The lean itself is declared with the arithmetic, in
+        // diagonal_text.rs, because the library's tables turn a heading the
+        // same way and there can only be one of it.
+        let DiagonalLean = mod.widgets.DiagonalLean
         mod.widgets.FabDiagonalLabelBase = #(FabDiagonalLabel::register_widget(vm))
         /** A name written across the corner of the box it names, for a
          * column too narrow to hold it flat: a matrix header. The ink
@@ -3775,6 +3785,12 @@ fn knob_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
 // ===========================================================================
 // FabDiagonalLabel — the name over a column too narrow to hold it.
 //
+// Where the name goes, and the glyph walk that puts it there, are in
+// diagonal_text.rs: the library's tables turn their headings by the same
+// arithmetic, and a name standing over the wrong column names the wrong
+// column, so there is one copy of that sum and not three. What stays here is
+// this control's own face — the panel's palette, the panel's small type.
+//
 // A matrix of knobs ten rows by eight columns, in a sidebar 280 wide, comes
 // out around 26 points a column, and the names a panel has to write over
 // such columns -- a theme's, a family's -- run to two and a half times that.
@@ -3799,109 +3815,6 @@ fn knob_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
 // standing over the wrong column names the wrong column — so that is pure
 // arithmetic, settled and tested without a window.
 // ===========================================================================
-
-/// Which way a diagonal name runs across the column it names.
-///
-/// Both are wanted, and what the choice really decides is which edge of the
-/// panel the ink hangs over.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
-#[repr(u32)]
-pub enum DiagonalLean {
-    /// The name ENDS on its column's bottom centre, having begun up and to
-    /// the left, and reads downward to the right. The overflow is to the
-    /// LEFT, and over a matrix that is the empty corner above the row-name
-    /// column — so the LAST column's name is never cut in half by the
-    /// panel's right edge. That is why it is the default.
-    #[pick]
-    Fall = 0,
-    /// The name STARTS on its column's bottom centre and rises to the upper
-    /// right: the spreadsheet convention. The overflow is to the RIGHT, so a
-    /// host that picks this owes its last column that much room.
-    Rise = 1,
-}
-
-/// Where a diagonal name's baseline runs, and the box its ink takes.
-///
-/// Every coordinate is absolute, in the same space as the box handed in.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DiagonalRun {
-    /// The first glyph's pen point.
-    pub start: DVec2,
-    /// One advance past the last glyph's: where the baseline stops.
-    pub end: DVec2,
-    /// The rotation every glyph is turned by, in radians and in SCREEN
-    /// terms — y points down, so a `Fall` is positive and a `Rise`
-    /// negative.
-    pub angle: f64,
-    /// Everything the ink covers. Normally wider than the box and usually
-    /// taller: it is what must NOT be clipped, and what a host measures a
-    /// header row against.
-    pub bounds: Rect,
-}
-
-/// How tall a header row has to be to hold a name of `text_width` turned by
-/// `angle_deg`, in points.
-///
-/// The name lies along the hypotenuse and its line stands across it, so the
-/// row needs both: `text_width * sin(angle) + line_height * cos(angle)`. It
-/// is the same for either lean — they differ in which way the ink leans, not
-/// in how much room it takes. A host that cannot ask the widget (a height
-/// written in the DSL) can do this sum with a ruler: at 45 degrees it is
-/// about 0.71 of the longest name plus 0.71 of a line.
-pub fn diagonal_row_height(text_width: f64, line_height: f64, angle_deg: f64) -> f64 {
-    let rad = angle_deg.clamp(0.0, 90.0).to_radians();
-    text_width.max(0.0) * rad.sin() + line_height.max(0.0) * rad.cos()
-}
-
-/// Where the name goes over the box it names.
-///
-/// The anchor is the box's BOTTOM CENTRE in both leans, and that is the
-/// whole point of the control: whatever the name is, one end of it stands on
-/// the middle of its own column, right above whatever the column holds. What
-/// changes with the lean is WHICH end, and so which side the rest hangs over.
-///
-/// At nought degrees this degenerates to a plain horizontal label sitting on
-/// the box's bottom edge — a `Fall` ending on the centre, a `Rise` starting
-/// there — which is the honest answer rather than a special case: a column
-/// wide enough not to need the trick does not need a different control.
-pub fn diagonal_run(
-    box_: Rect,
-    text_width: f64,
-    line_height: f64,
-    angle_deg: f64,
-    lean: DiagonalLean,
-) -> DiagonalRun {
-    let rad = angle_deg.clamp(0.0, 90.0).to_radians();
-    let (sin, cos) = (rad.sin(), rad.cos());
-    let width = text_width.max(0.0);
-    let line = line_height.max(0.0);
-    let anchor = dvec2(box_.pos.x + box_.size.x * 0.5, box_.pos.y + box_.size.y);
-    // The glyph band lies from the baseline UP by one line, so the rotated
-    // band reaches `width * sin + line * cos` above the anchor either way.
-    let top = anchor.y - width * sin - line * cos;
-    let (angle, start, end, left, right) = match lean {
-        DiagonalLean::Fall => {
-            let start = dvec2(anchor.x - width * cos, anchor.y - width * sin);
-            // Leaning down to the right, the band's far corner is the one
-            // that reaches furthest right; the pen point is the left edge.
-            (rad, start, anchor, start.x, start.x + width * cos + line * sin)
-        }
-        DiagonalLean::Rise => {
-            let end = dvec2(anchor.x + width * cos, anchor.y - width * sin);
-            // Leaning up to the right, the band hangs back over the pen.
-            (-rad, anchor, end, anchor.x - line * sin, anchor.x + width * cos)
-        }
-    };
-    DiagonalRun {
-        start,
-        end,
-        angle,
-        bounds: Rect {
-            pos: dvec2(left, top),
-            size: dvec2(right - left, anchor.y - top),
-        },
-    }
-}
 
 /// A name written across the corner of the box it names, for a column too
 /// narrow to hold it flat. No gesture, no focus, no actions: it is a label.
@@ -3992,53 +3905,20 @@ impl Widget for FabDiagonalLabel {
         // name is free to cross its neighbours. See the note above.
         let rect = cx.walk_turtle(walk);
         cx.add_aligned_rect_area(&mut self.area, rect);
-        self.last_run = None;
         // A Fill on an axis nothing has sized is a NaN box; there is no
-        // centre to stand a name on, so nothing is drawn rather than a name
-        // at nowhere.
-        if self.text.is_empty() || !rect.size.x.is_finite() || !rect.size.y.is_finite() {
-            return DrawStep::done();
-        }
-        let Some(run) = self.draw_text.prepare_single_line_run(cx, &self.text) else {
-            return DrawStep::done();
-        };
-        let placed = diagonal_run(
+        // centre to stand a name on, so the shared placement draws nothing
+        // rather than a name at nowhere.
+        let mut glyphs = std::mem::take(&mut self.glyphs);
+        self.last_run = draw_diagonal_name(
+            &mut self.draw_text,
+            cx,
+            &mut glyphs,
             rect,
-            run.width_in_lpxs as f64,
-            (run.ascender_in_lpxs - run.descender_in_lpxs) as f64,
+            &self.text,
             self.angle,
             self.lean,
         );
-        // A straight baseline is one direction for every glyph, so the walk
-        // along it is the run's own pen advances and nothing else: the
-        // rotation origin is the pen point, the ink sits one bearing along
-        // from it, and every glyph turns by the same angle.
-        let dir = dvec2(placed.angle.cos(), placed.angle.sin());
-        let mut glyphs = std::mem::take(&mut self.glyphs);
-        glyphs.clear();
-        for glyph in &run.glyphs {
-            if glyph.advance_in_lpxs <= 0.0 {
-                continue;
-            }
-            let pen = placed.start + dir * glyph.pen_x_in_lpxs as f64;
-            let ink = pen + dir * glyph.offset_x_in_lpxs as f64;
-            glyphs.push(PathGlyphInstance {
-                glyph_origin: Point::new(ink.x as f32, ink.y as f32),
-                rotation_origin: Point::new(pen.x as f32, pen.y as f32),
-                font_size_in_lpxs: glyph.font_size_in_lpxs,
-                rasterized: glyph.rasterized,
-                angle: placed.angle as f32,
-            });
-        }
-        // One draw call for the whole name rather than one per letter. The
-        // camera, warp and fade uniforms this shader carries for the map are
-        // left where their defaults are — identity, no fold, no fade — so
-        // what is drawn is the placement above and nothing on top of it.
-        self.draw_text.begin_glyph_batch(cx);
-        self.draw_text.draw_path_glyphs(cx, &glyphs);
-        self.draw_text.end_glyph_batch(cx);
         self.glyphs = glyphs;
-        self.last_run = Some(placed);
         DrawStep::done()
     }
 }
