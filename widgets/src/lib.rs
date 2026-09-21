@@ -28,6 +28,7 @@ pub mod theme_store;
 pub mod theme_lab;
 pub mod theme_groups;
 pub mod theme_builder;
+pub mod theme_combinations;
 pub mod conceding_row;
 pub mod widget;
 pub mod width_override;

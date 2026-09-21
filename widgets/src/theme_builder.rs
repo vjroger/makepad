@@ -76,6 +76,7 @@
 
 use crate::desktop_style::{self, DesktopStyle, StyleSheet};
 use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
+use crate::theme_combinations::COMBINATIONS;
 use crate::theme_tokens::{
     base_theme_keys, ground_tint, held_pairs, hsl_to_rgb, reads_on, rgb_to_hsl, roles_from_seed_tuned,
     theme_module_script, theme_script_body, theme_source_with_globals, token_spec, Appearance, BlendTheme,
@@ -1022,8 +1023,31 @@ const LIGHT_COMPANIONS: (f64, f64) = (0.20, 0.76);
 /// grows the same palette in every harmony there is.
 const SAME_COLOR: i32 = 8;
 
+/// How much colour a colour needs before it has a hue worth sorting by, and
+/// before a page leans toward it. Below this it is a grey said in a roundabout
+/// way, and its hue is whatever rounding left behind.
+const HAS_HUE: f64 = 0.08;
+
 /// What a suggestion grown from a person's own list is called.
 pub const OWN_LABEL: &str = "From your palettes";
+
+/// What a suggestion taken from the built-in table is called, before its
+/// number: see [`crate::theme_combinations`] for what the numbers are.
+pub const COMBINATION_LABEL: &str = "Combination";
+
+/// The number the first row of the built-in table carries.
+pub const FIRST_COMBINATION: usize = 121;
+
+/// How many of the built-in combinations a colour is offered at most. The
+/// strip holds eight to a page and a person who has to turn nine pages to see
+/// what a colour can do has been given a catalogue rather than a choice, so
+/// the nearest three pages' worth are kept and the rest dropped.
+pub const MOST_COMBINATIONS: usize = 24;
+
+/// What the row at `at` in the built-in table is called.
+pub fn combination_label(at: usize) -> String {
+    format!("{COMBINATION_LABEL} {}", FIRST_COMBINATION + at)
+}
 
 /// How far a colour in a person's own scheme may stand from the favourite and
 /// still count as the one the scheme was found by. Thirty of the sum of hue
@@ -1119,24 +1143,47 @@ pub fn suggestions(favourite: u32, dark: bool) -> Vec<Suggestion> {
     out
 }
 
-/// [`suggestions`], and then whatever in a person's own list of schemes has
-/// the favourite colour in it, re-anchored on the favourite exactly and put
-/// through the same dropping -- so a scheme of theirs that came out as one
-/// the rule had already offered is not offered twice.
+/// Everything a favourite colour is offered, in the order a person meets it:
+/// the palettes the rule grew, then the built-in combinations that hold a
+/// colour near this one, then the person's own schemes that do.
 ///
-/// The library ships no list. `own` is read from wherever the caller keeps
-/// one; `theme_store::read_palettes` is where a person's own file is.
+/// The rule's come first because they always exist and they always cover the
+/// ground -- every harmony in every mood -- and the two lists after it are
+/// what a rule cannot think of. [`crate::theme_combinations`] is a book's
+/// worth of combinations put together by eye; a person's own file is the
+/// handful they have decided about already, and it comes last because it is
+/// the shortest and the easiest to find at the end of a strip.
+///
+/// Every one of the three is re-anchored on the favourite exactly, given its
+/// roles by [`in_role_order`], and put through the same dropping, so a scheme
+/// that came out as one the rule had already offered is not offered twice --
+/// and neither is a combination that came out as a person's own.
+///
+/// At most [`MOST_COMBINATIONS`] of the built-in matches are kept, nearest
+/// first: the strip is a choice and not a catalogue.
+///
+/// The library ships no personal list. `own` is read from wherever the caller
+/// keeps one; `theme_store::read_palettes` is where a person's own file is.
 pub fn all_suggestions(favourite: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Suggestion> {
     let mut out = suggestions(favourite, dark);
+    let built_in = matched(favourite, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
+    for (at, scheme) in built_in.into_iter().take(MOST_COMBINATIONS) {
+        offer(&mut out, from_scheme(favourite, dark, &scheme, combination_label(at)));
+    }
     for scheme in matching_schemes(favourite, own, OWN_TOLERANCE) {
-        let Some(made) = from_own(favourite, dark, &scheme) else {
-            continue;
-        };
-        if !out.iter().any(|kept| the_same_palette(kept, &made)) {
-            out.push(made);
-        }
+        offer(&mut out, from_scheme(favourite, dark, &scheme, OWN_LABEL.to_string()));
     }
     out
+}
+
+/// One more palette on the strip, unless it is one that is already on it.
+fn offer(out: &mut Vec<Suggestion>, made: Option<Suggestion>) {
+    let Some(made) = made else {
+        return;
+    };
+    if !out.iter().any(|kept| the_same_palette(kept, &made)) {
+        out.push(made);
+    }
 }
 
 /// How far one colour stands from another for the purpose of finding a scheme
@@ -1164,8 +1211,25 @@ pub fn color_distance(a: u32, b: u32) -> f64 {
 /// Any list: the library ships none, a scheme may hold two colours or four,
 /// and nothing here knows where the list came from.
 pub fn matching_schemes(favourite: u32, schemes: &[Vec<u32>], tolerance: f64) -> Vec<Vec<u32>> {
-    let mut found: Vec<(f64, Vec<u32>)> = Vec::new();
-    for scheme in schemes {
+    matched(favourite, schemes.iter().map(|scheme| scheme.as_slice()), tolerance)
+        .into_iter()
+        .map(|(_, scheme)| scheme)
+        .collect()
+}
+
+/// [`matching_schemes`], and where in the list each match came from -- which
+/// is how a built-in combination learns the number it is called by.
+///
+/// Over an iterator rather than a slice because the two lists are not the same
+/// shape: a person's own is a `Vec` of `Vec`s read off a file, and the
+/// built-in table is rows of a `const`.
+fn matched<'a>(
+    favourite: u32,
+    schemes: impl Iterator<Item = &'a [u32]>,
+    tolerance: f64,
+) -> Vec<(usize, Vec<u32>)> {
+    let mut found: Vec<(f64, usize, Vec<u32>)> = Vec::new();
+    for (place, scheme) in schemes.enumerate() {
         let nearest = scheme
             .iter()
             .enumerate()
@@ -1180,12 +1244,92 @@ pub fn matching_schemes(favourite: u32, schemes: &[Vec<u32>], tolerance: f64) ->
         let mut ordered = Vec::with_capacity(scheme.len());
         ordered.push(scheme[at]);
         ordered.extend(scheme.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, c)| *c));
-        found.push((distance, ordered));
+        found.push((distance, place, ordered));
     }
     // A stable sort, so two schemes that stand equally near the favourite
     // stay in the order the person wrote them in.
-    found.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    found.into_iter().map(|(_, scheme)| scheme).collect()
+    found.sort_by(|(a, _, _), (b, _, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    found.into_iter().map(|(_, place, scheme)| (place, scheme)).collect()
+}
+
+/// A scheme's colours in the order the theme wants them: the anchor first,
+/// then the secondary accent, the tertiary accent, and the page's tint.
+///
+/// A list of colours has no roles in it. Somebody typed them in some order, or
+/// a book printed them in one, and that order says which was written first and
+/// nothing else -- so letting it decide which colour becomes the quiet accent
+/// and which the ground hands the shape of a theme to an accident of typing.
+///
+/// What the colours themselves say decides it instead, and it says the same
+/// thing every harmony the rule grows already says:
+///
+/// * The page's tint is the one with LEAST colour in it, the one already
+///   behaving like a ground. Only where there is one to spare: three colours
+///   are the three accent families exactly, and taking one of them for the
+///   page would leave the theme a family short and have it filled by rule
+///   anyway, which is a worse palette than the one that was written down.
+/// * Of the two accents left, the one NEARER the anchor round the circle is
+///   the secondary and the farther one the tertiary -- the quiet accent beside
+///   the favourite, the contrast accent across from it. That is what every
+///   built-in harmony reads like, and a scheme from a list should read like
+///   one rather than like whatever order it was typed in.
+///
+/// A colour with no colour in it has no hue, so it cannot be near anything:
+/// it sorts as far from the anchor as a colour can get, which puts it in the
+/// contrast place where it does the least harm -- a grey secondary beside a
+/// strong favourite is a family that has quietly stopped being one. Where the
+/// ANCHOR is the grey there is nothing at all to be near or far from, and then
+/// written order decides, as it does for every other tie. Anything past the
+/// fourth colour is left where it fell; nothing reads it.
+fn in_role_order(scheme: &[u32]) -> Vec<u32> {
+    if scheme.len() < 3 {
+        return scheme.to_vec();
+    }
+    let anchor = scheme[0];
+    let mut rest: Vec<u32> = scheme[1..].to_vec();
+    let tint = (rest.len() >= 3).then(|| rest.remove(palest(&rest)));
+    // A stable sort, so colours standing equally far round the circle keep the
+    // order they were written in.
+    rest.sort_by(|a, b| {
+        hue_gap(anchor, *a).partial_cmp(&hue_gap(anchor, *b)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let accents = rest.len().min(2);
+    let mut out = Vec::with_capacity(scheme.len());
+    out.push(anchor);
+    out.extend(rest.drain(..accents));
+    out.extend(tint);
+    out.extend(rest);
+    out
+}
+
+/// Which of these colours has least colour in it. The first of them where
+/// several are equally pale, so a tie falls to written order.
+fn palest(colors: &[u32]) -> usize {
+    colors
+        .iter()
+        .enumerate()
+        .map(|(at, packed)| (at, rgb_to_hsl(*packed | 0xFF).1))
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(at, _)| at)
+        .unwrap_or(0)
+}
+
+/// How far round the circle a colour stands from the anchor, the short way.
+///
+/// Half a turn is the farthest anything can be, so that is what a colour with
+/// no hue is given. An anchor with no hue makes the question meaningless
+/// rather than hard, and every answer is nought: nothing is near a grey.
+fn hue_gap(anchor: u32, other: u32) -> f64 {
+    let (anchor_hue, anchor_colour, _) = rgb_to_hsl(anchor | 0xFF);
+    if anchor_colour < HAS_HUE {
+        return 0.0;
+    }
+    let (other_hue, other_colour, _) = rgb_to_hsl(other | 0xFF);
+    if other_colour < HAS_HUE {
+        return 180.0;
+    }
+    let turn = (anchor_hue - other_hue).rem_euclid(360.0);
+    turn.min(360.0 - turn)
 }
 
 /// A scheme re-anchored on the favourite colour: the same scheme, said as
@@ -1261,7 +1405,7 @@ fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Mood) -> Suggestion
     // A favourite with no colour in it has no hue for the page to lean
     // toward, by the same bar the palette rule uses to decide the brand
     // families are greys.
-    let lean = hsl_to_rgb(hue, if colour >= 0.08 { rule.lean } else { 0.0 }, 0.5);
+    let lean = hsl_to_rgb(hue, if colour >= HAS_HUE { rule.lean } else { 0.0 }, 0.5);
     let seeds = SuggestionSeeds {
         secondary: companion(second, SECONDARY_SHARE),
         tertiary: companion(third, TERTIARY_SHARE),
@@ -1278,16 +1422,22 @@ fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Mood) -> Suggestion
     }
 }
 
-/// One of a person's own schemes, already matched and re-anchored, dressed as
-/// a suggestion.
+/// One scheme off a list -- a person's own or a built-in combination --
+/// already matched and re-anchored, dressed as a suggestion under the name it
+/// is offered by.
+///
+/// The roles are handed out by [`in_role_order`] and not by where a colour
+/// stood in the line, and they are handed out after the re-anchoring, because
+/// it is the colours the theme will actually wear that have to carry them.
 ///
 /// A scheme may be two colours or three, and a suggestion is always four, so
 /// the places it does not fill are filled the plain way -- [`Mood::Vivid`],
 /// companions as strong as the favourite -- because a palette somebody wrote
-/// down by hand is not one to have opinions about. A fourth colour, where
-/// there is one, is what the page leans toward.
-fn from_own(favourite: u32, dark: bool, scheme: &[u32]) -> Option<Suggestion> {
-    let adjusted = adjust_scheme(favourite, scheme);
+/// down by hand is not one to have opinions about. The harmony and the mood
+/// stay empty: a scheme off a list is in no harmony the library names, and the
+/// label is what says where it came from.
+fn from_scheme(favourite: u32, dark: bool, scheme: &[u32], label: String) -> Option<Suggestion> {
+    let adjusted = in_role_order(&adjust_scheme(favourite, scheme));
     if adjusted.len() < 2 {
         return None;
     }
@@ -1297,7 +1447,7 @@ fn from_own(favourite: u32, dark: bool, scheme: &[u32]) -> Option<Suggestion> {
     let tertiary = adjusted.get(2).copied().unwrap_or(plain.seeds.tertiary);
     let neutral = adjusted.get(3).copied().or(plain.seeds.neutral);
     Some(Suggestion {
-        label: OWN_LABEL.to_string(),
+        label,
         harmony: None,
         mood: None,
         colors: [adjusted[0], secondary, tertiary, page_under(dark, neutral, rule.saturation)],
@@ -2860,7 +3010,7 @@ mod theme_builder_tests {
         let grown = suggestions(favourite, true);
         let all = all_suggestions(favourite, true, &own);
         assert_eq!(all[..grown.len()], grown[..]);
-        assert_eq!(all.len(), grown.len() + 1, "only the scheme holding the colour is offered");
+        assert_eq!(theirs(&all), 1, "only the scheme holding the colour is offered");
         let mine = all.last().unwrap();
         assert_eq!(mine.label, OWN_LABEL);
         assert_eq!((mine.harmony, mine.mood), (None, None));
@@ -2881,7 +3031,146 @@ mod theme_builder_tests {
 
         // And a scheme that says what the rule already said is not said twice.
         let doubled = all_suggestions(favourite, true, &[vec![favourite, grown[0].colors[1], grown[0].colors[2]]]);
-        assert_eq!(doubled.len(), grown.len(), "a person's copy of a grown palette was offered again");
-        assert!(all_suggestions(favourite, true, &[]).len() == grown.len());
+        assert_eq!(theirs(&doubled), 0, "a person's copy of a grown palette was offered again");
+        assert_eq!(theirs(&all_suggestions(favourite, true, &[])), 0);
+    }
+
+    /// How many of these palettes came off the person's own file.
+    fn theirs(offered: &[Suggestion]) -> usize {
+        offered.iter().filter(|offer| offer.label == OWN_LABEL).count()
+    }
+
+    /// How many of these palettes came out of the built-in table.
+    fn book(offered: &[Suggestion]) -> Vec<&Suggestion> {
+        offered.iter().filter(|offer| offer.label.starts_with(COMBINATION_LABEL)).collect()
+    }
+
+    /// A colour lifted straight out of a row of the table finds that row, and
+    /// finds it before any other: nothing stands nearer to a colour than the
+    /// row it was taken from. It comes back under the number the book gives
+    /// it, which is the only thing about it a person can look up.
+    ///
+    /// The rows are ones whose first colour stands in no earlier row, so that
+    /// "first" has one answer rather than two equally near ones.
+    #[test]
+    fn a_colour_out_of_a_row_finds_that_row_first() {
+        // Three-colour rows and four-colour rows, by their numbers.
+        for number in [121usize, 122, 123, 124, 125, 251, 257, 284, 299] {
+            let at = number - FIRST_COMBINATION;
+            let favourite = COMBINATIONS[at][0];
+            for dark in [true, false] {
+                let offered = all_suggestions(favourite, dark, &[]);
+                let found = book(&offered);
+                assert!(!found.is_empty(), "{number} did not find itself on dark={dark}");
+                assert_eq!(found[0].label, combination_label(at), "on dark={dark}");
+                assert_eq!(found[0].colors[0], favourite | 0xFF);
+                assert_eq!((found[0].harmony, found[0].mood), (None, None));
+                assert!(found.len() <= MOST_COMBINATIONS, "{} kept", found.len());
+            }
+        }
+    }
+
+    /// The sweep the rule's own palettes go through, over the built-in
+    /// combinations instead: a hue every ten degrees, both pages, and every
+    /// combination the colour finds builds a theme where each pair the library
+    /// holds a theme to meets its bar.
+    ///
+    /// The favourite is a middling colour rather than a full one. The book is
+    /// printed in inks and most of its colours are muted, so a sweep at the
+    /// full saturation the rule's sweep uses would find almost no combinations
+    /// and pass by checking nothing -- which is why the count is asserted at
+    /// the end as well.
+    #[test]
+    fn every_combination_theme_reads() {
+        let mut checked = 0;
+        for dark in [true, false] {
+            for step in 0..36 {
+                let favourite = hsl_to_rgb(step as f64 * 10.0, 0.55, 0.5);
+                for suggestion in book(&all_suggestions(favourite, dark, &[])) {
+                    let built = build(&suggestion.params(BuilderParams::house(dark)));
+                    assert_eq!(built.readability.measured, held_pairs().len());
+                    assert!(
+                        built.readability.holds(),
+                        "{} for {favourite:08X} on dark={dark}: {:#?}",
+                        suggestion.label,
+                        built.readability.failures
+                    );
+                    assert!(built.readability.margin >= 0.0);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 300, "the sweep only found {checked} combinations to check");
+    }
+
+    /// The six ways three colours can be written down.
+    const WRITTEN_WAYS: [[usize; 3]; 6] =
+        [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+
+    /// The one suggestion in `offered` that came off the list, whatever it is
+    /// called.
+    fn off_the_list<'a>(offered: &'a [Suggestion], label: &str) -> &'a Suggestion {
+        offered.iter().find(|offer| offer.label == label).expect("the scheme was not offered at all")
+    }
+
+    /// A list has no roles in it, only an order somebody happened to type, so
+    /// the same four colours written six ways must come out as one palette:
+    /// the palest is the page, and of the two left the one nearer the
+    /// favourite round the circle is the secondary and the farther the
+    /// tertiary.
+    #[test]
+    fn a_scheme_takes_its_roles_from_the_colours_and_not_the_written_order() {
+        let favourite = hsl_to_rgb(210.0, 0.7, 0.5);
+        let near = hsl_to_rgb(250.0, 0.7, 0.5);
+        let far = hsl_to_rgb(40.0, 0.75, 0.5);
+        let ground = hsl_to_rgb(100.0, 0.12, 0.5);
+        let rest = [near, far, ground];
+        for way in WRITTEN_WAYS {
+            let written: Vec<u32> = std::iter::once(favourite).chain(way.map(|at| rest[at])).collect();
+            // And the anchor itself written in every place, because a list
+            // does not put the colour somebody will pick first either.
+            for turn in 0..written.len() {
+                let mut scheme = written.clone();
+                scheme.rotate_left(turn);
+                let offered = all_suggestions(favourite, true, &[scheme.clone()]);
+                let mine = off_the_list(&offered, OWN_LABEL);
+                let hue = |packed: u32| rgb_to_hsl(packed).0;
+                assert!(apart(hue(mine.seeds.secondary), 250.0) < 1.0, "{scheme:08X?} took {:08X} as the secondary", mine.seeds.secondary);
+                assert!(apart(hue(mine.seeds.tertiary), 40.0) < 1.0, "{scheme:08X?} took {:08X} as the tertiary", mine.seeds.tertiary);
+                let lean = mine.seeds.neutral.expect("a four colour scheme names the page's lean");
+                assert!(apart(hue(lean), 100.0) < 1.0, "{scheme:08X?} leant the page {lean:08X}");
+            }
+        }
+    }
+
+    /// Three colours are the three accent families exactly, so none of them
+    /// is taken for the page -- the fill supplies that -- and the two that are
+    /// not the favourite go near-then-far like the four's do. A colour with no
+    /// colour in it cannot be near anything, so it sorts farthest and lands in
+    /// the contrast place.
+    #[test]
+    fn three_colours_keep_their_accents_and_a_grey_sorts_farthest() {
+        let favourite = hsl_to_rgb(210.0, 0.7, 0.5);
+        let near = hsl_to_rgb(250.0, 0.7, 0.5);
+        let far = hsl_to_rgb(40.0, 0.75, 0.5);
+        let fill = suggestions(favourite, true)[0].seeds.neutral;
+        for way in [[0, 1], [1, 0]] {
+            let rest = [near, far];
+            let scheme: Vec<u32> = std::iter::once(favourite).chain(way.map(|at| rest[at])).collect();
+            let offered = all_suggestions(favourite, true, &[scheme.clone()]);
+            let mine = off_the_list(&offered, OWN_LABEL);
+            assert!(apart(rgb_to_hsl(mine.seeds.secondary).0, 250.0) < 1.0, "{scheme:08X?}");
+            assert!(apart(rgb_to_hsl(mine.seeds.tertiary).0, 40.0) < 1.0, "{scheme:08X?}");
+            assert_eq!(mine.seeds.neutral, fill, "a three colour scheme took a page tint it does not have");
+        }
+        // The grey stands farther from the favourite than a hue on the far
+        // side of the circle does, whichever way round the two are written.
+        let grey = 0x808080FF;
+        for scheme in [vec![favourite, grey, near], vec![favourite, near, grey]] {
+            let offered = all_suggestions(favourite, true, &[scheme.clone()]);
+            let mine = off_the_list(&offered, OWN_LABEL);
+            assert!(apart(rgb_to_hsl(mine.seeds.secondary).0, 250.0) < 1.0, "{scheme:08X?} made the grey the secondary");
+            assert_eq!(rgb_to_hsl(mine.seeds.tertiary).1, 0.0, "{scheme:08X?} did not put the grey across the circle");
+        }
     }
 }
