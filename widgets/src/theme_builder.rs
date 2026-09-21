@@ -346,17 +346,6 @@ impl BuilderParams {
         !(self.lightness > 0.5)
     }
 
-    /// The same settings on the other appearance's house page -- the one move
-    /// that used to be a pair of buttons, kept for a caller that has one. The
-    /// lightness is the only thing that changes.
-    pub fn with_dark(self, dark: bool) -> Self {
-        if self.dark() == dark {
-            self
-        } else {
-            Self { lightness: house_lightness(dark), ..self }
-        }
-    }
-
     /// The base theme a build derives from.
     pub fn scheme(&self) -> Scheme {
         if self.dark() {
@@ -4199,8 +4188,6 @@ mod theme_builder_tests {
             let house = BuilderParams::house(dark);
             assert_eq!(house.dark(), dark);
             assert_eq!(page_of(&house), house_page(house.scheme()));
-            assert_eq!(house.with_dark(!dark).dark(), !dark);
-            assert_eq!(house.with_dark(!dark).lightness, BuilderParams::house(!dark).lightness);
         }
         assert_eq!(BuilderParams::house(true).lightness, 0.5);
         // The two ends of each half are where the constants say.

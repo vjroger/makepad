@@ -923,10 +923,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
         }
         mod.widgets.FabPaletteChipBase = #(FabPaletteChip::register_widget(vm))
         /** A whole palette in one pressable block: four colours stacked, the
-         * first on top, outlined while it is the one in force. */
+         * first on top, outlined while it is the one in force. Four times as
+         * tall as it is wide, so each colour is a square. */
         mod.widgets.FabPaletteChip = set_type_default() do mod.widgets.FabPaletteChipBase{
-            width: Fill
-            height: 36
+            width: 22
+            height: 88
         }
 
         mod.widgets.FabColorPickBase = #(FabColorPick::register_widget(vm))
@@ -2461,6 +2462,31 @@ impl FabSlider {
         }
     }
 
+    /// The two stops, for a row whose range is not a constant: a setting
+    /// whose limits are worked out from other settings, where a track drawn
+    /// over a fixed range would offer numbers the host can only clamp away.
+    /// What the row holds is brought inside the new stops at once, so the
+    /// thumb never stands off the end of its own track.
+    ///
+    /// Refused mid-drag, for [`FabSlider::set_value`]'s reason: the travel
+    /// under a moving hand is not moved out from under it.
+    pub fn set_range(&mut self, cx: &mut Cx, min: f64, max: f64) {
+        if self.dragging || !(max > min) {
+            return;
+        }
+        if (self.min - min).abs() > f64::EPSILON || (self.max - max).abs() > f64::EPSILON {
+            self.min = min;
+            self.max = max;
+            self.value = self.travel().contain(self.value);
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// The two stops as they stand.
+    pub fn range(&self) -> (f64, f64) {
+        (self.min, self.max)
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -2834,6 +2860,17 @@ impl FabSliderRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_value_and_readout(cx, v, readout);
         }
+    }
+
+    /// See [`FabSlider::set_range`].
+    pub fn set_range(&self, cx: &mut Cx, min: f64, max: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_range(cx, min, max);
+        }
+    }
+
+    pub fn range(&self) -> (f64, f64) {
+        self.borrow().map_or((0.0, 0.0), |i| i.range())
     }
 
     pub fn value(&self) -> f64 {
@@ -4277,7 +4314,10 @@ impl Widget for FabPaletteStrip {
 /// One quad and not four: a chip is one thing to a hand -- it is pressed, it
 /// is outlined, it is the palette -- and four boxes with a corner each would
 /// have to be rounded outside-only and kept in step. The bands are chosen in
-/// the shader off the fragment's own height.
+/// the shader off the fragment's own height, a quarter each, so a chip four
+/// times as tall as it is wide is four exact squares: a band wider than it is
+/// tall reads as a stripe of the one above it, where a square reads as a
+/// colour of its own.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawFabPaletteChip {

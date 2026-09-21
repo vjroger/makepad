@@ -109,7 +109,7 @@ use crate::{
 };
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
-use crate::theme_builder::{all_suggestions, Applied as Built, BuilderParams, Harmony, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
+use crate::theme_builder::{all_suggestions, Applied as Built, BuilderParams, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
@@ -8105,36 +8105,39 @@ const EQ_ROW_IDS: [LiveId; 8] = [
     live_id!(eq_row_7),
 ];
 
-/// One setting of the theme builder, as a row on the screen.
+//// One setting of the theme builder, as a row on the screen.
 ///
-/// The six are a fixed list and not a table read off `BuilderParams`,
+/// The seven are a fixed list and not a table read off `BuilderParams`,
 /// because each of them is a different question asked in a different unit: a
-/// share of colour reads as parts of a hundred and a corner radius reads as
-/// points, and a row that printed 0.62 for the first would be a row nobody
-/// could set. So the enum holds the three things a row needs -- which slot it
-/// is drawn in, what it is called, and how the number on the track and the
-/// number in the settings are the same number -- and the draw, the action and
-/// the reset all walk the same list.
+/// share of colour reads as parts of a hundred, a contrast as a ratio and a
+/// corner radius as points, and a row that printed 0.62 for the first would
+/// be a row nobody could set. So the enum holds the three things a row needs
+/// -- which slot it is drawn in, what it is called, and how the number on the
+/// track and the number in the settings are the same number -- and the draw,
+/// the action and the reset all walk the same list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuildRow {
     Saturation,
-    Brightness,
-    Spacing,
-    Roundness,
+    Lightness,
     FontSize,
     FontContrast,
+    TextContrast,
+    Spacing,
+    Roundness,
 }
 
 impl BuildRow {
-    /// Down the panel in this order: the two that decide the colour first,
-    /// then the three that decide the shape of the page, then the type.
-    const ALL: [BuildRow; 6] = [
+    /// Down the panel in this order, under the three headings the splash
+    /// puts over them: the background's two first, then the text's three,
+    /// then the shape's two.
+    const ALL: [BuildRow; 7] = [
         BuildRow::Saturation,
-        BuildRow::Brightness,
-        BuildRow::Spacing,
-        BuildRow::Roundness,
+        BuildRow::Lightness,
         BuildRow::FontSize,
         BuildRow::FontContrast,
+        BuildRow::TextContrast,
+        BuildRow::Spacing,
+        BuildRow::Roundness,
     ];
 
     /// The slot it is drawn in. Declared in the splash and never made: see
@@ -8142,38 +8145,57 @@ impl BuildRow {
     fn slot(self) -> LiveId {
         match self {
             BuildRow::Saturation => live_id!(tb_saturation),
-            BuildRow::Brightness => live_id!(tb_brightness),
-            BuildRow::Spacing => live_id!(tb_spacing),
-            BuildRow::Roundness => live_id!(tb_roundness),
+            BuildRow::Lightness => live_id!(tb_lightness),
             BuildRow::FontSize => live_id!(tb_font_size),
             BuildRow::FontContrast => live_id!(tb_font_contrast),
+            BuildRow::TextContrast => live_id!(tb_text_contrast),
+            BuildRow::Spacing => live_id!(tb_spacing),
+            BuildRow::Roundness => live_id!(tb_roundness),
         }
     }
 
     /// What it is called, written out. The column is 92 points wide and the
     /// longest of these fits it, so none of them is shortened.
+    ///
+    /// "Text variation" is the step between neighbouring type sizes, named
+    /// for what a person sees move; "Text contrast" is how far the body text
+    /// stands off the page. Two different things, and the words keep them
+    /// apart where "font contrast" beside "text contrast" would not.
     fn label(self) -> &'static str {
         match self {
             BuildRow::Saturation => "Saturation",
-            BuildRow::Brightness => "Brightness",
+            BuildRow::Lightness => "Lightness",
+            BuildRow::FontSize => "Text size",
+            BuildRow::FontContrast => "Text variation",
+            BuildRow::TextContrast => "Text contrast",
             BuildRow::Spacing => "Spacing",
             BuildRow::Roundness => "Roundness",
-            BuildRow::FontSize => "Font size",
-            BuildRow::FontContrast => "Font contrast",
         }
     }
 
     /// Where the track stands for these settings. The two shares are held as
-    /// 0..1 and read as parts of a hundred; the four dimensions are in the
-    /// unit the theme file writes them in and are shown as they are.
+    /// 0..1 and read as parts of a hundred; the contrast is the ratio itself,
+    /// and the four dimensions are in the unit the theme file writes them in.
     fn shown(self, params: &BuilderParams) -> f64 {
         match self {
             BuildRow::Saturation => params.saturation * 100.0,
-            BuildRow::Brightness => params.lightness * 100.0,
-            BuildRow::Spacing => params.spacing,
-            BuildRow::Roundness => params.roundness,
+            BuildRow::Lightness => params.lightness * 100.0,
             BuildRow::FontSize => params.font_size,
             BuildRow::FontContrast => params.font_contrast,
+            BuildRow::TextContrast => params.clamped().text_contrast,
+            BuildRow::Spacing => params.spacing,
+            BuildRow::Roundness => params.roundness,
+        }
+    }
+
+    /// The two stops of the track, where they are not the splash's: the text
+    /// contrast runs from what reads to what the page allows, and the page
+    /// moves with the background rows, so its stops are worked out on every
+    /// draw rather than declared once.
+    fn range(self, params: &BuilderParams) -> Option<(f64, f64)> {
+        match self {
+            BuildRow::TextContrast => Some(params.text_contrast_range()),
+            _ => None,
         }
     }
 
@@ -8183,63 +8205,70 @@ impl BuildRow {
     fn moved(self, params: BuilderParams, shown: f64) -> BuilderParams {
         match self {
             BuildRow::Saturation => BuilderParams { saturation: shown / 100.0, ..params },
-            BuildRow::Brightness => BuilderParams { lightness: shown / 100.0, ..params },
-            BuildRow::Spacing => BuilderParams { spacing: shown, ..params },
-            BuildRow::Roundness => BuilderParams { roundness: shown, ..params },
+            BuildRow::Lightness => BuilderParams { lightness: shown / 100.0, ..params },
             BuildRow::FontSize => BuilderParams { font_size: shown, ..params },
             BuildRow::FontContrast => BuilderParams { font_contrast: shown, ..params },
+            BuildRow::TextContrast => BuilderParams { text_contrast: shown, ..params },
+            BuildRow::Spacing => BuilderParams { spacing: shown, ..params },
+            BuildRow::Roundness => BuilderParams { roundness: shown, ..params },
         }
     }
 
-    /// The settings with this one row back at the house theme's value and
+    /// The settings with this one row back where the house theme has it and
     /// every other row left where it is. The gesture is a click on the name,
     /// which is the slider's own reset -- and it resets THIS setting rather
     /// than the whole theme, because the name that was clicked names one row.
+    ///
+    /// The house of the appearance in force, so that the lightness goes back
+    /// to its own half's page and never turns a dark theme light; the
+    /// saturation's house is its top, the palette's own background colour.
     fn house(self, params: BuilderParams) -> BuilderParams {
         let house = BuilderParams::house(params.dark());
         self.moved(params, self.shown(&house))
     }
 }
 
-/// What the eyedropper is armed with when it was the builder's colour
-/// control that asked for it.
+/// What the eyedropper is armed with when it was one of the builder's four
+/// colour controls that asked for it, in the order the row shows them.
 ///
 /// The eyedropper is one mechanism with one place to arm it and one place to
 /// spend it, and everywhere else in the panel what it is spent ON is a
-/// property of the selected widget. The builder's favourite is not a
-/// property of anything, so it is named here and recognised there. Not a
-/// property name anything could really have: a sample that fell through to
-/// the widget path would write a token nobody asked for.
-const TB_FAVOURITE_PROP: &str = "\u{1}favourite";
-
-/// The swatches under the builder's rows: the three brand families, base and
-/// container each, then the page and the ink that is read on it.
-///
-/// Eight fixed Views with a colour written into them, and not a palette strip
-/// or a row of themed widgets: the panel draws itself from `mod.fab` so that
-/// it does not restyle itself when the app's theme moves, and a swatch that
-/// took its colour from the theme would show the panel's own skin rather than
-/// the theme being built.
-const TB_SWATCH_IDS: [LiveId; 8] = [
-    live_id!(tb_sw_0),
-    live_id!(tb_sw_1),
-    live_id!(tb_sw_2),
-    live_id!(tb_sw_3),
-    live_id!(tb_sw_4),
-    live_id!(tb_sw_5),
-    live_id!(tb_sw_6),
-    live_id!(tb_sw_7),
+/// property of the selected widget. The builder's colours are not a property
+/// of anything, so they are named here and recognised there -- each by its
+/// own name, so that a pixel sampled for the background colour lands on the
+/// background colour. Not property names anything could really have: a
+/// sample that fell through to the widget path would write a token nobody
+/// asked for.
+const TB_COLOR_PROPS: [&str; 4] = [
+    "\u{1}palette primary",
+    "\u{1}palette secondary",
+    "\u{1}palette tertiary",
+    "\u{1}palette background",
 ];
 
-/// The palettes on offer above the builder's rows, one slot each.
+/// The four colour controls over the strip, in palette order.
+const TB_COLOR_IDS: [LiveId; 4] = [
+    live_id!(tb_color_0),
+    live_id!(tb_color_1),
+    live_id!(tb_color_2),
+    live_id!(tb_color_3),
+];
+
+/// What each of the four is called, over its control.
+const TB_COLOR_NAMES: [&str; 4] = ["primary", "secondary", "tertiary", "background"];
+
+/// What the line under the strip calls a palette whose colours were named by
+/// hand: not any chip's, whatever chip it started from.
+const TB_OWN_PALETTE: &str = "Your own palette";
+
+/// The palettes on offer under the builder's colours, one slot each.
 ///
-/// How many are shown at once, and therefore what a page of them is. Eight is
-/// what 280 points of sidebar holds at a width where four bands still read as
-/// four colours, and it is also the number the engine's ordering is worth
-/// having: any eight taken off the front carry all six harmonies and all four
-/// moods, so a first page is a choice between ideas rather than one idea in
-/// four brightnesses.
-const TB_CHIP_IDS: [LiveId; 8] = [
+/// How many are shown at once, and therefore what a page of them is. A chip
+/// is four squares stacked and 22 points wide, and ten of them with their
+/// gaps are what the default 280 points of sidebar holds. The engine puts
+/// the six plain harmonies first, so the first page opens with every one of
+/// them and the first of the moods after.
+const TB_CHIP_IDS: [LiveId; 10] = [
     live_id!(tb_chip_0),
     live_id!(tb_chip_1),
     live_id!(tb_chip_2),
@@ -8248,6 +8277,8 @@ const TB_CHIP_IDS: [LiveId; 8] = [
     live_id!(tb_chip_5),
     live_id!(tb_chip_6),
     live_id!(tb_chip_7),
+    live_id!(tb_chip_8),
+    live_id!(tb_chip_9),
 ];
 
 /// How long the mix waits between installs while a weight is being dragged.
@@ -8966,24 +8997,25 @@ pub struct Tweaker {
     /// open would route a press meant for something else.
     #[rust]
     tb_fold_uid: u64,
+    /// The four colour controls, in palette order.
     #[rust]
-    tb_favourite_uid: u64,
+    tb_color_uids: [u64; 4],
+    /// Which of the four colour controls opened its popover last, so that
+    /// the draw can shut any other one still up: four popovers over one
+    /// sidebar are three the hand is not in, and only one rect can be
+    /// parked for the rows.
     #[rust]
-    tb_harmony_uid: u64,
-    #[rust]
-    tb_dark_uid: u64,
-    #[rust]
-    tb_light_uid: u64,
+    tb_color_opened: Option<usize>,
     #[rust]
     tb_random_uid: u64,
     /// One per slider row, in `BuildRow::ALL`'s order.
     #[rust]
-    tb_row_uids: [u64; 6],
+    tb_row_uids: [u64; 7],
     /// One per chip slot, in the order they stand in. A slot with no palette
     /// on it is zero, the same as a folded section's: an empty slot is hidden
     /// and must route nothing.
     #[rust]
-    tb_chip_uids: [u64; 8],
+    tb_chip_uids: [u64; 10],
     #[rust]
     tb_more_uid: u64,
     /// The palettes on offer for the favourite that is set, in the engine's
@@ -9011,14 +9043,6 @@ pub struct Tweaker {
     /// round the colour wheel reports per frame.
     #[rust]
     tb_suggest_due: bool,
-    /// The list the harmony picker was last given. Kept and compared rather
-    /// than written every draw, because writing labels asks for a redraw and a
-    /// draw that asks for a draw never stops -- and the list is no longer a
-    /// constant: it grows a seventh entry while a palette off the strip is in
-    /// force. Emptied when the sidebar is rebuilt and takes the picker with
-    /// it, because a new picker has no list in it.
-    #[rust]
-    tb_harmony_listed: Vec<String>,
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -9206,9 +9230,10 @@ pub struct Tweaker {
     /// there (the input-side mirror of app < outlines < panel < popups).
     #[rust]
     open_popup: Option<Rect>,
-    /// The builder's colour popover, measured this frame and not yet
-    /// claimed. The builder is drawn up in the head, BEFORE the rows start
-    /// the frame's popups over, so a rect it wrote straight into
+    /// The popover of whichever of the builder's four colours is open,
+    /// measured this frame and not yet claimed. The builder is drawn up in
+    /// the head, BEFORE the rows start the frame's popups over, so a rect
+    /// it wrote straight into
     /// `open_popup` was gone again before any event could read it: a press
     /// on the wheel went on to fold the section header under it, and a
     /// spin scrolled the token list behind. It is parked here instead and
@@ -9478,10 +9503,6 @@ impl Tweaker {
             // but a rebuild asked for any other way would leave the panel
             // showing an empty tab.
             self.rows_uid = 0;
-            // The harmony picker goes with the sidebar, and a new one has no
-            // list in it. Said here rather than trusted to the draw, because
-            // a picker that believes it has been filled shows six blank rows.
-            self.tb_harmony_listed.clear();
             self.sidebar = None;
         }
         if self.theme_colors.is_empty() {
@@ -10644,48 +10665,45 @@ impl Tweaker {
                         height: fab.row_height_sm
                     }
                 }
-                // ONE SWATCH OF THE BUILT PALETTE. A bare View with a colour
-                // written into it every frame the builder is dirty, and not a
-                // themed widget of any kind: the panel is drawn from
-                // `mod.fab` so that it keeps its own skin whatever the app is
-                // wearing, and a swatch that read `theme.color_primary` would
-                // show the panel's palette rather than the one being grown.
-                //
-                // No label on it either. Eight names at seven point under
-                // eight sixteen-point blocks is a paragraph, and what a
-                // swatch is for is the colour: the row reads left to right in
-                // the order the families are named in the line above it.
-                //
-                // A RoundedView and not a View with `show_bg`, for the
-                // reason the cascade chip beside the property rows is one: a
-                // View paints nothing here, and a swatch that paints nothing
-                // is the panel's ground showing through eight times over.
-                let TbSwatchT = RoundedView {
-                    width: Fill
-                    height: 16
-                    draw_bg +: {
-                        color: #x000000
-                        radius: 2.
-                    }
-                }
                 // ONE PALETTE ON OFFER. The chip itself is the kit's own
                 // control -- four colours in one block that takes a press --
-                // and the View round it is the SLOT, which holds its share
-                // of the row whether or not there is a palette in it. A page
-                // with fewer than eight on it hides the chips and not the
-                // slots, or the last page of a list would be one chip
-                // stretched across the whole sidebar.
+                // and the View round it is the SLOT, which holds its place in
+                // the row whether or not there is a palette in it. A page
+                // with fewer on it than the row has slots hides the chips and
+                // not the slots, or the last page of a list would close up.
                 //
-                // Fill, so that eight of them divide the sidebar between
-                // them however wide it is. 36 down is four bands of nine,
-                // which is the least a band can be and still be a colour
-                // rather than a line.
+                // A fixed width and four times it down, so every colour on a
+                // chip is a square at any sidebar width: a band wider than it
+                // is tall reads as a stripe of the one above it, and the
+                // fourth colour -- the page's own -- was read as nothing at
+                // all. 22 is the narrowest a square can be and still be told
+                // from its neighbours at a glance, and ten of them sit in the
+                // default 280 with room left round them.
                 let TbChipT = View {
-                    width: Fill
+                    width: 22
                     height: Fit
                     tb_chip := FabPaletteChip {
+                        width: 22
+                        height: 88
+                    }
+                }
+                // ONE OF THE FOUR COLOURS IN FORCE, under the word that says
+                // which. The View is the column: the word over the control,
+                // both the column's width, so the four divide the row evenly
+                // and every word stands over its own square.
+                let TbColorT = View {
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    spacing: 1
+                    tb_color_name := PanelLabelSmall {
                         width: Fill
-                        height: 36
+                        text: ""
+                        max_lines: 1
+                    }
+                    tb_color := FabColorPick {
+                        width: Fill
+                        height: 18
                     }
                 }
                 View {
@@ -10952,54 +10970,28 @@ impl Tweaker {
                             flow: Down
                             spacing: 3
                             padding: Inset{left: 0 right: 0 top: 2 bottom: 0}
-                            // The colour the whole theme comes out of, and
-                            // what the other two brand hues do about it.
+                            // THE FOUR COLOURS IN FORCE, and the control of
+                            // each: the primary, the two companions and the
+                            // background colour. A chip fills all four; any
+                            // one of them edited makes the palette the
+                            // person's own, and the first is also what the
+                            // strip below is grown from.
                             //
                             // The panel's own colour control, the one the
-                            // Props tab edits colours with, so that a
-                            // favourite is chosen the way every other colour
-                            // in this panel is -- wheel, hex or eyedropper
-                            // off the app itself.
-                            //
-                            // The harmony is a list and not a row of
-                            // switches: six rungs is past where a strip of
-                            // buttons stops being readable at this width,
-                            // and the names are words rather than glyphs.
+                            // Props tab edits colours with, so that each is
+                            // chosen the way every other colour in this
+                            // panel is -- wheel, hex or eyedropper off the
+                            // app itself. Four of equal width, because the
+                            // four are equals: a palette is all of them.
                             tb_seed_row := View {
                                 width: Fill
                                 height: Fit
                                 flow: Right
                                 spacing: 3
-                                align: Align{x: 0.0 y: 0.5}
-                                // Named nowhere and addressed by nothing: they
-                                // say one word each and never change it, and
-                                // an id is a route the panel would then owe a
-                                // reason for.
-                                //
-                                // The harmony gets a word in front of it for
-                                // the same reason the colour does: a bare list
-                                // box at the end of a row reads as a field
-                                // somebody typed into, and the word is what
-                                // says it is a choice. Both are as narrow as
-                                // the words allow, because what is left over
-                                // goes to the list -- which has to hold
-                                // "Complementary" at the sidebar's own width.
-                                PanelLabelSmall {
-                                    width: 32
-                                    text: "Color"
-                                }
-                                tb_favourite := FabColorPick {
-                                    width: 34
-                                    height: 18
-                                }
-                                PanelLabelSmall {
-                                    width: 48
-                                    text: "Harmony"
-                                }
-                                tb_harmony := PanelDropDown {
-                                    width: Fill
-                                    height: 20
-                                }
+                                tb_color_0 := TbColorT {}
+                                tb_color_1 := TbColorT {}
+                                tb_color_2 := TbColorT {}
+                                tb_color_3 := TbColorT {}
                             }
                             // WHAT THE FAVOURITE COULD BECOME. Every harmony
                             // in every mood is a couple of dozen palettes,
@@ -11009,16 +11001,18 @@ impl Tweaker {
                             // a row to choose from rather than one theme and
                             // six sliders to hunt the rest with.
                             //
-                            // Eight slots and a "more" that walks the pages
-                            // round: eight is what the sidebar holds at a
-                            // width a chip can still be read at, and the
-                            // engine orders the list so that any eight of it
-                            // hold all six harmonies and all four moods.
+                            // The first six the engine offers are the six
+                            // harmonies as they are, so the first page is
+                            // what a harmony picker used to be -- which is
+                            // why there is no picker. Ten slots and a "more"
+                            // that walks the pages round: ten is what the
+                            // default sidebar holds of a chip that is four
+                            // squares.
                             tb_chips := View {
                                 width: Fill
                                 height: Fit
                                 flow: Right
-                                spacing: 2
+                                spacing: 3
                                 tb_chip_0 := TbChipT {}
                                 tb_chip_1 := TbChipT {}
                                 tb_chip_2 := TbChipT {}
@@ -11027,11 +11021,15 @@ impl Tweaker {
                                 tb_chip_5 := TbChipT {}
                                 tb_chip_6 := TbChipT {}
                                 tb_chip_7 := TbChipT {}
+                                tb_chip_8 := TbChipT {}
+                                tb_chip_9 := TbChipT {}
                             }
-                            // What the strip is, or what was taken off it.
-                            // The button is beside the line and not over it
-                            // because a page is turned far more often than
-                            // it is read about.
+                            // What the strip is, or which palette of it is
+                            // in force -- the only place the palette is
+                            // named, so it has to be the palette the app is
+                            // wearing. The button is beside the line and not
+                            // over it because a page is turned far more
+                            // often than it is read about.
                             //
                             // Where the page stands is on the BUTTON's side
                             // of the row and not in the line, because it is
@@ -11042,6 +11040,10 @@ impl Tweaker {
                             // wrapper is what carries `visible` for the two
                             // together -- a Label is not a View and answers
                             // `set_visible` with nothing at all.
+                            //
+                            // The surprise is at the row's far end: it is
+                            // one more way of choosing a palette, and the
+                            // strip is where palettes are chosen.
                             tb_sugg_row := View {
                                 width: Fill
                                 height: Fit
@@ -11074,55 +11076,41 @@ impl Tweaker {
                                     text: ""
                                     max_lines: 2
                                 }
-                            }
-                            // Which page the theme is grown for. A pair of
-                            // switches and not one, for the mix's reason: a
-                            // theme is dark or light and "not dark" is not
-                            // a thing anybody presses.
-                            tb_appearance_row := View {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 3
-                                align: Align{x: 0.0 y: 0.5}
-                                tb_dark := PanelButton {
-                                    width: Fit
-                                    height: 20
-                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
-                                    text: "dark"
-                                    draw_text +: { text_style +: { font_size: 7.5 } }
-                                }
-                                tb_light := PanelButton {
-                                    width: Fit
-                                    height: 20
-                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
-                                    text: "light"
-                                    draw_text +: { text_style +: { font_size: 7.5 } }
-                                }
                                 tb_random := PanelButton {
                                     width: Fit
-                                    height: 20
-                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
-                                    margin: Inset{left: 10}
+                                    height: 18
+                                    padding: Inset{left: 7 right: 7 top: 1 bottom: 1}
                                     text: "surprise"
                                     draw_text +: { text_style +: { font_size: 7.5 } }
                                 }
                             }
-                            // The six settings, each in the unit it is read
-                            // in. A slider and not a number field for every
-                            // one of them: none of these is a value anybody
-                            // knows the right number for, and all six are
-                            // found by moving them and looking at the app.
+                            // The settings, in three groups under a word
+                            // each, every one in the unit it is read in. A
+                            // slider and not a number field for every one of
+                            // them: none of these is a value anybody knows
+                            // the right number for, and all of them are found
+                            // by moving them and looking at the app.
                             //
                             // The ranges are the theme tokens' own, so a
                             // track cannot ask for a theme the engine would
-                            // clamp; a click on the name puts that one
-                            // setting back to the house theme's value.
+                            // clamp -- the text contrast's is the page's, and
+                            // is written every draw -- and a click on the
+                            // name puts that one setting back where the
+                            // house theme has it.
+                            //
+                            // There is no dark and light switch. The
+                            // lightness is the whole of that: its lower half
+                            // is a dark theme and its upper half a light one.
                             tb_rows := View {
                                 width: Fill
                                 height: Fit
                                 flow: Down
                                 spacing: 1
+                                PanelLabelSmall {
+                                    width: Fill
+                                    margin: Inset{top: 3}
+                                    text: "Background"
+                                }
                                 tb_saturation := FabSlider {
                                     height: fab.row_height_sm
                                     label: "Saturation"
@@ -11130,12 +11118,52 @@ impl Tweaker {
                                     max: 100.0
                                     step: 1.0
                                 }
-                                tb_brightness := FabSlider {
+                                tb_lightness := FabSlider {
                                     height: fab.row_height_sm
-                                    label: "Brightness"
+                                    label: "Lightness"
                                     min: 0.0
                                     max: 100.0
                                     step: 1.0
+                                }
+                                PanelLabelSmall {
+                                    width: Fill
+                                    margin: Inset{top: 3}
+                                    text: "Text"
+                                }
+                                tb_font_size := FabSlider {
+                                    height: fab.row_height_sm
+                                    label: "Text size"
+                                    min: 6.0
+                                    max: 30.0
+                                    step: 0.5
+                                    big_step: 2.0
+                                    precision: 1
+                                    unit: ""
+                                }
+                                tb_font_contrast := FabSlider {
+                                    height: fab.row_height_sm
+                                    label: "Text variation"
+                                    min: 0.0
+                                    max: 8.0
+                                    step: 0.5
+                                    big_step: 1.0
+                                    precision: 1
+                                    unit: ""
+                                }
+                                tb_text_contrast := FabSlider {
+                                    height: fab.row_height_sm
+                                    label: "Text contrast"
+                                    min: 4.5
+                                    max: 21.0
+                                    step: 0.1
+                                    big_step: 1.0
+                                    precision: 1
+                                    unit: ""
+                                }
+                                PanelLabelSmall {
+                                    width: Fill
+                                    margin: Inset{top: 3}
+                                    text: "Shape"
                                 }
                                 tb_spacing := FabSlider {
                                     height: fab.row_height_sm
@@ -11157,50 +11185,6 @@ impl Tweaker {
                                     precision: 1
                                     unit: ""
                                 }
-                                tb_font_size := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Font size"
-                                    min: 6.0
-                                    max: 30.0
-                                    step: 0.5
-                                    big_step: 2.0
-                                    precision: 1
-                                    unit: ""
-                                }
-                                tb_font_contrast := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Font contrast"
-                                    min: 0.0
-                                    max: 8.0
-                                    step: 0.5
-                                    big_step: 1.0
-                                    precision: 1
-                                    unit: ""
-                                }
-                            }
-                            // The palette at a glance, ahead of the install
-                            // that puts it on the app: the three brand
-                            // families base and container each, then the
-                            // page and the ink that is read on it. A drag
-                            // moves these on every frame, where the app
-                            // itself moves once the settle lets it.
-                            PanelLabelSmall {
-                                width: Fill
-                                text: "primary \u{00b7} secondary \u{00b7} tertiary \u{00b7} page"
-                            }
-                            tb_swatches := View {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 2
-                                tb_sw_0 := TbSwatchT {}
-                                tb_sw_1 := TbSwatchT {}
-                                tb_sw_2 := TbSwatchT {}
-                                tb_sw_3 := TbSwatchT {}
-                                tb_sw_4 := TbSwatchT {}
-                                tb_sw_5 := TbSwatchT {}
-                                tb_sw_6 := TbSwatchT {}
-                                tb_sw_7 := TbSwatchT {}
                             }
                             // How the built theme reads, in the mix's own
                             // words and for the mix's own reason: a palette
@@ -12543,12 +12527,12 @@ impl Tweaker {
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_relative)], "the weights share a hundred parts \u{00b7} turning one up takes from the rest"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_random)], "a mix nobody planned \u{00b7} the same press from the same place is the same mix"),
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(tb_fold)], "grow a whole theme from one colour you like \u{00b7} palette, spacing and type together"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_favourite)], "the colour everything is grown from \u{00b7} its hue is what is read, and the pick button samples the app"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_harmony)], "where the other two brand hues stand to the favourite"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_0), live_id!(tb_color)], "the primary \u{00b7} the palettes below are grown from it, and editing any of the four makes the palette your own"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_1), live_id!(tb_color)], "the secondary \u{00b7} editing any of the four makes the palette your own"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_2), live_id!(tb_color)], "the tertiary \u{00b7} editing any of the four makes the palette your own"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_3), live_id!(tb_color)], "the background colour \u{00b7} the page wears its hue, as much of it as Saturation says"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_sugg_row), live_id!(tb_more_wrap), live_id!(tb_more)], "the next handful of palettes for this colour \u{00b7} round to the first again at the end"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_appearance_row), live_id!(tb_dark)], "grow the theme for a dark page"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_appearance_row), live_id!(tb_light)], "grow the theme for a light page"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_appearance_row), live_id!(tb_random)], "a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_sugg_row), live_id!(tb_random)], "a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
             (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
@@ -16542,52 +16526,41 @@ impl Tweaker {
                     self.toggle_theme_builder(cx);
                 }
             }
-            // The favourite colour. `Changed` is every frame of a drag round
-            // the wheel and `Ended` is the release, so the two go the two
-            // ways a slider's do: the first collects on the settle, the
-            // second is a commit and does not wait.
-            if self.tb_favourite_uid != 0 && widget_action.widget_uid.0 == self.tb_favourite_uid {
-                let harmony = self.tb_builder.params().harmony;
+            // The four colours. `Changed` is every frame of a drag round the
+            // wheel and `Ended` is the release, so the two go the two ways a
+            // slider's do: the first collects on the settle, the second is a
+            // commit and does not wait.
+            if let Some(which) = self
+                .tb_color_uids
+                .iter()
+                .position(|uid| *uid != 0 && *uid == widget_action.widget_uid.0)
+            {
                 match widget_action.cast::<FabColorPickAction>() {
                     FabColorPickAction::Changed(v) => {
-                        self.tb_favourite_moving(packed_of([v.x, v.y, v.z, v.w]));
+                        self.tb_color_moving(which, packed_of([v.x, v.y, v.z, v.w]));
                         self.redraw_panel(cx);
                     }
                     FabColorPickAction::Ended(v) => {
-                        self.tb_set_seed(packed_of([v.x, v.y, v.z, v.w]), harmony);
+                        self.tb_color_ended(which, packed_of([v.x, v.y, v.z, v.w]));
+                        self.redraw_panel(cx);
+                    }
+                    FabColorPickAction::Opened => {
+                        self.tb_color_opened = Some(which);
                         self.redraw_panel(cx);
                     }
                     // The popover's own eyedropper: the host owns it,
                     // because it is the host that knows the window. Armed
-                    // with the token the built theme's favourite is, so the
-                    // pixel that is clicked comes back through the same
-                    // route a theme edit's does.
+                    // with the name of THIS colour, so the pixel that is
+                    // clicked comes back to the square that asked for it.
                     FabColorPickAction::Eyedropper => {
-                        log!("TWEAK eyedropper armed for the favourite colour \u{2014} click a pixel in the app");
-                        session().lock().unwrap().eyedrop = Some(TB_FAVOURITE_PROP.to_string());
+                        log!(
+                            "TWEAK eyedropper armed for the {} colour \u{2014} click a pixel in the app",
+                            TB_COLOR_NAMES[which]
+                        );
+                        session().lock().unwrap().eyedrop = Some(TB_COLOR_PROPS[which].to_string());
                         cx.set_cursor(MouseCursor::Crosshair);
                     }
                     _ => {}
-                }
-            }
-            if self.tb_harmony_uid != 0 && widget_action.widget_uid.0 == self.tb_harmony_uid {
-                if let DropDownAction::Select(index) = widget_action.cast::<DropDownAction>() {
-                    if let Some(harmony) = Harmony::ALL.get(index).copied() {
-                        let favourite = self.tb_builder.params().favourite;
-                        self.tb_set_seed(favourite, harmony);
-                        self.redraw_sidebar(cx);
-                    }
-                }
-            }
-            // The page the theme is grown for. A pair and not a branch each,
-            // because a rung that answers differently from its neighbour is
-            // how a radio row stops being one.
-            for (uid, dark) in [(self.tb_dark_uid, true), (self.tb_light_uid, false)] {
-                if uid != 0 && widget_action.widget_uid.0 == uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.tb_set_appearance(dark);
-                        self.redraw_sidebar(cx);
-                    }
                 }
             }
             if self.tb_random_uid != 0 && widget_action.widget_uid.0 == self.tb_random_uid {
@@ -18457,8 +18430,9 @@ impl Tweaker {
     /// measured.
     ///
     /// The rows name their open popover as they are walked, so the slate is
-    /// wiped just before the walk. The builder's colour control is not a row:
-    /// it is drawn in the head, ahead of the wipe, and parks its rect in
+    /// wiped just before the walk. The builder's colour controls are not rows:
+    /// they are drawn in the head, ahead of the wipe, and the open one parks
+    /// its rect in
     /// `tb_popup`. Taken here rather than read, so a popover that closed, a
     /// section that folded and a tab that was left all come to nothing on the
     /// next frame without anybody having to say so.
@@ -18475,11 +18449,11 @@ impl Tweaker {
     /// moves a drag collects, and the uids a press is routed by are taken
     /// here because a folded section has to be able to shut them.
     ///
-    /// The swatches are the one thing this draw does that the mix's does
-    /// not. They are written on every frame, because the theme on the
-    /// controls is rebuilt by every `set` and the palette moves under a drag
-    /// while the app is still wearing the install before it -- which is the
-    /// whole of what they are for.
+    /// The four colours are written on every frame, except the one whose
+    /// popover is up: a chip, a surprise and a flip to the other appearance
+    /// all move the palette without touching them, and a control showing a
+    /// colour the theme is no longer built from is the lie the swatch row
+    /// used to tell.
     fn draw_theme_builder(&mut self, cx: &mut Cx, head: &WidgetRef) {
         let fold = head.child(live_id!(theme_pick_row)).child(live_id!(tb_fold));
         self.tb_fold_uid = fold.widget_uid().0;
@@ -18488,14 +18462,7 @@ impl Tweaker {
         body.set_visible(cx, self.tb_open);
         if !self.tb_open {
             // Folded, and every route into it shut with it.
-            self.tb_favourite_uid = 0;
-            self.tb_harmony_uid = 0;
-            self.tb_dark_uid = 0;
-            self.tb_light_uid = 0;
-            self.tb_random_uid = 0;
-            self.tb_row_uids = [0; 6];
-            self.tb_chip_uids = [0; 8];
-            self.tb_more_uid = 0;
+            self.tb_shut_routes();
             return;
         }
         if self.tb_apply_due {
@@ -18508,114 +18475,68 @@ impl Tweaker {
             }
         }
         let params = self.tb_builder.params();
+        let palette = params.palette();
         let seed_row = body.child(live_id!(tb_seed_row));
-        let favourite = seed_row.child(live_id!(tb_favourite));
-        self.tb_favourite_uid = favourite.widget_uid().0;
-        if let Some(mut pick) = favourite.borrow_mut::<FabColorPick>() {
-            // Written back except while the popover is up, exactly as the
-            // Props tab does it: a control being used must not be moved
-            // under the hand that is using it. While it IS up, its rectangle
-            // is what gives the popover input priority over the app.
-            if pick.is_open() {
-                let rect = pick.popover_rect();
-                if rect.size.x > 0.0 {
-                    // Parked, not written: see `tb_popup`.
-                    self.tb_popup = Some(rect);
+        let opened = self.tb_color_opened;
+        for (which, id) in TB_COLOR_IDS.iter().enumerate() {
+            let column = seed_row.child(*id);
+            column.child(live_id!(tb_color_name)).set_text(cx, TB_COLOR_NAMES[which]);
+            let control = column.child(live_id!(tb_color));
+            self.tb_color_uids[which] = control.widget_uid().0;
+            if let Some(mut pick) = control.borrow_mut::<FabColorPick>() {
+                // One popover at a time. The press that opened another one
+                // landed outside this one and ought to have shut it, but a
+                // press routed to the new control first is all it takes to
+                // leave two up -- and only one rect can be parked.
+                if pick.is_open() && opened.is_some_and(|last| last != which) {
+                    pick.close_popover(cx, false);
                 }
-            } else {
-                pick.set_rgba(cx, rgba_of(params.favourite));
-            }
+                // Written back except while the popover is up, exactly as the
+                // Props tab does it: a control being used must not be moved
+                // under the hand that is using it. While it IS up, its
+                // rectangle is what gives the popover input priority over the
+                // app.
+                if pick.is_open() {
+                    let rect = pick.popover_rect();
+                    if rect.size.x > 0.0 {
+                        // Parked, not written: see `tb_popup`.
+                        self.tb_popup = Some(rect);
+                    }
+                } else {
+                    pick.set_rgba(cx, rgba_of(palette[which]));
+                }
+            };
         }
-        self.tb_harmony_uid = seed_row.child(live_id!(tb_harmony)).widget_uid().0;
-        self.draw_the_harmony_picker(cx, &seed_row);
         self.draw_the_suggestion_strip(cx, &body);
-        let row = body.child(live_id!(tb_appearance_row));
-        let dark = row.child(live_id!(tb_dark));
-        let light = row.child(live_id!(tb_light));
-        self.tb_dark_uid = dark.widget_uid().0;
-        self.tb_light_uid = light.widget_uid().0;
-        set_button_fill(cx, dark, params.dark());
-        set_button_fill(cx, light, !params.dark());
-        // Sharing the row and taking no fill from it: the surprise leaves
-        // you in neither rung, so there is nothing for it to light.
-        self.tb_random_uid = row.child(live_id!(tb_random)).widget_uid().0;
+        self.tb_random_uid = body
+            .child(live_id!(tb_sugg_row))
+            .child(live_id!(tb_random))
+            .widget_uid()
+            .0;
         let rows = body.child(live_id!(tb_rows));
         for (index, which) in BuildRow::ALL.iter().enumerate() {
             let slider = rows.child(which.slot());
             self.tb_row_uids[index] = slider.widget_uid().0;
+            // The stops before the value: a value set first is clamped to the
+            // stops the row had, which for the text contrast are last page's.
+            if let Some((min, max)) = which.range(&params) {
+                slider.as_fab_slider().set_range(cx, min, max);
+            }
             slider.as_fab_slider().set_value(cx, which.shown(&params));
-        }
-        // The palette the controls come to, which is a frame ahead of the
-        // app whenever a drag is between two installs.
-        let swatches: [u32; 8] = match self.tb_builder.built() {
-            Some(built) => [
-                built.roles.primary.base,
-                built.roles.primary.container,
-                built.roles.secondary.base,
-                built.roles.secondary.container,
-                built.roles.tertiary.base,
-                built.roles.tertiary.container,
-                built.color("color_bg_app").unwrap_or(0),
-                // The ink and not the foreground surface: the pair a person
-                // reads the page by is the ground and what is written on it,
-                // and `color_fg_app` is another grey beside the first.
-                built.color("color_on_surface").unwrap_or(0),
-            ],
-            // A closed builder has built nothing, and this draw only runs
-            // with the section open -- but a swatch drawn from a colour
-            // nobody chose is worse than one drawn from nothing.
-            None => [0; 8],
-        };
-        let strip = body.child(live_id!(tb_swatches));
-        for (id, packed) in TB_SWATCH_IDS.iter().zip(swatches) {
-            let mut swatch = strip.child(*id);
-            let rgba = rgba_of(packed);
-            let color: Vec4f = vec4(rgba[0], rgba[1], rgba[2], rgba[3]);
-            script_apply_eval!(cx, swatch, { draw_bg +: { color: #(color) } });
         }
         let reading = self.tb_reading.clone();
         body.child(live_id!(tb_read)).set_text(cx, &reading);
     }
 
-    /// The harmony picker: what is in the list, and which of it is showing.
-    ///
-    /// Six harmonies, and a seventh place that exists only while a palette off
-    /// the strip is in force that is in no harmony the library names -- one of
-    /// the built-in combinations, or one of the person's own. Those are chosen
-    /// by pressing a chip and not by picking a harmony, so the picker has
-    /// nothing true to show for them, and a picker left showing the harmony
-    /// that happened to be set before is a control saying the theme is
-    /// something it is not. The seventh entry says what the chip says.
-    ///
-    /// It is an entry and not a caption over the top because a dropdown shows
-    /// its selected entry and nothing else. Choosing it does nothing: the
-    /// press handler asks `Harmony::ALL` for the index it was given, and the
-    /// seventh place is past the end -- which is also what leaves every real
-    /// entry doing exactly what it did, chip and all.
-    fn draw_the_harmony_picker(&mut self, cx: &mut Cx, seed_row: &WidgetRef) {
-        let borrowed = self
-            .tb_chosen_index()
-            .map(|index| &self.tb_suggestions[index])
-            .filter(|offer| offer.harmony.is_none())
-            .map(|offer| offer.label.clone());
-        let mut labels: Vec<String> = Harmony::ALL.iter().map(|h| h.label().to_string()).collect();
-        labels.extend(borrowed.clone());
-        let picker = seed_row.child(live_id!(tb_harmony));
-        if self.tb_harmony_listed != labels {
-            self.tb_harmony_listed = labels.clone();
-            picker.as_drop_down().set_labels(cx, labels);
-        }
-        // After the labels and never before: the picker clamps what it is
-        // told to the list it has, so a seventh place asked for over a list of
-        // six would land on the sixth harmony.
-        let shown = match borrowed {
-            Some(_) => Harmony::ALL.len(),
-            None => {
-                let harmony = self.tb_builder.params().harmony;
-                Harmony::ALL.iter().position(|which| *which == harmony).unwrap_or(0)
-            }
-        };
-        picker.as_drop_down().set_selected_item(cx, shown);
+    /// Every route into the section shut, for the two doors that leave it
+    /// without drawing it: the fold, and the section being left.
+    fn tb_shut_routes(&mut self) {
+        self.tb_color_uids = [0; 4];
+        self.tb_color_opened = None;
+        self.tb_random_uid = 0;
+        self.tb_row_uids = [0; BuildRow::ALL.len()];
+        self.tb_chip_uids = [0; TB_CHIP_IDS.len()];
+        self.tb_more_uid = 0;
     }
 
     /// The row of palettes on offer, and the line that says what it is.
@@ -18632,10 +18553,9 @@ impl Tweaker {
         let chips = body.child(live_id!(tb_chips));
         let outlined = self.tb_chosen_index();
         for (slot, id) in TB_CHIP_IDS.iter().enumerate() {
-            // The CHIP is hidden and never the slot round it. Eight slots
-            // divide the row between them, so hiding one hands its width to
-            // its neighbours -- and a page with one palette left on it would
-            // be one chip a whole row wide.
+            // The CHIP is hidden and never the slot round it: the slot is
+            // what keeps the chips that are left standing where a full page
+            // puts them, rather than closing up round a gap.
             let chip = chips.child(*id).child(live_id!(tb_chip));
             let Some(index) = self.tb_offer_at(slot) else {
                 chip.set_visible(cx, false);
@@ -18689,10 +18609,10 @@ impl Tweaker {
     ///
     /// The builder is asked as well as the list, and that one question is
     /// what takes the outline off. Every control that moves the palette out
-    /// from under the strip clears the named seeds on its way -- the harmony
-    /// picker, a new favourite, the surprise, the settings going back to
-    /// where the section opened -- so none of them has to remember to say so
-    /// a second time here.
+    /// from under the strip changes the named seeds on its way -- a colour
+    /// edited by hand, the surprise, the settings going back to where the
+    /// section opened -- so none of them has to remember to say so a second
+    /// time here.
     fn tb_chosen_index(&self) -> Option<usize> {
         let chosen = self.tb_chosen.as_ref()?;
         if self.tb_builder.params().seeds != Some(chosen.seeds) {
@@ -18701,56 +18621,71 @@ impl Tweaker {
         self.tb_suggestions.iter().position(|offer| offer == chosen)
     }
 
-    /// What the line under the strip says: the palette that was taken off
-    /// it, or else what the strip is.
+    /// What the line under the strip says: the palette in force, by the name
+    /// it was offered under, or else what the strip is.
     ///
-    /// One thing and not two. Where in the pages the strip is standing used
-    /// to be tacked on here, and at the panel's own 280 a colour with
-    /// combinations in it ran the line onto a second one; it sits beside the
-    /// "more" button now, which is what it is about anyway.
+    /// It is the only place the palette is named -- there is no harmony
+    /// picker beside it any more -- so it answers what the app is WEARING
+    /// and not what was last pressed: a chip in force is its own name, four
+    /// colours named by hand are the person's own palette whatever chip they
+    /// started from, and only a palette nobody has moved gets the count.
+    ///
+    /// Where in the pages the strip is standing is not in the line: at the
+    /// panel's own 280 a colour with combinations in it ran the line onto a
+    /// second one, so it sits beside the "more" button, which is what it is
+    /// about anyway.
     fn tb_strip_reading(&self) -> String {
-        match self.tb_chosen_index() {
-            Some(index) => self.tb_suggestions[index].label.clone(),
-            None => {
-                let total = self.tb_suggestions.len();
-                // Where the strip is longer than the rule alone would make
-                // it, what the extra is: the combinations this colour turned
-                // up in, and the person's own schemes that hold it. Each only
-                // where there are some -- a count of nought is a line about a
-                // book this colour is not in, or a file they have never made.
-                let combinations = self
-                    .tb_suggestions
-                    .iter()
-                    .filter(|offer| offer.label.starts_with(COMBINATION_LABEL))
-                    .count();
-                let own = self
-                    .tb_suggestions
-                    .iter()
-                    .filter(|offer| offer.label == OWN_LABEL)
-                    .count();
-                // "for this color" only where the count is the whole line.
-                // The words are true either way, but the colour they point at
-                // is in the row directly above and the strip under that is
-                // grown from it, so they are the line's least-paying words --
-                // and at the panel's own 280 a colour that turns up
-                // combinations needs every point of the row to say the counts
-                // on one line, which is the line's whole job.
-                let mut idle = format!(
-                    "{total} {}",
-                    if total == 1 { "palette" } else { "palettes" }
-                );
-                if combinations == 0 && own == 0 {
-                    idle.push_str(" for this color");
-                }
-                if combinations > 0 {
-                    idle.push_str(&format!(" \u{00b7} {combinations} combinations"));
-                }
-                if own > 0 {
-                    idle.push_str(&format!(" \u{00b7} {own} of your own"));
-                }
-                idle
-            }
+        if let Some(index) = self.tb_chosen_index() {
+            return self.tb_suggestions[index].label.clone();
         }
+        let params = self.tb_builder.params();
+        if params.seeds.is_some() {
+            return TB_OWN_PALETTE.to_string();
+        }
+        if params.favourite != BuilderParams::house(params.dark()).favourite
+            || params.harmony != BuilderParams::house(params.dark()).harmony
+        {
+            // A palette the rule grew and no chip names, which only lasts
+            // until the settle adopts the chip that does: see
+            // `tb_suggest_again`. Its harmony is the whole of what it is.
+            return params.harmony.label().to_string();
+        }
+        let total = self.tb_suggestions.len();
+        // Where the strip is longer than the rule alone would make it, what
+        // the extra is: the combinations this colour turned up in, and the
+        // person's own schemes that hold it. Each only where there are some
+        // -- a count of nought is a line about a book this colour is not in,
+        // or a file they have never made.
+        let combinations = self
+            .tb_suggestions
+            .iter()
+            .filter(|offer| offer.label.starts_with(COMBINATION_LABEL))
+            .count();
+        let own = self
+            .tb_suggestions
+            .iter()
+            .filter(|offer| offer.label == OWN_LABEL)
+            .count();
+        // "for this color" only where the count is the whole line. The words
+        // are true either way, but the colour they point at is in the row
+        // directly above and the strip under that is grown from it, so they
+        // are the line's least-paying words -- and at the panel's own 280 a
+        // colour that turns up combinations needs every point of the row to
+        // say the counts on one line, which is the line's whole job.
+        let mut idle = format!(
+            "{total} {}",
+            if total == 1 { "palette" } else { "palettes" }
+        );
+        if combinations == 0 && own == 0 {
+            idle.push_str(" for this color");
+        }
+        if combinations > 0 {
+            idle.push_str(&format!(" \u{00b7} {combinations} combinations"));
+        }
+        if own > 0 {
+            idle.push_str(&format!(" \u{00b7} {own} of your own"));
+        }
+        idle
     }
 
     /// Grow the offers again, for the favourite and the page that are set.
@@ -18758,13 +18693,19 @@ impl Tweaker {
     /// The page of the strip is brought back into range rather than kept: a
     /// colour that offers fewer palettes than the one before it can leave the
     /// strip showing a page that no longer exists, and an empty strip says
-    /// there is nothing to choose when there are eight things to choose.
+    /// there is nothing to choose when there are ten things to choose.
     ///
     /// The chosen palette is carried over where the new list has the same
     /// palette in it -- see [`Tweaker::tb_equivalent_offer`] -- and let go
     /// whole where it does not: the outline off AND the named companions off
     /// the controls, because a chip and a theme that disagree are worse than
     /// either of them alone.
+    ///
+    /// And a palette the rule grew that no chip is marked for -- what the
+    /// surprise leaves, and what letting a chip go leaves -- is given the
+    /// chip that IS it: the plain one of its harmony. It is the same four
+    /// colours, so the theme does not move, and the line under the strip
+    /// then names it rather than counting palettes as if none were in force.
     fn tb_suggest_again(&mut self) {
         let params = self.tb_builder.params();
         self.tb_suggestions = all_suggestions(params.favourite, params.dark(), &self.tb_own_schemes);
@@ -18776,9 +18717,9 @@ impl Tweaker {
         }
         // Whether the app is STILL WEARING what was chosen, which is the one
         // question that separates a strip grown for the other page from a
-        // control that moved the palette out from under it. The harmony
-        // picker, a new favourite and the surprise all let the companions go
-        // on their way through; the dark and light buttons do not, and this
+        // control that moved the palette out from under it. A colour edited
+        // by hand and the surprise both put other seeds on their way through;
+        // the lightness crossing into the other appearance does not, and this
         // is the only door a palette comes back through.
         let worn = self
             .tb_chosen
@@ -18787,18 +18728,34 @@ impl Tweaker {
         match worn.then(|| self.tb_equivalent_offer()).flatten() {
             Some(offer) => {
                 // On the controls as well as under the outline. The other
-                // page's palette is not the same colours -- the ground is in
-                // it, and a grown one's companions are clamped to the page's
-                // band -- so leaving the old seeds standing would mark a chip
-                // the theme is not built from.
+                // page's palette is not the same colours -- a grown one's
+                // companions are clamped to the page's band -- so leaving
+                // the old seeds standing would mark a chip the theme is not
+                // built from.
                 self.tb_builder.set(offer.params(params));
                 self.tb_chosen = Some(offer);
+                return;
             }
             None => {
                 self.tb_chosen = None;
                 if worn {
                     self.tb_builder.set(BuilderParams { seeds: None, ..params });
                 }
+            }
+        }
+        let params = self.tb_builder.params();
+        let untouched = params.favourite == BuilderParams::house(params.dark()).favourite
+            && params.harmony == BuilderParams::house(params.dark()).harmony;
+        if params.seeds.is_none() && !untouched {
+            let plain = self
+                .tb_suggestions
+                .iter()
+                .find(|offer| offer.harmony == Some(params.harmony) && offer.mood.is_none())
+                .or_else(|| self.tb_suggestions.iter().find(|offer| offer.colors == params.palette()))
+                .cloned();
+            if let Some(offer) = plain {
+                self.tb_builder.set(offer.params(params));
+                self.tb_chosen = Some(offer);
             }
         }
     }
@@ -18920,14 +18877,7 @@ impl Tweaker {
         self.tb_apply_at_once = false;
         self.tb_theme_stands = false;
         self.tb_reading.clear();
-        self.tb_favourite_uid = 0;
-        self.tb_harmony_uid = 0;
-        self.tb_dark_uid = 0;
-        self.tb_light_uid = 0;
-        self.tb_random_uid = 0;
-        self.tb_row_uids = [0; 6];
-        self.tb_chip_uids = [0; 8];
-        self.tb_more_uid = 0;
+        self.tb_shut_routes();
         // The offers go with the section: they are grown from a favourite
         // that is about to stop being one, and the person's own file is
         // looked at again on the way back in.
@@ -18967,60 +18917,94 @@ impl Tweaker {
     /// One setting moved under the pointer. The install waits on the settle:
     /// see `eq_weight_moved` for the whole of that bargain.
     fn tb_row_moved(&mut self, which: BuildRow, shown: f64) {
-        self.tb_builder.set(which.moved(self.tb_builder.params(), shown));
+        self.tb_row_set(which.moved(self.tb_builder.params(), shown));
         self.tb_apply_due = true;
     }
 
     /// The thumb was let go, on this value: a commit, so it does not wait.
     fn tb_gesture_ended(&mut self, which: BuildRow, shown: f64) {
-        self.tb_builder.set(which.moved(self.tb_builder.params(), shown));
+        self.tb_row_set(which.moved(self.tb_builder.params(), shown));
         self.tb_built_changed();
     }
 
     /// That one setting back to the house theme's, the rest left alone. The
     /// gesture is a click on the row's name.
     fn tb_row_cleared(&mut self, which: BuildRow) {
-        self.tb_builder.set(which.house(self.tb_builder.params()));
+        self.tb_row_set(which.house(self.tb_builder.params()));
         self.tb_built_changed();
     }
 
-    /// Grow the theme for the other page instead.
+    /// A row's settings onto the builder, and the strip owed a regrowth
+    /// where the row carried the theme into the other appearance.
     ///
-    /// The offers go with it: a palette that reads on a dark page is not the
-    /// same palette on a light one, and the swatch has the ground in it.
-    fn tb_set_appearance(&mut self, dark: bool) {
-        self.tb_builder.set(self.tb_builder.params().with_dark(dark));
-        self.tb_suggest_due = true;
-        self.tb_built_changed();
+    /// Only the lightness can, and only by crossing its middle; every other
+    /// row, and the lightness inside its own half, leaves the offers exactly
+    /// as they are -- a chip does not depend on the background rows, so a
+    /// strip grown again on every move would be the same strip, reshuffled
+    /// under nobody's hand for nothing. Across the middle the offers are the
+    /// other appearance's, and `tb_suggest_again` carries the chosen palette
+    /// over to its equivalent there, which is what the dark and light
+    /// buttons used to ask for.
+    fn tb_row_set(&mut self, params: BuilderParams) {
+        let was_dark = self.tb_builder.params().dark();
+        self.tb_builder.set(params);
+        if self.tb_builder.params().dark() != was_dark {
+            self.tb_suggest_due = true;
+        }
     }
 
-    /// The colour everything is grown from, or what the other two hues do
-    /// about it.
+    /// The settings with one of the four colours in force named anew, or
+    /// `None` where it was already that colour.
     ///
-    /// Through `with_harmony` and never by writing the field: a harmony
-    /// written over a palette's own named companions moves the picker and
-    /// leaves the theme exactly where it was, which is a control that looks
-    /// like it answered and did not.
-    fn tb_set_seed(&mut self, favourite: u32, harmony: Harmony) {
-        let params = self.tb_builder.params().with_harmony(harmony);
-        self.tb_builder.set(BuilderParams { favourite, ..params });
-        self.tb_suggest_due = true;
-        self.tb_built_changed();
-    }
-
-    /// The favourite under a hand that is still moving it: the theme
-    /// collects on the settle, and so do the offers.
-    fn tb_favourite_moving(&mut self, favourite: u32) {
+    /// The four as they stand go in with it, the other three unchanged, so
+    /// that editing one square names the whole palette outright: that is
+    /// what makes it the person's own, what takes the outline off the chip
+    /// it started from, and what keeps the other three exactly as they were
+    /// on the screen. The "already that colour" answer matters because a
+    /// popover closed without a change still reports its colour, and a look
+    /// at a square must not turn a chip into somebody's own palette.
+    fn tb_with_color(&self, which: usize, color: u32) -> Option<BuilderParams> {
         let params = self.tb_builder.params();
-        // The companions a palette named are not this colour's: whatever the
-        // strip handed over stops being what is on the controls the moment
-        // the favourite leaves it.
-        self.tb_builder
-            .set(BuilderParams { favourite, seeds: None, ..params });
-        self.tb_suggest_due = true;
+        let mut palette = params.palette();
+        if palette[which] | 0xFF == color | 0xFF {
+            return None;
+        }
+        palette[which] = color;
+        Some(params.with_palette(palette))
+    }
+
+    /// One of the four colours under a hand that is still moving it: the
+    /// theme collects on the settle. The first is also what the strip is
+    /// grown from, so its offers are owed a regrowth -- spent on the settle
+    /// as well, never per move round the wheel.
+    fn tb_color_moving(&mut self, which: usize, color: u32) {
+        let Some(params) = self.tb_with_color(which, color) else {
+            return;
+        };
+        self.tb_builder.set(params);
+        if which == 0 {
+            self.tb_suggest_due = true;
+        }
         self.tb_apply_due = true;
     }
 
+    /// One of the four colours let go on, or typed, or sampled off the app:
+    /// a commit, so it does not wait.
+    fn tb_color_ended(&mut self, which: usize, color: u32) {
+        let Some(params) = self.tb_with_color(which, color) else {
+            // The drag already carried the colour here, and the release
+            // is still a commit: what the moves left owed goes in now.
+            if self.tb_apply_due {
+                self.tb_built_changed();
+            }
+            return;
+        };
+        self.tb_builder.set(params);
+        if which == 0 {
+            self.tb_suggest_due = true;
+        }
+        self.tb_built_changed();
+    }
     /// A theme nobody planned, off a seed that walks rather than a clock, so
     /// that the same press from the same place is the same theme.
     ///
@@ -19793,18 +19777,18 @@ impl Widget for Tweaker {
                         true,
                     );
                     log!("TWEAK eyedropper {prop} <- {hex}");
-                    if prop == TB_FAVOURITE_PROP {
-                        // A colour taken off the app itself, grown into a
-                        // whole theme. Nothing about the selection: the
-                        // builder's favourite is not a property of a widget.
-                        let harmony = self.tb_builder.params().harmony;
-                        let favourite = packed_of([
+                    if let Some(which) = TB_COLOR_PROPS.iter().position(|named| *named == prop) {
+                        // A colour taken off the app itself, onto the one of
+                        // the builder's four that asked for it. Nothing about
+                        // the selection: the builder's colours are not a
+                        // property of any widget.
+                        let color = packed_of([
                             rgba[0] as f32 / 255.0,
                             rgba[1] as f32 / 255.0,
                             rgba[2] as f32 / 255.0,
                             rgba[3] as f32 / 255.0,
                         ]);
-                        self.tb_set_seed(favourite, harmony);
+                        self.tb_color_ended(which, color);
                     } else {
                         let sel = session().lock().unwrap().pinned.clone();
                         if let Some(sel) = sel {
@@ -20951,6 +20935,7 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme_builder::Harmony;
 
     #[test]
     fn the_theme_picker_offers_every_base_theme_and_every_sheet_the_library_ships() {
@@ -21313,8 +21298,12 @@ mod tests {
             ("tb_fold", "PanelButton"),
             ("tb_body", "View"),
             ("tb_seed_row", "View"),
-            ("tb_favourite", "FabColorPick"),
-            ("tb_harmony", "PanelDropDown"),
+            ("tb_color_0", "TbColorT"),
+            ("tb_color_1", "TbColorT"),
+            ("tb_color_2", "TbColorT"),
+            ("tb_color_3", "TbColorT"),
+            ("tb_color", "FabColorPick"),
+            ("tb_color_name", "PanelLabelSmall"),
             ("tb_chips", "View"),
             ("tb_chip_0", "TbChipT"),
             ("tb_chip_1", "TbChipT"),
@@ -21324,32 +21313,23 @@ mod tests {
             ("tb_chip_5", "TbChipT"),
             ("tb_chip_6", "TbChipT"),
             ("tb_chip_7", "TbChipT"),
+            ("tb_chip_8", "TbChipT"),
+            ("tb_chip_9", "TbChipT"),
             ("tb_chip", "FabPaletteChip"),
             ("tb_sugg_row", "View"),
             ("tb_more_wrap", "View"),
             ("tb_more", "PanelButton"),
             ("tb_page_read", "PanelLabelSmall"),
             ("tb_sugg_read", "PanelLabelSmall"),
-            ("tb_appearance_row", "View"),
-            ("tb_dark", "PanelButton"),
-            ("tb_light", "PanelButton"),
             ("tb_random", "PanelButton"),
             ("tb_rows", "View"),
             ("tb_saturation", "FabSlider"),
-            ("tb_brightness", "FabSlider"),
-            ("tb_spacing", "FabSlider"),
-            ("tb_roundness", "FabSlider"),
+            ("tb_lightness", "FabSlider"),
             ("tb_font_size", "FabSlider"),
             ("tb_font_contrast", "FabSlider"),
-            ("tb_swatches", "View"),
-            ("tb_sw_0", "TbSwatchT"),
-            ("tb_sw_1", "TbSwatchT"),
-            ("tb_sw_2", "TbSwatchT"),
-            ("tb_sw_3", "TbSwatchT"),
-            ("tb_sw_4", "TbSwatchT"),
-            ("tb_sw_5", "TbSwatchT"),
-            ("tb_sw_6", "TbSwatchT"),
-            ("tb_sw_7", "TbSwatchT"),
+            ("tb_text_contrast", "FabSlider"),
+            ("tb_spacing", "FabSlider"),
+            ("tb_roundness", "FabSlider"),
             ("tb_read", "PanelLabelSmall"),
         ] {
             let decl = format!("{id} := {ty}");
@@ -21362,17 +21342,16 @@ mod tests {
             // control nothing drives.
             assert!(src.contains(&format!("live_id!({id})")), "`{id}` is declared but never addressed");
         }
-        // The builder's swatch, for the same reason: a rename here is eight
-        // slots that resolve to nothing and a palette that draws as air.
+        // The builder's colour column, for the same reason: a rename here is
+        // four slots that resolve to nothing and a palette nobody can edit.
         assert_eq!(
-            src.matches("let TbSwatchT = RoundedView {").count(),
+            src.matches("let TbColorT = View {").count(),
             1,
-            "the builder's `TbSwatchT` is not declared once as a RoundedView"
+            "the builder's `TbColorT` is not declared once as a View"
         );
         // And its chip's slot, which is a View round the control so that a
-        // slot with no palette on it still holds its share of the row: eight
-        // of them divide the sidebar, and a slot that went would hand its
-        // width to its neighbours.
+        // slot with no palette on it still holds its place in the row, and
+        // the chips left on a short page stand where a full page puts them.
         assert_eq!(
             src.matches("let TbChipT = View {").count(),
             1,
@@ -22839,11 +22818,16 @@ line two");
         let pass = DrawPass::new(cx);
         pass.set_size(cx, SIZE);
         let mut draw_list = DrawList2d::new(cx);
+        // A window's overlay, which is what a colour control's popover draws
+        // into: a head drawn with one of the builder's popovers up has to
+        // have somewhere to put it.
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
         let event = DrawEvent::default();
         let mut draw = CxDraw::new(cx, &event);
         let mut cx2d = Cx2d::new(&mut draw);
         cx2d.begin_pass(&pass, None);
         draw_list.begin_always(&mut cx2d);
+        overlay.begin(&mut cx2d);
         cx2d.begin_root_turtle(SIZE, Layout::flow_down());
         panel.draw_equalizer(&mut cx2d, head);
         // Both sections, in the order the tab draws them: the builder's fold
@@ -22852,6 +22836,7 @@ line two");
         panel.draw_theme_builder(&mut cx2d, head);
         head.draw_all(&mut cx2d, &mut Scope::empty());
         cx2d.end_pass_sized_turtle();
+        overlay.end(&mut cx2d);
         draw_list.end(&mut cx2d);
         cx2d.end_pass(&pass);
     }
@@ -22893,6 +22878,41 @@ line two");
         });
         cx.fingers.first_mouse_button = None;
         assert!(!actions.is_empty(), "the press produced no action whatever");
+        panel.handle_sidebar_actions(cx, &actions);
+    }
+
+    /// A press with BOTH halves routed through the panel: a colour control
+    /// opens its popover on the way down, so the actions that matter are
+    /// the ones `one_press_on` hands to the frame instead. The release is
+    /// sent all the same -- a press left down keeps the pointer, and the
+    /// next press would go to the control still holding it.
+    fn a_press_down_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef) {
+        use std::cell::Cell;
+        const WINDOW: WindowId = WindowId(1, 1);
+        let face = target.area().rect(cx);
+        assert!(face.size.x > 0.0, "the control was never drawn, so the press lands nowhere");
+        let at = face.pos + face.size * 0.5;
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        let actions = cx.capture_actions(|cx| root.handle_event(cx, &down, &mut Scope::empty()));
+        assert!(!actions.is_empty(), "the press produced no action whatever");
+        panel.handle_sidebar_actions(cx, &actions);
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+        });
+        let actions = cx.capture_actions(|cx| root.handle_event(cx, &up, &mut Scope::empty()));
+        cx.fingers.first_mouse_button = None;
         panel.handle_sidebar_actions(cx, &actions);
     }
 
@@ -23969,12 +23989,32 @@ line two");
     /// harmony and the saturation at the far end, installed through the same
     /// settle the draw goes through, and its reload landed.
     fn a_built_theme_in_force(cx: &mut Cx, panel: &mut Tweaker, now: f64) {
-        panel.tb_set_seed(0xE0_5A_18_FF, Harmony::Triadic);
+        a_palette_grown_from(panel, 0xE0_5A_18_FF, Harmony::Triadic);
         panel.tb_gesture_ended(BuildRow::Saturation, 100.0);
         let was = panel.tb_builder.rebuilds();
         panel.tb_settle(cx, now);
         assert_eq!(panel.tb_builder.rebuilds(), was + 1, "the built theme never went in");
         the_build_reload_lands(cx, panel, now);
+    }
+
+    /// The plain palette of a harmony, grown from a favourite, on the
+    /// controls and owed its install -- what pressing that harmony's chip on
+    /// a strip grown from that colour comes to, without a strip to press.
+    fn a_palette_grown_from(panel: &mut Tweaker, favourite: u32, harmony: Harmony) {
+        let params = panel.tb_builder.params();
+        panel.tb_builder.set(BuilderParams { favourite, ..params }.with_harmony(harmony));
+        panel.tb_suggest_due = true;
+        panel.tb_built_changed();
+    }
+
+    /// The lightness carried over its middle to the other appearance's house
+    /// page, by the row a hand would use: what the dark and light buttons
+    /// were before the lightness became the only control of it.
+    fn across_the_middle(panel: &mut Tweaker) {
+        let dark = panel.tb_builder.params().dark();
+        let there = BuilderParams::house(!dark).lightness * 100.0;
+        panel.tb_gesture_ended(BuildRow::Lightness, there);
+        assert_eq!(panel.tb_builder.params().dark(), !dark, "the lightness did not cross its middle");
     }
 
     /// Every colour and number the theme in force carries, by name. What a
@@ -24094,11 +24134,11 @@ line two");
 
         // One setting out and back again. Out is a theme; back is the entry
         // theme, sheet and all, and not a house theme installed over it.
-        panel.tb_gesture_ended(BuildRow::Brightness, 20.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 20.0);
         panel.tb_settle(&mut cx, 2.0);
         the_build_reload_lands(&mut cx, &mut panel, 2.0);
         assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the setting never reached the app");
-        panel.tb_row_cleared(BuildRow::Brightness);
+        panel.tb_row_cleared(BuildRow::Lightness);
         assert_eq!(
             panel.tb_builder.params().lightness,
             BuilderParams::house(true).lightness,
@@ -24325,14 +24365,18 @@ line two");
         assert_eq!(theme_value(&mut cx, "space_factor"), Some(6.0), "the saved theme outlived the pick");
     }
 
-    /// The builder's colour popover keeps its claim on the pointer across
-    /// the wipe that starts the rows' popups over.
+    /// The builder's colour popovers keep their claim on the pointer across
+    /// the wipe that starts the rows' popups over -- each of the four.
     ///
     /// It did not, once. The builder is drawn in the head, ahead of the
     /// wipe, and wrote its rect straight into `open_popup`; the wipe then
     /// took it away before any event could read it. A press on the wheel
     /// folded the section header under the popover, two presses reset a
-    /// token nobody had touched, and a spin scrolled the list behind.
+    /// token nobody had touched, and a spin scrolled the list behind. There
+    /// was one colour control then and there are four now, so the claim is
+    /// taken through a real draw with each of them open in turn: a park that
+    /// only knew the first would leave three popovers the pointer falls
+    /// through.
     #[test]
     fn the_builders_popover_outlives_the_wipe_that_starts_the_rows_over() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -24349,8 +24393,70 @@ line two");
         // simply parks nothing. The claim has to lapse on its own.
         panel.popups_start_over();
         assert_eq!(panel.open_popup, None, "a popover that closed still holds the pointer");
+
+        // And every one of the four parks its own, through the draw.
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        for (which, id) in TB_COLOR_IDS.iter().enumerate() {
+            let control = row.child(*id).child(live_id!(tb_color));
+            control.borrow_mut::<FabColorPick>().expect("a colour control").open_popover(&mut cx);
+            panel.tb_color_opened = Some(which);
+            // Twice: the popover measures itself as it is drawn, and the
+            // head reads that measure on the frame after.
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+            let open = control.borrow::<FabColorPick>().expect("a colour control").popover_rect();
+            assert!(open.size.x > 0.0, "the {} colour's popover never drew", TB_COLOR_NAMES[which]);
+            assert_eq!(panel.tb_popup, Some(open), "the {} colour's popover was not parked", TB_COLOR_NAMES[which]);
+            panel.popups_start_over();
+            assert_eq!(panel.open_popup, Some(open), "the wipe took the {} colour's popover", TB_COLOR_NAMES[which]);
+            control.borrow_mut::<FabColorPick>().expect("a colour control").close_popover(&mut cx, false);
+        }
     }
 
+    /// One popover at a time, whichever of the four opened last. A press
+    /// opens one and the panel is told which; where two are up -- the press
+    /// on a second square reached it before the first had shut -- the draw
+    /// shuts the older, because only one rect can be parked for the rows and
+    /// the other would be a popover the pointer goes straight through.
+    #[test]
+    fn only_one_of_the_builders_colour_popovers_is_up_at_a_time() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        let control = |which: usize| row.child(TB_COLOR_IDS[which]).child(live_id!(tb_color));
+        let is_open = |which: usize| control(which).borrow::<FabColorPick>().expect("a colour control").is_open();
+
+        a_press_down_on(&mut cx, &mut panel, &head, &control(0));
+        assert!(is_open(0), "a press on the primary did not open its popover");
+        assert_eq!(panel.tb_color_opened, Some(0), "the panel was never told which popover opened");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+
+        // Two up at once: the draw shuts the one that is not the last.
+        control(2).borrow_mut::<FabColorPick>().expect("a colour control").open_popover(&mut cx);
+        panel.tb_color_opened = Some(2);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(is_open(2), "the draw shut the popover that opened last");
+        assert!(!is_open(0), "the primary's popover is still up under the tertiary's");
+        control(3).borrow_mut::<FabColorPick>().expect("a colour control").open_popover(&mut cx);
+        panel.tb_color_opened = Some(3);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(is_open(3));
+        assert!(!is_open(2), "two of the builder's popovers are up at once");
+        // And a look is not an edit. A popover shut without a change still
+        // reports its colour on the way out, and that report must not make
+        // the palette on the controls somebody's own.
+        let shown = control(1).borrow::<FabColorPick>().expect("a colour control").rgba();
+        let uid = panel.tb_color_uids[1];
+        let actions = cx.capture_actions(|cx| {
+            cx.widget_action(WidgetUid(uid), FabColorPickAction::Ended(vec4(shown[0], shown[1], shown[2], shown[3])));
+        });
+        panel.handle_sidebar_actions(&mut cx, &actions);
+        assert_eq!(panel.tb_builder.params().seeds, None, "opening and shutting a popover named a palette");
+        assert!(!panel.tb_apply_due, "a look at a colour asked for an install");
+    }
     /// A press on the fold opens a section that really draws.
     ///
     /// The whole of this panel is fixed slots shown and hidden, and a DSL
@@ -24379,21 +24485,16 @@ line two");
         let body = head.child(live_id!(tb_body));
         let seed_row = body.child(live_id!(tb_seed_row));
         let rows = body.child(live_id!(tb_rows));
-        let strip = body.child(live_id!(tb_swatches));
-        let appearance = body.child(live_id!(tb_appearance_row));
         let mut drawn: Vec<(&str, WidgetRef)> = vec![
-            ("tb_favourite", seed_row.child(live_id!(tb_favourite))),
-            ("tb_harmony", seed_row.child(live_id!(tb_harmony))),
-            ("tb_dark", appearance.child(live_id!(tb_dark))),
-            ("tb_light", appearance.child(live_id!(tb_light))),
-            ("tb_random", appearance.child(live_id!(tb_random))),
+            ("tb_random", body.child(live_id!(tb_sugg_row)).child(live_id!(tb_random))),
             ("tb_read", body.child(live_id!(tb_read))),
         ];
         for which in BuildRow::ALL {
             drawn.push((which.label(), rows.child(which.slot())));
         }
-        for id in TB_SWATCH_IDS {
-            drawn.push(("a swatch", strip.child(id)));
+        for (which, id) in TB_COLOR_IDS.iter().enumerate() {
+            drawn.push((TB_COLOR_NAMES[which], seed_row.child(*id).child(live_id!(tb_color))));
+            drawn.push(("a colour's name", seed_row.child(*id).child(live_id!(tb_color_name))));
         }
         for (name, widget) in drawn {
             let rect = widget.area().rect(&mut cx);
@@ -24405,8 +24506,8 @@ line two");
         // ...and every route into it was captured, which is the other half
         // of the same draw: a control that draws and is routed by no uid is
         // a control attached to nothing.
-        assert!(panel.tb_favourite_uid != 0 && panel.tb_harmony_uid != 0);
-        assert!(panel.tb_dark_uid != 0 && panel.tb_light_uid != 0 && panel.tb_random_uid != 0);
+        assert!(panel.tb_color_uids.iter().all(|uid| *uid != 0), "a colour control has no route");
+        assert!(panel.tb_random_uid != 0);
         assert!(panel.tb_row_uids.iter().all(|uid| *uid != 0), "a slider row has no route");
 
         // Folding shuts every one of them, or a uid left standing routes a
@@ -24414,9 +24515,9 @@ line two");
         one_press_on(&mut cx, &mut panel, &head, &fold);
         assert!(!panel.tb_open, "the second press did not fold the section");
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_favourite_uid, 0);
-        assert_eq!(panel.tb_harmony_uid, 0);
-        assert_eq!(panel.tb_row_uids, [0; 6]);
+        assert_eq!(panel.tb_color_uids, [0; 4]);
+        assert_eq!(panel.tb_random_uid, 0);
+        assert_eq!(panel.tb_row_uids, [0; BuildRow::ALL.len()]);
     }
 
     /// A real slider row, pressed on its own track, reaching the builder.
@@ -24449,6 +24550,111 @@ line two");
         // lands left of the thumb.
         assert!(after < before, "the thumb landed left of where it was and the setting went up");
         assert!(panel.tb_apply_due, "a moved setting owes the app an install and asked for none");
+    }
+
+    /// The rows say what they do, in the order the headings over them name,
+    /// and a click on each name puts that one setting back where the house
+    /// theme of the appearance in force has it.
+    ///
+    /// The saturation's house is its TOP -- the palette's own background
+    /// colour -- and it only ever takes colour out; the lightness goes back
+    /// to its own half's page and never turns a dark theme light; and the
+    /// text contrast's track is the page's own range, written on every draw,
+    /// because a track over a fixed range would offer ratios the page cannot
+    /// give and a thumb that stands on a number the engine then clamps away.
+    #[test]
+    fn the_builders_rows_say_what_they_do_and_reset_to_their_own_house() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let rows = head.child(live_id!(tb_body)).child(live_id!(tb_rows));
+        let names: Vec<String> = BuildRow::ALL
+            .iter()
+            .map(|which| rows.child(which.slot()).as_fab_slider().borrow().expect("a slider row").label().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["Saturation", "Lightness", "Text size", "Text variation", "Text contrast", "Spacing", "Roundness"],
+            "the rows do not say what they do"
+        );
+        // The headings are over the rows they name: the splash's own order.
+        let src = include_str!("tweaker.rs");
+        let block = &src[src.find("tb_rows := View {").expect("the rows are declared")..];
+        let at = |needle: &str| block.find(needle).unwrap_or_else(|| panic!("`{needle}` is not in the rows"));
+        assert!(at("text: \"Background\"") < at("tb_saturation :=") && at("tb_lightness :=") < at("text: \"Text\""));
+        assert!(at("text: \"Text\"") < at("tb_font_size :=") && at("tb_text_contrast :=") < at("text: \"Shape\""));
+        assert!(at("text: \"Shape\"") < at("tb_spacing :="));
+
+        let house = BuilderParams::house(panel.tb_builder.params().dark());
+        assert_eq!(house.saturation, 1.0, "the saturation's default is not its top");
+        let contrast = rows.child(BuildRow::TextContrast.slot()).as_fab_slider();
+        assert_eq!(contrast.range(), house.text_contrast_range(), "the text contrast's track is not the page's range");
+        assert!((contrast.value() - house.text_contrast).abs() < 1e-9, "the text contrast row is not on the house ratio");
+
+        // The page moved to the dark end: the range is the new page's.
+        panel.tb_gesture_ended(BuildRow::Lightness, 0.0);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let params = panel.tb_builder.params();
+        assert_eq!(contrast.range(), params.text_contrast_range(), "the track kept the last page's range");
+        assert_ne!(params.text_contrast_range(), house.text_contrast_range(), "the page moved and its range did not");
+
+        // Each row out and back by its name.
+        panel.tb_gesture_ended(BuildRow::Saturation, 10.0);
+        panel.tb_gesture_ended(BuildRow::TextContrast, 9.0);
+        for which in BuildRow::ALL {
+            panel.tb_row_cleared(which);
+        }
+        let back = panel.tb_builder.params();
+        assert_eq!(back.saturation, 1.0, "the saturation's name did not put it back at the top");
+        assert_eq!(back.lightness, house.lightness, "the lightness went back somewhere other than its own page");
+        assert!(back.dark() == house.dark(), "putting the lightness back turned the appearance over");
+        assert!((back.text_contrast - house.text_contrast).abs() < 1e-9, "the text contrast did not go back");
+
+        // And in the light half the lightness goes back to the LIGHT page.
+        across_the_middle(&mut panel);
+        panel.tb_gesture_ended(BuildRow::Lightness, 99.0);
+        panel.tb_row_cleared(BuildRow::Lightness);
+        let light = panel.tb_builder.params();
+        assert_eq!(light.dark(), !house.dark(), "the lightness's name turned the appearance back over");
+        assert_eq!(light.lightness, BuilderParams::house(!house.dark()).lightness);
+    }
+
+    /// A chip is four squares, and stays four squares: its width is its own
+    /// and not a share of the sidebar, and it is four times as tall. And the
+    /// fourth square is the palette's background colour itself, the colour
+    /// the seeds name, not the greyed page -- a chip whose fourth colour was
+    /// a dark grey was read as a palette of three.
+    #[test]
+    fn a_chip_is_four_squares_and_its_fourth_is_the_background_colour() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        // A colour with a hue, so that its background colours are colours.
+        panel.tb_color_ended(0, 0xD0_40_80_FF);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        for slot in 0..TB_CHIP_IDS.len() {
+            let rect = a_chip_of(&head, slot).area().rect(&mut cx);
+            assert!(rect.size.x > 0.0, "chip {slot} drew nothing");
+            assert!(
+                (rect.size.y - 4.0 * rect.size.x).abs() < 0.5,
+                "chip {slot} is {} by {}, which is not four squares",
+                rect.size.x,
+                rect.size.y
+            );
+            let offer = &panel.tb_suggestions[panel.tb_offer_at(slot).expect("a full first page")];
+            assert_eq!(offer.colors[3], offer.seeds.background, "chip {slot}'s fourth square is not its background colour");
+        }
+        // Squares at the default sidebar: every chip of a full page inside
+        // the row, and none of them squeezed.
+        let row = head.child(live_id!(tb_body)).child(live_id!(tb_chips)).area().rect(&mut cx);
+        let last = a_chip_of(&head, TB_CHIP_IDS.len() - 1).area().rect(&mut cx);
+        assert!(last.pos.x + last.size.x <= row.pos.x + row.size.x + 0.5, "the last chip runs off the row");
+        let first = a_chip_of(&head, 0).area().rect(&mut cx);
+        assert!((first.size.x - last.size.x).abs() < 0.5, "the chips are not one width");
     }
 
     /// The panel, its sidebar and the theme head drawn once with the builder
@@ -24559,7 +24765,7 @@ line two");
         // routes a press meant for whatever stands there instead.
         panel.toggle_theme_builder(&mut cx);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_chip_uids, [0; 8]);
+        assert_eq!(panel.tb_chip_uids, [0; TB_CHIP_IDS.len()]);
         assert_eq!(panel.tb_more_uid, 0);
     }
 
@@ -24600,6 +24806,15 @@ line two");
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = the_builder_drawn(&mut cx, &mut panel);
         let offered = panel.tb_suggestions[2].clone();
+        // The background and text rows moved first, so that a chip that put
+        // any of them back would be caught: from the house settings a chip
+        // that reset them would change nothing anybody could see.
+        panel.tb_gesture_ended(BuildRow::Saturation, 30.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 20.0);
+        panel.tb_gesture_ended(BuildRow::TextContrast, 7.0);
+        panel.tb_settle(&mut cx, 0.0);
+        the_build_reload_lands(&mut cx, &mut panel, 0.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
         let before = panel.tb_builder.params();
 
         one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 2));
@@ -24612,16 +24827,30 @@ line two");
         // person put them, and so does the colour they picked.
         assert_eq!(panel.tb_builder.params().saturation, before.saturation, "the chip moved the saturation");
         assert_eq!(panel.tb_builder.params().lightness, before.lightness, "the chip moved the lightness");
+        assert_eq!(panel.tb_builder.params().text_contrast, before.text_contrast, "the chip moved the text contrast");
         assert_eq!(panel.tb_builder.params().favourite, before.favourite, "the chip moved the colour picked");
         assert_eq!(panel.tb_chosen_index(), Some(2), "the chip that was pressed is not the one marked");
         // A press and not a drag: it does not wait out the settle.
         assert!(panel.tb_apply_at_once, "the palette is waiting for a settle nobody is dragging");
         let was = panel.tb_builder.rebuilds();
-        panel.tb_settle(&mut cx, 0.0);
+        panel.tb_settle(&mut cx, 0.5);
         assert_eq!(panel.tb_builder.rebuilds(), was + 1, "the palette never went on the app");
         // And the frame after it installs nothing more.
         panel.tb_settle(&mut cx, 1.0);
         assert_eq!(panel.tb_builder.rebuilds(), was + 1, "the palette went in twice");
+        // Nor does the panel write the rows back from anywhere but the
+        // settings: drawn again, every row still reads what it read.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let rows = head.child(live_id!(tb_body)).child(live_id!(tb_rows));
+        for which in [BuildRow::Saturation, BuildRow::Lightness, BuildRow::TextContrast] {
+            let reads = rows.child(which.slot()).as_fab_slider().value();
+            assert!(
+                (reads - which.shown(&before)).abs() < 1e-9,
+                "the {} row reads {reads} after a chip, where it read {}",
+                which.label(),
+                which.shown(&before)
+            );
+        }
 
         // What a person's spacing is worth: a palette is a palette, and the
         // dimensions they set are not part of it.
@@ -24669,55 +24898,75 @@ line two");
             panel.tb_strip_reading()
         );
 
-        // The harmony picker. It has to go through `with_harmony`: a harmony
-        // written over the palette's own named companions moves the picker
-        // and leaves the theme exactly where it was.
-        let harmony = head
-            .child(live_id!(tb_body))
-            .child(live_id!(tb_seed_row))
-            .child(live_id!(tb_harmony));
-        let uid = harmony.widget_uid();
+        // A colour edited by hand, through the route its control takes: the
+        // palette is the person's own from then on. The other three stay as
+        // they were on the screen, the outline comes off the chip it started
+        // from, the line says whose it is -- and the strip is NOT grown
+        // again, because only the first colour is what it is grown from.
+        let offers = panel.tb_suggestions.clone();
+        let was = panel.tb_builder.params().palette();
+        let edited = 0x3A_6E_C8_FF;
+        let uid = panel.tb_color_uids[1];
+        assert_ne!(uid, 0, "the secondary's control was never routed");
         let actions = cx.capture_actions(|cx| {
-            cx.widget_action(uid, DropDownAction::Select(2));
+            let rgba = rgba_of(edited);
+            cx.widget_action(WidgetUid(uid), FabColorPickAction::Ended(vec4(rgba[0], rgba[1], rgba[2], rgba[3])));
         });
         panel.handle_sidebar_actions(&mut cx, &actions);
-        assert_eq!(panel.tb_builder.params().harmony, Harmony::ALL[2]);
-        assert_eq!(panel.tb_builder.params().seeds, None, "the harmony left the palette's companions standing");
-        assert_eq!(panel.tb_chosen_index(), None, "the harmony picker left a chip outlined");
-
-        // The surprise, over a palette chosen again.
+        let now = panel.tb_builder.params().palette();
+        assert_eq!(now, [was[0], edited, was[2], was[3]], "editing the secondary moved some other colour");
+        assert_eq!(panel.tb_chosen_index(), None, "an edited palette left the chip it started from outlined");
+        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE, "the line does not say the palette is their own");
+        assert!(panel.tb_apply_at_once, "an edited colour is waiting for a settle nobody is dragging");
         the_palette_lands(&mut cx, &mut panel, 1.0);
+        assert_eq!(panel.tb_suggestions, offers, "editing the secondary grew the strip again");
+        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE, "the settle forgot whose palette it is");
+
+        // The surprise, over a palette chosen again. It lets the chip go at
+        // once, and on the settle the palette it drew is marked by the chip
+        // that IS it -- the plain one of its harmony -- so the line names it
+        // rather than counting palettes as if none were in force.
         draw_the_theme_head(&mut cx, &mut panel, &head);
         one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 1));
         assert_eq!(panel.tb_chosen_index(), Some(1));
         panel.tb_surprise();
         assert_eq!(panel.tb_chosen_index(), None, "the surprise left a chip outlined");
-
-        // And a new favourite, which grows a whole new row of palettes: the
-        // one that was chosen is not among them, so nothing is marked.
+        let drawn = panel.tb_builder.params().palette();
+        let harmony = panel.tb_builder.params().harmony;
         the_palette_lands(&mut cx, &mut panel, 2.0);
+        let at = panel.tb_chosen_index().expect("the surprise's palette is marked by no chip");
+        let offer = &panel.tb_suggestions[at];
+        assert_eq!((offer.harmony, offer.mood), (Some(harmony), None), "some other chip took the surprise's name");
+        assert_eq!(panel.tb_builder.params().palette(), drawn, "marking the surprise moved its colours");
+        assert_eq!(panel.tb_strip_reading(), harmony.label(), "the line does not name the surprise's palette");
+
+        // And a new primary, which grows a whole new row of palettes: the
+        // one that was chosen is not among them, so nothing is marked and the
+        // four on the controls are the person's own.
         draw_the_theme_head(&mut cx, &mut panel, &head);
         one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 0));
         assert_eq!(panel.tb_chosen_index(), Some(0));
         let chosen = panel.tb_chosen.clone().expect("a palette was chosen");
-        let harmony = panel.tb_builder.params().harmony;
-        panel.tb_set_seed(0x18_C0_4A_FF, harmony);
+        panel.tb_color_ended(0, 0x18_C0_4A_FF);
         the_palette_lands(&mut cx, &mut panel, 3.0);
-        assert_eq!(panel.tb_chosen_index(), None, "a new favourite left the old palette outlined");
+        assert_eq!(panel.tb_chosen_index(), None, "a new primary left the old palette outlined");
         assert!(panel.tb_chosen.is_none(), "the old palette is still remembered as the chosen one");
+        assert_eq!(panel.tb_builder.params().favourite, 0x18_C0_4A_FF, "the strip is not grown from the new primary");
+        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE);
         assert!(
             !panel.tb_suggestions.contains(&chosen),
-            "a new favourite grew the same palettes, so nothing about dropping it was tested"
+            "a new primary grew the same palettes, so nothing about dropping it was tested"
         );
     }
 
     /// Growing the theme for the other page keeps the chip and the theme
     /// saying the same thing.
     ///
-    /// The dark and light buttons leave the palette's named companions
-    /// standing -- the app goes on wearing that palette -- but the strip is
-    /// grown again for the other page, and a palette's fourth colour IS the
-    /// page, so the offer that was chosen is no longer in the list. What the
+    /// The lightness carried across its middle leaves the palette's named
+    /// companions standing -- the app goes on wearing that palette -- but the
+    /// strip is grown again for the other appearance, whose chips are not
+    /// the same colours, so the offer that was chosen is no longer in the
+    /// list. What the
     /// section keeps is the equivalent one: the same harmony and mood for a
     /// palette the rule grew, the same name for one out of the book or off a
     /// person's own list. It goes on the controls as well as under the
@@ -24725,8 +24974,8 @@ line two");
     /// and not two.
     ///
     /// Without that, the outline came off a palette that was still in force
-    /// and the harmony picker dropped back to naming a harmony the theme was
-    /// not in -- the exact lie the seventh place exists to prevent.
+    /// and the line under the strip, the one place the palette is named,
+    /// went back to counting palettes as if none were.
     #[test]
     fn the_other_page_marks_the_palette_that_is_still_in_force() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -24743,8 +24992,7 @@ line two");
         let was = panel.tb_chosen.clone().expect("a palette was chosen");
         assert!(was.harmony.is_some() && was.mood.is_some(), "the chip pressed was not one the rule grew");
 
-        let dark = panel.tb_builder.params().dark();
-        panel.tb_set_appearance(!dark);
+        across_the_middle(&mut panel);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert!(!panel.tb_suggestions.contains(&was), "the other page grew the same palette, so nothing was tested");
@@ -24762,10 +25010,10 @@ line two");
             "the marked palette is not the one wearing the outline"
         );
 
-        // And one out of the book, which is its name -- the name the picker
-        // borrows for its seventh place.
-        let harmony = panel.tb_builder.params().harmony;
-        panel.tb_set_seed(crate::theme_combinations::COMBINATIONS[0][0], harmony);
+        assert_eq!(panel.tb_strip_reading(), now.label, "the line does not name the palette in force");
+
+        // And one out of the book, which is its name.
+        panel.tb_color_ended(0, crate::theme_combinations::COMBINATIONS[0][0]);
         the_palette_lands(&mut cx, &mut panel, 2.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let at = panel
@@ -24781,25 +25029,32 @@ line two");
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(panel.tb_chosen_index(), Some(at));
 
-        let dark = panel.tb_builder.params().dark();
-        panel.tb_set_appearance(!dark);
+        across_the_middle(&mut panel);
         the_palette_lands(&mut cx, &mut panel, 4.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let at = panel.tb_chosen_index().expect("the other page left the combination unmarked");
         let now = panel.tb_suggestions[at].clone();
         assert_eq!(now.label, named, "some other palette took the outline");
         assert_eq!(panel.tb_builder.params().seeds, Some(now.seeds));
-        let picker = head
-            .child(live_id!(tb_body))
-            .child(live_id!(tb_seed_row))
-            .child(live_id!(tb_harmony))
-            .as_drop_down();
-        assert_eq!(
-            picker.selected_label(),
-            named,
-            "the picker went back to naming a harmony the theme is not in"
-        );
-        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len() + 1);
+        assert_eq!(panel.tb_strip_reading(), named, "the line went back to counting palettes");
+
+        // And a drag that crosses, rather than a release: the strip is owed
+        // its regrowth from the first move over the middle, and gets it on
+        // the settle.
+        let dark = panel.tb_builder.params().dark();
+        panel.tb_row_moved(BuildRow::Lightness, BuilderParams::house(!dark).lightness * 100.0);
+        assert!(panel.tb_suggest_due, "the lightness crossed its middle and the strip was not told");
+        the_palette_lands(&mut cx, &mut panel, 5.0);
+        let at = panel.tb_chosen_index().expect("the drag across left the combination unmarked");
+        assert_eq!(panel.tb_suggestions[at].label, named);
+        // Inside one half nothing is regrown: a chip does not depend on the
+        // background rows.
+        panel.tb_row_moved(BuildRow::Lightness, BuilderParams::house(dark).lightness * 100.0 + if dark { -5.0 } else { 5.0 });
+        assert_eq!(panel.tb_builder.params().dark(), dark);
+        panel.tb_suggest_due = false;
+        panel.tb_row_moved(BuildRow::Saturation, 10.0);
+        panel.tb_row_moved(BuildRow::Lightness, BuilderParams::house(dark).lightness * 100.0);
+        assert!(!panel.tb_suggest_due, "a background row inside one half asked for the strip again");
     }
 
     /// A palette the other page has no equivalent for is let go outright:
@@ -24825,17 +25080,28 @@ line two");
         orphan.mood = None;
         panel.tb_chosen = Some(orphan);
 
-        let dark = panel.tb_builder.params().dark();
-        panel.tb_set_appearance(!dark);
+        across_the_middle(&mut panel);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert!(panel.tb_chosen.is_none(), "a palette nothing offers is still remembered as the chosen one");
-        assert_eq!(
-            panel.tb_builder.params().seeds,
-            None,
-            "the outline came off a palette whose companions are still on the controls"
+        assert!(
+            panel.tb_chosen.as_ref().is_none_or(|chosen| chosen.label != "Nowhere, nohow"),
+            "a palette nothing offers is still remembered as the chosen one"
         );
-        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len(), "the borrowed name outlived the chip");
+        // What is left on the controls is the plain palette of the harmony
+        // the chip was grown in, and the chip that IS that palette is the one
+        // marked: the chip and the theme agree either way round.
+        match panel.tb_chosen_index() {
+            Some(at) => assert_eq!(
+                panel.tb_builder.params().seeds,
+                Some(panel.tb_suggestions[at].seeds),
+                "the chip marked and the palette worn are two different palettes"
+            ),
+            None => assert_eq!(
+                panel.tb_builder.params().seeds,
+                None,
+                "the outline came off a palette whose companions are still on the controls"
+            ),
+        }
     }
 
     /// "more" walks the pages round, and a page that cannot fill the strip
@@ -24882,8 +25148,7 @@ line two");
         panel.tb_page = pages - 1;
         let full = a_chip_of(&head, 0).area().rect(&mut cx).size.x;
         assert!(full > 0.0, "the chips of a full page were never drawn");
-        let harmony = panel.tb_builder.params().harmony;
-        panel.tb_set_seed(0x80_80_80_FF, harmony);
+        panel.tb_color_ended(0, 0x80_80_80_FF);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         let left = panel.tb_suggestions.len();
         assert!(left < TB_CHIP_IDS.len(), "a grey favourite still fills the strip, so an empty slot is untested");
@@ -24989,36 +25254,41 @@ line two");
         );
     }
 
-    /// The harmony picker says what is in force, and a palette that is in no
-    /// harmony is not left looking like one.
+    /// The line under the strip names the palette in force whatever kind it
+    /// is, and it is the only thing that does.
     ///
-    /// A combination out of the book and one of the person's own are chosen by
-    /// pressing a chip, not by picking a harmony, so the picker has nothing
-    /// true to show for them and would otherwise go on showing whichever name
-    /// happened to be set before. It shows the chip's name instead, out of a
-    /// seventh place in the list that exists only while that palette stands --
-    /// and picking a real harmony takes the place away again along with the
-    /// chip, which is what the seventh place must not quietly break.
+    /// The six harmonies are the first six chips and there is no harmony
+    /// picker beside them, so a palette out of the book or out of the
+    /// person's own file is named by the line or by nothing. It opens on
+    /// what the strip is, names a plain harmony by its harmony, a
+    /// combination by its number and a scheme of their own as theirs, and a
+    /// palette whose colours were then edited by hand as their own palette
+    /// -- never the chip it started from.
     #[test]
-    fn the_harmony_picker_names_a_palette_that_is_in_no_harmony() {
+    fn the_line_names_the_palette_in_force_whatever_it_is() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        let _store = a_store_of_its_own(&mut panel);
+        let store = a_store_of_its_own(&mut panel);
         let head = the_builder_drawn(&mut cx, &mut panel);
-        let picker = head
-            .child(live_id!(tb_body))
-            .child(live_id!(tb_seed_row))
-            .child(live_id!(tb_harmony))
-            .as_drop_down();
-        // Nothing off the strip yet: six harmonies and the one that is set.
-        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len());
-        assert_eq!(picker.selected_label(), panel.tb_builder.params().harmony.label());
+        // Nothing chosen and nothing moved: the line says what the strip is.
+        assert!(
+            panel.tb_strip_reading().contains("palettes"),
+            "an untouched builder names a palette nobody chose: {}",
+            panel.tb_strip_reading()
+        );
+        // The first six are the six harmonies, in their plain form and by
+        // their own names, so the first page is what the picker used to be.
+        for (at, harmony) in Harmony::ALL.iter().enumerate() {
+            let offer = &panel.tb_suggestions[at];
+            assert_eq!((offer.harmony, offer.mood), (Some(*harmony), None), "chip {at} is not the plain {harmony:?}");
+        }
+        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 5));
+        assert_eq!(panel.tb_strip_reading(), Harmony::ALL[5].label());
 
         // A colour lifted out of the book, so that the strip has a
         // combination on it to press.
-        let harmony = panel.tb_builder.params().harmony;
-        panel.tb_set_seed(crate::theme_combinations::COMBINATIONS[0][0], harmony);
+        panel.tb_color_ended(0, crate::theme_combinations::COMBINATIONS[0][0]);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         let at = panel
             .tb_suggestions
@@ -25026,52 +25296,36 @@ line two");
             .position(|offer| offer.label.starts_with(COMBINATION_LABEL))
             .expect("a colour out of the book found no combination");
         let named = panel.tb_suggestions[at].label.clone();
-        assert!(
-            panel.tb_strip_reading().contains("combinations"),
-            "the line under the strip does not count the combinations: {}",
-            panel.tb_strip_reading()
-        );
         panel.tb_page = at / TB_CHIP_IDS.len();
         draw_the_theme_head(&mut cx, &mut panel, &head);
         one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
         assert_eq!(panel.tb_chosen_index(), Some(at));
         the_palette_lands(&mut cx, &mut panel, 2.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(picker.selected_label(), named, "the picker is not showing the combination that is in force");
-        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len() + 1);
-        assert!(
-            panel.tb_strip_reading().starts_with(&named),
-            "the line under the strip does not name it either: {}",
-            panel.tb_strip_reading()
-        );
+        assert_eq!(panel.tb_strip_reading(), named, "the line does not name the combination in force");
+        // The four controls show the four colours of the chip, exactly.
+        let row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        for (which, id) in TB_COLOR_IDS.iter().enumerate() {
+            let shown = row
+                .child(*id)
+                .child(live_id!(tb_color))
+                .borrow::<FabColorPick>()
+                .expect("a colour control")
+                .rgba();
+            assert_eq!(
+                packed_of(shown) | 0xFF,
+                panel.tb_suggestions[at].colors[which] | 0xFF,
+                "the {} control is not showing the chip's {} colour",
+                TB_COLOR_NAMES[which],
+                TB_COLOR_NAMES[which]
+            );
+        }
 
-        // The seventh place is a name and not a choice: picking it changes
-        // nothing at all.
-        let uid = head
-            .child(live_id!(tb_body))
-            .child(live_id!(tb_seed_row))
-            .child(live_id!(tb_harmony))
-            .widget_uid();
-        let was = panel.tb_builder.params();
-        let actions = cx.capture_actions(|cx| {
-            cx.widget_action(uid, DropDownAction::Select(Harmony::ALL.len()));
-        });
-        panel.handle_sidebar_actions(&mut cx, &actions);
-        assert_eq!(panel.tb_builder.params(), was, "the picker's own name was pickable");
-        assert_eq!(panel.tb_chosen_index(), Some(at));
-
-        // A real harmony, which lets the palette's companions go: the chip
-        // goes out, the seventh place goes with it, and the picker is back to
-        // naming a harmony.
-        let actions = cx.capture_actions(|cx| {
-            cx.widget_action(uid, DropDownAction::Select(2));
-        });
-        panel.handle_sidebar_actions(&mut cx, &actions);
-        the_palette_lands(&mut cx, &mut panel, 3.0);
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_chosen_index(), None);
-        assert_eq!(panel.tb_harmony_listed.len(), Harmony::ALL.len(), "the borrowed name outlived the chip");
-        assert_eq!(picker.selected_label(), Harmony::ALL[2].label());
+        // Its background colour edited by hand: their own palette now, and
+        // the combination's number is not left on the line.
+        panel.tb_color_ended(3, 0x2A_40_60_FF);
+        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE);
+        assert_eq!(panel.tb_builder.params().palette()[3], 0x2A_40_60_FF);
 
         // And one of the person's own does what a combination does. The
         // section is left and entered again to read the file, which puts the
@@ -25079,13 +25333,18 @@ line two");
         // the favourite those have.
         let favourite = BuilderParams::house(true).favourite;
         std::fs::write(
-            _store.dir.join(crate::theme_store::PALETTES_FILE),
+            store.dir.join(crate::theme_store::PALETTES_FILE),
             format!("#{:06X} #E08A2A #2AE0A0 #6A6E5A\r\n", favourite >> 8),
         )
         .expect("a palette file to read back");
         panel.toggle_theme_builder(&mut cx);
         panel.toggle_theme_builder(&mut cx);
         assert_eq!(panel.tb_builder.params().favourite, favourite, "the section came back on some other colour");
+        assert!(
+            panel.tb_strip_reading().contains("palettes"),
+            "the section came back naming a palette: {}",
+            panel.tb_strip_reading()
+        );
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let at = panel
             .tb_suggestions
@@ -25097,7 +25356,7 @@ line two");
         one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
         the_palette_lands(&mut cx, &mut panel, 4.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(picker.selected_label(), OWN_LABEL);
+        assert_eq!(panel.tb_strip_reading(), OWN_LABEL);
     }
 
     /// "Save as" while a built theme is in force saves THAT theme.
@@ -25126,9 +25385,9 @@ line two");
         let _store = a_store_of_its_own(&mut panel);
         open_the_build_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
         // Everything moved, so that a theme that lost any of it is caught.
-        panel.tb_set_seed(0x22_A0_60_FF, Harmony::Split);
+        a_palette_grown_from(&mut panel, 0x22_A0_60_FF, Harmony::Split);
         panel.tb_gesture_ended(BuildRow::Saturation, 90.0);
-        panel.tb_gesture_ended(BuildRow::Brightness, 70.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 70.0);
         panel.tb_gesture_ended(BuildRow::Spacing, 9.0);
         panel.tb_gesture_ended(BuildRow::Roundness, 7.5);
         panel.tb_gesture_ended(BuildRow::FontSize, 12.0);
