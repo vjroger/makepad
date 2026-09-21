@@ -322,6 +322,118 @@ pub fn handle_event(cx: &mut Cx, event: &Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fields a person types or picks a value in that are laid out by a
+    /// TURTLE: they are Fit, so the vertical padding IS their height, and two
+    /// of them padded differently part company again as soon as the type
+    /// grows. `TextInput` heads the list because every sheet already reshaped
+    /// it, and it is the one the rest of the row has to match.
+    ///
+    /// Left out, with reasons, so the next reader does not take the gaps for
+    /// oversights: `WellInput` is the inside of a field, not a field, and is
+    /// the one thing that must impose no height at all; `Select` wears a
+    /// `Button` for a face and follows the button rule; `TreeSelect` names its
+    /// corner `radius` and packs chips into whatever box its own Rust is
+    /// handed.
+    const FIELD_FIT: &[&str] = &[
+        "TextInput",
+        "ComboBox",
+        "DropDown",
+        "DropDown2",
+        "FieldWell",
+        "TagField",
+    ];
+    /// The fields that state a FRAME and lay their own parts out inside it: a
+    /// number with a stepper, a number you drag, a date, a time, and the two
+    /// pickers that wrap a date. The row's height is all these can take from a
+    /// sheet. Each measures its parts against the turtle's whole rect and
+    /// draws them from the content origin, so a vertical padding displaces the
+    /// line instead of holding it off the box -- padded, the number sat on the
+    /// bottom edge of its box with its two arrows split around it. They must
+    /// therefore carry NO vertical padding, and that is asserted below rather
+    /// than skipped, because it is the thing the next sheet would get wrong.
+    const FIELD_FRAME: &[&str] = &[
+        "NumberField",
+        "ValueInput",
+        "DateField",
+        "TimeField",
+        "DatePicker",
+        "DateRangePicker",
+    ];
+
+    /// A field's box metrics as the sheet leaves them: the minimum height,
+    /// and the padding above and below the line.
+    fn field_metrics(vm: &mut ScriptVm, name: &str) -> (Option<f64>, Option<f64>, Option<f64>) {
+        let widgets = vm.module(id!(widgets));
+        let widget = vm
+            .bx
+            .heap
+            .value(widgets, LiveId::from_str(name).into(), NoTrap)
+            .as_object()
+            .unwrap_or_else(|| panic!("the library has no widget named {name}"));
+        let min = vm.bx.heap.value(widget, id!(min_height).into(), NoTrap).as_f64();
+        let pad = vm.bx.heap.value(widget, id!(padding).into(), NoTrap).as_object();
+        let side = |vm: &mut ScriptVm, key: LiveId| {
+            pad.and_then(|p| vm.bx.heap.value(p, key.into(), NoTrap).as_f64())
+        };
+        (min, side(vm, id!(top)), side(vm, id!(bottom)))
+    }
+
+    /// A row of fields is one height, under every sheet the library ships.
+    ///
+    /// The sheets used to reshape the text box alone: with the android sheet
+    /// on, the catalogue's search box became a 48 point pill and the number
+    /// field beside it stayed 24 tall, the drop down after it 26. Each sheet
+    /// now states its field metrics once and hands them to the whole family,
+    /// and this is what holds that: a field added to the library, or a sheet
+    /// added to the folder, cannot quietly stand at a height of its own.
+    #[test]
+    fn every_field_stands_at_the_height_its_sheet_gives_the_text_box() {
+        for (style, dark) in DesktopStyle::ALL
+            .into_iter()
+            .flat_map(|style| if style.supports_dark() { vec![(style, false), (style, true)] } else { vec![(style, false)] })
+        {
+            // A sheet of its own per appearance: an assignment a sheet makes
+            // stays made, so sheets read one after another on one VM would
+            // measure the last one that named a number, not this one.
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.init_cx_os();
+            cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.bx.captured_errors = Some(Vec::new());
+                vm.with_reload(crate::script_mod);
+                let sheet = if dark { format!("{}-dark", style.id()) } else { style.id().to_string() };
+                assert!(vm.take_errors().is_empty(), "{sheet} does not evaluate");
+                let row = field_metrics(vm, "TextInput");
+                assert!(row.0.is_some(), "{sheet} states no field height for the row to stand at");
+                for name in FIELD_FIT {
+                    assert_eq!(
+                        field_metrics(vm, name),
+                        row,
+                        "{sheet}: {name} does not stand in the row its TextInput sets"
+                    );
+                }
+                for name in FIELD_FRAME {
+                    let field = field_metrics(vm, name);
+                    assert_eq!(field.0, row.0, "{sheet}: {name} does not stand at the height of the row");
+                    assert!(
+                        field.1.unwrap_or(0.0) == 0.0 && field.2.unwrap_or(0.0) == 0.0,
+                        "{sheet}: {name} lays its own parts out, so a vertical padding on it moves the line off the box"
+                    );
+                }
+                // The chrome-less input inside a well inherits TextInput, and
+                // a minimum as tall as the whole field, applied inside a well
+                // already that tall, pushes the line out through the bottom.
+                assert_eq!(
+                    field_metrics(vm, "WellInput").0,
+                    Some(0.0),
+                    "{sheet}: the input inside a well must impose no height"
+                );
+            });
+        }
+    }
+
     #[test]
     fn mobile_typefaces_keep_symbol_fallbacks_across_appearances() {
         let mut cx=Cx::new(Box::new(|_,_|{}));

@@ -5359,6 +5359,71 @@ mod tests {
     /// Read off the sheets in the tree, so a sheet that starts overriding
     /// something else is caught here rather than by somebody finding the
     /// filter unreadable.
+    ///
+    /// Every property a sheet sets on `target`, whether it says so in a line
+    /// of its own or through one of the sheet's own helpers. A sheet states
+    /// its field metrics ONCE and hands them to each field in turn -- `let
+    /// field_room = fn(w) { w.min_height = .. }`, then
+    /// `field_room(mod.widgets.TextInput)` -- so a scan that reads only
+    /// `mod.widgets.TextInput.x = y` lines goes blind the moment a sheet
+    /// stops repeating itself, and says the sheets did not load. The helper
+    /// bodies are read here too, so both spellings count.
+    fn sheet_overrides(text: &str, target: &str) -> Vec<String> {
+        let mut helpers: Vec<(String, String, Vec<String>)> = Vec::new();
+        let mut open: Option<(String, String, Vec<String>)> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some((name, arg)) = line
+                .strip_prefix("let ")
+                .and_then(|rest| rest.split_once(" = fn("))
+                .and_then(|(name, rest)| rest.split_once(')').map(|(arg, _)| (name, arg)))
+            {
+                open = Some((name.trim().to_string(), arg.trim().to_string(), Vec::new()));
+                continue;
+            }
+            let Some((_, arg, props)) = open.as_mut() else { continue };
+            if line == "}" {
+                helpers.push(open.take().expect("the block is open"));
+                continue;
+            }
+            if let Some(prop) = line
+                .strip_prefix(&format!("{arg}."))
+                .and_then(|rest| rest.split_once('='))
+                .map(|(prop, _)| prop.trim().to_string())
+            {
+                props.push(prop);
+            }
+        }
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix(&format!("{target}.")) {
+                if let Some(prop) = rest.split([' ', '=']).next() {
+                    found.push(prop.to_string());
+                }
+                continue;
+            }
+            for (name, _, props) in &helpers {
+                // `field_face(mod.widgets.TextInput.draw_bg)` reaches the
+                // same place as `mod.widgets.TextInput.draw_bg.border_radius
+                // = ..`, so whatever the call named is put back in front.
+                let Some(arg) = line
+                    .strip_prefix(&format!("{name}("))
+                    .and_then(|rest| rest.strip_suffix(')'))
+                else {
+                    continue;
+                };
+                let under = match arg.strip_prefix(target) {
+                    Some("") => String::new(),
+                    Some(rest) => format!("{}.", rest.trim_start_matches('.')),
+                    None => continue,
+                };
+                found.extend(props.iter().map(|prop| format!("{under}{prop}")));
+            }
+        }
+        found
+    }
+
     #[test]
     fn the_filter_field_answers_what_the_sheets_override_on_a_text_input() {
         // Everything before `#[cfg(test)]`: the controls, without the tests
@@ -5388,17 +5453,10 @@ mod tests {
             let Ok(text) = std::fs::read_to_string(&sheet) else {
                 continue;
             };
-            for line in text.lines() {
-                let Some(prop) = line
-                    .trim()
-                    .strip_prefix("mod.widgets.TextInput.")
-                    .and_then(|rest| rest.split([' ', '=']).next())
-                else {
-                    continue;
-                };
+            for prop in sheet_overrides(&text, "mod.widgets.TextInput") {
                 // `draw_bg.pixel` is answered by declaring `pixel:` inside
                 // this field's own `draw_bg`, and so on down.
-                let leaf = prop.rsplit('.').next().unwrap_or(prop);
+                let leaf = prop.rsplit('.').next().unwrap_or(&prop).to_string();
                 assert!(
                     kit.contains(&format!("{leaf}:")),
                     "{} overrides `{prop}` on a TextInput and the filter field does not declare `{leaf}`",
