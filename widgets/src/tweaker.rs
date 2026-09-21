@@ -10723,19 +10723,32 @@ impl Tweaker {
                     mx_cell_6 := MxCellT {}
                     mx_cell_7 := MxCellT {}
                 }
-                // A theme's name over its column. Two lines and an ellipsis,
-                // because at twenty-six points across most of these names are
-                // a syllable and a half -- the header says which column is
-                // which for somebody who already knows the list, and the
-                // status line under the matrix is what actually names a knob.
+                // A theme's name over its column, written across the corner
+                // of the box rather than along it. At twenty-six points across
+                // a flat name was a syllable and a half -- "Windows" and
+                // "Windows 2000" were the same header -- and a name turned to
+                // forty-five degrees is whole at any width the sidebar can be
+                // dragged to, because what it needs is height and the header
+                // row has that to give.
+                //
+                // It FALLS: the name ends over its own column and begins up
+                // and to the left, so what hangs out of the box lands in the
+                // empty corner over the family names and the last column is
+                // never cut by the panel's edge. Sixty points is what the
+                // longest name the library ships stands in at this size.
+                //
+                // Nothing here may clip. The name is drawn out of its own box
+                // and over its neighbours' on purpose, so the cell and the
+                // row that holds the cells both let it.
                 let MxHeadT = View {
                     width: Fill
                     height: Fit
-                    mx_head_name := PanelLabelSmall {
+                    clip_x: false
+                    clip_y: false
+                    mx_head_name := FabDiagonalLabel {
                         width: Fill
+                        height: 60
                         text: ""
-                        max_lines: 2
-                        text_overflow: TextOverflow.Ellipsis
                     }
                 }
                 // ONE SWATCH OF THE BUILT PALETTE. A bare View with a colour
@@ -11032,6 +11045,8 @@ impl Tweaker {
                                     height: Fit
                                     flow: Right
                                     spacing: 1
+                                    clip_x: false
+                                    clip_y: false
                                     align: Align{x: 0.0 y: 1.0}
                                     // Standing in for the name column, so
                                     // that the eight headers sit over the
@@ -21224,7 +21239,7 @@ mod tests {
             ("mx_head_5", "MxHeadT"),
             ("mx_head_6", "MxHeadT"),
             ("mx_head_7", "MxHeadT"),
-            ("mx_head_name", "PanelLabelSmall"),
+            ("mx_head_name", "FabDiagonalLabel"),
             ("mx_row_0", "MxRowT"),
             ("mx_row_1", "MxRowT"),
             ("mx_row_2", "MxRowT"),
