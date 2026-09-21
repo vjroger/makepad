@@ -2251,7 +2251,7 @@ fn read_pairs(colors: &BTreeMap<String, u32>, accents: &[(String, String, f64)],
         };
         let g = if composite { over(page, *g) } else { *g | 0xFF };
         let stands = reads_on(g, *i);
-        let line = format!("{ink} on {ground} = {stands:.2}, wants {need}");
+        let line = format!("{ink} on {ground} = {stands:.2}, wants {need:.1}");
         out.measured += 1;
         if margin.is_none_or(|best| stands - need < best) {
             margin = Some(stands - need);
