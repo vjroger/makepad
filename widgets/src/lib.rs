@@ -26,7 +26,6 @@ pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
 pub mod theme_store;
 pub mod theme_lab;
-pub mod theme_groups;
 pub mod theme_builder;
 pub mod theme_combinations;
 pub mod conceding_row;

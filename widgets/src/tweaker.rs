@@ -90,7 +90,7 @@
 
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
-    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabKnobAction, FabKnobWidgetRefExt, FabPaletteChip, FabPaletteChipAction, FabSliderAction, FabSliderWidgetRefExt, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
+    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabPaletteChip, FabPaletteChipAction, FabSliderAction, FabSliderWidgetRefExt, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
     makepad_draw::makepad_platform::devtools,
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     dock::DockWidgetRefExt,
@@ -108,7 +108,7 @@ use crate::{
     widget_tree::{live_id_token, widget_type_names, CxWidgetExt},
 };
 use crate::makepad_script::script_eval;
-use crate::theme_lab::{Applied, MixGroup, PinnedTheme, ThemeLab};
+use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
 use crate::theme_builder::{all_suggestions, Applied as Built, BuilderParams, Harmony, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
@@ -8105,49 +8105,6 @@ const EQ_ROW_IDS: [LiveId; 8] = [
     live_id!(eq_row_7),
 ];
 
-/// The matrix's rows, one per family of tokens, in `MixGroup::ALL`'s order.
-///
-/// Ten, and exactly ten: the families are an enum and not a list that grows
-/// at run time, so a row is declared for each of them and none of them is
-/// ever hidden. It is the COLUMNS that come and go with the group on show.
-const MX_ROW_IDS: [LiveId; MixGroup::COUNT] = [
-    live_id!(mx_row_0),
-    live_id!(mx_row_1),
-    live_id!(mx_row_2),
-    live_id!(mx_row_3),
-    live_id!(mx_row_4),
-    live_id!(mx_row_5),
-    live_id!(mx_row_6),
-    live_id!(mx_row_7),
-    live_id!(mx_row_8),
-    live_id!(mx_row_9),
-];
-
-/// The cells of one matrix row, one per theme, in the same order as the
-/// weight rows above them. Eight for the same reason `EQ_ROW_IDS` is eight.
-const MX_CELL_IDS: [LiveId; 8] = [
-    live_id!(mx_cell_0),
-    live_id!(mx_cell_1),
-    live_id!(mx_cell_2),
-    live_id!(mx_cell_3),
-    live_id!(mx_cell_4),
-    live_id!(mx_cell_5),
-    live_id!(mx_cell_6),
-    live_id!(mx_cell_7),
-];
-
-/// The names over the columns, one per theme.
-const MX_HEAD_IDS: [LiveId; 8] = [
-    live_id!(mx_head_0),
-    live_id!(mx_head_1),
-    live_id!(mx_head_2),
-    live_id!(mx_head_3),
-    live_id!(mx_head_4),
-    live_id!(mx_head_5),
-    live_id!(mx_head_6),
-    live_id!(mx_head_7),
-];
-
 /// One setting of the theme builder, as a row on the screen.
 ///
 /// The six are a fixed list and not a table read off `BuilderParams`,
@@ -8292,14 +8249,6 @@ const TB_CHIP_IDS: [LiveId; 8] = [
     live_id!(tb_chip_6),
     live_id!(tb_chip_7),
 ];
-
-/// The matrix's status line with no knob in hand.
-///
-/// It says what the grid IS, because the grid does not say so itself: ten
-/// unlabelled rows of dials under a row of clipped names is not a thing
-/// anybody reads their way into.
-const MX_IDLE_HINT: &str =
-    "a weight per theme per family of tokens \u{00b7} turn one and only that family moves";
 
 /// How long the mix waits between installs while a weight is being dragged.
 ///
@@ -8973,29 +8922,6 @@ pub struct Tweaker {
     /// One per weight row on show, in the group's own order; the rest 0.
     #[rust]
     eq_row_uids: [u64; 8],
-    /// Whether the matrix under the weight rows is unfolded.
-    ///
-    /// Folded by default, and kept here rather than in the section's own
-    /// state so that it survives `- mix`: somebody who works a family at a
-    /// time wants the grid back when they open the mix again, and somebody
-    /// who has never opened it never sees it. Nothing about the WEIGHTS
-    /// hangs on it -- a folded matrix is still whatever matrix the lab
-    /// holds -- so folding installs nothing.
-    #[rust]
-    eq_matrix_open: bool,
-    /// The matrix's own fold toggle, captured at draw like the rest.
-    #[rust]
-    mx_fold_uid: u64,
-    /// A uid per cell: `[family][theme]`, and 0 for a cell that is not on
-    /// show -- a hidden column, or the whole grid folded away. An action is
-    /// matched against this, so a uid left standing would route a knob
-    /// somebody else is now holding.
-    #[rust]
-    mx_uids: [[u64; 8]; MixGroup::COUNT],
-    /// Which cell was last in hand, as a line to put under the grid. Empty
-    /// means none since the section was opened, and the hint stands instead.
-    #[rust]
-    mx_status: String,
     /// The builder: a whole theme grown from one favourite colour, and the
     /// part of that a panel would otherwise have to remember. Held here
     /// beside the lab and for the same reason -- the sidebar is dropped and
@@ -10718,92 +10644,6 @@ impl Tweaker {
                         height: fab.row_height_sm
                     }
                 }
-                // ONE CELL OF THE MATRIX: what one theme lends one family of
-                // tokens. A dial and not a slider, because eight of them
-                // share the width a single weight row had -- at the panel's
-                // default 280 that is about twenty-six points a column, and a
-                // track with a thumb on it needs more than that to be worth
-                // reading. The dial is square, so a column is as wide as it
-                // is tall and the face takes whatever the sidebar gives it.
-                //
-                // No name and no number on the cell itself. The name is in
-                // the header over the column and in the label down the side,
-                // and the number is in the one status line under the matrix:
-                // eighty readouts at seven and a half point would be a wall
-                // of digits nobody reads, and the face already says where the
-                // weight stands.
-                //
-                // The wrapper is what carries `visible`, as in `EqRowT`: a
-                // group of seven themes hides the eighth column, and a
-                // FabKnob is not a View so it answers `set_visible` with
-                // nothing at all.
-                let MxCellT = View {
-                    width: Fill
-                    height: Fit
-                    mx_knob := FabKnob {
-                        width: Fill
-                        height: 30
-                        label: ""
-                        show_readout: false
-                        min: 0.0
-                        max: 100.0
-                        step: 1.0
-                    }
-                }
-                // A row of the matrix: one family of tokens across every
-                // theme in the mix. The name column is fixed so that the ten
-                // names line up under one another and every column below the
-                // header is the same width as its neighbours; the cells Fill,
-                // so the eight of them share whatever is left.
-                let MxRowT = View {
-                    width: Fill
-                    height: Fit
-                    flow: Right
-                    spacing: 1
-                    align: Align{x: 0.0 y: 0.5}
-                    mx_name := PanelLabelSmall {
-                        width: 62
-                        text: ""
-                        max_lines: 1
-                        text_overflow: TextOverflow.Ellipsis
-                    }
-                    mx_cell_0 := MxCellT {}
-                    mx_cell_1 := MxCellT {}
-                    mx_cell_2 := MxCellT {}
-                    mx_cell_3 := MxCellT {}
-                    mx_cell_4 := MxCellT {}
-                    mx_cell_5 := MxCellT {}
-                    mx_cell_6 := MxCellT {}
-                    mx_cell_7 := MxCellT {}
-                }
-                // A theme's name over its column, written across the corner
-                // of the box rather than along it. At twenty-six points across
-                // a flat name was a syllable and a half -- "Windows" and
-                // "Windows 2000" were the same header -- and a name turned to
-                // forty-five degrees is whole at any width the sidebar can be
-                // dragged to, because what it needs is height and the header
-                // row has that to give.
-                //
-                // It FALLS: the name ends over its own column and begins up
-                // and to the left, so what hangs out of the box lands in the
-                // empty corner over the family names and the last column is
-                // never cut by the panel's edge. Sixty points is what the
-                // longest name the library ships stands in at this size.
-                //
-                // Nothing here may clip. The name is drawn out of its own box
-                // and over its neighbours' on purpose, so the cell and the
-                // row that holds the cells both let it.
-                let MxHeadT = View {
-                    width: Fill
-                    height: Fit
-                    clip_x: false
-                    clip_y: false
-                    mx_head_name := FabDiagonalLabel {
-                        width: Fill
-                        height: 60
-                        text: ""
-                    }
-                }
                 // ONE SWATCH OF THE BUILT PALETTE. A bare View with a colour
                 // written into it every frame the builder is dirty, and not a
                 // themed widget of any kind: the panel is drawn from
@@ -11085,76 +10925,6 @@ impl Tweaker {
                                 eq_row_5 := EqRowT {}
                                 eq_row_6 := EqRowT {}
                                 eq_row_7 := EqRowT {}
-                            }
-                            // THE MATRIX. The same mix, one storey down: a
-                            // weight per theme per family of tokens, so the
-                            // grounds can come from one theme and the ink
-                            // from another. A weight row is that matrix with
-                            // a whole theme moved together -- which is why
-                            // the sliders stay where they are and this
-                            // unfolds underneath them rather than replacing
-                            // them.
-                            //
-                            // Folded by default and folded is the common
-                            // case: eighty dials is the answer to a question
-                            // most people never ask, and the eight sliders
-                            // above are the whole of the mix until somebody
-                            // does.
-                            mx_fold := PanelButton {
-                                width: Fit
-                                height: 20
-                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
-                                text: "+ groups"
-                                draw_text +: { text_style +: { font_size: 7.5 } }
-                            }
-                            mx_body := View {
-                                visible: false
-                                width: Fill
-                                height: Fit
-                                flow: Down
-                                spacing: 1
-                                mx_head := View {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 1
-                                    clip_x: false
-                                    clip_y: false
-                                    align: Align{x: 0.0 y: 1.0}
-                                    // Standing in for the name column, so
-                                    // that the eight headers sit over the
-                                    // eight cells and not one place left of
-                                    // them.
-                                    View { width: 62 height: 1 }
-                                    mx_head_0 := MxHeadT {}
-                                    mx_head_1 := MxHeadT {}
-                                    mx_head_2 := MxHeadT {}
-                                    mx_head_3 := MxHeadT {}
-                                    mx_head_4 := MxHeadT {}
-                                    mx_head_5 := MxHeadT {}
-                                    mx_head_6 := MxHeadT {}
-                                    mx_head_7 := MxHeadT {}
-                                }
-                                mx_row_0 := MxRowT {}
-                                mx_row_1 := MxRowT {}
-                                mx_row_2 := MxRowT {}
-                                mx_row_3 := MxRowT {}
-                                mx_row_4 := MxRowT {}
-                                mx_row_5 := MxRowT {}
-                                mx_row_6 := MxRowT {}
-                                mx_row_7 := MxRowT {}
-                                mx_row_8 := MxRowT {}
-                                mx_row_9 := MxRowT {}
-                                // Which knob is in hand, and what it holds.
-                                // The column headers cannot carry a name at
-                                // this width and eighty readouts would be a
-                                // wall of digits, so one line says the whole
-                                // of it for the one cell being turned.
-                                mx_status := PanelLabelSmall {
-                                    width: Fill
-                                    text: ""
-                                    max_lines: 2
-                                }
                             }
                             // How the mix reads. Two themes that were each
                             // readable can average into one that is not: both
@@ -12765,9 +12535,8 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 40] = [
+        let chrome: [(&[LiveId], &str); 39] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
-            (&[live_id!(theme_head), live_id!(eq_body), live_id!(mx_fold)], "a weight per family of tokens \u{00b7} take the grounds from one theme and the ink from another"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_absolute)], "every weight is its own \u{00b7} turning one up puts more of that theme in"),
@@ -16768,11 +16537,6 @@ impl Tweaker {
                     _ => {}
                 }
             }
-            if self.mx_fold_uid != 0 && widget_action.widget_uid.0 == self.mx_fold_uid {
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    self.toggle_matrix(cx);
-                }
-            }
             if self.tb_fold_uid != 0 && widget_action.widget_uid.0 == self.tb_fold_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.toggle_theme_builder(cx);
@@ -16879,29 +16643,6 @@ impl Tweaker {
                         }
                         _ => {}
                     }
-                }
-            }
-            // A cell of the matrix, routed by the same rule and into the same
-            // settle as a weight row: a family is a theme's weight in one
-            // part of itself, and the two must not be able to disagree about
-            // when a mix goes in.
-            if let Some((group, row)) = self.matrix_cell_of(widget_action.widget_uid.0) {
-                match widget_action.cast::<FabKnobAction>() {
-                    FabKnobAction::Changed(weight) => {
-                        self.mx_cell_moved(row, group, weight);
-                        self.redraw_panel(cx);
-                    }
-                    FabKnobAction::Ended(weight) => {
-                        self.mx_gesture_ended(row, group, weight);
-                        self.redraw_panel(cx);
-                    }
-                    // A double click on the cell: that family comes out of
-                    // that theme, and an all-zero column is legal.
-                    FabKnobAction::Reset => {
-                        self.mx_cell_cleared(row, group);
-                        self.redraw_panel(cx);
-                    }
-                    _ => {}
                 }
             }
             if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
@@ -18254,8 +17995,6 @@ impl Tweaker {
             self.eq_relative_uid = 0;
             self.eq_random_uid = 0;
             self.eq_row_uids = [0; 8];
-            self.mx_fold_uid = 0;
-            self.mx_uids = [[0; 8]; MixGroup::COUNT];
             return;
         }
         // Only where something is waiting on it. The settle is an interval
@@ -18349,30 +18088,12 @@ impl Tweaker {
             let slider = row.child(live_id!(eq_weight));
             self.eq_row_uids[index] = slider.widget_uid().0;
             let slider = slider.as_fab_slider();
-            // A row whose ten cells are not all the same number is not
-            // holding a weight at all: it is holding their MEAN, and the
-            // thumb somebody is about to grab would gather the ten back up
-            // into one. Said on the row itself, in a word, because it is a
-            // fact about what this slider READS and there is nowhere else
-            // that is about this row. Quiet on purpose -- no colour and no
-            // warning; a matrix is a thing somebody did on purpose one
-            // storey down, not a fault.
-            let name = if self.eq_lab.is_whole_row(index) {
-                label.clone()
-            } else {
-                format!("{label} \u{00b7} mean")
-            };
-            slider.set_label(cx, &name);
+            slider.set_label(cx, label);
             // Written back every draw on purpose: in relative mode a move
             // of one weight moves the others, and a row that only heard
             // about its own pointer would show a share it no longer has.
             slider.set_value_and_readout(cx, *weight, *share);
         }
-        // Under the rows, because a family is a part of a theme and the
-        // theme comes first. The names are the rows' own, so the columns
-        // stand in the order the sliders do.
-        let names: Vec<String> = weights.iter().map(|(label, _)| label.clone()).collect();
-        self.draw_matrix(cx, &body, &names);
         let row = body.child(live_id!(eq_appearance_row));
         let absolute = row.child(live_id!(eq_absolute));
         let relative = row.child(live_id!(eq_relative));
@@ -18386,154 +18107,6 @@ impl Tweaker {
         self.eq_random_uid = row.child(live_id!(eq_random)).widget_uid().0;
         let reading = self.eq_reading.clone();
         body.child(live_id!(eq_read)).set_text(cx, &reading);
-    }
-
-    /// The matrix under the weight rows, drawn from the lab and from nothing
-    /// else -- the same rule the rows above it keep, and for the same reason:
-    /// in relative mode one knob moves its whole column, so a cell that only
-    /// heard about its own pointer would show a weight it no longer has.
-    ///
-    /// Every cell is written back on every draw. `FabKnob::set_value` refuses
-    /// while a knob is being dragged, which is exactly right here: the one
-    /// cell in hand keeps what the hand is doing to it, and the other seven
-    /// of its column take what the engine did to them.
-    ///
-    /// The install is not here either. A knob's `Changed` marks the mix due
-    /// and `eq_settle` spends it, the same way a thumb on a weight row does
-    /// -- see [`Tweaker::draw_equalizer`] for what that buys.
-    fn draw_matrix(&mut self, cx: &mut Cx, body: &WidgetRef, names: &[String]) {
-        let fold = body.child(live_id!(mx_fold));
-        self.mx_fold_uid = fold.widget_uid().0;
-        fold.set_text(cx, if self.eq_matrix_open { "- groups" } else { "+ groups" });
-        let matrix = body.child(live_id!(mx_body));
-        matrix.set_visible(cx, self.eq_matrix_open);
-        if !self.eq_matrix_open {
-            // Folded, and every route into it shut with it.
-            self.mx_uids = [[0; 8]; MixGroup::COUNT];
-            return;
-        }
-        // The names over the columns. A theme with no column is a column the
-        // group on show does not have, and its header goes with it.
-        let head = matrix.child(live_id!(mx_head));
-        for (column, id) in MX_HEAD_IDS.iter().enumerate() {
-            let cell = head.child(*id);
-            match names.get(column) {
-                Some(name) => {
-                    cell.set_visible(cx, true);
-                    cell.child(live_id!(mx_head_name)).set_text(cx, name);
-                }
-                None => cell.set_visible(cx, false),
-            }
-        }
-        // Taken off the lab in one go, the way the weights above are: the
-        // loop writes at `self` as it walks.
-        let groups = self.eq_lab.groups();
-        let labels = self.eq_lab.group_labels();
-        for (index, id) in MX_ROW_IDS.iter().enumerate() {
-            let group = groups[index];
-            let row = matrix.child(*id);
-            row.child(live_id!(mx_name)).set_text(cx, labels[index]);
-            for (column, cell_id) in MX_CELL_IDS.iter().enumerate() {
-                let cell = row.child(*cell_id);
-                if column >= names.len() {
-                    cell.set_visible(cx, false);
-                    self.mx_uids[index][column] = 0;
-                    continue;
-                }
-                cell.set_visible(cx, true);
-                let knob = cell.child(live_id!(mx_knob));
-                self.mx_uids[index][column] = knob.widget_uid().0;
-                knob.as_fab_knob().set_value(cx, self.eq_lab.cell(column, group));
-            }
-        }
-        let line = if self.mx_status.is_empty() {
-            MX_IDLE_HINT.to_string()
-        } else {
-            self.mx_status.clone()
-        };
-        matrix.child(live_id!(mx_status)).set_text(cx, &line);
-    }
-
-    /// Which cell a knob's uid belongs to: the family, and the theme's row.
-    ///
-    /// Zero is never a cell. Hidden columns and a folded grid are held as 0,
-    /// and a uid of 0 arriving from anywhere would otherwise match every one
-    /// of them at once.
-    fn matrix_cell_of(&self, uid: u64) -> Option<(MixGroup, usize)> {
-        if uid == 0 {
-            return None;
-        }
-        self.mx_uids.iter().enumerate().find_map(|(index, row)| {
-            row.iter()
-                .position(|held| *held == uid)
-                .map(|column| (MixGroup::ALL[index], column))
-        })
-    }
-
-    /// Open or close the matrix.
-    ///
-    /// It hands no theme back and installs nothing, unlike the fold above it:
-    /// the weights the matrix holds are the weights the mix is made of
-    /// whether the grid is on the screen or not, and a whole-row matrix is
-    /// exactly the mix the eight sliders were already showing.
-    fn toggle_matrix(&mut self, cx: &mut Cx) {
-        self.eq_matrix_open = !self.eq_matrix_open;
-        if !self.eq_matrix_open {
-            self.mx_uids = [[0; 8]; MixGroup::COUNT];
-            self.mx_status.clear();
-        }
-        self.redraw_sidebar(cx);
-    }
-
-    /// One cell moved under the pointer.
-    ///
-    /// The install waits on the settle, exactly as a weight row's does: a
-    /// drag reports a change per pointer move and each install is a module
-    /// rebuild. See [`Tweaker::eq_weight_moved`].
-    fn mx_cell_moved(&mut self, row: usize, group: MixGroup, weight: f64) {
-        self.eq_lab.set_cell(row, group, weight);
-        self.eq_apply_due = true;
-        self.mx_note(row, group);
-    }
-
-    /// The knob was let go, on this value: a commit, so it does not wait.
-    fn mx_gesture_ended(&mut self, row: usize, group: MixGroup, weight: f64) {
-        self.eq_lab.set_cell(row, group, weight);
-        self.eq_mix_changed();
-        self.mx_note(row, group);
-    }
-
-    /// That family out of that theme. The gesture is a double click on the
-    /// cell, which is the knob's own reset.
-    fn mx_cell_cleared(&mut self, row: usize, group: MixGroup) {
-        self.eq_lab.clear_cell(row, group);
-        self.eq_mix_changed();
-        self.mx_note(row, group);
-    }
-
-    /// What the line under the matrix says: the cell in hand, named in full.
-    ///
-    /// Read back off the LAB rather than taken from the knob, because in
-    /// relative mode the engine has the last word on what a cell holds -- a
-    /// column that was already full gives a turned-up knob less than the hand
-    /// asked for, and the line has to say what it got.
-    fn mx_note(&mut self, row: usize, group: MixGroup) {
-        let Some(theme) = self.eq_lab.rows().get(row).map(|row| row.label.clone()) else {
-            return;
-        };
-        let held = self.eq_lab.cell(row, group);
-        self.mx_status = format!("{theme} \u{00b7} {} {held:.0}", group.label());
-    }
-
-    /// Whatever the line said, it no longer holds.
-    ///
-    /// Anything that moves the grid WHOLESALE comes through here: the
-    /// surprise, the switch of appearance, the switch of mode. A line naming
-    /// one cell and the number it stood at is a reading of a matrix that has
-    /// been replaced -- and the cell it names may not even be in this group
-    /// any more.
-    fn mx_cell_is_no_longer_in_hand(&mut self) {
-        self.mx_status.clear();
     }
 
     /// Open or close the mix section.
@@ -18596,15 +18169,6 @@ impl Tweaker {
         self.eq_apply_at_once = false;
         self.eq_mix_stands = false;
         self.eq_reading.clear();
-        // The matrix goes out with the mix it is part of. Its WEIGHTS go
-        // with the lab, which is closed below; what is cleared here is the
-        // panel's half -- the routes into eighty knobs that are no longer on
-        // the screen, and a line naming a cell of a mix that no longer
-        // stands. The fold itself is not touched: whether somebody works a
-        // family at a time is a thing about them and not about this mix.
-        self.mx_status.clear();
-        self.mx_fold_uid = 0;
-        self.mx_uids = [[0; 8]; MixGroup::COUNT];
         cx.with_vm(|vm| self.eq_lab.leave(vm));
         self.arm_the_saved_themes_pins();
     }
@@ -18741,31 +18305,19 @@ impl Tweaker {
     /// chose, and one left on screen is a number somebody will move.
     fn eq_set_appearance(&mut self, appearance: Appearance) {
         self.eq_lab.set_appearance(appearance);
-        self.mx_cell_is_no_longer_in_hand();
         self.eq_mix_changed();
     }
 
     /// Change what the other weights do when one of them moves.
     fn eq_set_mode(&mut self, mode: WeightMode) {
         self.eq_lab.set_mode(mode);
-        self.mx_cell_is_no_longer_in_hand();
         self.eq_mix_changed();
     }
 
     /// A mix nobody planned, off a seed that walks rather than a clock.
-    ///
-    /// It surprises whatever is on the screen. With the matrix folded that is
-    /// eight weights, and every family of a theme is drawn together; with it
-    /// open it is eighty, drawn a column at a time. The seed rule is the same
-    /// either way, so the same press from the same place is the same mix.
     fn eq_surprise(&mut self) {
         self.eq_seed = next_mix_seed(self.eq_seed);
-        if self.eq_matrix_open {
-            self.eq_lab.randomize_groups(self.eq_seed);
-        } else {
-            self.eq_lab.randomize(self.eq_seed);
-        }
-        self.mx_cell_is_no_longer_in_hand();
+        self.eq_lab.randomize(self.eq_seed);
         self.eq_mix_changed();
     }
 
@@ -21758,39 +21310,6 @@ mod tests {
             ("eq_relative", "PanelButton"),
             ("eq_random", "PanelButton"),
             ("eq_read", "PanelLabelSmall"),
-            ("mx_fold", "PanelButton"),
-            ("mx_body", "View"),
-            ("mx_head", "View"),
-            ("mx_head_0", "MxHeadT"),
-            ("mx_head_1", "MxHeadT"),
-            ("mx_head_2", "MxHeadT"),
-            ("mx_head_3", "MxHeadT"),
-            ("mx_head_4", "MxHeadT"),
-            ("mx_head_5", "MxHeadT"),
-            ("mx_head_6", "MxHeadT"),
-            ("mx_head_7", "MxHeadT"),
-            ("mx_head_name", "FabDiagonalLabel"),
-            ("mx_row_0", "MxRowT"),
-            ("mx_row_1", "MxRowT"),
-            ("mx_row_2", "MxRowT"),
-            ("mx_row_3", "MxRowT"),
-            ("mx_row_4", "MxRowT"),
-            ("mx_row_5", "MxRowT"),
-            ("mx_row_6", "MxRowT"),
-            ("mx_row_7", "MxRowT"),
-            ("mx_row_8", "MxRowT"),
-            ("mx_row_9", "MxRowT"),
-            ("mx_name", "PanelLabelSmall"),
-            ("mx_cell_0", "MxCellT"),
-            ("mx_cell_1", "MxCellT"),
-            ("mx_cell_2", "MxCellT"),
-            ("mx_cell_3", "MxCellT"),
-            ("mx_cell_4", "MxCellT"),
-            ("mx_cell_5", "MxCellT"),
-            ("mx_cell_6", "MxCellT"),
-            ("mx_cell_7", "MxCellT"),
-            ("mx_knob", "FabKnob"),
-            ("mx_status", "PanelLabelSmall"),
             ("tb_fold", "PanelButton"),
             ("tb_body", "View"),
             ("tb_seed_row", "View"),
@@ -21842,16 +21361,6 @@ mod tests {
             // And it is addressed: an id declared and never used is a
             // control nothing drives.
             assert!(src.contains(&format!("live_id!({id})")), "`{id}` is declared but never addressed");
-        }
-        // The matrix's three templates. Every cell, row and header above is
-        // an instance of one of them, so a rename here is eighty slots that
-        // resolve to nothing and a grid that draws as empty air.
-        for name in ["MxCellT", "MxRowT", "MxHeadT"] {
-            assert_eq!(
-                src.matches(&format!("let {name} = View {{")).count(),
-                1,
-                "the matrix's `{name}` is not declared once as a View"
-            );
         }
         // The builder's swatch, for the same reason: a rename here is eight
         // slots that resolve to nothing and a palette that draws as air.
@@ -22212,33 +21721,6 @@ mod tests {
                     "a weight row has no slider in it"
                 );
             }
-            // The matrix under them, built although it too is folded, and
-            // down to the knob: eighty cells declared in a macro body no
-            // compiler reads is eighty chances of a panel that comes up
-            // with a hole where the grid should be.
-            let matrix = body.child(live_id!(mx_body));
-            assert!(!matrix.is_empty(), "the matrix did not build");
-            assert!(!body.child(live_id!(mx_fold)).is_empty(), "the matrix has no fold");
-            let head = matrix.child(live_id!(mx_head));
-            assert!(!head.is_empty(), "the matrix has no header row");
-            for id in MX_HEAD_IDS {
-                assert!(
-                    !head.child(id).child(live_id!(mx_head_name)).is_empty(),
-                    "a column has no name over it"
-                );
-            }
-            for id in MX_ROW_IDS {
-                let row = matrix.child(id);
-                assert!(!row.is_empty(), "the matrix is missing a family row");
-                assert!(!row.child(live_id!(mx_name)).is_empty(), "a family row is unnamed");
-                for cell in MX_CELL_IDS {
-                    assert!(
-                        !row.child(cell).child(live_id!(mx_knob)).is_empty(),
-                        "a matrix cell has no knob in it"
-                    );
-                }
-            }
-            assert!(!matrix.child(live_id!(mx_status)).is_empty(), "the matrix has no status line");
             // The filter field the panel is filtered with, while we are here.
             let input = sidebar
                 .child(live_id!(filter_row))
@@ -23412,141 +22894,6 @@ line two");
         cx.fingers.first_mouse_button = None;
         assert!(!actions.is_empty(), "the press produced no action whatever");
         panel.handle_sidebar_actions(cx, &actions);
-    }
-
-    /// One knob taken hold of and pulled `up` points, and let go again --
-    /// the whole gesture, with everything it said routed through the panel's
-    /// own `handle_sidebar_actions`.
-    ///
-    /// The slop is added on top of the travel asked for, because the knob
-    /// spends the first three points deciding whether this is a drag at all
-    /// and never counts them. Up is more: `drag_travel` is 150 points for the
-    /// whole range, so thirty points is twenty parts of a hundred.
-    fn one_pull_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef, up: f64) {
-        use crate::fab_controls::KNOB_DRAG_SLOP;
-        use std::cell::Cell;
-        const WINDOW: WindowId = WindowId(1, 1);
-        let face = target.area().rect(cx);
-        assert!(face.size.x > 0.0, "the knob was never drawn, so the pull lands nowhere");
-        let at = face.pos + face.size * 0.5;
-        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
-        let down = Event::MouseDown(MouseDownEvent {
-            abs: at,
-            button: MouseButton::PRIMARY,
-            window_id: WINDOW,
-            modifiers: KeyModifiers::default(),
-            handled: Cell::new(Area::Empty),
-            time: 1.0,
-        });
-        root.handle_event(cx, &down, &mut Scope::empty());
-        cx.handle_actions();
-        let to = dvec2(at.x, at.y - KNOB_DRAG_SLOP - up);
-        let moved = Event::MouseMove(MouseMoveEvent {
-            abs: to,
-            lock_delta: Vec2d::default(),
-            window_id: WINDOW,
-            modifiers: KeyModifiers::default(),
-            handled: Cell::new(Area::Empty),
-            time: 1.05,
-        });
-        let actions = cx.capture_actions(|cx| {
-            root.handle_event(cx, &moved, &mut Scope::empty());
-        });
-        assert!(!actions.is_empty(), "the pull turned nothing whatever");
-        panel.handle_sidebar_actions(cx, &actions);
-        let release = Event::MouseUp(MouseUpEvent {
-            abs: to,
-            button: MouseButton::PRIMARY,
-            window_id: WINDOW,
-            modifiers: KeyModifiers::default(),
-            time: 1.1,
-        });
-        let actions = cx.capture_actions(|cx| {
-            root.handle_event(cx, &release, &mut Scope::empty());
-        });
-        panel.handle_sidebar_actions(cx, &actions);
-        cx.fingers.first_mouse_button = None;
-    }
-
-    /// Two presses in the same place, close enough together to be one
-    /// gesture: the knob's reset. It is detected on the SECOND PRESS, so
-    /// that is the buffer the panel is handed.
-    fn a_double_click_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef) {
-        use std::cell::Cell;
-        const WINDOW: WindowId = WindowId(1, 1);
-        let face = target.area().rect(cx);
-        assert!(face.size.x > 0.0, "the knob was never drawn, so the clicks land nowhere");
-        let at = face.pos + face.size * 0.5;
-        let down = |time: f64| {
-            Event::MouseDown(MouseDownEvent {
-                abs: at,
-                button: MouseButton::PRIMARY,
-                window_id: WINDOW,
-                modifiers: KeyModifiers::default(),
-                handled: Cell::new(Area::Empty),
-                time,
-            })
-        };
-        let up = |time: f64| {
-            Event::MouseUp(MouseUpEvent {
-                abs: at,
-                button: MouseButton::PRIMARY,
-                window_id: WINDOW,
-                modifiers: KeyModifiers::default(),
-                time,
-            })
-        };
-        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
-        root.handle_event(cx, &down(1.0), &mut Scope::empty());
-        cx.handle_actions();
-        root.handle_event(cx, &up(1.05), &mut Scope::empty());
-        cx.handle_actions();
-        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
-        let actions = cx.capture_actions(|cx| {
-            root.handle_event(cx, &down(1.1), &mut Scope::empty());
-        });
-        assert!(!actions.is_empty(), "the second press said nothing at all");
-        panel.handle_sidebar_actions(cx, &actions);
-        root.handle_event(cx, &up(1.15), &mut Scope::empty());
-        cx.handle_actions();
-        cx.fingers.first_mouse_button = None;
-    }
-
-    /// The Theme tab's head drawn with the mix open and the matrix unfolded,
-    /// and the knob at one cell of it handed back.
-    ///
-    /// Everything in one call because the three have to happen in this order
-    /// and no test wants a different one: the head is only built once, the
-    /// matrix only has rectangles after a draw, and the uids a press is
-    /// routed by are taken at that same draw.
-    fn the_matrix_drawn(
-        cx: &mut Cx,
-        panel: &mut Tweaker,
-        head: &WidgetRef,
-    ) -> WidgetRef {
-        head.set_visible(cx, true);
-        draw_the_theme_head(cx, panel, head);
-        head.child(live_id!(eq_body)).child(live_id!(mx_body))
-    }
-
-    /// The knob at one cell, by family and by the theme's row.
-    fn a_cell_of(matrix: &WidgetRef, group: MixGroup, column: usize) -> WidgetRef {
-        matrix
-            .child(MX_ROW_IDS[group.index()])
-            .child(MX_CELL_IDS[column])
-            .child(live_id!(mx_knob))
-    }
-
-    /// Every cell the lab holds, family by family, as one flat list to
-    /// compare against itself.
-    fn every_cell(panel: &Tweaker) -> Vec<((usize, MixGroup), f64)> {
-        let mut out = Vec::new();
-        for row in 0..panel.eq_lab.rows().len() {
-            for group in MixGroup::ALL {
-                out.push(((row, group), panel.eq_lab.cell(row, group)));
-            }
-        }
-        out
     }
 
     /// A folder for this panel's themes that is this test's alone, removed
@@ -25838,500 +25185,6 @@ line two");
             theme_tokens_now(&mut cx),
             built,
             "the theme that was saved is not the theme that came back"
-        );
-    }
-
-    /// A real knob, taken hold of and pulled, moving ONE cell of the matrix.
-    ///
-    /// The routing is the point, as it is for every control in this panel: a
-    /// dial that draws and turns is still a dial attached to nothing if its
-    /// uid never reached the panel, and eighty of them sitting in a grid is
-    /// eighty chances to route one press to the cell next door. So nothing
-    /// here calls `mx_cell_moved`; it presses the knob and asks the LAB what
-    /// happened to every one of its eighty cells.
-    ///
-    /// Absolute mode, so that what moved is exactly what was turned. Relative
-    /// mode settles the whole column behind a cell, which is a different
-    /// claim and is held by `a_relative_column_still_reads_a_hundred_across`.
-    #[test]
-    fn a_pull_on_one_cell_of_the_matrix_moves_that_cell_and_no_other() {
-        use crate::theme_lab::BlendTheme;
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The clock: a draw of the mix asks the platform what time it is
-        // wherever an install is waiting on the settle.
-        cx.init_cx_os();
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
-        panel.eq_set_mode(WeightMode::Absolute);
-        panel.eq_settle(&mut cx, 1.0);
-        panel.eq_matrix_open = true;
-        panel.ensure_sidebar(&mut cx);
-        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
-        let head = sidebar.child(live_id!(theme_head));
-        let matrix = the_matrix_drawn(&mut cx, &mut panel, &head);
-
-        // A theme that is not the one the section was opened on, so the cell
-        // starts at nought and the number below is not an anchor's.
-        let entry = panel
-            .eq_lab
-            .index_of(BlendTheme::Sheet(crate::desktop_style::DesktopStyle::Omarchy, false))
-            .expect("the theme the section was opened on is one of the rows");
-        let column = (entry + 1) % panel.eq_lab.rows().len();
-        let knob = a_cell_of(&matrix, MixGroup::Bevels, column);
-        let held = panel.eq_lab.cell(column, MixGroup::Bevels);
-        assert_eq!(
-            knob.as_fab_knob().value(),
-            held,
-            "the draw did not write the lab's cell onto the knob"
-        );
-        let before = every_cell(&panel);
-        panel.eq_apply_due = false;
-        panel.eq_apply_at_once = false;
-
-        // Thirty points up: `drag_travel` is 150 for the whole hundred.
-        one_pull_on(&mut cx, &mut panel, &head, &knob, 30.0);
-
-        let after = every_cell(&panel);
-        let moved: Vec<(usize, MixGroup)> = before
-            .iter()
-            .zip(after.iter())
-            .filter(|(was, now)| was.1 != now.1)
-            .map(|(_, now)| now.0)
-            .collect();
-        assert_eq!(
-            moved,
-            vec![(column, MixGroup::Bevels)],
-            "one knob was turned and these cells moved: {moved:?}"
-        );
-        assert_eq!(panel.eq_lab.cell(column, MixGroup::Bevels), held + 20.0);
-        // The row is no longer a whole row, which is what the slider above it
-        // has to start saying.
-        assert!(
-            !panel.eq_lab.is_whole_row(column),
-            "a cell of the row moved and the row still reads as one weight"
-        );
-        // ...and the end of the gesture is a commit, so it does not wait out
-        // the drag's settle.
-        assert!(panel.eq_apply_due, "the pull never asked for the mix to go in");
-        assert!(panel.mix_due(1.0), "the release waits out an interval nobody is dragging in");
-        // The one line under the grid names the cell in hand, in full.
-        let name = panel.eq_lab.rows()[column].label.clone();
-        assert!(
-            panel.mx_status.contains(&name) && panel.mx_status.contains("Bevels"),
-            "the status line does not say which knob was turned: {}",
-            panel.mx_status
-        );
-        assert!(panel.mx_status.contains("20"), "or what it holds: {}", panel.mx_status);
-        // ...and the slider over that column says, on the next draw, that it
-        // is no longer holding a weight but reading the mean of ten.
-        the_matrix_drawn(&mut cx, &mut panel, &head);
-        let slider = head
-            .child(live_id!(eq_body))
-            .child(live_id!(eq_rows))
-            .child(EQ_ROW_IDS[column])
-            .child(live_id!(eq_weight));
-        let said = slider
-            .borrow::<crate::fab_controls::FabSlider>()
-            .expect("the weight row is a FabSlider")
-            .label()
-            .to_string();
-        assert_eq!(
-            said,
-            format!("{name} \u{00b7} mean"),
-            "the row's slider does not say that it is reading a mean"
-        );
-    }
-
-    /// The matrix strikes the same bargain the weight rows do: a drag reports
-    /// a change per pointer move, each install is a module rebuild of some 52
-    /// ms, and the moves arrive on separate FRAMES -- so a half-second drag
-    /// has to cost a handful of installs, and the value the hand stopped on
-    /// has to be one of them.
-    #[test]
-    fn a_drag_of_one_cell_across_forty_frames_is_a_handful_of_installs() {
-        use crate::desktop_style::DesktopStyle;
-        use crate::theme_lab::BlendTheme;
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
-        panel.eq_set_mode(WeightMode::Absolute);
-        panel.eq_settle(&mut cx, 1.0);
-        let row = panel
-            .eq_lab
-            .index_of(BlendTheme::Base(crate::theme_tokens::Scheme::Dark))
-            .expect("the dark base theme is one of the dark group's rows");
-
-        const SPAN: f64 = 0.5;
-        const FRAMES: u32 = 40;
-        let before = panel.eq_lab.rebuilds();
-        for step in 0..FRAMES {
-            let now = 2.0 + f64::from(step) * (SPAN / f64::from(FRAMES));
-            panel.mx_cell_moved(row, MixGroup::Accent, f64::from(step) + 1.0);
-            panel.eq_settle(&mut cx, now);
-        }
-        let during = panel.eq_lab.rebuilds() - before;
-        let most = (SPAN / EQ_SETTLE).ceil() as u32 + 1;
-        assert!(
-            during <= most,
-            "a {} ms drag of one cell cost {during} module rebuilds",
-            SPAN * 1000.0
-        );
-        assert!(during >= 1, "the drag never reached the app at all");
-
-        panel.mx_gesture_ended(row, MixGroup::Accent, f64::from(FRAMES) + 1.0);
-        panel.eq_settle(&mut cx, 2.0 + SPAN);
-        assert!(!panel.eq_apply_due, "a move is still waiting after the gesture ended");
-        assert!(!panel.eq_lab.is_dirty(), "the app is a blend behind what the grid reads");
-        assert_eq!(panel.eq_lab.cell(row, MixGroup::Accent), f64::from(FRAMES) + 1.0);
-        assert!(
-            panel.eq_lab.rebuilds() <= before + during + 1,
-            "the release installed more than once"
-        );
-    }
-
-    /// A double click on a cell takes that family out of that theme -- the
-    /// knob's own reset, driven as two real presses, because the knob is what
-    /// decides that two presses are one gesture.
-    #[test]
-    fn a_double_click_on_a_cell_takes_that_family_out_of_that_theme() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The clock: a draw of the mix asks the platform what time it is
-        // wherever an install is waiting on the settle.
-        cx.init_cx_os();
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
-        panel.eq_set_mode(WeightMode::Absolute);
-        panel.eq_matrix_open = true;
-        panel.ensure_sidebar(&mut cx);
-        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
-        let head = sidebar.child(live_id!(theme_head));
-        // Two cells of one column with something in them, so that clearing
-        // one of them is visibly not clearing the theme.
-        let column = 1;
-        panel.mx_gesture_ended(column, MixGroup::Icons, 40.0);
-        panel.mx_gesture_ended(column, MixGroup::Text, 60.0);
-        panel.eq_settle(&mut cx, 1.0);
-        let matrix = the_matrix_drawn(&mut cx, &mut panel, &head);
-        let knob = a_cell_of(&matrix, MixGroup::Icons, column);
-        assert_eq!(knob.as_fab_knob().value(), 40.0, "the draw never put the cell on the knob");
-
-        a_double_click_on(&mut cx, &mut panel, &head, &knob);
-
-        assert_eq!(panel.eq_lab.cell(column, MixGroup::Icons), 0.0, "the cell is still in the mix");
-        assert_eq!(
-            panel.eq_lab.cell(column, MixGroup::Text),
-            60.0,
-            "clearing one family took another with it"
-        );
-        assert!(panel.mix_due(1.0), "a reset is a press and does not wait out the settle");
-    }
-
-    /// The dark group is one theme shorter than the light one, and the column
-    /// it does not have goes off the screen with the route into it.
-    ///
-    /// The uids are the half that matters. A hidden column whose knobs still
-    /// answer to their old uids is eight cells of a theme that is not in this
-    /// mix, quietly taking presses meant for the cell beside them.
-    #[test]
-    fn the_column_a_group_does_not_have_is_hidden_and_its_cells_route_nowhere() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The clock: a draw of the mix asks the platform what time it is
-        // wherever an install is waiting on the settle.
-        cx.init_cx_os();
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
-        panel.eq_matrix_open = true;
-        panel.ensure_sidebar(&mut cx);
-        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
-        let head = sidebar.child(live_id!(theme_head));
-
-        panel.eq_set_appearance(Appearance::Light);
-        let matrix = the_matrix_drawn(&mut cx, &mut panel, &head);
-        let light = panel.eq_lab.rows().len();
-        panel.eq_set_appearance(Appearance::Dark);
-        the_matrix_drawn(&mut cx, &mut panel, &head);
-        let dark = panel.eq_lab.rows().len();
-        assert!(dark < light, "the two groups are the same length, so nothing here is hidden");
-        assert!(light <= MX_CELL_IDS.len(), "a group has more themes than the grid has columns");
-
-        for (index, _) in MX_ROW_IDS.iter().enumerate() {
-            for column in dark..MX_CELL_IDS.len() {
-                assert_eq!(
-                    panel.mx_uids[index][column], 0,
-                    "a column the dark group does not have still routes a press"
-                );
-            }
-            for column in 0..dark {
-                assert_ne!(
-                    panel.mx_uids[index][column], 0,
-                    "a column the group DOES have lost its route"
-                );
-            }
-        }
-        // ...and the header over it went with it, along with the cells.
-        let head_cell = matrix.child(live_id!(mx_head)).child(MX_HEAD_IDS[dark]);
-        assert!(!head_cell.is_empty(), "the header has no cell for that column at all");
-        assert!(!head_cell.visible(), "a theme that is not in this group is still named");
-        let cell = matrix.child(MX_ROW_IDS[0]).child(MX_CELL_IDS[dark]);
-        assert!(!cell.visible(), "a column the group does not have is still drawn");
-    }
-
-    /// The fold, pressed for real, and what folding it costs: every route
-    /// into the grid, and nothing else. The weights stay exactly where they
-    /// were -- a matrix is the mix whether or not it is on the screen.
-    #[test]
-    fn folding_the_matrix_away_zeroes_every_cells_route_and_moves_no_weight() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The clock: a draw of the mix asks the platform what time it is
-        // wherever an install is waiting on the settle.
-        cx.init_cx_os();
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
-        panel.ensure_sidebar(&mut cx);
-        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
-        let head = sidebar.child(live_id!(theme_head));
-        let matrix = the_matrix_drawn(&mut cx, &mut panel, &head);
-        assert!(!panel.eq_matrix_open, "the matrix came up unfolded");
-        assert!(!matrix.visible(), "a folded matrix is on the screen");
-
-        // Unfolded by a press on its own toggle, at its own address.
-        let fold = head.child(live_id!(eq_body)).child(live_id!(mx_fold));
-        assert!(!fold.is_empty(), "the matrix has no fold inside the mix");
-        one_press_on(&mut cx, &mut panel, &head, &fold);
-        assert!(panel.eq_matrix_open, "the press never reached the fold");
-        the_matrix_drawn(&mut cx, &mut panel, &head);
-        assert!(matrix.visible(), "the matrix unfolded and did not come on screen");
-        assert!(
-            panel.mx_uids.iter().flatten().any(|uid| *uid != 0),
-            "an open matrix routes nothing"
-        );
-        panel.mx_gesture_ended(1, MixGroup::Shape, 30.0);
-        // Spent here rather than left for the draw below to spend: the draw
-        // asks the platform what time it is only where a mix is waiting, and
-        // a headless Cx has no clock.
-        panel.eq_settle(&mut cx, 2.0);
-        let held = every_cell(&panel);
-
-        // ...and folded again by the same press.
-        one_press_on(&mut cx, &mut panel, &head, &fold);
-        assert!(!panel.eq_matrix_open, "the second press did not fold it");
-        the_matrix_drawn(&mut cx, &mut panel, &head);
-        assert!(
-            panel.mx_uids.iter().flatten().all(|uid| *uid == 0),
-            "a folded matrix still routes a press"
-        );
-        assert!(panel.mx_status.is_empty(), "the line outlived the grid it was under");
-        assert_eq!(every_cell(&panel), held, "folding the grid moved a weight");
-    }
-
-    /// The surprise draws whatever is on the screen: eight weights with the
-    /// matrix folded, eighty with it open. The seed rule is the same either
-    /// way, so the same press from the same place is the same mix.
-    #[test]
-    fn the_surprise_draws_a_matrix_only_while_the_matrix_is_open() {
-        use crate::theme_lab::RELATIVE_TOTAL;
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
-
-        // Folded: whole rows, every family of a theme drawn together.
-        panel.eq_seed = 11;
-        panel.eq_surprise();
-        for row in 0..panel.eq_lab.rows().len() {
-            assert!(
-                panel.eq_lab.is_whole_row(row),
-                "the surprise drew a matrix with the grid folded away"
-            );
-        }
-
-        // Open: a draw per column, so a row is no longer one number.
-        panel.eq_matrix_open = true;
-        panel.eq_seed = 11;
-        panel.eq_surprise();
-        let drawn = every_cell(&panel);
-        assert!(
-            (0..panel.eq_lab.rows().len()).any(|row| !panel.eq_lab.is_whole_row(row)),
-            "the surprise over an open matrix drew the same weight in every family"
-        );
-        // Every column still adds up, which is what relative mode means.
-        for group in MixGroup::ALL {
-            let total: f64 = (0..panel.eq_lab.rows().len())
-                .map(|row| panel.eq_lab.cell(row, group))
-                .sum();
-            assert!(
-                (total - RELATIVE_TOTAL).abs() < 1e-9,
-                "{} adds up to {total}",
-                group.label()
-            );
-        }
-        // ...and it is reproducible, the way the folded one is.
-        panel.eq_seed = 11;
-        panel.mx_status = "a cell of the matrix before this one".to_string();
-        panel.eq_surprise();
-        assert_eq!(every_cell(&panel), drawn, "the same seed drew a different matrix");
-        // The line under the grid named one cell of the matrix that has just
-        // been replaced, so it says nothing now.
-        assert!(panel.mx_status.is_empty(), "the line outlived the matrix it was reading");
-    }
-
-    /// Relative mode is a hundred parts shared out, one column at a time --
-    /// and it has to read that way ON THE KNOBS, not only in the lab. Every
-    /// cell is written back on every draw for exactly this: turning one up
-    /// takes from the rest of its column, and a knob that only heard about
-    /// its own pointer would show a share it no longer has.
-    #[test]
-    fn a_relative_column_still_reads_a_hundred_across() {
-        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        // The clock: a draw of the mix asks the platform what time it is
-        // wherever an install is waiting on the settle.
-        cx.init_cx_os();
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
-        panel.eq_set_mode(WeightMode::Relative);
-        panel.eq_matrix_open = true;
-        panel.ensure_sidebar(&mut cx);
-        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
-        let head = sidebar.child(live_id!(theme_head));
-        let matrix = the_matrix_drawn(&mut cx, &mut panel, &head);
-
-        let entry = panel
-            .eq_lab
-            .index_of(BlendTheme::Sheet(crate::desktop_style::DesktopStyle::Omarchy, false))
-            .expect("the theme the section was opened on is one of the rows");
-        let column = (entry + 1) % panel.eq_lab.rows().len();
-        let knob = a_cell_of(&matrix, MixGroup::Outset, column);
-        one_pull_on(&mut cx, &mut panel, &head, &knob, 45.0);
-        // The draw that follows any move, which is where the other cells of
-        // the column hear what was done to them.
-        the_matrix_drawn(&mut cx, &mut panel, &head);
-
-        let on_screen: f64 = (0..panel.eq_lab.rows().len())
-            .map(|row| a_cell_of(&matrix, MixGroup::Outset, row).as_fab_knob().value())
-            .sum();
-        assert!(
-            (on_screen - RELATIVE_TOTAL).abs() < 1e-9,
-            "the column reads {on_screen} on the screen"
-        );
-        assert!(
-            a_cell_of(&matrix, MixGroup::Outset, column).as_fab_knob().value() > 0.0,
-            "the cell that was turned up shows nothing"
-        );
-        // ...and no other family was touched by any of it.
-        for group in MixGroup::ALL {
-            if group == MixGroup::Outset {
-                continue;
-            }
-            assert_eq!(
-                panel.eq_lab.cell(column, group),
-                0.0,
-                "turning one family of a theme up put {} in as well",
-                group.label()
-            );
-        }
-    }
-
-    /// "Save as" over a matrix mix saves what is ON THE SCREEN.
-    ///
-    /// The store snapshots `mod.theme`, which is where an install puts the
-    /// blend -- so a matrix saves itself for the same reason a weight row
-    /// does. What this holds is that the blend it snapshots really is the
-    /// grouped one: the ground comes from one theme and the ink from another,
-    /// which no mix of whole rows can produce, and both survive the save and
-    /// the door out of the mix.
-    #[test]
-    fn saving_a_matrix_mix_writes_the_grouped_blend_and_not_a_row_of_means() {
-        use crate::desktop_style::DesktopStyle;
-        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        let _store = a_store_of_its_own(&mut panel);
-        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
-        panel.eq_matrix_open = true;
-        panel.eq_set_mode(WeightMode::Absolute);
-
-        // Two themes, and a matrix that crosses them: the grounds from one,
-        // the ink from the other, every other family from the first. Read off
-        // each theme ALONE first, so the two numbers below are known to be
-        // different and known to belong to different themes.
-        let ground_from = panel
-            .eq_lab
-            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
-            .expect("the theme the section was opened on is one of the rows");
-        let ink_from = panel
-            .eq_lab
-            .index_of(BlendTheme::Base(crate::theme_tokens::Scheme::Dark))
-            .expect("the dark base theme is one of the dark group's rows");
-        let whole = |panel: &mut Tweaker, cx: &mut Cx, row: usize, now: f64| {
-            // Every row to nought FIRST. `reset` puts the anchor row back to
-            // a hundred rather than clearing it, and in absolute mode a
-            // second row at a hundred beside it is a mix of the two -- which
-            // is not what "this theme alone" means.
-            for other in 0..panel.eq_lab.rows().len() {
-                panel.eq_lab.clear_weight(other);
-            }
-            panel.eq_gesture_ended(row, RELATIVE_TOTAL);
-            panel.eq_settle(cx, now);
-            the_reload_lands(cx, panel, now);
-            (theme_color(cx, "color_bg_app"), theme_color(cx, "color_text"))
-        };
-        // The ink theme first: the section opened on the ground theme, so a
-        // whole row on THAT is the mix already in force and installs nothing
-        // for the reload to carry.
-        let (other_ground, ink) = whole(&mut panel, &mut cx, ink_from, 1.0);
-        let (ground, _) = whole(&mut panel, &mut cx, ground_from, 2.0);
-        assert!(ground.is_some() && ink.is_some(), "a theme carries neither a ground nor an ink");
-        assert_ne!(ground, other_ground, "the two themes have the same ground, so nothing below sorts them");
-
-        // The matrix: every family from the ink theme, except the grounds.
-        panel.eq_lab.reset();
-        for group in MixGroup::ALL {
-            panel.mx_gesture_ended(ink_from, group, RELATIVE_TOTAL);
-            panel.mx_cell_cleared(ground_from, group);
-        }
-        panel.mx_gesture_ended(ground_from, MixGroup::Backgrounds, RELATIVE_TOTAL);
-        panel.mx_cell_cleared(ink_from, MixGroup::Backgrounds);
-        assert!(
-            !panel.eq_lab.is_whole_row(ground_from) && !panel.eq_lab.is_whole_row(ink_from),
-            "this matrix is a row of means after all, so it proves nothing"
-        );
-        panel.eq_settle(&mut cx, 3.0);
-        the_reload_lands(&mut cx, &mut panel, 3.0);
-        assert_eq!(theme_color(&mut cx, "color_bg_app"), ground, "the grounds did not come from their own column");
-        assert_eq!(theme_color(&mut cx, "color_text"), ink, "the ink did not come from its own column");
-
-        panel.theme_name = "crossed".to_string();
-        panel.save_theme_as(&mut cx);
-        assert_eq!(panel.theme_saved(), Some("crossed"), "the save did not take: {}", panel.theme_msg);
-        // Saving a mix goes out through the door a pick goes through, so the
-        // theme it wrote arrives the way a picked one does: the module is
-        // rebuilt by the style reload, and the tokens land on the event
-        // after it. Driven by hand here, which is the two calls `app_main!`
-        // and the panel's own `Event::LiveEdit` arm make.
-        assert!(
-            std::mem::take(&mut cx.pending_style_reload),
-            "the save asked for no reload, so nothing carries the theme to the app"
-        );
-        cx.pending_live_edit_request = false;
-        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
-        panel.land_the_pending_pins(&mut cx);
-        assert_eq!(
-            theme_color(&mut cx, "color_bg_app"),
-            ground,
-            "the file kept a ground the screen was not wearing"
-        );
-        assert_eq!(
-            theme_color(&mut cx, "color_text"),
-            ink,
-            "the file kept an ink the screen was not wearing"
         );
     }
 

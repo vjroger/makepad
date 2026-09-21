@@ -708,7 +708,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
          * `clip_x: false` and room at the end they lean over. */
         mod.widgets.FabDiagonalLabel = set_type_default() do mod.widgets.FabDiagonalLabelBase{
             // Fill so a header row divides itself between its columns the
-            // way the matrix under it does. 60 down is measured and not
+            // way the grid under it does. 60 down is measured and not
             // guessed: the longest theme name the library ships takes 56.5
             // points of height at 45 degrees in the panel's small face, and
             // a host that knows its own longest name should fix this for
@@ -2966,8 +2966,8 @@ pub struct KnobTurn {
 impl KnobTurn {
     /// The stops, the detent and the containment are the SLIDER's, borrowed
     /// whole rather than written again: a number means the same thing in a
-    /// cell of the matrix as in a row of the equalizer, because the matrix is
-    /// the equalizer with its groups pulled apart.
+    /// cell of a matrix as in a row of sliders, and a host that offers both
+    /// must not have the two disagree about what a hand asked for.
     fn law(&self) -> SliderTravel {
         SliderTravel {
             min: self.min,
@@ -3775,10 +3775,10 @@ fn knob_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
 // ===========================================================================
 // FabDiagonalLabel — the name over a column too narrow to hold it.
 //
-// The Theme tab is a matrix of knobs, ten rows by up to eight columns, in a
-// sidebar 280 wide: a column comes out around 26 points across, and the
-// theme names the panel has to write over them run to two and a half times
-// that. So the name is turned on its side and let out over its neighbours,
+// A matrix of knobs ten rows by eight columns, in a sidebar 280 wide, comes
+// out around 26 points a column, and the names a panel has to write over
+// such columns -- a theme's, a family's -- run to two and a half times that.
+// So the name is turned on its side and let out over its neighbours,
 // which is safe
 // for the reason parallel lines are safe: at 45 degrees a pitch of 26 puts
 // 26 * sin(45) = 18 points between one name and the next ACROSS the line,
@@ -3974,7 +3974,7 @@ impl Widget for FabDiagonalLabel {
     }
 
     /// Emits nothing, and says nothing when the name has not changed: the
-    /// matrix writes every header into a fixed slot on every draw, and a
+    /// host writes every header into a fixed slot on every draw, and a
     /// setter that dirtied the draw list each time would redraw the panel
     /// forever.
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
@@ -5928,7 +5928,7 @@ mod tests {
         );
     }
 
-    /// A 26 point column of the Theme tab's matrix, 48 down.
+    /// A 26 point column of a knob matrix, 48 down.
     fn column() -> Rect {
         Rect {
             pos: dvec2(100.0, 40.0),
@@ -7483,8 +7483,8 @@ mod fab_diagonal_label_draw {
 
     const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
 
-    /// A header row the way the matrix wants one: columns at the pitch a 280
-    /// wide sidebar comes down to, leaning both ways, and one with no theme
+    /// A header row the way a matrix wants one: columns at the pitch a 280
+    /// wide sidebar comes down to, leaning both ways, and one with no name
     /// behind it.
     fn scene(cx: &mut Cx) -> WidgetRef {
         cx.with_vm(|vm| {
@@ -7607,7 +7607,7 @@ mod fab_diagonal_label_draw {
     }
 
     /// A shorter name takes less room, and one with nothing in it draws
-    /// nothing — the matrix leaves columns it has no theme for blank, and
+    /// nothing — a matrix leaves columns it has nothing to name blank, and
     /// they still have to keep their place in the row.
     #[test]
     fn a_shorter_name_takes_less_room_and_an_empty_one_takes_none() {
@@ -7635,7 +7635,7 @@ mod fab_diagonal_label_draw {
 
     /// The name a host writes in is the name that is drawn, and asking for
     /// it asks for the frame that shows it. Writing the same name again is
-    /// silent: the matrix fills every header on every draw, and a setter
+    /// silent: a matrix fills every header on every draw, and a setter
     /// that dirtied the list each time would redraw the panel forever.
     #[test]
     fn a_written_name_is_held_and_asks_for_the_frame_that_shows_it() {

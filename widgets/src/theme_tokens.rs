@@ -1950,8 +1950,6 @@ mod tuning_tests {
 // The theme equalizer: several themes mixed together by weight.
 // ---------------------------------------------------------------------------
 
-use crate::theme_groups::{group_of, MixGroup};
-
 /// Which appearance group a theme sits in.
 ///
 /// A mix never crosses the two. Half way between a dark theme and a light one
@@ -2111,11 +2109,6 @@ pub enum WeightMode {
     /// spent, from all the others in proportion to what each still holds.
     /// Lowering one hands it back to the anchor. This is a budget of a hundred
     /// parts shared out, where a theme's number IS its share of the result.
-    ///
-    /// Where a mix has a weight per family of tokens the budget is a
-    /// family's: each column of the matrix is a mix of its own and adds up
-    /// to `RELATIVE_TOTAL` by itself, so this same rule is simply applied a
-    /// column at a time.
     Relative,
 }
 
@@ -2261,44 +2254,6 @@ pub fn normalized(weights: &[f64]) -> Vec<f64> {
     weights.iter().map(|w| w.max(0.0) / total).collect()
 }
 
-/// One theme's weights in a grouped mix: a weight per family of tokens, in
-/// the order of [`MixGroup::ALL`], so `weights[group.index()]` is how much of
-/// this theme goes into that family.
-///
-/// A row of the matrix. The equalizer's single weight is the row with every
-/// entry the same -- [`uniform_weights`] -- and a mix made of such rows is the
-/// equalizer's mix exactly: see [`BlendCache::blend_grouped`].
-pub type GroupWeights = [f64; MixGroup::COUNT];
-
-/// The row that moves every family together: one weight, ten times.
-pub fn uniform_weights(weight: f64) -> GroupWeights {
-    [weight; MixGroup::COUNT]
-}
-
-/// The mean of a row of weights, with anything under nought read as nought.
-///
-/// This is a theme's weight in the mix AS A WHOLE, and three things are
-/// settled by it: what a token with no family is mixed by, which theme is the
-/// heaviest and so lends the mix what a blend cannot carry, and what number a
-/// panel shows beside a theme whose ten knobs are not all in one place.
-///
-/// It is taken as the lowest entry plus the mean of what each entry stands
-/// above it, and not as the sum over the count, for the sake of one case: a
-/// row whose entries are all the same weight has to come back as that weight
-/// to the last bit. Ten lots of 0.1 add up to 0.9999999999999999, and a tenth
-/// of that is not 0.1; a mix weighed by it would differ from the equalizer's
-/// in the last place of a number, and the script the two install is compared
-/// as text. Above the lowest entry a uniform row stands at nought ten times,
-/// and nought is one sum floating point does get right.
-pub fn mean_weight(weights: &[f64]) -> f64 {
-    if weights.is_empty() {
-        return 0.0;
-    }
-    let low = weights.iter().map(|w| w.max(0.0)).fold(f64::INFINITY, f64::min);
-    let above: f64 = weights.iter().map(|w| w.max(0.0) - low).sum();
-    low + above / weights.len() as f64
-}
-
 /// The narrowest and the widest the random curve may be.
 pub const SIGMA_MIN: f64 = 0.6;
 pub const SIGMA_MAX: f64 = 4.0;
@@ -2351,22 +2306,6 @@ fn next_u64(state: &mut u64) -> u64 {
 /// The next draw as a number in 0..1.
 fn next_unit(state: &mut u64) -> f64 {
     (next_u64(state) >> 11) as f64 / (1u64 << 53) as f64
-}
-
-/// The seed one family of tokens draws its random weights from, given the
-/// seed of the whole matrix: a pure function of the two, so the same seed is
-/// the same matrix on every machine and every run.
-///
-/// Not `seed + group`. `random_weights` walks SplitMix64 from the seed it is
-/// given, and that generator steps by adding a constant, so ten seeds a fixed
-/// step apart are ten windows onto one sequence: every family would draw its
-/// curve from the number the family before it spent on its shuffle. The
-/// family is folded in under a multiplier of its own and the result put
-/// through the generator's finaliser, which leaves ten seeds with nothing to
-/// do with each other.
-pub fn group_seed(seed: u64, group: usize) -> u64 {
-    let mut state = seed ^ (group as u64 + 1).wrapping_mul(0xA076_1D64_78BD_642F);
-    next_u64(&mut state)
 }
 
 /// `mix_rgb` with the alpha channel carried along.
@@ -2622,96 +2561,38 @@ impl BlendCache {
     /// ground -- are thresholds, and a threshold does not survive an average:
     /// two themes whose text reads on their own page can average into one
     /// whose does not.
-    ///
-    /// There is one blend and this is not it: this is
-    /// [`BlendCache::blend_grouped`] handed rows that move every family of a
-    /// theme together, which is all a single weight per theme has ever meant.
-    /// So the equalizer and the matrix cannot drift apart -- there is nothing
-    /// of the one that is not the other.
     pub fn blend(&self, mix: &[(BlendTheme, f64)]) -> Result<ThemeBlend, BlendError> {
-        let rows: Vec<(BlendTheme, GroupWeights)> =
-            mix.iter().map(|(theme, weight)| (*theme, uniform_weights(*weight))).collect();
-        self.blend_grouped(&rows)
-    }
-
-    /// Mix the themes of `mix` with a weight per theme per family of tokens:
-    /// the grounds from here, the corners from there.
-    ///
-    /// Each row is a theme and its [`GroupWeights`]. A token that has a
-    /// family ([`group_of`]) is mixed by that family's column and by nothing
-    /// else, `sum(w_ig * T_i) / sum(w_ig)` over the themes `i`, so a theme at
-    /// nought in a column adds nothing to that column's tokens however heavy
-    /// it is in the rest. Everything [`BlendCache::blend`] says of weights
-    /// holds column by column: they need not be normalised, a weight of
-    /// nought or less is out, and one theme alone in a column is that theme's
-    /// tokens exactly.
-    ///
-    /// What is not decided by a column is decided by the row as a whole, and
-    /// a row's weight as a whole is the mean of its entries
-    /// ([`mean_weight`]):
-    ///
-    /// * A token that blends and has no family -- a shadow, a duration, the
-    ///   translucent ladder -- is mixed by the themes' mean weights.
-    /// * The categorical palettes, and everything a blend cannot carry, come
-    ///   from the theme with the heaviest row, the first of them on a tie.
-    ///   The heaviest row is the largest total, and is found by the mean,
-    ///   which is the total over a constant and is exact where it matters.
-    /// * A theme is in the mix at all if any entry of its row is above
-    ///   nought. Only such a theme has to be resolved, and only such themes
-    ///   are held to one appearance; a matrix with nothing above nought
-    ///   anywhere is [`BlendError::NoWeight`].
-    ///
-    /// A column can be empty while the matrix is not: every Shape knob turned
-    /// to nought, say, with the mix still made of three themes everywhere
-    /// else. There is nothing in that column to divide by, and refusing the
-    /// whole mix over one family would make a knob at nought an error a panel
-    /// has to explain. So an empty column falls back to the mean weights:
-    /// with nobody chosen for the corners, the corners are the mix's. The
-    /// same fallback catches the narrower case of a column whose only
-    /// weighted themes do not carry the token -- a sheet's own key, and the
-    /// sheet at nought in that column. A blend has always given a token only
-    /// one ingredient carries to the mix whole, whatever that ingredient
-    /// weighs, and it still does.
-    ///
-    /// The roles are derived again from the blended tokens exactly as they
-    /// always were, after every column has been mixed and from whatever the
-    /// columns came to: a ground from one theme under an ink from another is
-    /// precisely the case the ink has to be asked again for.
-    ///
-    /// Rows at one weight throughout give the same [`ThemeBlend`], and so the
-    /// same script to the byte, as [`BlendCache::blend`] with those weights.
-    pub fn blend_grouped(&self, mix: &[(BlendTheme, GroupWeights)]) -> Result<ThemeBlend, BlendError> {
-        let mut parts: Vec<MixPart> = Vec::new();
-        for (theme, weights) in mix {
-            if !weights.iter().any(|w| *w > 0.0) {
+        let mut parts: Vec<(&ThemeValues, f64)> = Vec::new();
+        for (theme, weight) in mix {
+            if !(*weight > 0.0) {
                 continue;
             }
             let values = self.get(*theme).ok_or(BlendError::NotResolved(*theme))?;
-            parts.push(MixPart { values, overall: mean_weight(weights), weights: *weights });
+            parts.push((values, *weight));
         }
-        let Some(first) = parts.first().map(|part| part.values) else {
+        let Some((first, _)) = parts.first().copied() else {
             return Err(BlendError::NoWeight);
         };
         let appearance = first.theme.appearance();
-        for part in &parts {
-            if part.values.theme.appearance() != appearance {
-                return Err(BlendError::MixedAppearance(first.theme, part.values.theme));
+        for (values, _) in &parts {
+            if values.theme.appearance() != appearance {
+                return Err(BlendError::MixedAppearance(first.theme, values.theme));
             }
         }
         // The heaviest theme, and the FIRST of them on a tie, so that an even
         // mix does not change its mind about whose fonts it wears when the
         // list is rebuilt.
         let mut argmax = first;
-        let mut best = parts[0].overall;
-        for part in &parts[1..] {
-            if part.overall > best {
-                best = part.overall;
-                argmax = part.values;
+        let mut best = parts[0].1;
+        for (values, weight) in &parts[1..] {
+            if *weight > best {
+                best = *weight;
+                argmax = values;
             }
         }
         let mut keys: BTreeSet<&str> = BTreeSet::new();
-        for part in &parts {
-            keys.extend(part.values.keys());
+        for (values, _) in &parts {
+            keys.extend(values.keys());
         }
         let mut blended: BTreeMap<String, BlendValue> = BTreeMap::new();
         for key in keys {
@@ -2721,14 +2602,23 @@ impl BlendCache {
                 }
                 continue;
             }
-            // By the token's own column where it has one and the column has
-            // anything in it for this token; by the rows as a whole where
-            // not. Every part has a mean above nought, so the second asks
-            // every theme that carries the token, as a blend always has.
-            let value = group_of(key)
-                .and_then(|group| weighted_mean(&parts, key, |part| part.weights[group.index()]))
-                .or_else(|| weighted_mean(&parts, key, |part| part.overall));
-            if let Some(value) = value {
+            // A running weighted mean: each theme in turn, mixed in at its
+            // share of the weight so far. The first one lands whole, so one
+            // ingredient is itself and nothing is rounded on the way.
+            let mut acc: Option<BlendValue> = None;
+            let mut total = 0.0;
+            for (values, weight) in &parts {
+                let Some(value) = values.get(key) else {
+                    continue;
+                };
+                total += weight;
+                let t = weight / total;
+                acc = Some(match acc {
+                    None => value,
+                    Some(sofar) => blend_value(sofar, value, t),
+                });
+            }
+            if let Some(value) = acc {
                 blended.insert(key.to_string(), value);
             }
         }
@@ -2778,43 +2668,6 @@ impl BlendCache {
             overrides,
         })
     }
-}
-
-/// One theme taking part in a mix: its resolved tokens, its weight family by
-/// family, and its weight as a whole, which is the mean of those.
-struct MixPart<'a> {
-    values: &'a ThemeValues,
-    weights: GroupWeights,
-    overall: f64,
-}
-
-/// One token, mixed across the parts by whatever weight `weight` reads off
-/// each of them, and `None` where no part that carries the token has any.
-///
-/// A running weighted mean: each theme in turn, mixed in at its share of the
-/// weight so far. The first one lands whole, so one ingredient is itself and
-/// nothing is rounded on the way. A part at nought is passed over rather than
-/// mixed in at a share of nought -- the answer is the same, but the first
-/// share would be nought over nought.
-fn weighted_mean(parts: &[MixPart], key: &str, weight: impl Fn(&MixPart) -> f64) -> Option<BlendValue> {
-    let mut acc: Option<BlendValue> = None;
-    let mut total = 0.0;
-    for part in parts {
-        let weight = weight(part);
-        if !(weight > 0.0) {
-            continue;
-        }
-        let Some(value) = part.values.get(key) else {
-            continue;
-        };
-        total += weight;
-        let t = weight / total;
-        acc = Some(match acc {
-            None => value,
-            Some(sofar) => blend_value(sofar, value, t),
-        });
-    }
-    acc
 }
 
 /// Two values of one token, mixed by `t`.
@@ -4189,7 +4042,8 @@ mod equalizer_tests {
     /// ratio of their rounding errors: five of them got 4.75 and the sixth
     /// got -4.75, which a panel then drew as a slider at less than nothing.
     /// The total was right throughout, which is why a test of the total
-    /// never saw it. Found by the matrix, which makes ten times the moves.
+    /// never saw it. It takes a few hundred moves of a slider to land on,
+    /// which is what the loop below is for.
     #[test]
     fn a_spent_weight_is_nought_and_not_a_residue_to_be_shared_out() {
         let mut moves = 0;
@@ -4235,371 +4089,5 @@ mod equalizer_tests {
         let mut weights = to_relative(&[1.0, 3.1666666666666665, 0.7, 2.2], 0);
         relative_set(&mut weights, 0, 3, RELATIVE_TOTAL);
         assert_eq!(weights, vec![0.0, 0.0, 0.0, RELATIVE_TOTAL]);
-    }
-
-    // -- The matrix: a weight per theme per family of tokens. ---------------
-
-    /// A row with the named families at their own weights and every other
-    /// family at `rest`.
-    fn row(named: &[(MixGroup, f64)], rest: f64) -> GroupWeights {
-        let mut out = uniform_weights(rest);
-        for (group, weight) in named {
-            out[group.index()] = *weight;
-        }
-        out
-    }
-
-    /// The tokens the role derivation asks again once a mix is made, which
-    /// the check below leaves to the tests that are about roles.
-    fn is_asked_again(key: &str) -> bool {
-        DERIVED_ROLES.iter().any(|(role, _, _)| *role == key)
-            || key.starts_with("color_on_")
-    }
-
-    /// The equalizer's arithmetic as it stood before a weight was split by
-    /// family, written out a second time so that there is something for the
-    /// matrix to be held against that is not the matrix: one weight per
-    /// theme, the heaviest theme's palettes, and every other token a running
-    /// weighted mean. `BlendCache::blend` is made by the grouped blend now,
-    /// so comparing those two with each other would compare a thing with
-    /// itself.
-    fn one_weight_per_theme(cache: &BlendCache, mix: &[(BlendTheme, f64)]) -> BTreeMap<String, BlendValue> {
-        let parts: Vec<(&ThemeValues, f64)> =
-            mix.iter().filter(|(_, w)| *w > 0.0).map(|(t, w)| (cache.get(*t).unwrap(), *w)).collect();
-        let mut argmax = parts[0];
-        for part in &parts[1..] {
-            if part.1 > argmax.1 {
-                argmax = *part;
-            }
-        }
-        let keys: BTreeSet<&str> = parts.iter().flat_map(|(values, _)| values.keys()).collect();
-        let mut out = BTreeMap::new();
-        for key in keys {
-            if is_categorical(key) {
-                if let Some(value) = argmax.0.get(key) {
-                    out.insert(key.to_string(), value);
-                }
-                continue;
-            }
-            let mut acc: Option<BlendValue> = None;
-            let mut total = 0.0;
-            for (values, weight) in &parts {
-                let Some(value) = values.get(key) else { continue };
-                total += weight;
-                acc = Some(match acc {
-                    None => value,
-                    Some(sofar) => blend_value(sofar, value, weight / total),
-                });
-            }
-            if let Some(value) = acc {
-                out.insert(key.to_string(), value);
-            }
-        }
-        out
-    }
-
-    fn carried(blend: &ThemeBlend, key: &str) -> Option<BlendValue> {
-        match (blend.color(key), blend.num(key)) {
-            (Some(c), _) => Some(BlendValue::Color(c)),
-            (_, Some(n)) => Some(BlendValue::Num(n)),
-            _ => None,
-        }
-    }
-
-    /// The equalizer is the matrix with every family of a theme moved
-    /// together, so rows at one weight throughout have to give the
-    /// equalizer's answer to the byte: a panel that has never touched a
-    /// single knob must install exactly the script it installed before there
-    /// were knobs. Over the real themes, because that is where the numbers
-    /// are awkward, and over weights chosen to be: a tenth does not survive
-    /// being added up ten times and divided by ten, which is what a careless
-    /// mean of a uniform row does to it.
-    #[test]
-    fn a_matrix_of_whole_rows_is_the_equalizer_to_the_byte() {
-        let cache = resolved();
-        let mut tried = 0;
-        let mut compared = 0;
-        for appearance in Appearance::ALL {
-            let group = BlendTheme::group(appearance);
-            for seed in 0..24u64 {
-                let drawn = random_weights(seed, group.len());
-                let variants: [Vec<f64>; 4] = [
-                    drawn.clone(),
-                    to_relative(&drawn, 0),
-                    drawn.iter().enumerate().map(|(i, w)| if i % 2 == 0 { 0.0 } else { *w * 33.3 }).collect(),
-                    (0..group.len()).map(|i| if i == seed as usize % group.len() { 0.1 } else if i % 3 == 0 { 0.7 } else { 0.0 }).collect(),
-                ];
-                for weights in variants {
-                    let mix: Vec<(BlendTheme, f64)> = group.iter().copied().zip(weights.iter().copied()).collect();
-                    let rows: Vec<(BlendTheme, GroupWeights)> =
-                        mix.iter().map(|(theme, weight)| (*theme, uniform_weights(*weight))).collect();
-                    let whole = cache.blend(&mix).unwrap();
-                    let grouped = cache.blend_grouped(&rows).unwrap();
-                    assert_eq!(grouped, whole, "seed {seed}: {weights:?}");
-                    assert_eq!(grouped.script("equalized"), whole.script("equalized"), "seed {seed}: {weights:?}");
-                    // And both are what the equalizer has always answered.
-                    let want = one_weight_per_theme(cache, &mix);
-                    for (key, value) in &want {
-                        if is_asked_again(key) {
-                            continue;
-                        }
-                        assert_eq!(carried(&grouped, key), Some(*value), "{key}, seed {seed}: {weights:?}");
-                        compared += 1;
-                    }
-                    tried += 1;
-                }
-            }
-        }
-        assert!(tried >= 190 && compared > tried * 300, "{tried} mixes and {compared} tokens");
-    }
-
-    /// A uniform row's mean is the weight itself to the last bit, which is
-    /// what the byte-for-byte promise above stands on; any other row's is the
-    /// plain mean, and what is under nought counts as nought.
-    #[test]
-    fn the_mean_of_a_row_at_one_weight_is_that_weight_exactly() {
-        for weight in [0.1, 0.7, 33.3, 100.0 / 3.0, 1e-9, 1.0, 100.0, 0.0] {
-            assert_eq!(mean_weight(&uniform_weights(weight)), weight, "{weight}");
-        }
-        // The careless version really is wrong, or the care is for nothing.
-        let careless = uniform_weights(0.1).iter().sum::<f64>() / MixGroup::COUNT as f64;
-        assert_ne!(careless, 0.1);
-        assert_eq!(mean_weight(&[10.0, 20.0, 60.0]), 30.0);
-        assert_eq!(mean_weight(&row(&[(MixGroup::Backgrounds, 100.0)], 0.0)), 10.0);
-        assert_eq!(mean_weight(&[-5.0, 10.0]), 5.0, "under nought is nought");
-        assert_eq!(mean_weight(&[f64::NAN, 10.0]), 5.0, "and so is not a number");
-        assert_eq!(mean_weight(&[]), 0.0);
-    }
-
-    /// The whole point of the matrix: a token is mixed by its own family's
-    /// column and by nothing else. A theme at nought in a column adds nothing
-    /// to that column's tokens, however heavy it is everywhere else.
-    #[test]
-    fn a_token_is_mixed_by_its_own_column_and_no_other() {
-        let cache = bench();
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Backgrounds, 100.0), (MixGroup::Shape, 25.0)], 0.0)),
-            (CHARCOAL, row(&[(MixGroup::Backgrounds, 0.0), (MixGroup::Shape, 75.0)], 50.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        // Charcoal is the heavier theme by far and is at nought in the
-        // grounds, so the grounds are the other theme's to the bit.
-        assert_eq!(blend.argmax, CHARCOAL);
-        assert_eq!(blend.color("color_bg_app"), Some(0x101010FF));
-        assert_eq!(blend.color("color_fg_app"), Some(0x202020FF));
-        // And the other way about in every column the first theme is out of.
-        assert_eq!(blend.color("color_text"), Some(0xCCCCCCFF));
-        assert_eq!(blend.color("color_primary"), Some(0x39A5FFFF));
-        assert_eq!(blend.num("space_factor"), Some(10.0));
-        // A column with both in it is a mix by that column's two weights:
-        // one part to three, where the rows as a whole stand at 12.5 to 47.5.
-        assert_eq!(blend.num("radius_m"), Some(6.0 + (4.0 - 6.0) * 0.75));
-        // Two columns of one matrix, mixed two different ways at once.
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Backgrounds, 75.0), (MixGroup::Text, 25.0)], 50.0)),
-            (CHARCOAL, row(&[(MixGroup::Backgrounds, 25.0), (MixGroup::Text, 75.0)], 50.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        assert_eq!(blend.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.25)));
-        assert_eq!(blend.color("color_text"), Some(mix_rgb(0xEEEEEEFF, 0xCCCCCCFF, 0.75)));
-        assert_eq!(blend.num("radius_m"), Some(5.0));
-    }
-
-    /// A token that blends and has no family -- the translucent ladder, an
-    /// opacity -- is mixed by each theme's weight as a whole, which is the
-    /// mean of its row.
-    #[test]
-    fn a_token_with_no_group_is_mixed_by_the_mean_of_each_row() {
-        assert_eq!(group_of("color_u_3"), None, "the ladder has been given a family, so this test is about nothing");
-        assert_eq!(group_of("state_hover_opacity"), None);
-        let mut cache = BlendCache::new();
-        cache.insert(made_up(NEAR_BLACK, &[("color_u_3", 0x404040FF), ("color_bg_app", 0x101010FF)], &[("state_hover_opacity", 0.08)]));
-        cache.insert(made_up(CHARCOAL, &[("color_u_3", 0x606060FF), ("color_bg_app", 0x303030FF)], &[("state_hover_opacity", 0.16)]));
-        // One theme at a hundred in a single column is ten as a whole; the
-        // other at thirty throughout is thirty. One part to three.
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Backgrounds, 100.0)], 0.0)),
-            (CHARCOAL, uniform_weights(30.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        assert_eq!(blend.color("color_u_3"), Some(mix_rgb(0x404040FF, 0x606060FF, 0.75)));
-        assert_eq!(blend.num("state_hover_opacity"), Some(0.08 + (0.16 - 0.08) * 0.75));
-        // While the grounds, in the same mix, go by their own column: a
-        // hundred to thirty.
-        assert_eq!(blend.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 30.0 / 130.0)));
-        assert_ne!(blend.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.75)));
-    }
-
-    /// The palettes, and through the base object the fonts and the eases,
-    /// come from the theme that is heaviest AS A WHOLE: the largest row, not
-    /// the largest single knob. And a tie keeps the first, as it always has.
-    #[test]
-    fn the_heaviest_row_lends_the_palettes_whatever_one_knob_says() {
-        let cache = bench();
-        // One knob at a hundred is a row of a hundred. Twenty everywhere is
-        // a row of two hundred.
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Backgrounds, 100.0)], 0.0)),
-            (CHARCOAL, uniform_weights(20.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        assert_eq!(blend.argmax, CHARCOAL);
-        assert_eq!(blend.base, Scheme::Dark);
-        assert_eq!(blend.argmax_sheet(), Some((DesktopStyle::Omarchy, false)));
-        assert_eq!(blend.color("color_map_1"), Some(0x900000FF));
-        assert_eq!(blend.color("color_syntax_string"), Some(0x0000FFFF));
-        // Turned round, and the palettes turn with it.
-        let rows = [
-            (NEAR_BLACK, uniform_weights(20.0)),
-            (CHARCOAL, row(&[(MixGroup::Backgrounds, 100.0)], 0.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        assert_eq!(blend.argmax, NEAR_BLACK);
-        assert_eq!(blend.color("color_map_1"), Some(0x286CABFF));
-        // The same total spent in different columns is a tie, and a tie is
-        // the first theme's whichever order the knobs were turned in.
-        let one = row(&[(MixGroup::Backgrounds, 100.0), (MixGroup::Text, 0.0)], 50.0);
-        let other = row(&[(MixGroup::Backgrounds, 0.0), (MixGroup::Text, 100.0)], 50.0);
-        assert_eq!(cache.blend_grouped(&[(NEAR_BLACK, one), (CHARCOAL, other)]).unwrap().argmax, NEAR_BLACK);
-        assert_eq!(cache.blend_grouped(&[(CHARCOAL, one), (NEAR_BLACK, other)]).unwrap().argmax, CHARCOAL);
-    }
-
-    /// Every knob of one column at nought, with the mix alive everywhere
-    /// else, is a thing a person will do within a minute of being handed a
-    /// matrix. It is not an error and it is not a division by nought: the
-    /// column goes by the rows as a whole.
-    #[test]
-    fn an_empty_column_goes_by_the_mean_and_is_not_an_error() {
-        let cache = bench();
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Shape, 0.0)], 60.0)),
-            (CHARCOAL, row(&[(MixGroup::Shape, 0.0)], 20.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        // Fifty-four to eighteen as a whole: one part in four.
-        assert_eq!(blend.num("radius_m"), Some(6.0 + (4.0 - 6.0) * 0.25));
-        for (key, value) in &blend.overrides {
-            if let TokenValue::Num(n) = value {
-                assert!(n.is_finite(), "{key} came out {n}");
-            }
-        }
-        assert!(!blend.script("equalized").contains("NaN"));
-        // The narrower case of the same thing: the column is not empty, but
-        // the only theme with any weight in it does not carry the token. A
-        // token one ingredient alone carries has always reached the mix
-        // whole, and it still does.
-        let mut cache = bench();
-        cache.insert(made_up(
-            CHARCOAL,
-            &[("color_bg_app", 0x303030FF), ("color_terminal_bg", 0x123456FF)],
-            &[],
-        ));
-        assert_eq!(group_of("color_terminal_bg"), Some(MixGroup::Backgrounds));
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Backgrounds, 100.0)], 50.0)),
-            (CHARCOAL, row(&[(MixGroup::Backgrounds, 0.0)], 50.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        assert_eq!(blend.color("color_bg_app"), Some(0x101010FF), "the column decides where it can");
-        assert_eq!(blend.color("color_terminal_bg"), Some(0x123456FF), "and the token nobody in it carries is not lost");
-    }
-
-    /// The inks are asked again of a grouped mix exactly as they are of any
-    /// other, after every column has been mixed. Light and macOS each put a
-    /// readable ink on their success green and average into a mid grey that
-    /// stands at 1.04:1 on the averaged green; with the Accent column at
-    /// half and half and every other column somewhere else entirely, the ink
-    /// still comes back black -- and the surfaces a made-up theme does not
-    /// carry are still derived from the grounds its own column came to.
-    #[test]
-    fn the_roles_are_asked_again_of_a_grouped_mix() {
-        let cache = resolved();
-        let light = BlendTheme::Base(Scheme::Light);
-        let macos = BlendTheme::Sheet(DesktopStyle::Macos, false);
-        let rows = [
-            (light, row(&[(MixGroup::Accent, 50.0), (MixGroup::Backgrounds, 100.0)], 10.0)),
-            (macos, row(&[(MixGroup::Accent, 50.0), (MixGroup::Backgrounds, 0.0)], 90.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        let half = cache.blend(&[(light, 50.0), (macos, 50.0)]).unwrap();
-        assert_eq!(blend.color("color_success"), half.color("color_success"), "the Accent column is half and half");
-        assert_eq!(blend.color("color_on_success"), Some(0x000000FF), "the averaged ink was shipped as it fell");
-        assert_eq!(
-            blend.color("color_bg_app"),
-            cache.get(light).unwrap().color("color_bg_app"),
-            "while the grounds are one theme's alone"
-        );
-
-        let cache = bench();
-        let rows = [
-            (NEAR_BLACK, row(&[(MixGroup::Backgrounds, 100.0)], 0.0)),
-            (CHARCOAL, row(&[(MixGroup::Backgrounds, 0.0)], 40.0)),
-        ];
-        let blend = cache.blend_grouped(&rows).unwrap();
-        assert_eq!(blend.color("color_surface"), Some(0x101010FF), "the page is the ground the column chose");
-        assert_eq!(blend.color("color_surface_container"), Some(0x202020FF));
-        assert_eq!(blend.color("color_surface_container_low"), Some(mix_rgb(0x101010FF, 0x202020FF, 0.5)));
-        // The outline is read off the ladder, which has no family and went
-        // by the rows as a whole: ten to thirty-six.
-        assert_eq!(blend.color("color_outline"), blend.color("color_u_3"));
-        assert_eq!(blend.color("color_u_3"), Some(mix_rgba(0x404040FF, 0x606060FF, 36.0 / 46.0)));
-    }
-
-    /// What `blend` refuses, the matrix refuses, and it takes one knob to be
-    /// in a mix: a light theme with a single family above nought has crossed
-    /// the appearance, and a theme with every family at nought is not there.
-    #[test]
-    fn a_matrix_is_refused_where_a_mix_would_be() {
-        let cache = bench();
-        let light = BlendTheme::Base(Scheme::Light);
-        let nothing = uniform_weights(0.0);
-        assert_eq!(cache.blend_grouped(&[]), Err(BlendError::NoWeight));
-        assert_eq!(cache.blend_grouped(&[(NEAR_BLACK, nothing), (CHARCOAL, nothing)]), Err(BlendError::NoWeight));
-        assert_eq!(
-            cache.blend_grouped(&[(NEAR_BLACK, row(&[(MixGroup::Icons, -3.0), (MixGroup::Text, f64::NAN)], 0.0))]),
-            Err(BlendError::NoWeight),
-            "under nought and not a number are both nought"
-        );
-        assert_eq!(
-            cache.blend_grouped(&[(NEAR_BLACK, uniform_weights(50.0)), (light, row(&[(MixGroup::Shape, 1.0)], 0.0))]),
-            Err(BlendError::MixedAppearance(NEAR_BLACK, light))
-        );
-        assert!(cache.blend_grouped(&[(NEAR_BLACK, uniform_weights(50.0)), (light, nothing)]).is_ok());
-        let absent = BlendTheme::Sheet(DesktopStyle::NextStep, false);
-        assert_eq!(
-            cache.blend_grouped(&[(absent, row(&[(MixGroup::Shape, 1.0)], 0.0))]),
-            Err(BlendError::NotResolved(absent))
-        );
-        assert!(cache.blend_grouped(&[(NEAR_BLACK, uniform_weights(1.0)), (absent, nothing)]).is_ok());
-        // A weight under nought in one column is nought there and does not
-        // take from the rest of the row.
-        let blend = cache
-            .blend_grouped(&[
-                (NEAR_BLACK, uniform_weights(50.0)),
-                (CHARCOAL, row(&[(MixGroup::Backgrounds, -50.0)], 50.0)),
-            ])
-            .unwrap();
-        assert_eq!(blend.color("color_bg_app"), Some(0x101010FF));
-        assert_eq!(blend.num("radius_m"), Some(5.0));
-    }
-
-    /// Ten seeds from one, each a pure function of the matrix's seed and the
-    /// family's place, and none of them a window onto another's sequence.
-    #[test]
-    fn every_group_draws_from_a_seed_of_its_own() {
-        let mut seen = BTreeSet::new();
-        for group in 0..MixGroup::COUNT {
-            assert_eq!(group_seed(0x5EED, group), group_seed(0x5EED, group));
-            assert_ne!(group_seed(0x5EED, group), group_seed(0x5EED + 1, group));
-            assert!(seen.insert(group_seed(0x5EED, group)), "two families share a seed");
-        }
-        // Not a fixed step apart, which is the one spacing that would make
-        // every family's draw a shifted copy of its neighbour's.
-        let steps: BTreeSet<u64> =
-            (1..MixGroup::COUNT).map(|g| group_seed(7, g).wrapping_sub(group_seed(7, g - 1))).collect();
-        assert_eq!(steps.len(), MixGroup::COUNT - 1, "{steps:?}");
-        let curves: BTreeSet<String> =
-            (0..MixGroup::COUNT).map(|g| format!("{:?}", random_weights(group_seed(7, g), 7))).collect();
-        assert_eq!(curves.len(), MixGroup::COUNT, "two families drew the same curve");
     }
 }
