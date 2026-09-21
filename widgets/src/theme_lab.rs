@@ -52,6 +52,30 @@
 //! the tick after the reload, exactly as the panel landed them when the theme
 //! was picked. See `ThemeLab::install_entry`.
 //!
+//! # The matrix
+//!
+//! A weight per theme is the equalizer. Underneath it the lab keeps a weight
+//! per theme per FAMILY of tokens -- the grounds, the text, the fills, the
+//! corners, ten of them, see [`MixGroup`] -- so that a mix can take its
+//! grounds from one theme and its spacing from another. That is the matrix: a
+//! row per theme, a column per family, and a knob where they cross, read with
+//! [`ThemeLab::cell`] and moved with [`ThemeLab::set_cell`].
+//!
+//! There are not two mixes. The equalizer IS the matrix with every family of
+//! a theme moved together: [`ThemeLab::set_weight`] moves a whole row, and
+//! the weight a row reports is the mean of its ten knobs, which is the weight
+//! itself for as long as the row has only ever been moved whole. A panel that
+//! draws only sliders never learns the matrix is there, and installs to the
+//! byte what it installed before there was one; a panel that draws both can
+//! let somebody move a slider, then a knob, then the slider again, and each
+//! does what it says. [`ThemeLab::is_whole_row`] tells the two states of a
+//! row apart for a panel that wants to show which it is looking at.
+//!
+//! Everything that was true of the weights is true of the matrix: the mode
+//! holds column by column, reset and the dirty check and the applied snapshot
+//! cover every knob, and the readability reading is taken off the mix the
+//! whole matrix amounts to.
+//!
 //! # What the lab will not let a panel do
 //!
 //! Mix a dark theme with a light one. Half way between the two is a mid grey
@@ -72,7 +96,8 @@
 use crate::desktop_style::{self, DesktopStyle, StyleSheet};
 use crate::makepad_platform::{ScriptVm, ScriptVmCx};
 use crate::theme_tokens::{
-    held_pairs, random_weights, reads_on, set_weight, to_relative, Scheme, ThemeBlend,
+    group_seed, held_pairs, mean_weight, random_weights, reads_on, set_weight, to_relative,
+    uniform_weights, GroupWeights, Scheme, ThemeBlend,
 };
 use crate::BaseTheme;
 
@@ -80,7 +105,10 @@ use crate::BaseTheme;
 /// import from and never reaches past the lab for a type the lab handed it.
 /// [`BlendCache`] is here for the sake of a caller that cannot afford fifteen
 /// real theme resolutions -- see [`ThemeLab::with_cache`] -- and not because a
-/// panel has any business holding one.
+/// panel has any business holding one. [`MixGroup`] is the column of the
+/// matrix: what [`ThemeLab::cell`] and [`ThemeLab::set_cell`] are asked by,
+/// and where a column's header comes from.
+pub use crate::theme_groups::MixGroup;
 pub use crate::theme_tokens::{
     Appearance, BlendCache, BlendError, BlendTheme, WeightMode, RELATIVE_TOTAL,
 };
@@ -109,7 +137,12 @@ pub struct LabRow {
     /// The display name, as the theme itself gives it: `Dark`, `macOS dark`,
     /// `Windows 2000`.
     pub label: String,
-    /// Its weight, nought to `RELATIVE_TOTAL`.
+    /// Its weight, nought to `RELATIVE_TOTAL`: the mean of the row's ten
+    /// knobs. A row that has only ever been moved whole has all ten at one
+    /// weight, and then this is that weight to the last bit; a row with a
+    /// knob moved on its own reads somewhere between its lowest and its
+    /// highest, which is how much of the theme is in the mix as a whole. See
+    /// [`ThemeLab::cell`] for the knobs themselves.
     pub weight: f64,
 }
 
@@ -261,17 +294,22 @@ pub struct ThemeLab {
     entry: Option<Entry>,
     /// The group on show. A mix never crosses the two.
     appearance: Appearance,
-    /// One per theme of `appearance`, in the group's own order.
+    /// One per theme of `appearance`, in the group's own order. What a panel
+    /// reads; the weight on each is worked out from `cells` and never moved
+    /// on its own -- see `ThemeLab::settle_rows`.
     rows: Vec<LabRow>,
+    /// The matrix: for each row, its weight in each family of tokens. This
+    /// is the mix. A row moved whole has one weight ten times.
+    cells: Vec<GroupWeights>,
     /// The row the mix starts from, which relative mode takes from first: the
     /// entry theme where the group on show holds it, and otherwise the plain
     /// theme of the group, which is the first row of both groups.
     anchor: usize,
     mode: WeightMode,
-    /// The weights the last apply installed, so that a second apply over an
+    /// The matrix the last apply installed, so that a second apply over an
     /// untouched mix is nothing at all. `None` before the lab is entered, and
     /// again after [`ThemeLab::invalidate`].
-    applied: Option<(Appearance, Vec<f64>)>,
+    applied: Option<(Appearance, Vec<GroupWeights>)>,
     /// The blend those weights came to, kept from the apply that installed it.
     /// A panel reads a mix twice on the frame it goes in -- once to install it
     /// and once to measure it -- and the second read is the same arithmetic
@@ -295,6 +333,7 @@ impl Default for ThemeLab {
             entry: None,
             appearance: Appearance::Dark,
             rows: Vec::new(),
+            cells: Vec::new(),
             anchor: 0,
             mode: WeightMode::Absolute,
             applied: None,
@@ -331,10 +370,13 @@ impl ThemeLab {
     /// [`ThemeLab::leave`] has not.
     ///
     /// A closed lab is inert. It has no rows, so `set_weight` and
-    /// `clear_weight` find no index, `reset` and `randomize` have nothing to
-    /// write, `index_of` has no row to point at, and `readability` has no mix
-    /// to measure; `set_appearance` draws no group, and `apply` answers
-    /// [`Applied::Nothing`].
+    /// `clear_weight` find no index and `set_cell` and `clear_cell` no knob,
+    /// `reset`, `randomize` and `randomize_groups` have nothing to write,
+    /// `index_of` has no row to point at, every `cell` reads nought, and
+    /// `readability` has no mix to measure; `set_appearance` draws no group,
+    /// and `apply` answers [`Applied::Nothing`]. The one thing it does hand
+    /// out is the list of columns, [`ThemeLab::groups`], which is the
+    /// library's and not the mix's.
     ///
     /// The rows are part of that rather than an exception to it, which is
     /// worth saying because they look cheap enough to draw early. Entering
@@ -433,7 +475,7 @@ impl ThemeLab {
         self.entry = Some(Entry { base, sheet, theme, pinned });
         self.installed = false;
         self.show(theme.appearance());
-        self.applied = Some((self.appearance, self.weights()));
+        self.applied = Some((self.appearance, self.cells.clone()));
     }
 
     /// The group on show.
@@ -484,13 +526,21 @@ impl ThemeLab {
     /// once that is spent, from the rest in proportion to what each still
     /// holds.
     ///
+    /// This is the equalizer's move, and in the matrix it is a whole row:
+    /// every family of this theme goes to `weight` together, and every column
+    /// settles the others by the rule of the mode, each within itself. A
+    /// knob of this row that had been moved on its own is moved with the
+    /// rest -- the slider says how much of the theme there is, and after it
+    /// has been moved that is what every family of it says.
+    ///
     /// An index past the last row is ignored, and a closed lab has no rows at
     /// all, so this is silent before [`ThemeLab::enter`]. See
     /// [`ThemeLab::is_open`].
     pub fn set_weight(&mut self, index: usize, weight: f64) {
-        let mut weights = self.weights();
-        set_weight(self.mode, &mut weights, self.anchor, index, weight);
-        self.take_weights(weights);
+        for group in MixGroup::ALL {
+            self.move_cell(index, group, weight);
+        }
+        self.settle_rows();
     }
 
     /// Take a theme out of the mix. The gesture is clicking its name, which is
@@ -498,6 +548,67 @@ impl ThemeLab {
     /// not have to know that they are the same thing.
     pub fn clear_weight(&mut self, index: usize) {
         self.set_weight(index, 0.0);
+    }
+
+    /// The columns of the matrix, in the order a panel draws them, and the
+    /// same for every lab, open or closed: the families are the library's
+    /// and not the mix's. A header is [`MixGroup::label`], and the sentence
+    /// for its tooltip is [`MixGroup::describe`].
+    pub fn groups(&self) -> &'static [MixGroup] {
+        &MixGroup::ALL
+    }
+
+    /// The column headers and nothing else, for a panel that only wants to
+    /// write them: `group_labels()[i]` heads the column `groups()[i]`.
+    pub fn group_labels(&self) -> Vec<&'static str> {
+        MixGroup::ALL.iter().map(|group| group.label()).collect()
+    }
+
+    /// One knob: how much of the theme on `row` goes into the tokens of
+    /// `group`, nought to `RELATIVE_TOTAL`. Nought for a row past the last
+    /// one, so a closed lab reads nought everywhere.
+    pub fn cell(&self, row: usize, group: MixGroup) -> f64 {
+        self.cells.get(row).map(|cells| cells[group.index()]).unwrap_or(0.0)
+    }
+
+    /// Move one knob, and settle the rest of ITS COLUMN by the rule of the
+    /// mode. No other column is touched: what the other themes give to the
+    /// text is nothing to do with how much of this one went into the
+    /// corners.
+    ///
+    /// In [`WeightMode::Relative`] each column is its own budget of
+    /// `RELATIVE_TOTAL`, shared out among the themes, so raising this knob
+    /// takes from the same column of the theme the mix started from, and
+    /// then from the rest of the column in proportion.
+    ///
+    /// The row's own weight ([`LabRow::weight`]) follows, being the mean of
+    /// its knobs. A row past the last one is ignored, as
+    /// [`ThemeLab::set_weight`] ignores it.
+    pub fn set_cell(&mut self, row: usize, group: MixGroup, weight: f64) {
+        self.move_cell(row, group, weight);
+        self.settle_rows();
+    }
+
+    /// Take a theme out of one family of tokens: [`ThemeLab::set_cell`] to
+    /// nought, as [`ThemeLab::clear_weight`] is [`ThemeLab::set_weight`] to
+    /// nought, and for the same reason.
+    ///
+    /// A column with every knob at nought is allowed and is not an error:
+    /// those tokens go by the mix as a whole. See
+    /// [`BlendCache::blend_grouped`].
+    pub fn clear_cell(&mut self, row: usize, group: MixGroup) {
+        self.set_cell(row, group, 0.0);
+    }
+
+    /// Whether every knob of a row stands at one weight, which is to say
+    /// whether the row is still what a slider alone would have made it. A
+    /// panel drawing both can show a row that is not -- its slider is then
+    /// reading a mean, and moving it will gather the knobs back up. False for
+    /// a row past the last one.
+    pub fn is_whole_row(&self, row: usize) -> bool {
+        self.cells
+            .get(row)
+            .is_some_and(|cells| cells.iter().all(|weight| (weight - cells[0]).abs() < SAME_WEIGHT))
     }
 
     pub fn mode(&self) -> WeightMode {
@@ -511,14 +622,22 @@ impl ThemeLab {
     /// read as shares. Going absolute leaves them exactly as they are: a set
     /// of weights adding to a hundred is a perfectly good absolute mix, and
     /// re-scaling it would move a theme nobody touched.
+    ///
+    /// The total is a column's: each family of tokens is its own budget,
+    /// because each is its own mix. So going relative scales every column to
+    /// `RELATIVE_TOTAL` by itself, and a column with nothing in it at all
+    /// starts on the theme the mix started from, as an empty mix always has.
     pub fn set_mode(&mut self, mode: WeightMode) {
         if mode == self.mode {
             return;
         }
         self.mode = mode;
         if mode == WeightMode::Relative {
-            let weights = to_relative(&self.weights(), self.anchor);
-            self.take_weights(weights);
+            for group in MixGroup::ALL {
+                let weights = to_relative(&self.column(group), self.anchor);
+                self.take_column(group, weights);
+            }
+            self.settle_rows();
         }
     }
 
@@ -527,42 +646,73 @@ impl ThemeLab {
     /// same mix on every machine, which is what lets a panel offer the same
     /// surprise twice and a test pin one. A closed lab draws no weights,
     /// having nothing to draw them for.
+    ///
+    /// Whole rows: one draw, and every family of a theme at the weight it
+    /// drew. [`ThemeLab::randomize_groups`] is the one that draws per family.
     pub fn randomize(&mut self, seed: u64) {
         let drawn = random_weights(seed, self.rows.len());
         // The draw sums to one, and both modes want a slider's worth of
         // number; relative mode additionally requires the total, so scaling
         // to it is the one answer that serves both.
         let weights = to_relative(&drawn, self.anchor);
-        self.take_weights(weights);
+        for group in MixGroup::ALL {
+            self.take_column(group, weights.clone());
+        }
+        self.settle_rows();
     }
 
-    /// The entry theme at `RELATIVE_TOTAL` and everything else at nought.
+    /// A draw per family of tokens: the same bell curve over a shuffled
+    /// order as [`ThemeLab::randomize`], made once for each column, so the
+    /// grounds may come mostly from one theme and the corners mostly from
+    /// another.
+    ///
+    /// As pure and as seeded. Each column's seed is worked out from `seed`
+    /// and the column's place and from nothing else
+    /// ([`crate::theme_tokens::group_seed`]), so the same seed is the same
+    /// matrix, and a different one is ten different draws. Every column
+    /// comes out adding up to `RELATIVE_TOTAL`, which serves both modes for
+    /// the reason it does there.
+    pub fn randomize_groups(&mut self, seed: u64) {
+        for group in MixGroup::ALL {
+            let drawn = random_weights(group_seed(seed, group.index()), self.rows.len());
+            let weights = to_relative(&drawn, self.anchor);
+            self.take_column(group, weights);
+        }
+        self.settle_rows();
+    }
+
+    /// The entry theme at `RELATIVE_TOTAL` and everything else at nought, in
+    /// every family: the whole matrix back where entering left it.
     pub fn reset(&mut self) {
         let anchor = self.anchor;
-        for (index, row) in self.rows.iter_mut().enumerate() {
-            row.weight = if index == anchor { RELATIVE_TOTAL } else { 0.0 };
+        for (index, cells) in self.cells.iter_mut().enumerate() {
+            *cells = uniform_weights(if index == anchor { RELATIVE_TOTAL } else { 0.0 });
         }
+        self.settle_rows();
     }
 
     /// Whether [`ThemeLab::apply`] would change anything.
     ///
-    /// The weights against the weights that went in, and nothing else: the lab
+    /// The matrix against the matrix that went in, and nothing else: the lab
     /// holds no handle on the module it installed them into. Something else
     /// rebuilding that module leaves this answering `false` over a reading
     /// taken off a module that has gone -- the mix itself stands, because it
     /// is held on the Cx and emitted again by the very run that rebuilt
     /// everything else -- and that stale reading is what
     /// [`ThemeLab::invalidate`] is for.
+    ///
+    /// Every knob is compared and not the rows' weights: two knobs of one
+    /// row moved opposite ways leave its mean where it was and the mix
+    /// somewhere else.
     pub fn is_dirty(&self) -> bool {
-        let Some((appearance, weights)) = &self.applied else {
+        let Some((appearance, applied)) = &self.applied else {
             return true;
         };
         *appearance != self.appearance
-            || weights.len() != self.rows.len()
-            || weights
-                .iter()
-                .zip(self.rows.iter())
-                .any(|(was, row)| (was - row.weight).abs() >= SAME_WEIGHT)
+            || applied.len() != self.cells.len()
+            || applied.iter().zip(self.cells.iter()).any(|(was, now)| {
+                was.iter().zip(now.iter()).any(|(was, now)| (was - now).abs() >= SAME_WEIGHT)
+            })
     }
 
     /// Say that the module was rebuilt underneath the lab, so that the next
@@ -702,7 +852,7 @@ impl ThemeLab {
                 did = Applied::Entry;
             }
         } else {
-            let blend = self.cache.blend(&self.mix())?;
+            let blend = self.cache.blend_grouped(&self.mix())?;
             let code = Self::mix_script(&blend);
             // A mix that is already the one in force does not go in again.
             // The module can be rebuilt under the lab -- a style reload, a
@@ -720,7 +870,7 @@ impl ThemeLab {
             }
             blended = Some(blend);
         }
-        self.applied = Some((self.appearance, self.weights()));
+        self.applied = Some((self.appearance, self.cells.clone()));
         // Only the install path leaves a blend to measure; the entry theme
         // went on as itself and was never blended into anything.
         self.blended = blended;
@@ -749,6 +899,7 @@ impl ThemeLab {
         }
         self.installed = false;
         self.rows.clear();
+        self.cells.clear();
         self.applied = None;
         self.blended = None;
         self.anchor = 0;
@@ -768,7 +919,7 @@ impl ThemeLab {
             // does nothing -- so the weights not having moved is the whole of
             // what keeps the blend from the last apply true.
             Some(blend) if !self.is_dirty() => blend,
-            _ => match self.cache.blend(&self.mix()) {
+            _ => match self.cache.blend_grouped(&self.mix()) {
                 Ok(blend) => {
                     fresh = blend;
                     &fresh
@@ -817,30 +968,50 @@ impl ThemeLab {
         self.appearance = appearance;
         self.rows =
             group.into_iter().map(|theme| LabRow { label: theme.label(), weight: 0.0 }).collect();
+        self.cells = vec![uniform_weights(0.0); self.rows.len()];
         self.reset();
     }
 
-    /// The mix the rows on show amount to. The theme each row stands for is
-    /// held by position rather than on the row, so that a panel reading a row
-    /// cannot start mixing on its own.
-    fn mix(&self) -> Vec<(BlendTheme, f64)> {
-        BlendTheme::group(self.appearance)
-            .into_iter()
-            .zip(self.rows.iter().map(|row| row.weight))
-            .collect()
+    /// The mix the matrix on show amounts to. The theme each row stands for
+    /// is held by position rather than on the row, so that a panel reading a
+    /// row cannot start mixing on its own.
+    fn mix(&self) -> Vec<(BlendTheme, GroupWeights)> {
+        BlendTheme::group(self.appearance).into_iter().zip(self.cells.iter().copied()).collect()
     }
 
-    fn weights(&self) -> Vec<f64> {
-        self.rows.iter().map(|row| row.weight).collect()
+    /// One column of the matrix: every theme's weight in one family of
+    /// tokens, in row order. A column is what a mode is a rule about, so it
+    /// is what the engine's own `set_weight` and `to_relative` are handed.
+    fn column(&self, group: MixGroup) -> Vec<f64> {
+        self.cells.iter().map(|cells| cells[group.index()]).collect()
     }
 
-    fn take_weights(&mut self, weights: Vec<f64>) {
-        for (row, weight) in self.rows.iter_mut().zip(weights) {
-            row.weight = weight;
+    fn take_column(&mut self, group: MixGroup, weights: Vec<f64>) {
+        for (cells, weight) in self.cells.iter_mut().zip(weights) {
+            cells[group.index()] = weight;
         }
     }
 
-    /// Whether the mix on show is just the theme the lab was entered on.
+    /// One knob moved and its column settled by the rule of the mode, with
+    /// the rows' own weights left for the caller to settle once it has moved
+    /// everything it means to.
+    fn move_cell(&mut self, row: usize, group: MixGroup, weight: f64) {
+        let mut column = self.column(group);
+        set_weight(self.mode, &mut column, self.anchor, row, weight);
+        self.take_column(group, column);
+    }
+
+    /// Every row's weight read off its knobs again. The matrix is the state
+    /// and a row's weight is only ever a reading of it, so every call that
+    /// moves a knob ends here, and nothing writes a row's weight but this.
+    fn settle_rows(&mut self) {
+        for (row, cells) in self.rows.iter_mut().zip(self.cells.iter()) {
+            row.weight = mean_weight(cells);
+        }
+    }
+
+    /// Whether the mix on show is just the theme the lab was entered on: that
+    /// theme at the top in every family, and nothing else anywhere.
     fn is_entry_mix(&self) -> bool {
         let Some(entry) = self.entry.as_ref() else {
             return false;
@@ -849,9 +1020,9 @@ impl ThemeLab {
             return false;
         }
         let group = BlendTheme::group(self.appearance);
-        self.rows.iter().enumerate().all(|(index, row)| {
+        self.cells.iter().enumerate().all(|(index, cells)| {
             let want = if group[index] == entry.theme { RELATIVE_TOTAL } else { 0.0 };
-            (row.weight - want).abs() < SAME_WEIGHT
+            cells.iter().all(|weight| (weight - want).abs() < SAME_WEIGHT)
         })
     }
 
@@ -1795,9 +1966,400 @@ mod theme_lab_tests {
         });
     }
 
+    // -- The matrix. -------------------------------------------------------
+
+    /// Every knob of a lab, row by row, for comparing two labs whole.
+    fn matrix(lab: &ThemeLab) -> Vec<Vec<f64>> {
+        (0..lab.rows().len())
+            .map(|row| lab.groups().iter().map(|group| lab.cell(row, *group)).collect())
+            .collect()
+    }
+
+    fn column_total(lab: &ThemeLab, group: MixGroup) -> f64 {
+        (0..lab.rows().len()).map(|row| lab.cell(row, group)).sum()
+    }
+
+    /// The equalizer is the matrix with every family of a theme moved
+    /// together, so a lab driven by its sliders alone has to be, move for
+    /// move, the lab there was before it had a matrix in it: the same number
+    /// on every row, and the same script installed to the byte.
+    ///
+    /// What it is held against is the old lab's own arithmetic -- one plain
+    /// list of weights, moved by the engine's `set_weight` and scaled by its
+    /// `to_relative` -- replayed beside it, because the lab's new code cannot
+    /// vouch for itself. The weights are awkward on purpose: a tenth is the
+    /// number a careless mean of ten equal knobs gets wrong.
+    #[test]
+    fn a_lab_moved_by_whole_rows_is_the_equalizer_to_the_byte() {
+        for mode in [WeightMode::Absolute, WeightMode::Relative] {
+            let mut lab = ThemeLab::new();
+            lab.cache = bench();
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                desktop_style::uninstall(vm);
+                lab.enter(vm);
+                let anchor = lab.anchor;
+                let count = lab.rows().len();
+                let mut plain: Vec<f64> = lab.rows().iter().map(|row| row.weight).collect();
+                lab.set_mode(mode);
+                if mode == WeightMode::Relative {
+                    plain = to_relative(&plain, anchor);
+                }
+                let mut installs = 0;
+                for step in 0..60u64 {
+                    match step % 20 {
+                        7 => {
+                            lab.randomize(step);
+                            plain = to_relative(&random_weights(step, count), anchor);
+                        }
+                        13 => {
+                            lab.clear_weight(step as usize % count);
+                            set_weight(mode, &mut plain, anchor, step as usize % count, 0.0);
+                        }
+                        _ => {
+                            let index = (step as usize * 5) % count;
+                            let value = [0.1, 33.3, 70.0, 100.0 / 3.0, 12.5][step as usize % 5];
+                            lab.set_weight(index, value);
+                            set_weight(mode, &mut plain, anchor, index, value);
+                        }
+                    }
+                    let shown: Vec<f64> = lab.rows().iter().map(|row| row.weight).collect();
+                    assert_eq!(shown, plain, "{mode:?} step {step}: the rows are not the equalizer's");
+                    assert!((0..count).all(|row| lab.is_whole_row(row)), "{mode:?} step {step}");
+                    if plain.iter().all(|w| *w <= 0.0) {
+                        continue;
+                    }
+                    let mix: Vec<(BlendTheme, f64)> =
+                        BlendTheme::group(lab.appearance()).into_iter().zip(plain.iter().copied()).collect();
+                    let want = lab.cache.blend(&mix).unwrap().script(MIX_NAME);
+                    if lab.apply(vm).unwrap() == Applied::Mix {
+                        installs += 1;
+                        assert_eq!(
+                            crate::theme_mix(vm.cx_mut()).as_deref(),
+                            Some(want.as_str()),
+                            "{mode:?} step {step}: the script installed is not the equalizer's"
+                        );
+                        the_reload_lands(vm);
+                    }
+                }
+                assert!(installs > 40, "{mode:?}: only {installs} mixes went in, so little was compared");
+            });
+        }
+    }
+
+    /// One knob is one theme's weight in one family of tokens. Moving it
+    /// moves that and nothing else: not the rest of its row, and -- in
+    /// absolute mode -- not the rest of its column either. The row's own
+    /// weight follows as the mean of its knobs, and the slider gathers them
+    /// back up.
+    #[test]
+    fn a_knob_moves_its_own_cell_and_the_row_reads_the_mean() {
+        let mut lab = entered();
+        lab.set_mode(WeightMode::Absolute);
+        let dark = lab.index_of(DARK).unwrap();
+        let omarchy = lab.index_of(OMARCHY).unwrap();
+        let before = matrix(&lab);
+        assert!(lab.is_whole_row(omarchy));
+        lab.set_cell(omarchy, MixGroup::Shape, 40.0);
+        assert_eq!(lab.cell(omarchy, MixGroup::Shape), 40.0);
+        let mut want = before.clone();
+        want[omarchy][MixGroup::Shape.index()] = 40.0;
+        assert_eq!(matrix(&lab), want, "a knob moved something that was not itself");
+        assert_eq!(lab.rows()[omarchy].weight, 4.0, "forty in one family of ten");
+        assert_eq!(lab.rows()[dark].weight, RELATIVE_TOTAL, "and the row nobody touched has not moved");
+        assert!(!lab.is_whole_row(omarchy) && lab.is_whole_row(dark));
+        assert!(lab.is_dirty(), "a knob moved is a mix that has changed");
+
+        // Clicking a knob's header takes the theme out of that family.
+        lab.clear_cell(omarchy, MixGroup::Shape);
+        assert_eq!(matrix(&lab), before);
+        assert!(!lab.is_dirty(), "and put back, it is the mix that went in");
+
+        // The slider is the whole row, whatever the knobs were doing.
+        lab.set_cell(omarchy, MixGroup::Text, 80.0);
+        lab.set_weight(omarchy, 30.0);
+        assert!(lab.groups().iter().all(|group| lab.cell(omarchy, *group) == 30.0));
+        assert_eq!(lab.rows()[omarchy].weight, 30.0);
+        assert!(lab.is_whole_row(omarchy));
+
+        // Nothing is under nought, and a row that is not there is not moved
+        // and reads nought.
+        lab.set_cell(omarchy, MixGroup::Icons, -5.0);
+        assert_eq!(lab.cell(omarchy, MixGroup::Icons), 0.0);
+        let settled = matrix(&lab);
+        lab.set_cell(99, MixGroup::Icons, 50.0);
+        lab.clear_cell(99, MixGroup::Icons);
+        assert_eq!(matrix(&lab), settled);
+        assert_eq!(lab.cell(99, MixGroup::Icons), 0.0);
+        assert!(!lab.is_whole_row(99));
+    }
+
+    /// A panel draws its headers from the lab and indexes its knobs by them,
+    /// open or closed: the families are the library's and not the mix's.
+    #[test]
+    fn the_columns_are_there_to_draw_before_the_lab_is_open() {
+        let lab = ThemeLab::new();
+        assert!(!lab.is_open());
+        assert_eq!(lab.groups().len(), 10);
+        assert_eq!(
+            lab.group_labels(),
+            vec!["Backgrounds", "Text", "Labels", "Icons", "Accent", "Outset", "Inset", "Bevels", "Spacing", "Shape"]
+        );
+        for (at, group) in lab.groups().iter().enumerate() {
+            assert_eq!(group.index(), at);
+            assert_eq!(lab.group_labels()[at], group.label());
+        }
+        // And a closed lab has no knobs to go with them: every one reads
+        // nought and none of them moves.
+        let mut lab = lab;
+        lab.set_cell(0, MixGroup::Text, 50.0);
+        lab.randomize_groups(0x5EED);
+        assert!(lab.rows().is_empty() && matrix(&lab).is_empty());
+        assert_eq!(lab.cell(0, MixGroup::Text), 0.0);
+    }
+
+    /// A knob moved reaches the app, and reaches only its own family there:
+    /// with Omarchy turned up in Shape alone, the corners on screen are half
+    /// way between the two themes and the ground is still the dark theme's
+    /// to the bit, because Omarchy is at nought in the grounds however much
+    /// of it went into the corners.
+    #[test]
+    fn a_knob_reaches_the_app_and_only_in_its_own_group() {
+        let mut lab = ThemeLab::new();
+        lab.cache = bench();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            desktop_style::uninstall(vm);
+            lab.enter(vm);
+            lab.set_mode(WeightMode::Absolute);
+            let omarchy = lab.index_of(OMARCHY).unwrap();
+            lab.set_cell(omarchy, MixGroup::Shape, RELATIVE_TOTAL);
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix, "one knob off the entry theme is a mix");
+            assert!(!lab.is_dirty());
+            the_reload_lands(vm);
+            let (dark, other) = (lab.cache.get(DARK).unwrap().clone(), lab.cache.get(OMARCHY).unwrap().clone());
+            assert_ne!(dark.color("color_bg_app"), other.color("color_bg_app"));
+            assert_eq!(read_theme(vm, "color_bg_app"), dark.color("color_bg_app"), "the ground moved with the corners");
+            assert_eq!(read_widget_theme(vm, "color_bg_app"), dark.color("color_bg_app"));
+            let midway = (dark.num("radius_m").unwrap() + other.num("radius_m").unwrap()) / 2.0;
+            assert_ne!(Some(midway), dark.num("radius_m"));
+            assert_eq!(read_theme_number(vm, "radius_m"), Some(midway), "the corners did not move");
+
+            // The other way about: the grounds alone, and the corners stay.
+            lab.clear_cell(omarchy, MixGroup::Shape);
+            lab.set_cell(omarchy, MixGroup::Backgrounds, RELATIVE_TOTAL);
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
+            let ground = mix_rgb(dark.color("color_bg_app").unwrap(), other.color("color_bg_app").unwrap(), 0.5);
+            assert_eq!(read_theme(vm, "color_bg_app"), Some(ground));
+            assert_eq!(read_theme_number(vm, "radius_m"), dark.num("radius_m"));
+
+            // And the last knob put back is the entry theme again, which
+            // goes on as itself.
+            lab.clear_cell(omarchy, MixGroup::Backgrounds);
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Entry);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:?}");
+        });
+    }
+
+    /// A relative mix is a hundred parts shared out, and in the matrix each
+    /// family of tokens is a mix of its own: every column holds a hundred
+    /// through any move of a knob or a slider, and a knob takes from its own
+    /// column and leaves the other nine alone.
+    #[test]
+    fn a_relative_matrix_holds_a_hundred_in_every_column() {
+        let mut lab = entered();
+        // Going relative converts every column by itself, an empty one
+        // included: that one starts on the theme the mix started from.
+        lab.set_mode(WeightMode::Absolute);
+        let anchor = lab.anchor;
+        let other = (anchor + 1) % lab.rows().len();
+        lab.set_cell(other, MixGroup::Text, 300.0);
+        lab.set_cell(other, MixGroup::Shape, 50.0);
+        for row in 0..lab.rows().len() {
+            lab.clear_cell(row, MixGroup::Icons);
+        }
+        lab.set_mode(WeightMode::Relative);
+        for group in MixGroup::ALL {
+            let total = column_total(&lab, group);
+            assert!((total - RELATIVE_TOTAL).abs() < 1e-9, "{group:?} came over as {total}");
+        }
+        assert_eq!(lab.cell(other, MixGroup::Text), 75.0, "three hundred to one hundred is three parts in four");
+        assert_eq!(lab.cell(anchor, MixGroup::Text), 25.0);
+        assert_eq!(lab.cell(anchor, MixGroup::Icons), RELATIVE_TOTAL, "the empty column starts on the anchor");
+        assert_eq!(lab.cell(other, MixGroup::Labels), 0.0, "a column nobody touched is as it was");
+
+        // A knob takes from the anchor of ITS column and from no other.
+        let before = matrix(&lab);
+        lab.set_cell(other, MixGroup::Outset, 40.0);
+        assert_eq!(lab.cell(other, MixGroup::Outset), 40.0);
+        assert_eq!(lab.cell(anchor, MixGroup::Outset), 60.0);
+        for group in MixGroup::ALL.into_iter().filter(|group| *group != MixGroup::Outset) {
+            for row in 0..lab.rows().len() {
+                assert_eq!(lab.cell(row, group), before[row][group.index()], "{group:?} moved with Outset");
+            }
+        }
+
+        // And it holds through anything.
+        for step in 0..300u64 {
+            let row = (step as usize * 7) % lab.rows().len();
+            let value = ((step * 37) % 130) as f64;
+            match step % 3 {
+                0 => lab.set_weight(row, value),
+                _ => lab.set_cell(row, MixGroup::ALL[(step as usize * 3) % MixGroup::COUNT], value),
+            }
+            for group in MixGroup::ALL {
+                let total = column_total(&lab, group);
+                assert!((total - RELATIVE_TOTAL).abs() < 1e-9, "step {step} left {group:?} at {total}");
+            }
+            // Exactly, and not to a tolerance: this is the loop that found a
+            // knob at -4.75 in a column that added up to a hundred. See
+            // `a_spent_weight_is_nought_and_not_a_residue_to_be_shared_out`.
+            assert!(matrix(&lab).iter().flatten().all(|w| *w >= 0.0), "step {step} went under nought: {:?}", matrix(&lab));
+            assert!(matrix(&lab).iter().flatten().all(|w| *w <= RELATIVE_TOTAL + 1e-9), "step {step} went over the budget");
+            for (row, shown) in lab.rows().iter().enumerate() {
+                let mean = matrix(&lab)[row].iter().sum::<f64>() / MixGroup::COUNT as f64;
+                assert!((shown.weight - mean).abs() < 1e-9, "step {step}: row {row} reads {} over {mean}", shown.weight);
+            }
+        }
+    }
+
+    /// The same seed is the same matrix, here and on any other machine, and
+    /// it is a matrix: each family drew for itself, so the columns differ
+    /// from one another where `randomize` makes them all alike.
+    #[test]
+    fn the_same_seed_is_the_same_matrix() {
+        for mode in [WeightMode::Absolute, WeightMode::Relative] {
+            let mut first = entered();
+            let mut second = entered();
+            first.set_mode(mode);
+            second.set_mode(mode);
+            first.randomize_groups(0x5EED);
+            second.randomize_groups(0x5EED);
+            assert_eq!(matrix(&first), matrix(&second), "{mode:?}");
+            assert_eq!(first.rows(), second.rows(), "{mode:?}");
+            for group in MixGroup::ALL {
+                let total = column_total(&first, group);
+                assert!((total - RELATIVE_TOTAL).abs() < 1e-9, "{mode:?}: {group:?} summed to {total}");
+            }
+            assert!(matrix(&first).iter().flatten().all(|w| *w > 0.0), "{mode:?} dropped a theme from a family");
+            // Ten draws and not one draw ten times.
+            let columns: std::collections::BTreeSet<String> = MixGroup::ALL
+                .iter()
+                .map(|group| format!("{:?}", (0..first.rows().len()).map(|row| first.cell(row, *group)).collect::<Vec<_>>()))
+                .collect();
+            assert_eq!(columns.len(), MixGroup::COUNT, "{mode:?}: two families drew the same weights");
+            assert!((0..first.rows().len()).any(|row| !first.is_whole_row(row)), "{mode:?}");
+            // Each column's draw is its own seed's, and nothing else's.
+            for group in MixGroup::ALL {
+                let drawn = to_relative(&random_weights(group_seed(0x5EED, group.index()), first.rows().len()), first.anchor);
+                let column: Vec<f64> = (0..first.rows().len()).map(|row| first.cell(row, group)).collect();
+                assert_eq!(column, drawn, "{mode:?}: {group:?}");
+            }
+            let mut other = entered();
+            other.set_mode(mode);
+            other.randomize_groups(0x5EED + 1);
+            assert_ne!(matrix(&other), matrix(&first), "{mode:?} gives one matrix whatever the seed");
+            // While the older call still draws whole rows.
+            first.randomize(0x5EED);
+            assert!((0..first.rows().len()).all(|row| first.is_whole_row(row)), "{mode:?}");
+        }
+    }
+
+    /// Two knobs of one row moved opposite ways leave the row's weight where
+    /// it was and the mix somewhere else, so what is compared with what went
+    /// in is every knob and not the rows. The same goes for the question of
+    /// whether the mix is just the entry theme, for the snapshot an apply
+    /// takes, for a reset, and for an invalidation.
+    #[test]
+    fn the_dirty_check_and_the_snapshot_cover_every_knob() {
+        let mut lab = ThemeLab::new();
+        lab.cache = bench();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            desktop_style::uninstall(vm);
+            lab.enter(vm);
+            lab.set_mode(WeightMode::Absolute);
+            let dark = lab.index_of(DARK).unwrap();
+            let omarchy = lab.index_of(OMARCHY).unwrap();
+            lab.set_cell(dark, MixGroup::Shape, RELATIVE_TOTAL - 10.0);
+            lab.set_cell(dark, MixGroup::Text, RELATIVE_TOTAL + 10.0);
+            let weights: Vec<f64> = lab.rows().iter().map(|row| row.weight).collect();
+            assert_eq!(weights[dark], RELATIVE_TOTAL, "the row reads what it read before");
+            assert!(weights.iter().enumerate().all(|(i, w)| i == dark || *w == 0.0));
+            assert!(lab.is_dirty(), "two knobs moved and the lab sees no change");
+            assert!(!lab.is_entry_mix(), "a row that only averages a hundred is not the entry theme");
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
+            assert!(!lab.is_dirty(), "the snapshot is not the matrix that went in");
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Nothing, "a settled matrix went in a second time");
+
+            // One knob, and it is owed an apply again; back, and it is not.
+            lab.set_cell(omarchy, MixGroup::Bevels, 5.0);
+            assert!(lab.is_dirty());
+            lab.clear_cell(omarchy, MixGroup::Bevels);
+            assert!(!lab.is_dirty());
+
+            // Being told about a rebuild costs a blend and not an install,
+            // for a matrix as for a mix.
+            lab.invalidate();
+            assert!(lab.is_dirty());
+            let rebuilds = lab.rebuilds();
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Nothing);
+            assert_eq!(lab.rebuilds(), rebuilds);
+
+            // Reset is the whole matrix, not the rows' means.
+            lab.set_cell(omarchy, MixGroup::Icons, 60.0);
+            lab.reset();
+            for (row, _) in lab.rows().iter().enumerate() {
+                let want = if row == dark { RELATIVE_TOTAL } else { 0.0 };
+                assert!(lab.groups().iter().all(|group| lab.cell(row, *group) == want), "row {row} was not reset");
+            }
+            assert!(lab.is_entry_mix());
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Entry);
+        });
+    }
+
+    /// The reading is taken off the mix the whole matrix amounts to. A theme
+    /// whose inks do not stand off its grounds, turned up in the corners
+    /// alone, spoils nothing; the same theme given the grounds does, and the
+    /// lab says so before anything is installed.
+    #[test]
+    fn the_reading_is_of_the_matrix_and_not_of_the_rows() {
+        let mut lab = entered();
+        lab.cache.insert(unreadable(OMARCHY));
+        lab.set_mode(WeightMode::Absolute);
+        let dark = lab.index_of(DARK).unwrap();
+        let omarchy = lab.index_of(OMARCHY).unwrap();
+        lab.set_cell(omarchy, MixGroup::Shape, RELATIVE_TOTAL);
+        let reading = lab.readability();
+        assert!(reading.holds(), "the corners of an unreadable theme are not unreadable: {reading:?}");
+        lab.clear_cell(omarchy, MixGroup::Shape);
+        lab.set_cell(omarchy, MixGroup::Backgrounds, RELATIVE_TOTAL);
+        lab.clear_cell(dark, MixGroup::Backgrounds);
+        assert_eq!(lab.rows()[dark].weight, 90.0, "the dark theme is still nine tenths of the mix as a whole");
+        let reading = lab.readability();
+        assert!(reading.measured > 0 && !reading.holds(), "{reading:?}");
+        assert!(
+            reading.failures[0].starts_with("color_on_surface_variant on color_surface_container_highest"),
+            "{:?}",
+            reading.failures
+        );
+    }
+
     fn read_theme(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let theme = vm.module(LiveId::from_str("theme"));
         vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+    }
+
+    fn read_theme_number(vm: &mut ScriptVm, key: &str) -> Option<f64> {
+        let theme = vm.module(LiveId::from_str("theme"));
+        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_number()
     }
 
     /// The theme object the widget module was handed, which is what every
