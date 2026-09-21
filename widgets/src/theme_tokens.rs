@@ -33,6 +33,13 @@
 //! light and are not generated into the files; the generator still produces
 //! those two bases so an override path can use them.
 //!
+//! Those numbers are the house's and not the rule's. `RoleTuning` carries the
+//! brand saturation and both schemes' lightness targets, `Harmony` carries
+//! the two rotations, and `SeedColors::neutral` says how far the grounds lean
+//! toward a colour (`ground_tint`). `roles_from_seed` is the rule at the house
+//! values of all of them, which is what the theme files hold; a theme built
+//! from somebody's favourite colour goes through `roles_from_seed_tuned`.
+//!
 //! The generator is a trait (`RoleGenerator`) so a colour-science generator
 //! can replace `BuiltinRoles` later without any caller changing.
 //!
@@ -41,7 +48,9 @@
 //! points `mod.theme` at it; `theme_source_with_globals` and
 //! `export_theme_source` produce whole theme files. Never assign into
 //! `mod.theme.x` directly: `mod.theme` is the shared base object, and such a
-//! write mutates it for every widget that was built from it.
+//! write mutates it for every widget that was built from it. A style sheet is
+//! the one thing that does, and `export_sheet_source`, which writes one, says
+//! what makes it the exception.
 
 use crate::desktop_style::DesktopStyle;
 use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm, ScriptVmCx};
@@ -372,8 +381,91 @@ pub fn token_spec(name: &str) -> Option<&'static TokenSpec> {
     THEME_TOKENS.iter().find(|t| t.name == name)
 }
 
+/// How the secondary and tertiary families stand to the primary on the hue
+/// circle: two offsets in degrees, and nothing else.
+///
+/// A harmony is not a second rule. The rule takes one hue per family and
+/// brings its own saturation and lightness, so a colour scheme out of a book
+/// comes down to where the other two hues sit, and the families that come out
+/// are as readable as the house ones because they ARE the house ones, turned.
+///
+/// There is no tetradic. Four hues want four brand families and `ColorRoles`
+/// has three; a tetrad with one corner left out is a split scheme that does
+/// not say so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Harmony {
+    /// The library's own: the secondary a step round from the primary and the
+    /// tertiary most of the way across, +30 and -150. It is a neighbour and a
+    /// near opposite, which is no scheme a book names, and it is the default
+    /// because it is what every theme file was generated with.
+    #[default]
+    House,
+    /// One hue for all three. The families still differ, by the share of the
+    /// saturation each keeps.
+    Single,
+    /// A neighbour on either side: +30 and -30.
+    Analogous,
+    /// The opposite hue, +180, for the tertiary, which is the family a theme
+    /// uses for contrast. The secondary stays on the primary's hue: a
+    /// complementary scheme has two hues in it, and the quieter accent is a
+    /// quieter version of the first rather than a third colour from nowhere.
+    Complementary,
+    /// Either side of the opposite: +150 and -150.
+    Split,
+    /// Three hues evenly round the circle: +120 and -120.
+    Triadic,
+}
+
+impl Harmony {
+    pub const ALL: [Harmony; 6] = [
+        Harmony::House,
+        Harmony::Single,
+        Harmony::Analogous,
+        Harmony::Complementary,
+        Harmony::Split,
+        Harmony::Triadic,
+    ];
+
+    /// What a picker shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Harmony::House => "House",
+            Harmony::Single => "Single hue",
+            Harmony::Analogous => "Analogous",
+            Harmony::Complementary => "Complementary",
+            Harmony::Split => "Split",
+            Harmony::Triadic => "Triadic",
+        }
+    }
+
+    /// How far the secondary and the tertiary hue sit from the primary, in
+    /// degrees. Either may leave 0..360; `hsl_to_rgb` wraps it.
+    pub fn offsets(self) -> (f64, f64) {
+        match self {
+            Harmony::House => (30.0, -150.0),
+            Harmony::Single => (0.0, 0.0),
+            Harmony::Analogous => (30.0, -30.0),
+            Harmony::Complementary => (0.0, 180.0),
+            Harmony::Split => (150.0, -150.0),
+            Harmony::Triadic => (120.0, -120.0),
+        }
+    }
+}
+
 /// The colours a palette is grown from. Only `primary` is required; every
 /// other seed defaults to a rotation of it or a fixed intent hue.
+///
+/// `harmony` says which rotation. It is a field and not a pair of seed
+/// colours worked out ahead of time, because a colour cannot carry a hue
+/// exactly: eight bits a channel put the nearest colour to a hue up to an
+/// eighth of a degree off it, and a triad that is 119.9 degrees on one side
+/// is a different palette from the one that was asked for, by a step on some
+/// channel somewhere. A seed named outright still wins over the harmony, as
+/// it won over the fixed rotation before there was a choice.
+///
+/// `neutral` is what the grounds lean toward, and it says how far by how much
+/// colour it has in it: a grey, or none, leaves the page as the theme file
+/// has it. See `ground_tint`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeedColors {
     pub primary: u32,
@@ -381,6 +473,7 @@ pub struct SeedColors {
     pub tertiary: Option<u32>,
     pub neutral: Option<u32>,
     pub error: Option<u32>,
+    pub harmony: Harmony,
 }
 
 impl SeedColors {
@@ -391,7 +484,23 @@ impl SeedColors {
         tertiary: None,
         neutral: None,
         error: None,
+        harmony: Harmony::House,
     };
+
+    /// A seed from the one colour somebody likes and the scheme the other two
+    /// families are to stand to it in. The alpha is dropped: a seed is read
+    /// for its hue, and a role is drawn solid.
+    ///
+    /// The house colour in the house harmony is `HOUSE`, field for field, so
+    /// a builder that starts there starts on the theme the library ships.
+    pub fn from_favourite(favourite: u32, harmony: Harmony) -> SeedColors {
+        SeedColors { primary: favourite | 0xFF, harmony, ..SeedColors::HOUSE }
+    }
+
+    /// The same seed with its grounds leaning toward `neutral`.
+    pub fn with_neutral(self, neutral: Option<u32>) -> SeedColors {
+        SeedColors { neutral, ..self }
+    }
 }
 
 /// One accent family: the colour, what is drawn on it, its container tint
@@ -531,7 +640,112 @@ struct FamilyInput {
     intent: bool,
 }
 
-fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
+/// The lightness a scheme draws a family at: its base, its container, and
+/// the ink the rule reaches for first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FamilyTargets {
+    pub base: f64,
+    pub container: f64,
+    pub ink: f64,
+}
+
+/// The numbers the rule is run with, which were constants in it until
+/// somebody wanted a palette that was not the house one.
+///
+/// Three of them. `brand` is how much colour the primary family carries; the
+/// secondary keeps 55 percent of it and the tertiary 80, as they always did.
+/// `light` and `dark` are where each scheme puts a family's base, its
+/// container and its ink on the lightness axis. A scheme needs the other
+/// one's numbers too and not only its own: `color_inverse_primary` is the
+/// other scheme's base, and the pale colour the dark rule draws on a
+/// container is the light rule's container.
+///
+/// None of them can make a family unreadable, whatever they are set to. The
+/// rule never trusts its own targets for what is drawn ON a colour: every ink
+/// goes through `readable_on`, which keeps the choice where it reads and
+/// falls to black or white where it does not, and one of those two clears
+/// 4.5:1 on any ground there is. So a tuning moves how a palette LOOKS and is
+/// free to be wrong about it.
+///
+/// The skeleton takes none of this. Its brand families are greys at lightness
+/// targets of their own and its intents are fixed, because a placeholder page
+/// has no brand to tune.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RoleTuning {
+    /// Saturation of the primary family, 0..1.
+    pub brand: f64,
+    pub light: FamilyTargets,
+    pub dark: FamilyTargets,
+}
+
+impl RoleTuning {
+    /// The numbers every theme file was generated with. `roles_from_seed` is
+    /// `roles_from_seed_tuned` with these, and
+    /// `the_house_roles_did_not_move` pins what comes out to what came out
+    /// before there was a tuning at all.
+    pub const HOUSE: RoleTuning = RoleTuning {
+        brand: 0.62,
+        light: FamilyTargets { base: 0.40, container: 0.90, ink: 0.12 },
+        dark: FamilyTargets { base: 0.74, container: 0.30, ink: 0.18 },
+    };
+}
+
+impl Default for RoleTuning {
+    fn default() -> Self {
+        RoleTuning::HOUSE
+    }
+}
+
+/// How much of the grounds' colour a fully saturated `neutral` may ask for,
+/// as the theme's `color_tint_amount`.
+///
+/// Two numbers because the tint is a MULTIPLY. The theme files take the
+/// page's grey and multiply it by a colour mixed this far from white, so a
+/// light page -- which is nearly white -- comes out nearly that colour, and a
+/// dark page comes out a dark grey with a cast. The same amount that gives a
+/// dark theme a navy undertone turns a light one periwinkle from edge to
+/// edge, and a page is not an accent.
+pub const GROUND_TINT_DARK: f64 = 0.30;
+pub const GROUND_TINT_LIGHT: f64 = 0.12;
+
+/// The two globals that lean a theme's grounds toward a colour, as a seed
+/// asks for them: `(color_tint, color_tint_amount)`. `None` where the seed
+/// asks for nothing, which leaves the theme file's own -- an amount of
+/// nought -- and the page exactly as it ships.
+///
+/// This is what `SeedColors::neutral` is for. The tint is the neutral's HUE
+/// at full strength, and the amount is the neutral's SATURATION scaled into
+/// what the scheme can take (`GROUND_TINT_DARK`, `GROUND_TINT_LIGHT`): the
+/// theme files mix the tint in by an amount, so the strength of the colour
+/// and the amount of it are one quantity said twice, and saying it once keeps
+/// a washed-out neutral from also being mixed in weakly. A neutral with no
+/// colour in it has no hue to lean toward, and the skeleton has no tint knob
+/// at all.
+///
+/// The bar for "no colour" is a hundredth, far under the 0.08 the brand
+/// families use, and it can be: a nearly grey neutral reports a hue that is
+/// mostly rounding, but it asks for an amount in proportion, so the wrong hue
+/// arrives too faint to see. A brand family has no such governor -- it brings
+/// its own saturation -- which is why that bar is where it is and this one
+/// is not. A slider run down toward grey fades out instead of stopping short.
+///
+/// The grounds are not roles and this rule does not write them. They are
+/// expressions of these two globals in the theme files, so the answer goes
+/// in through `theme_source_with_globals` and the whole ladder moves.
+pub fn ground_tint(seed: &SeedColors, scheme: Scheme) -> Option<(u32, f64)> {
+    let most = match scheme {
+        Scheme::Dark => GROUND_TINT_DARK,
+        Scheme::Light => GROUND_TINT_LIGHT,
+        Scheme::Skeleton => return None,
+    };
+    let (hue, sat, _) = rgb_to_hsl(seed.neutral?);
+    if sat < 0.01 {
+        return None;
+    }
+    Some((hsl_to_rgb(hue, 1.0, 0.5), sat * most))
+}
+
+fn family_inputs(seed: &SeedColors, tuning: &RoleTuning) -> [FamilyInput; 7] {
     let hue_of = |rgba: u32| rgb_to_hsl(rgba).0;
     let primary = hue_of(seed.primary);
     // A seed with no colour in it has no hue either, and the number it
@@ -539,11 +753,12 @@ fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
     // got a family of reds. The rule takes only the hue from a seed and
     // brings its own saturation, so it has to be told when there is no hue
     // to take, and then the three brand families are greys.
-    let brand = if rgb_to_hsl(seed.primary).1 < 0.08 { 0.0 } else { 0.62 };
+    let brand = if rgb_to_hsl(seed.primary).1 < 0.08 { 0.0 } else { tuning.brand.clamp(0.0, 1.0) };
+    let (second, third) = seed.harmony.offsets();
     [
         FamilyInput { hue: primary, sat: brand, intent: false },
-        FamilyInput { hue: seed.secondary.map(hue_of).unwrap_or(primary + 30.0), sat: brand * 0.55, intent: false },
-        FamilyInput { hue: seed.tertiary.map(hue_of).unwrap_or(primary - 150.0), sat: brand * 0.8, intent: false },
+        FamilyInput { hue: seed.secondary.map(hue_of).unwrap_or(primary + second), sat: brand * 0.55, intent: false },
+        FamilyInput { hue: seed.tertiary.map(hue_of).unwrap_or(primary + third), sat: brand * 0.8, intent: false },
         FamilyInput { hue: seed.error.map(hue_of).unwrap_or(0.0), sat: 0.72, intent: true },
         FamilyInput { hue: 42.0, sat: 0.85, intent: true },
         FamilyInput { hue: 140.0, sat: 0.55, intent: true },
@@ -808,10 +1023,11 @@ pub fn readable_on(ground: u32, first: u32, other: u32) -> u32 {
     }
 }
 
-fn light_family(hue: f64, sat: f64) -> RoleFamily {
-    let base = hsl_to_rgb(hue, sat, 0.40);
-    let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90);
-    let ink = hsl_to_rgb(hue, sat, 0.12);
+fn light_family(hue: f64, sat: f64, tuning: &RoleTuning) -> RoleFamily {
+    let at = tuning.light;
+    let base = hsl_to_rgb(hue, sat, at.base);
+    let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), at.container);
+    let ink = hsl_to_rgb(hue, sat, at.ink);
     RoleFamily {
         base,
         on_base: readable_on(base, WHITE, ink),
@@ -820,11 +1036,15 @@ fn light_family(hue: f64, sat: f64) -> RoleFamily {
     }
 }
 
-fn dark_family(hue: f64, sat: f64) -> RoleFamily {
-    let base = hsl_to_rgb(hue, sat, 0.74);
-    let container = hsl_to_rgb(hue, sat * 0.7, 0.30);
-    let ink = hsl_to_rgb(hue, sat, 0.18);
-    let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90);
+fn dark_family(hue: f64, sat: f64, tuning: &RoleTuning) -> RoleFamily {
+    let at = tuning.dark;
+    let base = hsl_to_rgb(hue, sat, at.base);
+    let container = hsl_to_rgb(hue, sat * 0.7, at.container);
+    let ink = hsl_to_rgb(hue, sat, at.ink);
+    // The pale end is the light rule's container, borrowed: the same colour
+    // at the same lightness, which is why a dark container's text and a
+    // light container's fill are one literal in the theme files.
+    let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), tuning.light.container);
     RoleFamily {
         base,
         on_base: readable_on(base, ink, pale),
@@ -835,7 +1055,8 @@ fn dark_family(hue: f64, sat: f64) -> RoleFamily {
 
 fn skeleton_family(hue: f64, intent: bool) -> RoleFamily {
     if intent {
-        light_family(hue, 0.45)
+        // At the house targets whatever the tuning is: see `RoleTuning`.
+        light_family(hue, 0.45, &RoleTuning::HOUSE)
     } else {
         RoleFamily {
             base: hsl_to_rgb(0.0, 0.0, 0.35),
@@ -846,22 +1067,38 @@ fn skeleton_family(hue: f64, intent: bool) -> RoleFamily {
     }
 }
 
-fn family_for(scheme: Scheme, input: &FamilyInput) -> RoleFamily {
+fn family_for(scheme: Scheme, input: &FamilyInput, tuning: &RoleTuning) -> RoleFamily {
     match scheme {
-        Scheme::Light => light_family(input.hue, input.sat),
-        Scheme::Dark => dark_family(input.hue, input.sat),
+        Scheme::Light => light_family(input.hue, input.sat, tuning),
+        Scheme::Dark => dark_family(input.hue, input.sat, tuning),
         Scheme::Skeleton => skeleton_family(input.hue, input.intent),
     }
 }
 
 /// The accent roles of a scheme grown from a seed, by the rule in the module
-/// doc. `roles_for` is this with the house seed.
+/// doc. `roles_for` is this with the house seed, and this is
+/// `roles_from_seed_tuned` with the house numbers.
 pub fn roles_from_seed(seed: &SeedColors, scheme: Scheme) -> ColorRoles {
-    let inputs = family_inputs(seed);
-    let f = |i: usize| family_for(scheme, &inputs[i]);
+    roles_from_seed_tuned(seed, scheme, &RoleTuning::HOUSE)
+}
+
+/// The accent roles of a scheme grown from a seed, with the rule's own
+/// numbers handed in rather than taken as read: how much colour the brand
+/// families carry, and where each scheme puts a family on the lightness axis.
+/// See `RoleTuning` for why no setting of them can cost a palette its text.
+///
+/// All seven families follow the lightness targets, the four intents too: a
+/// palette made brighter is brighter throughout, and a success green left at
+/// the house lightness beside a primary that has moved reads as a colour from
+/// another theme. Only the brand families follow `brand`. An intent keeps its
+/// own saturation, because how loudly a theme says "error" is not a matter of
+/// how much the person likes their favourite colour.
+pub fn roles_from_seed_tuned(seed: &SeedColors, scheme: Scheme, tuning: &RoleTuning) -> ColorRoles {
+    let inputs = family_inputs(seed, tuning);
+    let f = |i: usize| family_for(scheme, &inputs[i], tuning);
     let inverse_primary = match scheme {
-        Scheme::Light => dark_family(inputs[0].hue, inputs[0].sat).base,
-        Scheme::Dark => light_family(inputs[0].hue, inputs[0].sat).base,
+        Scheme::Light => dark_family(inputs[0].hue, inputs[0].sat, tuning).base,
+        Scheme::Dark => light_family(inputs[0].hue, inputs[0].sat, tuning).base,
         Scheme::Skeleton => 0xBBBBBBFF,
     };
     // Error and warning are not drawn on the colours this rule makes for
@@ -1146,6 +1383,19 @@ impl RoleGenerator for BuiltinRoles {
     }
 }
 
+/// The same HSL rule with its numbers set by the caller: `BuiltinRoles` is
+/// this at `RoleTuning::HOUSE`. It ignores `contrast` for the same reason --
+/// the lightness targets are whatever the tuning says, and a second knob
+/// pulling at them would be two answers to one question.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TunedRoles(pub RoleTuning);
+
+impl RoleGenerator for TunedRoles {
+    fn generate(&self, seed: &SeedColors, scheme: Scheme, _contrast: f32) -> ColorRoles {
+        roles_from_seed_tuned(seed, scheme, &self.0)
+    }
+}
+
 /// A token value on its way into a script: a colour, a number, or any other
 /// expression written out as the script would read it.
 #[derive(Clone, Debug, PartialEq)]
@@ -1336,6 +1586,358 @@ pub fn export_theme_source(name: &str, values: &[(String, TokenValue)]) -> Strin
     }
     out.push_str("    }\n}\n");
     out
+}
+
+/// A style sheet from a flat list of values, in the shape of the ones under
+/// `widgets/themes`: a first line that points `mod.theme` at the base theme
+/// the sheet is written against, then one `mod.theme.<key> = <value>` a line
+/// in the order given, then the bare `true` every shipped sheet ends on so
+/// that the last assignment is not the statement the VM drops.
+///
+/// A sheet is the one place that assigns into `mod.theme` token by token, and
+/// it may because of when it runs: `desktop_style::apply_theme` evaluates it
+/// inside a module run, after the base themes are built and before a widget
+/// template has read one of them, so there is nothing yet for the write to be
+/// shared with. The same text evaluated at any other moment is the mutation
+/// the module doc warns about.
+///
+/// Like `export_theme_source` it is a snapshot: every value is a literal and
+/// nothing in it re-derives. A sheet that sets `space_factor` and stops has
+/// moved one token, so a caller that means "this spacing" hands in every rung
+/// the spacing came to. `assigned_keys` reads the result back.
+pub fn export_sheet_source(base: Scheme, values: &[(String, TokenValue)]) -> String {
+    let mut out = format!("mod.theme = mod.themes.{}\n", base.theme_name());
+    for (key, value) in values {
+        out.push_str(&format!("mod.theme.{key} = {}\n", value.render()));
+    }
+    out.push_str("true\n");
+    out
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+
+    /// What `roles_for` returned, entry for entry, on the tree as it stood
+    /// before the rule had a tuning, a harmony or a neutral: printed from
+    /// that tree by a throwaway test and pasted here. The generator's own
+    /// drift test compares it to the theme files, which would move with it
+    /// if both were regenerated; this one compares it to the past.
+    const BEFORE: [(Scheme, [u32; 29]); 3] = [
+        (
+            Scheme::Dark,
+            [
+                0xE6A294FF, 0x4A1C11FF, 0x6E372BFF, 0xF7DAD4FF, 0xD3C5A6FF, 0x3E331EFF, 0x5F533AFF, 0xEFE9DCFF,
+                0x9CB1DEFF, 0x172645FF, 0x324367FF, 0xD8E1F3FF, 0xEC8D8DFF, 0xFFFFFFFF, 0x732626FF, 0xFAD1D1FF,
+                0xF5D384FF, 0x553E07FF, 0x7A5F1FFF, 0xFDEFCEFF, 0x98E1B1FF, 0x154725FF, 0x2F6A43FF, 0xD6F5E0FF,
+                0x8EBAEBFF, 0x0E2C4EFF, 0x274A72FF, 0xD2E4F9FF, 0xA53D27FF,
+            ],
+        ),
+        (
+            Scheme::Light,
+            [
+                0xA53D27FF, 0xFFFFFFFF, 0xF7DAD4FF, 0x32120CFF, 0x897243FF, 0xFFFFFFFF, 0xEFE9DCFF, 0x292214FF,
+                0x335499FF, 0xFFFFFFFF, 0xD8E1F3FF, 0x0F192EFF, 0xAF1D1DFF, 0xFFFFFFFF, 0xFAD1D1FF, 0x350909FF,
+                0xBD890FFF, 0x392905FF, 0xFDEFCEFF, 0x392905FF, 0x2E9E53FF, 0x000000FF, 0xD6F5E0FF, 0x0E2F19FF,
+                0x1F61ADFF, 0xFFFFFFFF, 0xD2E4F9FF, 0x091D34FF, 0xE6A294FF,
+            ],
+        ),
+        (
+            Scheme::Skeleton,
+            [
+                0x595959FF, 0xFFFFFFFF, 0xCCCCCCFF, 0x1A1A1AFF, 0x595959FF, 0xFFFFFFFF, 0xCCCCCCFF, 0x1A1A1AFF,
+                0x595959FF, 0xFFFFFFFF, 0xCCCCCCFF, 0x1A1A1AFF, 0x943838FF, 0xFFFFFFFF, 0xF2D9D9FF, 0x2C1111FF,
+                0x947838FF, 0x000000FF, 0xF2EBD9FF, 0x2C2411FF, 0x389457FF, 0x000000FF, 0xD9F2E1FF, 0x112C1AFF,
+                0x386394FF, 0xFFFFFFFF, 0xD9E5F2FF, 0x111E2CFF, 0xBBBBBBFF,
+            ],
+        ),
+    ];
+
+    /// Making the rule's constants into parameters is only free if the
+    /// parameters' defaults ARE the constants. Every way into the rule that
+    /// names no tuning is held to the old answer here, byte for byte: the
+    /// house seed, the house seed spelled out, the favourite-colour
+    /// constructor at the house colour, and both generators.
+    #[test]
+    fn the_house_roles_did_not_move() {
+        for (scheme, before) in BEFORE {
+            let name = scheme.theme_name();
+            let want: Vec<u32> = before.to_vec();
+            let got = |roles: ColorRoles| roles.entries().iter().map(|(_, rgba)| *rgba).collect::<Vec<u32>>();
+            assert_eq!(got(roles_for(scheme)), want, "roles_for({name})");
+            assert_eq!(got(roles_from_seed(&SeedColors::HOUSE, scheme)), want, "roles_from_seed({name})");
+            assert_eq!(
+                got(roles_from_seed_tuned(&SeedColors::HOUSE, scheme, &RoleTuning::default())),
+                want,
+                "the default tuning in {name}"
+            );
+            let favourite = SeedColors::from_favourite(0xFF5C39FF, Harmony::default());
+            assert_eq!(favourite, SeedColors::HOUSE, "the house colour in the house harmony is the house seed");
+            assert_eq!(got(roles_from_seed(&favourite, scheme)), want, "from_favourite in {name}");
+            assert_eq!(got(BuiltinRoles.generate(&SeedColors::HOUSE, scheme, 1.0)), want, "BuiltinRoles in {name}");
+            assert_eq!(
+                got(TunedRoles::default().generate(&SeedColors::HOUSE, scheme, 1.0)),
+                want,
+                "TunedRoles at its default in {name}"
+            );
+            // The order the numbers above are in is the order of the keys.
+            assert_eq!(roles_for(scheme).entries()[0].0, "color_primary");
+            assert_eq!(roles_for(scheme).entries()[28].0, "color_inverse_primary");
+        }
+        // And the grounds: a seed that names no neutral asks for no tint.
+        for scheme in Scheme::ALL {
+            assert_eq!(ground_tint(&SeedColors::HOUSE, scheme), None);
+        }
+    }
+
+    /// How far apart two hues are, the short way round.
+    fn apart(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    /// A harmony is two offsets, and the families have to land on them. Read
+    /// off the colours that come out rather than off `offsets()`, which would
+    /// be the table agreeing with itself. To within four degrees and no
+    /// closer: the secondary keeps about a third of full saturation, so its
+    /// channels are some forty steps apart and eight bits blur its hue by a
+    /// degree or two. The nearest two harmonies differ by thirty.
+    #[test]
+    fn each_harmony_puts_its_hues_where_it_says() {
+        let want: [(Harmony, f64, f64); 6] = [
+            (Harmony::House, 30.0, -150.0),
+            (Harmony::Single, 0.0, 0.0),
+            (Harmony::Analogous, 30.0, -30.0),
+            (Harmony::Complementary, 0.0, 180.0),
+            (Harmony::Split, 150.0, -150.0),
+            (Harmony::Triadic, 120.0, -120.0),
+        ];
+        assert_eq!(want.len(), Harmony::ALL.len(), "a harmony was added and not put to this test");
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            for favourite_hue in [0.0, 47.0, 200.0, 333.0] {
+                let favourite = hsl_to_rgb(favourite_hue, 0.9, 0.5);
+                let first = rgb_to_hsl(favourite).0;
+                for (harmony, second, third) in want {
+                    let roles = roles_from_seed(&SeedColors::from_favourite(favourite, harmony), scheme);
+                    let hue = |family: RoleFamily| rgb_to_hsl(family.base).0;
+                    let at = format!("{harmony:?} from hue {favourite_hue} in {}", scheme.theme_name());
+                    assert!(apart(hue(roles.primary), first) < 4.0, "{at}: primary at {}", hue(roles.primary));
+                    assert!(
+                        apart(hue(roles.secondary), first + second) < 4.0,
+                        "{at}: secondary at {}, wanted {}",
+                        hue(roles.secondary),
+                        first + second
+                    );
+                    assert!(
+                        apart(hue(roles.tertiary), first + third) < 4.0,
+                        "{at}: tertiary at {}, wanted {}",
+                        hue(roles.tertiary),
+                        first + third
+                    );
+                }
+            }
+        }
+    }
+
+    /// A seed named outright is somebody's decision and a harmony is a
+    /// default, so the seed wins -- as it won over the fixed rotation before
+    /// there was a harmony to lose to.
+    #[test]
+    fn a_seed_named_outright_beats_the_harmony() {
+        let green = hsl_to_rgb(120.0, 0.9, 0.5);
+        let seed = SeedColors { secondary: Some(green), ..SeedColors::from_favourite(0xFF5C39FF, Harmony::Triadic) };
+        let roles = roles_from_seed(&seed, Scheme::Light);
+        assert!(apart(rgb_to_hsl(roles.secondary.base).0, 120.0) < 4.0);
+        // The tertiary named nothing and still follows the triad.
+        assert!(apart(rgb_to_hsl(roles.tertiary.base).0, seed_hue() - 120.0) < 4.0);
+    }
+
+    /// `brand` is the primary's saturation and the other two keep their
+    /// shares of it; the intents do not move with it at all.
+    #[test]
+    fn brand_moves_the_brand_families_and_leaves_the_intents() {
+        let house = roles_for(Scheme::Light);
+        let sat = |rgba: u32| rgb_to_hsl(rgba).1;
+        let mut last = -1.0;
+        for brand in [0.0, 0.3, 0.62, 0.9, 1.0] {
+            let tuning = RoleTuning { brand, ..RoleTuning::HOUSE };
+            let roles = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &tuning);
+            assert!((sat(roles.primary.base) - brand).abs() < 0.02, "primary at brand {brand}: {}", sat(roles.primary.base));
+            assert!((sat(roles.secondary.base) - brand * 0.55).abs() < 0.02, "secondary at brand {brand}");
+            assert!((sat(roles.tertiary.base) - brand * 0.8).abs() < 0.02, "tertiary at brand {brand}");
+            assert!(sat(roles.primary.base) > last, "more brand is more colour");
+            last = sat(roles.primary.base);
+            for (mine, theirs) in [
+                (roles.error, house.error),
+                (roles.warning, house.warning),
+                (roles.success, house.success),
+                (roles.info, house.info),
+            ] {
+                assert_eq!(mine, theirs, "an intent moved with the brand at {brand}");
+            }
+        }
+        // Out of range is clamped rather than handed to the colour maths.
+        let over = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &RoleTuning { brand: 7.0, ..RoleTuning::HOUSE });
+        let full = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &RoleTuning { brand: 1.0, ..RoleTuning::HOUSE });
+        assert_eq!(over, full);
+    }
+
+    /// The lightness targets are where the colours land, in the scheme they
+    /// belong to, and the other scheme's base is this one's inverse primary.
+    #[test]
+    fn the_lightness_targets_are_where_the_families_land() {
+        let tuning = RoleTuning {
+            brand: 0.62,
+            light: FamilyTargets { base: 0.33, container: 0.86, ink: 0.10 },
+            dark: FamilyTargets { base: 0.81, container: 0.24, ink: 0.15 },
+        };
+        let light = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Light, &tuning);
+        let dark = roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Dark, &tuning);
+        let l = |rgba: u32| rgb_to_hsl(rgba).2;
+        for family in [light.primary, light.secondary, light.tertiary, light.success, light.info] {
+            assert!((l(family.base) - 0.33).abs() < 0.01, "{:08X}", family.base);
+            assert!((l(family.container) - 0.86).abs() < 0.01, "{:08X}", family.container);
+        }
+        for family in [dark.primary, dark.secondary, dark.tertiary, dark.success, dark.info] {
+            assert!((l(family.base) - 0.81).abs() < 0.01, "{:08X}", family.base);
+            assert!((l(family.container) - 0.24).abs() < 0.01, "{:08X}", family.container);
+        }
+        assert_eq!(light.inverse_primary, dark.primary.base);
+        assert_eq!(dark.inverse_primary, light.primary.base);
+        // The skeleton has no brand to tune and takes none of it.
+        assert_eq!(roles_from_seed_tuned(&SeedColors::HOUSE, Scheme::Skeleton, &tuning), roles_for(Scheme::Skeleton));
+    }
+
+    /// The ground every ink of a family is really drawn on: the family's own
+    /// colours, but for error and warning, whose base every theme keeps as
+    /// the older red and amber.
+    fn unreadable(roles: &ColorRoles) -> Vec<String> {
+        let mut out = Vec::new();
+        for quad in roles.entries().chunks(4).take(7) {
+            let (on_key, on_base) = quad[1];
+            let base = match on_key {
+                "color_on_error" => KEPT_ERROR,
+                "color_on_warning" => KEPT_WARNING,
+                _ => quad[0].1,
+            };
+            for (key, ink, ground) in [(on_key, on_base, base), (quad[3].0, quad[3].1, quad[2].1)] {
+                let ratio = contrast(ink, ground);
+                if ratio < READABLE {
+                    out.push(format!("{key} {ink:08X} on {ground:08X} is {ratio:.2}:1"));
+                }
+            }
+        }
+        out
+    }
+
+    /// No tuning, harmony or hue can cost a family its text, because no ink
+    /// is ever taken on trust: the targets only say what the rule reaches for
+    /// FIRST. Swept well past anything a slider offers -- a base at mid grey,
+    /// where neither black nor white is comfortable, a container as dark as
+    /// its ink, the two ends swapped over -- since a guarantee that holds
+    /// only over the sensible settings is a guarantee about the settings.
+    #[test]
+    fn no_tuning_can_make_a_family_unreadable() {
+        let targets = [
+            RoleTuning::HOUSE.light,
+            RoleTuning::HOUSE.dark,
+            FamilyTargets { base: 0.5, container: 0.5, ink: 0.5 },
+            FamilyTargets { base: 0.18, container: 0.18, ink: 0.18 },
+            FamilyTargets { base: 0.0, container: 1.0, ink: 0.0 },
+            FamilyTargets { base: 1.0, container: 0.0, ink: 1.0 },
+            FamilyTargets { base: 0.62, container: 0.41, ink: 0.55 },
+        ];
+        let mut checked = 0;
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            for harmony in Harmony::ALL {
+                for step in 0..36 {
+                    let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
+                    let seed = SeedColors::from_favourite(favourite, harmony);
+                    for brand in [0.0, 0.31, 0.62, 1.0] {
+                        for light in targets {
+                            for dark in targets {
+                                let tuning = RoleTuning { brand, light, dark };
+                                let bad = unreadable(&roles_from_seed_tuned(&seed, scheme, &tuning));
+                                assert!(
+                                    bad.is_empty(),
+                                    "{} {harmony:?} hue {} {tuning:?}: {bad:#?}",
+                                    scheme.theme_name(),
+                                    step * 10
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 6 * 36 * 4 * 7 * 7);
+    }
+
+    /// The neutral is a hue to lean toward and its saturation is how far,
+    /// scaled into what each scheme's page can take.
+    #[test]
+    fn a_neutral_leans_the_grounds_by_how_much_colour_it_has() {
+        let seed = |neutral: u32| SeedColors::HOUSE.with_neutral(Some(neutral));
+        let blue = hsl_to_rgb(220.0, 1.0, 0.5);
+        let (tint, amount) = ground_tint(&seed(blue), Scheme::Dark).unwrap();
+        assert_eq!(tint, blue, "the tint is the neutral's hue at full strength");
+        assert!((amount - GROUND_TINT_DARK).abs() < 1e-9, "{amount}");
+        let (_, amount) = ground_tint(&seed(blue), Scheme::Light).unwrap();
+        assert!((amount - GROUND_TINT_LIGHT).abs() < 1e-9, "{amount}");
+        // Half the colour is half the lean, toward the same full-strength tint.
+        let (tint, amount) = ground_tint(&seed(hsl_to_rgb(220.0, 0.5, 0.5)), Scheme::Dark).unwrap();
+        assert!(apart(rgb_to_hsl(tint).0, 220.0) < 1.0 && rgb_to_hsl(tint).1 > 0.99);
+        assert!((amount - GROUND_TINT_DARK * 0.5).abs() < 0.005, "{amount}");
+        // A grey has no hue to lean toward, and the skeleton has no knob.
+        assert_eq!(ground_tint(&seed(0x808080FF), Scheme::Dark), None);
+        assert_eq!(ground_tint(&seed(blue), Scheme::Skeleton), None);
+        // The roles never read it: the grounds are the theme file's business.
+        assert_eq!(roles_from_seed(&seed(blue), Scheme::Dark), roles_for(Scheme::Dark));
+    }
+
+    /// The two tint globals are keys `theme_source_with_globals` replaces, in
+    /// both themes that have a tint at all -- which is the whole of how a
+    /// neutral reaches the page.
+    #[test]
+    fn the_ground_tint_goes_in_as_globals() {
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let (tint, amount) = ground_tint(&SeedColors::HOUSE.with_neutral(Some(0x0044FFFF)), scheme).unwrap();
+            let globals = [
+                ("color_tint".to_string(), TokenValue::Color(tint)),
+                ("color_tint_amount".to_string(), TokenValue::Num(amount)),
+            ];
+            assert!(globals.iter().all(|(key, _)| is_global_key(key)));
+            let out = theme_source_with_globals("tinted", scheme.source(), &globals);
+            assert!(out.contains(&format!("\n        color_tint: #x{tint:08X}\n")), "{}", scheme.theme_name());
+            assert!(out.contains(&format!("\n        color_tint_amount: {amount:?}\n")), "{}", scheme.theme_name());
+            assert!(out.contains("theme.color_w * mix(#ffffff, theme.color_tint, theme.color_tint_amount)"));
+        }
+    }
+
+    #[test]
+    fn a_sheet_is_a_base_line_then_assignments_then_true() {
+        let values = [
+            ("corner_radius".to_string(), TokenValue::Num(6.0)),
+            ("color_primary".to_string(), TokenValue::Color(0xA53D27FF)),
+            ("mspace_1".to_string(), TokenValue::Raw("mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}".to_string())),
+        ];
+        let sheet = export_sheet_source(Scheme::Light, &values);
+        assert_eq!(
+            sheet,
+            "mod.theme = mod.themes.light\n\
+             mod.theme.corner_radius = 6.0\n\
+             mod.theme.color_primary = #xA53D27FF\n\
+             mod.theme.mspace_1 = mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}\n\
+             true\n"
+        );
+        assert_eq!(assigned_keys(&sheet), vec!["corner_radius", "color_primary", "mspace_1"]);
+        // The first line is the one the library reads a sheet's appearance
+        // off, and the shipped sheets open the same way.
+        let shipped = include_str!("../themes/macos-dark/theme.splash");
+        assert_eq!(shipped.lines().next(), export_sheet_source(Scheme::Dark, &[]).lines().next());
+        assert_eq!(shipped.lines().last().map(str::trim), Some("true"));
+    }
 }
 
 // ---------------------------------------------------------------------------
