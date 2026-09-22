@@ -9313,6 +9313,13 @@ pub struct Tweaker {
     /// other route into it is.
     #[rust]
     tb_carousel_uid: u64,
+    /// The carousel's two arrows, back and on. Zero while the section is
+    /// folded and while there is no carousel for them to move, so a press
+    /// where one stood reaches nothing.
+    #[rust]
+    tb_strip_prev_uid: u64,
+    #[rust]
+    tb_strip_next_uid: u64,
     /// The palettes on offer for the favourite that is set, in the engine's
     /// own order. Recomputed only when the colour or the page it is grown for
     /// moves -- it is two dozen themes' worth of arithmetic, and it is the
@@ -11434,9 +11441,44 @@ impl Tweaker {
                             // seed picker names, that colour held in its
                             // slot in every chip; with "None" it is hidden
                             // and takes no room.
-                            tb_carousel := FabPaletteCarousel {
+                            //
+                            // An arrow at each end is the rest of saying so.
+                            // A row that answers only a drag and a wheel
+                            // looks like a picture of chips until a hand
+                            // happens to push it, and the operator went
+                            // looking for the arrows before he found the
+                            // drag. They are the panel's own chevrons, the
+                            // search row's; each takes its room out of the
+                            // row, so a few chips fewer stand in the window
+                            // and every one of them is the size it was.
+                            tb_strip := View {
                                 width: Fill
-                                height: 88
+                                height: Fit
+                                flow: Right
+                                spacing: 2
+                                align: Align{x: 0.0 y: 0.5}
+                                tb_strip_prev := PanelButton {
+                                    width: 18
+                                    height: 22
+                                    padding: Inset{left: 4 right: 4 top: 1 bottom: 3}
+                                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                    align: Align{x: 0.5 y: 0.5}
+                                    text: "\u{2039}"
+                                    draw_text +: { text_style +: { font_size: 10.0 } }
+                                }
+                                tb_carousel := FabPaletteCarousel {
+                                    width: Fill
+                                    height: 88
+                                }
+                                tb_strip_next := PanelButton {
+                                    width: 18
+                                    height: 22
+                                    padding: Inset{left: 4 right: 4 top: 1 bottom: 3}
+                                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                    align: Align{x: 0.5 y: 0.5}
+                                    text: "\u{203a}"
+                                    draw_text +: { text_style +: { font_size: 10.0 } }
+                                }
                             }
                             // The settings, in three groups under a word
                             // each, every one in the unit it is read in. A
@@ -17036,6 +17078,15 @@ impl Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
+            // The arrows at the row's ends: a page along it, back or on.
+            if let Some(at) = [self.tb_strip_prev_uid, self.tb_strip_next_uid]
+                .iter()
+                .position(|uid| *uid != 0 && *uid == widget_action.widget_uid.0)
+            {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.tb_arrow_pressed(cx, at == 1);
+                }
+            }
             if let Some(index) = self
                 .tb_row_uids
                 .iter()
@@ -18977,22 +19028,34 @@ impl Tweaker {
                 }
             };
         }
-        // The seed picker. Its entries are written when its uid is new -- the
-        // first draw after the section opens, or after the sidebar was built
-        // again -- or when the count they list the slots of has moved, and
-        // not per frame: `set_labels` redraws.
+        // The seed picker, and the die beside it. The picker goes where the
+        // carousel goes: at one colour there is nothing to grow a row from,
+        // the only slot it could name is the primary, and a picker naming one
+        // thing is a control that asks a question with one answer. Its word
+        // goes with it, since the word names the picker. The die stays --
+        // one colour is still rolled -- and so does the word over it.
         let seed_col = seed_row.child(live_id!(tb_seed_col));
-        seed_col.child(live_id!(tb_seed_name)).set_text(cx, TB_SEED_HEADER);
         let roll_col = seed_row.child(live_id!(tb_roll_col));
         roll_col.child(live_id!(tb_roll_name)).set_text(cx, TB_ROLL_HEADER);
-        let seed_pick = seed_col.child(live_id!(tb_seed));
-        let seed_uid = seed_pick.widget_uid().0;
-        if seed_uid != self.tb_seed_uid || self.tb_seed_labels_for != count {
-            seed_pick.as_drop_down().set_labels(cx, tb_seed_labels(count));
-            self.tb_seed_uid = seed_uid;
-            self.tb_seed_labels_for = count;
+        let seeds_shown = count > 1;
+        seed_col.set_visible(cx, seeds_shown);
+        if seeds_shown {
+            seed_col.child(live_id!(tb_seed_name)).set_text(cx, TB_SEED_HEADER);
+            // Its entries are written when its uid is new -- the first draw
+            // after the section opens, or after the sidebar was built again
+            // -- or when the count they list the slots of has moved, and not
+            // per frame: `set_labels` redraws.
+            let seed_pick = seed_col.child(live_id!(tb_seed));
+            let seed_uid = seed_pick.widget_uid().0;
+            if seed_uid != self.tb_seed_uid || self.tb_seed_labels_for != count {
+                seed_pick.as_drop_down().set_labels(cx, tb_seed_labels(count));
+                self.tb_seed_uid = seed_uid;
+                self.tb_seed_labels_for = count;
+            }
+            seed_pick.as_drop_down().set_selected_item(cx, tb_seed_entry_at(self.tb_seed_slot, count));
+        } else {
+            self.tb_seed_uid = 0;
         }
-        seed_pick.as_drop_down().set_selected_item(cx, tb_seed_entry_at(self.tb_seed_slot, count));
         self.draw_the_suggestion_strip(cx, &body);
         self.tb_random_uid = roll_col.child(live_id!(tb_random)).widget_uid().0;
         let rows = body.child(live_id!(tb_rows));
@@ -19041,6 +19104,22 @@ impl Tweaker {
         self.tb_text_color_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
         self.tb_carousel_uid = 0;
+        self.tb_strip_prev_uid = 0;
+        self.tb_strip_next_uid = 0;
+    }
+
+    /// Which of the four the carousel is grown from, or `None` where there is
+    /// no carousel at all.
+    ///
+    /// Two doors lead to no carousel and they are not the same door. The
+    /// picker's own "None" is a person saying they do not want the row; one
+    /// colour is a palette with nothing to suggest -- a row of chips of one
+    /// square each, every one of them the colour that is already on the
+    /// square above it. So the slot the person chose is kept untouched
+    /// through a visit to one colour, and leaving it finds the row again
+    /// exactly where they left it.
+    fn tb_row_seed(&self) -> Option<SeedSlot> {
+        self.tb_seed_slot.filter(|_| self.tb_builder.params().color_count > 1)
     }
 
     /// The row of palettes on offer, the one in force outlined.
@@ -19058,14 +19137,28 @@ impl Tweaker {
     /// carousel itself is silent when it is handed what it already has, so
     /// writing it every draw costs a comparison.
     ///
-    /// With no seed there is no row: the carousel is hidden, so it takes no
-    /// room and the settings close up under the four colours, and its route
-    /// is shut, so a press where it stood reaches nothing.
+    /// With no seed there is no row: the carousel and the arrows at its ends
+    /// are hidden, so they take no room and the settings close up under the
+    /// four colours, and their routes are shut, so a press where they stood
+    /// reaches nothing. One colour is the same case by the other door (see
+    /// [`Tweaker::tb_row_seed`]) and is answered the same way.
+    ///
+    /// The arrows are dimmed and inert at the end they point at, and both are
+    /// off where every chip fits, for the reason any control is: an arrow
+    /// that can be pressed and does nothing teaches the hand that the row is
+    /// stuck rather than that it is at its end.
     fn draw_the_suggestion_strip(&mut self, cx: &mut Cx, body: &WidgetRef) {
-        let carousel = body.child(live_id!(tb_carousel));
-        carousel.set_visible(cx, self.tb_seed_slot.is_some());
-        if self.tb_seed_slot.is_none() {
+        let strip = body.child(live_id!(tb_strip));
+        let carousel = strip.child(live_id!(tb_carousel));
+        let shown = self.tb_row_seed().is_some();
+        // Both, and not the row alone: the row is what holds the chips, and
+        // the strip is what would keep its line of the layout open.
+        strip.set_visible(cx, shown);
+        carousel.set_visible(cx, shown);
+        if !shown {
             self.tb_carousel_uid = 0;
+            self.tb_strip_prev_uid = 0;
+            self.tb_strip_next_uid = 0;
             return;
         }
         // A chip shows the colours its palette chooses and no others, top
@@ -19094,17 +19187,56 @@ impl Tweaker {
             row.set_chips(cx, &chips, chosen);
         }
         self.tb_carousel_uid = carousel.widget_uid().0;
+        // Read off the row itself, off the window it was last drawn in: the
+        // arrows say what the row can do, and only the row knows how much of
+        // it is on the screen at this width.
+        let (at_start, at_end) = carousel
+            .borrow::<FabPaletteCarousel>()
+            .map_or((true, true), |row| (row.at_start(), row.at_end()));
+        let prev = strip.child(live_id!(tb_strip_prev));
+        let next = strip.child(live_id!(tb_strip_next));
+        set_button_live(cx, &prev, !at_start);
+        set_button_live(cx, &next, !at_end);
+        self.tb_strip_prev_uid = prev.widget_uid().0;
+        self.tb_strip_next_uid = next.widget_uid().0;
+    }
+
+    /// The carousel as the panel addresses it; empty before the sidebar is
+    /// built.
+    fn tb_carousel_ref(&self) -> WidgetRef {
+        self.sidebar.as_ref().map_or_else(WidgetRef::empty, |sidebar| {
+            sidebar
+                .child(live_id!(theme_head))
+                .child(live_id!(tb_body))
+                .child(live_id!(tb_strip))
+                .child(live_id!(tb_carousel))
+        })
+    }
+
+    /// One of the arrows was pressed: the row goes on by a page, or back by
+    /// one. The clamp is the carousel's own, so a press that reaches an arrow
+    /// at the end it points at moves nothing; the arrow is dimmed and off
+    /// there, and this is the second answer to the same question.
+    fn tb_arrow_pressed(&mut self, cx: &mut Cx, forward: bool) {
+        let carousel = self.tb_carousel_ref();
+        if let Some(mut row) = carousel.borrow_mut::<FabPaletteCarousel>() {
+            row.scroll_page(cx, forward);
+        }
+        // The arrows are drawn from where the row now stands, so the one that
+        // has just run out of room has to be drawn again.
+        self.redraw_sidebar(cx);
     }
 
     /// The tooltip for the chip under the pointer: the name its palette is
     /// offered under, over the part of the chip that shows.
     fn tb_chip_tip(&self, cx: &Cx, sidebar: &WidgetRef, abs: Vec2d) -> Option<(Rect, String)> {
-        if !self.tb_open || self.tb_seed_slot.is_none() {
+        if !self.tb_open || self.tb_row_seed().is_none() {
             return None;
         }
         let carousel = sidebar
             .child(live_id!(theme_head))
             .child(live_id!(tb_body))
+            .child(live_id!(tb_strip))
             .child(live_id!(tb_carousel));
         let row = carousel.borrow::<FabPaletteCarousel>()?;
         let (index, rect) = row.chip_at(cx, abs)?;
@@ -19158,7 +19290,7 @@ impl Tweaker {
     /// outlines the palette in force if it happens to offer it, as any row
     /// does.
     fn tb_suggest_again(&mut self) {
-        let Some(slot) = self.tb_seed_slot else {
+        let Some(slot) = self.tb_row_seed() else {
             self.tb_suggestions.clear();
             self.tb_chosen = None;
             self.tb_grown_for = None;
@@ -19425,14 +19557,14 @@ impl Tweaker {
     fn tb_row_set(&mut self, params: BuilderParams) {
         let was_dark = self.tb_builder.params().dark();
         self.tb_builder.set(params);
-        if self.tb_builder.params().dark() != was_dark && self.tb_seed_slot.is_some() {
+        if self.tb_builder.params().dark() != was_dark && self.tb_row_seed().is_some() {
             self.tb_suggest_due = true;
         }
     }
 
     /// Whether square `which` is the one the carousel is grown from.
     fn tb_is_seed(&self, which: usize) -> bool {
-        self.tb_seed_slot.is_some_and(|slot| slot.index() == which)
+        self.tb_row_seed().is_some_and(|slot| slot.index() == which)
     }
 
     /// The seed picker moved: the carousel is grown from the new slot at
@@ -19481,6 +19613,13 @@ impl Tweaker {
     /// The chip in force is the one the new row offers for the same
     /// colours, if it offers one: `tb_suggest_again` looks for it as it does
     /// for any palette in force.
+    ///
+    /// One colour takes the row away altogether -- there is nothing to
+    /// suggest -- and takes the seed picker with it, so the choice it held is
+    /// put somewhere leaving one colour can find a row again: the primary,
+    /// which is the one slot one colour has. "None" comes down to the primary
+    /// too, since the whole of what it does, hiding the row, the count is
+    /// doing already, and a person leaving one colour is owed the row back.
     fn tb_count_chosen(&mut self, count: usize) {
         let params = self.tb_builder.params();
         if count == params.color_count {
@@ -19492,7 +19631,7 @@ impl Tweaker {
         // nobody can see any more would be a colour nobody chose.
         let text_color = params.text_color.filter(|slot| slot.chosen_at(count));
         self.tb_builder.set(BuilderParams { color_count: count, text_color, ..params });
-        if self.tb_seed_slot.is_some_and(|slot| !slot.chosen_at(count)) {
+        if count == 1 || self.tb_seed_slot.is_some_and(|slot| !slot.chosen_at(count)) {
             self.tb_seed_slot = Some(SeedSlot::Primary);
         }
         // Another count is another row, not the same one grown again, so
@@ -19594,7 +19733,7 @@ impl Tweaker {
         self.tb_builder.set(params.with_palette(now));
         // The seed is a role: it stays on its slot, and the row is grown
         // again only where a different colour came to stand under it.
-        if let Some(slot) = self.tb_seed_slot {
+        if let Some(slot) = self.tb_row_seed() {
             if now[slot.index()] | 0xFF != was[slot.index()] | 0xFF {
                 self.tb_suggest_due = true;
             }
@@ -19612,7 +19751,7 @@ impl Tweaker {
     fn tb_surprise(&mut self) {
         self.tb_seed = next_mix_seed(self.tb_seed);
         self.tb_builder.randomize(self.tb_seed);
-        self.tb_suggest_due = self.tb_seed_slot.is_some();
+        self.tb_suggest_due = self.tb_row_seed().is_some();
         self.tb_built_changed();
     }
 
@@ -20399,9 +20538,15 @@ impl Tweaker {
             .fold(squares[0].pos.y, f64::min);
         // The row goes on past the four into the seed picker and the die,
         // and neither is a place in the list: the zone after the last square
-        // stops where the picker begins.
-        let beyond = row.child(live_id!(tb_seed_col)).area().rect(cx);
-        tb_drop_zone(&squares, top, beyond.pos.x, from, at)
+        // stops where they begin. Whichever of the two stands first, because
+        // at one colour the picker is not there and the die is that edge.
+        let beyond = [live_id!(tb_seed_col), live_id!(tb_roll_col)]
+            .into_iter()
+            .map(|id| row.child(id).area().rect(cx))
+            .filter(|rect| rect.size.x > 0.0)
+            .map(|rect| rect.pos.x)
+            .fold(f64::INFINITY, f64::min);
+        tb_drop_zone(&squares, top, beyond, from, at)
     }
 
     /// Show what the drop would be, and only that: the square it would
@@ -22010,7 +22155,10 @@ mod tests {
             ("tb_color_3", "TbColorT"),
             ("tb_color", "FabColorPick"),
             ("tb_color_name", "PanelLabelSmall"),
+            ("tb_strip", "View"),
             ("tb_carousel", "FabPaletteCarousel"),
+            ("tb_strip_prev", "PanelButton"),
+            ("tb_strip_next", "PanelButton"),
             ("tb_seed_col", "View"),
             ("tb_seed_name", "PanelLabelSmall"),
             ("tb_seed", "PanelDropDown"),
@@ -23564,6 +23712,20 @@ line two");
     /// the carousel needs, since the carousel is one control and the chip is
     /// a part of it.
     fn one_press_at(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, at: Vec2d) {
+        let actions = a_press_at(cx, panel, root, at);
+        assert!(!actions.is_empty(), "the press produced no action whatever");
+    }
+
+    /// The press itself, and what came of it, without that assertion: what a
+    /// test of a control it expects to be DEAF needs, since a dimmed button
+    /// answers nothing at all and the nothing is the assertion.
+    fn a_press_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef) -> Vec<Action> {
+        let face = target.area().rect(cx);
+        assert!(face.size.x > 0.0, "the control was never drawn, so the press lands nowhere");
+        a_press_at(cx, panel, root, face.pos + face.size * 0.5)
+    }
+
+    fn a_press_at(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, at: Vec2d) -> Vec<Action> {
         use std::cell::Cell;
         const WINDOW: WindowId = WindowId(1, 1);
         cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
@@ -23588,8 +23750,8 @@ line two");
             root.handle_event(cx, &up, &mut Scope::empty());
         });
         cx.fingers.first_mouse_button = None;
-        assert!(!actions.is_empty(), "the press produced no action whatever");
         panel.handle_sidebar_actions(cx, &actions);
+        actions
     }
 
     /// A press with BOTH halves routed through the panel: a colour control
@@ -26100,9 +26262,19 @@ line two");
         the_build_reload_lands(cx, panel, now);
     }
 
-    /// The builder's carousel of palettes, as the panel addresses it.
+    /// The builder's carousel of palettes, as the panel addresses it, and the
+    /// strip that holds it between its two arrows.
+    fn the_strip(head: &WidgetRef) -> WidgetRef {
+        head.child(live_id!(tb_body)).child(live_id!(tb_strip))
+    }
+
     fn the_carousel(head: &WidgetRef) -> WidgetRef {
-        head.child(live_id!(tb_body)).child(live_id!(tb_carousel))
+        the_strip(head).child(live_id!(tb_carousel))
+    }
+
+    /// The arrow at one end of the row: back, or on.
+    fn the_arrow(head: &WidgetRef, forward: bool) -> WidgetRef {
+        the_strip(head).child(if forward { live_id!(tb_strip_next) } else { live_id!(tb_strip_prev) })
     }
 
     fn carousel_scroll(head: &WidgetRef) -> f64 {
@@ -27291,6 +27463,197 @@ line two");
         assert_ne!(panel.tb_carousel_uid, 0, "the carousel came back routed nowhere");
         let gap = rows_rect(&cx).pos.y - (row_rect(&cx).pos.y + row_rect(&cx).size.y);
         assert!((gap - shown_gap).abs() < 0.5, "the carousel came back at another height");
+    }
+
+    /// One colour takes the carousel away, and the seed picker with it.
+    ///
+    /// At a palette of one there is nothing to suggest -- every chip would be
+    /// one square, the very square that is already on the screen above it --
+    /// and the only slot a picker could name is the primary. So both draw
+    /// nothing, take no room and route nothing, exactly as "None" hides the
+    /// row; Roll and its word stay where they are and still roll the one
+    /// colour; and leaving one colour brings both back, grown from what is in
+    /// force then.
+    ///
+    /// Seen failing with a row of identical one-square chips under a picker
+    /// that offered one answer.
+    #[test]
+    fn one_colour_hides_the_carousel_and_the_seed_picker_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let body = head.child(live_id!(tb_body));
+        let seed_row = body.child(live_id!(tb_seed_row));
+        let row_rect = |cx: &Cx| seed_row.area().rect(cx);
+        let rows_rect = |cx: &Cx| body.child(live_id!(tb_rows)).area().rect(cx);
+        let shown_gap = rows_rect(&cx).pos.y - (row_rect(&cx).pos.y + row_rect(&cx).size.y);
+        assert!(shown_gap > 80.0, "the carousel was not between the row and the settings to begin with: {shown_gap}");
+        assert!(the_seed_picker(&head).area().rect(&cx).size.x > 0.0, "the seed picker was not there to begin with");
+
+        a_count_pressed(&mut cx, &mut panel, &head, 1, 1.0);
+        let seed_col = seed_row.child(live_id!(tb_seed_col));
+        for (what, rect) in [
+            ("the strip", the_strip(&head).area().rect(&cx)),
+            ("the carousel", the_carousel(&head).area().rect(&cx)),
+            ("the back arrow", the_arrow(&head, false).area().rect(&cx)),
+            ("the arrow on", the_arrow(&head, true).area().rect(&cx)),
+            ("the seed picker", the_seed_picker(&head).area().rect(&cx)),
+            ("the seed's word", seed_col.child(live_id!(tb_seed_name)).area().rect(&cx)),
+        ] {
+            assert!(rect.size.x == 0.0 && rect.size.y == 0.0, "{what} still draws at one colour: {rect:?}");
+        }
+        assert!(!the_strip(&head).visible() && !the_carousel(&head).visible(), "the strip was never hidden");
+        assert!(!seed_col.visible(), "the seed picker was never hidden");
+        assert_eq!(
+            [panel.tb_carousel_uid, panel.tb_strip_prev_uid, panel.tb_strip_next_uid, panel.tb_seed_uid],
+            [0; 4],
+            "a route into the hidden row or picker is still open"
+        );
+        assert!(panel.tb_suggestions.is_empty(), "the hidden row is still grown");
+        assert_eq!(panel.tb_chosen, None, "the hidden row still has a chip chosen");
+        let gap = rows_rect(&cx).pos.y - (row_rect(&cx).pos.y + row_rect(&cx).size.y);
+        assert!((0.0..=4.0).contains(&gap), "{gap} points stand between the row and the settings: the hidden carousel takes room");
+
+        // Roll stays exactly where it was, word and all, and still rolls.
+        let roll_col = seed_row.child(live_id!(tb_roll_col));
+        assert_eq!(roll_col.child(live_id!(tb_roll_name)).text(), TB_ROLL_HEADER);
+        let die = roll_col.child(live_id!(tb_random));
+        assert!(die.area().rect(&cx).size.x > 0.0, "the die went with the picker");
+        let before = panel.tb_builder.params().palette()[0];
+        one_press_on(&mut cx, &mut panel, &head, &die);
+        the_palette_lands(&mut cx, &mut panel, 2.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_ne!(panel.tb_builder.params().palette()[0], before, "the die rolled nothing at one colour");
+        assert!(panel.tb_suggestions.is_empty(), "the die grew a row nobody can see");
+
+        // Two colours: both back, grown from the colour in force now.
+        a_count_pressed(&mut cx, &mut panel, &head, 2, 3.0);
+        let params = panel.tb_builder.params();
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Primary));
+        assert_eq!(
+            panel.tb_suggestions,
+            all_suggestions_for(2, SeedSlot::Primary, params.favourite, params.dark(), &panel.tb_own_schemes),
+            "the row that came back is not the one two colours grows now"
+        );
+        assert!(the_carousel(&head).area().rect(&cx).size.y > 0.0, "the carousel did not come back");
+        assert!(the_seed_picker(&head).area().rect(&cx).size.x > 0.0, "the seed picker did not come back");
+        assert_eq!(the_seed_picker(&head).as_drop_down().selected_label(), "Prim");
+        assert_ne!(panel.tb_carousel_uid, 0, "the carousel came back routed nowhere");
+        assert_ne!(panel.tb_seed_uid, 0, "the seed picker came back routed nowhere");
+
+        // "None" and one colour are two doors to the same empty place, and
+        // only one of them was a choice: somebody who turned the row off, went
+        // down to one colour and came back up is owed a row again.
+        a_seed_picked(&mut cx, &mut panel, &head, 2);
+        assert_eq!(panel.tb_seed_slot, None, "the last entry at two is not None");
+        a_count_pressed(&mut cx, &mut panel, &head, 1, 4.0);
+        a_count_pressed(&mut cx, &mut panel, &head, 4, 5.0);
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Primary), "one colour left the row off after it");
+        assert!(the_carousel(&head).area().rect(&cx).size.y > 0.0, "the carousel stayed away after one colour");
+    }
+
+    /// The row reads as a carousel: an arrow at each of its ends, a page of
+    /// whole chips per press, and each arrow dimmed and deaf at the end it
+    /// points at -- both of them where the window holds every chip. The chips
+    /// keep their own size; it is the row that is a little narrower for the
+    /// arrows, and the default sidebar still shows eight of them.
+    ///
+    /// Seen failing with a row that answered a drag, a wheel and the arrow
+    /// keys and showed none of it: the operator went looking for the arrows
+    /// before he found the drag.
+    #[test]
+    fn the_carousel_has_an_arrow_at_each_end_and_pages_by_them() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let width = DEFAULT_SIDEBAR_WIDTH - 8.0;
+        let redraw = |cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef| {
+            // Twice: the arrows are drawn off the window the row was last
+            // drawn in, so a width that is new this frame is theirs the next.
+            draw_the_theme_head_at(cx, panel, head, width);
+            draw_the_theme_head_at(cx, panel, head, width);
+        };
+        redraw(&mut cx, &mut panel, &head);
+        let back = the_arrow(&head, false);
+        let on = the_arrow(&head, true);
+        let strip = the_strip(&head).area().rect(&cx);
+        let row = the_carousel(&head).area().rect(&cx);
+        let back_face = back.area().rect(&cx);
+        let on_face = on.area().rect(&cx);
+        assert!(back_face.size.x > 0.0 && on_face.size.x > 0.0, "an arrow never drew");
+        assert_eq!(back.text(), "\u{2039}", "the back arrow wears something other than the panel's chevron");
+        assert_eq!(on.text(), "\u{203a}", "the arrow on wears something other than the panel's chevron");
+        // One at each end with the row between them, and the whole of it
+        // inside the strip: nothing hangs off the sidebar.
+        assert!(back_face.pos.x + back_face.size.x <= row.pos.x + 0.5, "the back arrow does not stand in front of the row");
+        assert!(row.pos.x + row.size.x <= on_face.pos.x + 0.5, "the arrow on does not stand after the row");
+        assert!(
+            back_face.pos.x >= strip.pos.x - 0.5 && on_face.pos.x + on_face.size.x <= strip.pos.x + strip.size.x + 0.5,
+            "the arrows hang off the strip: {back_face:?} {on_face:?} in {strip:?}"
+        );
+
+        // The chips are what they always were, and enough of them still show.
+        let chip = the_carousel(&head)
+            .borrow::<FabPaletteCarousel>()
+            .expect("a carousel")
+            .chip_rect(&cx, 0)
+            .expect("a first chip");
+        assert!((chip.size.x - 22.0).abs() < 0.5 && (chip.size.y - 88.0).abs() < 0.5, "the arrows resized the chips: {chip:?}");
+        let offers = panel.tb_suggestions.len();
+        let whole = (0..offers).filter(|index| a_chip_shown_whole(&mut cx, &head, *index)).count();
+        assert!(whole >= 8, "only {whole} chips stand in the row at the default sidebar");
+
+        // At the start: the back arrow is dimmed, and deaf as well as dim.
+        assert!(back.disabled(&cx), "the back arrow is live at the row's start");
+        assert!(!on.disabled(&cx), "the arrow on is dimmed with the row's far end off the screen");
+        let answered = a_press_on(&mut cx, &mut panel, &head, &back);
+        redraw(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_scroll(&head), 0.0, "the dimmed arrow moved the row");
+        assert!(
+            !answered
+                .iter()
+                .any(|action| matches!(action.as_widget_action().map(|a| a.cast::<ButtonAction>()), Some(ButtonAction::Clicked(_)))),
+            "the dimmed arrow answered the press"
+        );
+
+        // A page on is the whole chips the window was holding.
+        one_press_on(&mut cx, &mut panel, &head, &on);
+        redraw(&mut cx, &mut panel, &head);
+        let paged = carousel_scroll(&head);
+        assert!((paged - whole as f64 * 25.0).abs() < 0.5, "a page of {whole} chips moved the row {paged}");
+        assert!(!back.disabled(&cx), "the back arrow stayed dimmed once the row had moved");
+
+        // On to the far end, where it stops and the arrow goes out.
+        for _ in 0..offers {
+            if on.disabled(&cx) {
+                break;
+            }
+            one_press_on(&mut cx, &mut panel, &head, &on);
+            redraw(&mut cx, &mut panel, &head);
+        }
+        let far = the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx);
+        assert!(far > 0.0, "the house favourite's row fits the default sidebar, so nothing below is about scrolling");
+        assert!((carousel_scroll(&head) - far).abs() < 0.5, "paging on did not stop at the row's far end");
+        assert!(on.disabled(&cx), "the arrow on is live at the row's far end");
+        a_press_on(&mut cx, &mut panel, &head, &on);
+        redraw(&mut cx, &mut panel, &head);
+        assert!((carousel_scroll(&head) - far).abs() < 0.5, "the dimmed arrow carried the row past its end");
+        one_press_on(&mut cx, &mut panel, &head, &back);
+        redraw(&mut cx, &mut panel, &head);
+        assert!(carousel_scroll(&head) < far - 0.5, "the back arrow did not bring the row back");
+
+        // A window wide enough for every chip: both arrows out, because there
+        // is nowhere to go either way.
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, 4000.0);
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, 4000.0);
+        assert_eq!(
+            the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx),
+            0.0,
+            "the window does not hold the whole row even at 4000 points"
+        );
+        assert!(back.disabled(&cx) && on.disabled(&cx), "an arrow is live over a row the window holds whole");
     }
 
     /// The die keeps the seed choice, rolls the four colours as the surprise
@@ -28793,11 +29156,13 @@ line two");
         a_seed_picked(&mut cx, &mut panel, &head, 1);
         assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Surface), "the second entry at two is not the surface");
         assert_eq!(the_seed_picker(&head).as_drop_down().selected_label(), "Surf");
+        // One colour has no picker at all: see
+        // `one_colour_hides_the_carousel_and_the_seed_picker_with_it`. The
+        // words it would have listed are still the pure function's, which is
+        // what the table below reads.
         a_count_pressed(&mut cx, &mut panel, &head, 1, 3.0);
-        assert_eq!(listed(&mut cx, &head), ["Prim", "None"]);
+        assert_eq!(tb_seed_labels(1), ["Prim", "None"]);
         assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Primary));
-        a_seed_picked(&mut cx, &mut panel, &head, 1);
-        assert_eq!(panel.tb_seed_slot, None, "the last entry at one is not None");
         for count in COLOR_COUNTS {
             let slots = SeedSlot::chosen(count);
             for (entry, slot) in slots.iter().enumerate() {
@@ -28831,6 +29196,15 @@ line two");
             a_count_pressed(&mut cx, &mut panel, &head, count, now);
             let params = panel.tb_builder.params();
             assert_eq!(params.color_count, count);
+            // One colour has no row at all -- there is nothing to suggest, and
+            // the chips would be the square above them over and over: see
+            // `one_colour_hides_the_carousel_and_the_seed_picker_with_it`.
+            // What it hides still has to come back, which is the rest of this.
+            if count == 1 {
+                assert!(panel.tb_suggestions.is_empty(), "one colour grew a row");
+                assert_eq!(the_carousel(&head).area().rect(&cx).size.y, 0.0, "one colour drew a row");
+                continue;
+            }
             let want = all_suggestions_for(count, SeedSlot::Primary, params.favourite, params.dark(), &panel.tb_own_schemes);
             assert_eq!(panel.tb_suggestions, want, "{count}: the carousel is not the row for {count} colours");
             let carousel = the_carousel(&head);

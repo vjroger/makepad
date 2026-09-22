@@ -4497,6 +4497,21 @@ impl ChipTrack {
         (index < self.count && into <= self.chip_width).then_some(index)
     }
 
+    /// How far one press of an arrow moves the row: as many whole chips as
+    /// the window holds, and never fewer than one.
+    ///
+    /// Whole chips, and not the window's own width: a page of exactly the
+    /// window would leave the chip that straddles the far edge cut in half on
+    /// the other side, and the row is for comparing colours side by side. A
+    /// window too narrow to hold one chip still moves on by one, or the arrow
+    /// would be a button that does nothing.
+    pub fn page(&self) -> f64 {
+        // The last chip of a window needs no gap after it, so the gap is
+        // added back before the count: at ten chips' pitch less one gap the
+        // window holds ten, not nine.
+        ((self.view + self.gap) / self.pitch()).floor().max(1.0) * self.pitch()
+    }
+
     /// The chips any part of which is in the window, first to last.
     pub fn in_view(&self, scroll: f64) -> std::ops::Range<usize> {
         if self.count == 0 {
@@ -4585,6 +4600,15 @@ pub struct FabPaletteCarousel {
     /// How far along the row the window stands, in points from its start.
     #[rust]
     scroll: f64,
+    /// How wide the window was when it was last drawn.
+    ///
+    /// Kept rather than asked of the area, because the two questions an arrow
+    /// asks -- whether there is anywhere left to go that way, and how far a
+    /// page is -- are asked while the host is drawing, when the area is last
+    /// frame's and the draw list under it may already be gone. A number the
+    /// row wrote itself is the same number whenever it is read.
+    #[rust]
+    window: f64,
     /// The chosen chip is owed a place in the window on the next draw,
     /// which is the first moment the window's width is known.
     #[rust]
@@ -4689,6 +4713,38 @@ impl FabPaletteCarousel {
         }
     }
 
+    /// The row moved on by a page, or back by one: as many whole chips as
+    /// the window holds ([`ChipTrack::page`]), clamped at the ends like every
+    /// other way of moving it. What a host's arrow presses.
+    pub fn scroll_page(&mut self, cx: &mut Cx, forward: bool) {
+        let track = self.track(self.window);
+        let page = track.page();
+        let scroll = track.clamp(self.scroll + if forward { page } else { -page });
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            self.repaint(cx);
+        }
+    }
+
+    /// Whether the row stands at one of its ends, which is what an arrow
+    /// pointing that way asks to know whether it has anything left to do. A
+    /// row the window holds whole stands at both at once, so both arrows are
+    /// off together.
+    ///
+    /// Off the window as last drawn, so that these answer the same arithmetic
+    /// [`FabPaletteCarousel::scroll_page`] obeys: an arrow that is live and a
+    /// press that moves nothing cannot both be right.
+    pub fn at_start(&self) -> bool {
+        self.scroll <= 0.0
+    }
+
+    pub fn at_end(&self) -> bool {
+        // A hair's width of slack: the far end is reached by arithmetic on
+        // the window's width, and an arrow left live over a row that cannot
+        // move is a press that does nothing.
+        self.scroll >= self.track(self.window).max_scroll() - 0.01
+    }
+
     /// Bring chip `index` whole into the window, moving the row as little as
     /// that takes.
     pub fn show_chip(&mut self, cx: &mut Cx, index: usize) {
@@ -4768,7 +4824,8 @@ impl Widget for FabPaletteCarousel {
         cx.begin_turtle(walk, Layout::flow_down());
         let width = cx.turtle().rect().size.x;
         let rect = cx.walk_turtle(Walk::new(Size::fill(), Size::Fixed(height)));
-        let track = self.track(rect.size.x.max(width));
+        self.window = rect.size.x.max(width);
+        let track = self.track(self.window);
         // The width is new on every draw -- the sidebar is dragged wider, a
         // list comes in shorter -- so the scroll is clamped to what it is
         // now, and a chip owed a place in the window is given it here.
@@ -6979,6 +7036,27 @@ mod tests {
         // The chips drawn are the ones any part of which shows.
         assert_eq!(row.in_view(0.0), 0..11, "the chip cut by the edge was not drawn");
         assert_eq!(row.in_view(row.max_scroll()).end, 40);
+    }
+
+    /// A page is the whole chips the window holds, never nought, and paging
+    /// from either end walks the row and stops there.
+    #[test]
+    fn a_page_is_the_whole_chips_the_window_holds() {
+        let row = a_row_of(40, 260.0);
+        // Ten chips stand whole in 260 points at a pitch of 25.
+        assert_eq!(row.page(), 250.0);
+        assert_eq!(row.index_at(row.page(), 1.0), Some(10), "a page did not land on the eleventh chip");
+        // A window narrower than a chip still moves on by one.
+        assert_eq!(a_row_of(40, 10.0).page(), 25.0);
+        assert_eq!(a_row_of(40, 25.0).page(), 25.0, "a window holding one chip paged by none");
+        // From either end, and no further than the end.
+        assert_eq!(row.clamp(0.0 - row.page()), 0.0);
+        let mut at = 0.0;
+        for _ in 0..40 {
+            at = row.clamp(at + row.page());
+        }
+        assert_eq!(at, row.max_scroll(), "paging on did not reach the row's far end");
+        assert_eq!(a_row_of(6, 260.0).clamp(a_row_of(6, 260.0).page()), 0.0, "a row the window holds whole paged anyway");
     }
 
     /// A sideways delta and a plain wheel both scroll the row, the larger of
