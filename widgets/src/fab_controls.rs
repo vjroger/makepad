@@ -32,6 +32,9 @@
 //!   popover (wheel + RGB rows + hex entry) anchored at the swatch;
 //!   outside-click commits, Escape reverts. Publishes `Changed` live and
 //!   `Ended` on commit, plus `Opened`/`Closed` for hosts that need to know.
+//! * `mod.widgets.FabPaletteCarousel` — every palette on offer in one row
+//!   that scrolls sideways, a chip of four stacked colours each; drag, wheel
+//!   or arrows along it, press and let go on a chip to pick it.
 //! * `mod.widgets.FabLabel` / `FabLabelDim` / `FabLabelSmall` /
 //!   `FabHeaderLabel`, `mod.widgets.FabSearch` (input well),
 //!   `mod.widgets.FabPropRow` (label-left / value-right row),
@@ -891,7 +894,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             gap: 2.0
         }
 
-        // ---- one whole palette, pressable ----
+        // ---- every palette on offer, in a row that scrolls ----
         set_type_default() do #(DrawFabPaletteChip::script_shader(vm)){
             ..mod.draw.DrawQuad
             band_0: vec4(0.0, 0.0, 0.0, 1.0)
@@ -921,13 +924,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 return sdf.result
             }
         }
-        mod.widgets.FabPaletteChipBase = #(FabPaletteChip::register_widget(vm))
-        /** A whole palette in one pressable block: four colours stacked, the
-         * first on top, outlined while it is the one in force. Four times as
-         * tall as it is wide, so each colour is a square. */
-        mod.widgets.FabPaletteChip = set_type_default() do mod.widgets.FabPaletteChipBase{
-            width: 22
+        mod.widgets.FabPaletteCarouselBase = #(FabPaletteCarousel::register_widget(vm))
+        /** Every palette on offer in one row that scrolls sideways: a chip
+         * each, four colours stacked with the first on top, the one in force
+         * outlined. A chip is four times as tall as it is wide, so each of
+         * its colours is a square; the row is one chip high and as wide as
+         * it is given. */
+        mod.widgets.FabPaletteCarousel = set_type_default() do mod.widgets.FabPaletteCarouselBase{
+            width: Fill
             height: 88
+            chip_width: 22.0
+            chip_height: 88.0
+            gap: 3.0
         }
 
         mod.widgets.FabColorPickBase = #(FabColorPick::register_widget(vm))
@@ -4338,12 +4346,14 @@ impl Widget for FabPaletteStrip {
 }
 
 // ===========================================================================
-// FabPaletteChip — a whole palette as one pressable stack of colour bands.
-// Four colours in a single quad, hit-tested as one thing; the host writes the
-// bands and says which chip is the one in force, and a press comes back.
+// FabPaletteCarousel — every palette on offer, in one row that scrolls
+// sideways. One draw call of chips, hit-tested by rect math, the way the
+// palette strip is; the host hands it the list and says which is in force,
+// and a pick comes back as an index.
 // ===========================================================================
 
-/// Four colours stacked in one quad, rounded as a whole.
+/// Four colours stacked in one quad, rounded as a whole: one chip of the
+/// carousel.
 ///
 /// One quad and not four: a chip is one thing to a hand -- it is pressed, it
 /// is outlined, it is the palette -- and four boxes with a corner each would
@@ -4374,20 +4384,147 @@ pub struct DrawFabPaletteChip {
 }
 
 #[derive(Clone, Debug, Default)]
-pub enum FabPaletteChipAction {
-    /// Pressed. There is nothing else a chip does.
-    Pick,
+pub enum FabPaletteCarouselAction {
+    /// A chip was pressed and let go without the row moving under it.
+    Pick(usize),
+    /// The pointer rests on a chip (None: it left the row, or a drag took it).
+    Hover(Option<usize>),
     #[default]
     None,
 }
 
-/// One palette, pressable.
+/// How far a press may wander before it is a drag. A hand pressing a chip
+/// 22 points wide is not still to the point, and a press that is let go a
+/// pixel or two from where it landed is still a press on that chip.
+const CAROUSEL_DRAG_SLOP: f64 = 4.0;
+
+/// The arithmetic of a row of equal chips seen through a window: where each
+/// one stands, which is under a point, and how far the row may scroll.
+/// Apart from the widget so that it is checked on its own, without a draw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChipTrack {
+    pub count: usize,
+    pub chip_width: f64,
+    pub gap: f64,
+    /// The window's width, the part of the row that is on the screen.
+    pub view: f64,
+}
+
+impl ChipTrack {
+    pub fn pitch(&self) -> f64 {
+        self.chip_width + self.gap
+    }
+
+    /// The whole row, first chip's left edge to the last one's right.
+    pub fn span(&self) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        self.count as f64 * self.pitch() - self.gap
+    }
+
+    /// The furthest the row scrolls: the last chip flush with the right
+    /// edge, and nought for a row the window holds whole.
+    pub fn max_scroll(&self) -> f64 {
+        (self.span() - self.view).max(0.0)
+    }
+
+    pub fn clamp(&self, scroll: f64) -> f64 {
+        scroll.clamp(0.0, self.max_scroll())
+    }
+
+    /// The least scroll that puts the whole of chip `index` in the window:
+    /// a chip already in it leaves the row where it is, one off to the left
+    /// brings its left edge to the window's, one off to the right its right
+    /// edge. Least, because a row that jumped to centre every chip it was
+    /// asked to show would move under a hand that had only just found it.
+    pub fn reveal(&self, scroll: f64, index: usize) -> f64 {
+        if index >= self.count {
+            return self.clamp(scroll);
+        }
+        let left = index as f64 * self.pitch();
+        let right = left + self.chip_width;
+        let scroll = if left < scroll {
+            left
+        } else if right > scroll + self.view {
+            right - self.view
+        } else {
+            scroll
+        };
+        self.clamp(scroll)
+    }
+
+    /// The chip under a point `x` along the window, if there is one. The gap
+    /// between two chips belongs to neither: a press there is aimed at no
+    /// palette, and choosing its neighbour would be a guess.
+    pub fn index_at(&self, scroll: f64, x: f64) -> Option<usize> {
+        if x < 0.0 || x > self.view {
+            return None;
+        }
+        let along = x + scroll;
+        if along < 0.0 {
+            return None;
+        }
+        let index = (along / self.pitch()).floor() as usize;
+        let into = along - index as f64 * self.pitch();
+        (index < self.count && into <= self.chip_width).then_some(index)
+    }
+
+    /// The chips any part of which is in the window, first to last.
+    pub fn in_view(&self, scroll: f64) -> std::ops::Range<usize> {
+        if self.count == 0 {
+            return 0..0;
+        }
+        let first = ((scroll / self.pitch()).floor().max(0.0)) as usize;
+        let last = (((scroll + self.view) / self.pitch()).ceil().max(0.0)) as usize;
+        first.min(self.count)..last.min(self.count)
+    }
+}
+
+/// What a scroll event moves the row, in points.
 ///
-/// Its own control rather than a button with a colour written into it: what a
-/// chip has to show is four colours at once, and what it has to do is take a
-/// press. A button shows one colour and a row of coloured boxes takes none.
+/// A sideways delta always: it is the row's own. A plain vertical wheel as
+/// well, where a carousel standing in a page would leave it to the page:
+/// this one is a single row a chip high, so there is nothing vertical over
+/// it for the wheel to do, and a person with a one-wheel mouse has no other
+/// way along it than a drag. Whichever of the two is the larger wins, so a
+/// trackpad's diagonal drift does not scroll a row it was not moving along.
+pub fn carousel_wheel(scroll_x: f64, scroll_y: f64) -> f64 {
+    if scroll_x.abs() >= scroll_y.abs() {
+        scroll_x
+    } else {
+        scroll_y
+    }
+}
+
+/// A press held on the carousel: where it landed and where the row stood,
+/// so a drag moves the row with the hand rather than jumping it.
+#[derive(Clone, Copy, Debug)]
+struct CarouselPress {
+    abs_x: f64,
+    scroll: f64,
+    dragged: bool,
+}
+
+/// Every palette on offer, in one row that scrolls sideways.
+///
+/// Its own control rather than a View of chip slots: a View has no way to
+/// grow a child at run time, and a list of palettes is as long as the colour
+/// it is grown from makes it -- two dozen for a grey, sixty for a colour out
+/// of the book. So the chips are drawn, not built: one quad each off the
+/// list the host hands it, the ones in the window only, clipped to it.
+///
+/// The edge says there is more by cutting the chip that stands across it,
+/// and nothing louder: a row of colour is busy enough, and a fade would lay
+/// the panel's ground over the very colours somebody is comparing.
+///
+/// It scrolls by a drag, by a sideways delta, by a plain wheel (see
+/// [`carousel_wheel`]) and by the arrow keys once it has the keyboard, and
+/// it is clamped at both ends. The press holds the pointer until it is let
+/// go, and nothing else in the panel reacts meanwhile; a press that moves
+/// more than a few points is a drag and picks nothing.
 #[derive(Script, ScriptHook, Widget)]
-pub struct FabPaletteChip {
+pub struct FabPaletteCarousel {
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -4397,120 +4534,292 @@ pub struct FabPaletteChip {
     draw_chip: DrawFabPaletteChip,
     #[walk]
     walk: Walk,
-    /// Whether it is showing a palette at all.
-    ///
-    /// A hidden chip claims NOTHING, and that is the point of it: a strip of
-    /// these holds a fixed row of slots dividing the row's width between
-    /// them, and a slot whose chip has gone still holds its share. Hiding the
-    /// slot instead would hand its width to its neighbours and a page with
-    /// one palette on it would be one chip a whole row wide.
-    #[live(true)]
-    #[visible]
-    pub visible: bool,
+    #[live(22.0)]
+    chip_width: f64,
+    #[live(88.0)]
+    chip_height: f64,
+    #[live(3.0)]
+    gap: f64,
     #[rust]
-    hover: bool,
+    chips: Vec<[Vec4f; 4]>,
     #[rust]
-    current: bool,
+    chosen: Option<usize>,
+    #[rust]
+    hot: Option<usize>,
+    /// How far along the row the window stands, in points from its start.
+    #[rust]
+    scroll: f64,
+    /// The chosen chip is owed a place in the window on the next draw,
+    /// which is the first moment the window's width is known.
+    #[rust]
+    reveal_due: bool,
+    #[rust]
+    press: Option<CarouselPress>,
+    /// The whole row, the window the chips are seen through. Marked
+    /// `#[area]` so `Widget::area()` reports it: without that the derive
+    /// reports the last chip drawn, which is a different one every scroll.
+    #[rust]
+    #[area]
+    area: Area,
 }
 
-impl FabPaletteChip {
-    /// The four colours, top band first.
+impl FabPaletteCarousel {
+    /// The palettes on offer, four colours each with the top band first, and
+    /// which of them is in force.
     ///
     /// Silent when nothing moved, for [`FabDiagonalLabel::set_text`]'s
-    /// reason: a strip of these is written whole on every draw, and a setter
-    /// that dirtied the draw list each time would redraw the panel forever.
-    pub fn set_colors(&mut self, cx: &mut Cx, colors: [Vec4f; 4]) {
-        let bands = [
-            self.draw_chip.band_0,
-            self.draw_chip.band_1,
-            self.draw_chip.band_2,
-            self.draw_chip.band_3,
-        ];
-        if bands == colors {
+    /// reason: the host writes this on every draw, and a setter that dirtied
+    /// the draw list each time would redraw the panel forever. When either
+    /// DID move -- a new list, or another chip in force because the host
+    /// changed its mind from outside -- the chip in force is brought into the
+    /// window, since its outline is the one thing that says which palette is
+    /// in force, and an outline off the edge of the window says nothing.
+    pub fn set_chips(&mut self, cx: &mut Cx, chips: &[[Vec4f; 4]], chosen: Option<usize>) {
+        let chosen = chosen.filter(|index| *index < chips.len());
+        if self.chips.as_slice() == chips && self.chosen == chosen {
             return;
         }
-        self.draw_chip.band_0 = colors[0];
-        self.draw_chip.band_1 = colors[1];
-        self.draw_chip.band_2 = colors[2];
-        self.draw_chip.band_3 = colors[3];
-        self.redraw(cx);
-    }
-
-    /// Whether this is the chip the host is wearing.
-    pub fn set_current(&mut self, cx: &mut Cx, current: bool) {
-        if self.current == current {
-            return;
+        if self.chips.as_slice() != chips {
+            self.chips = chips.to_vec();
+            self.hot = None;
         }
-        self.current = current;
-        self.redraw(cx);
+        self.chosen = chosen;
+        self.reveal_due = chosen.is_some();
+        self.repaint(cx);
     }
 
-    /// What it is showing, for a test that has to read the bands back off the
-    /// widget rather than off the state that wrote them.
-    pub fn colors(&self) -> [Vec4f; 4] {
-        [
-            self.draw_chip.band_0,
-            self.draw_chip.band_1,
-            self.draw_chip.band_2,
-            self.draw_chip.band_3,
-        ]
+    /// Back to the first chip, for a list that is a new one rather than the
+    /// old one grown again: somebody who changed the colour it is grown from
+    /// is looking at a different row, and the middle of it is nowhere.
+    pub fn rewind(&mut self, cx: &mut Cx) {
+        self.scroll = 0.0;
+        self.repaint(cx);
     }
 
-    pub fn is_current(&self) -> bool {
-        self.current
+    pub fn chosen(&self) -> Option<usize> {
+        self.chosen
+    }
+
+    pub fn len(&self) -> usize {
+        self.chips.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chips.is_empty()
+    }
+
+    /// The four colours chip `index` is showing, for a test that has to read
+    /// the bands back off the control rather than off the state that wrote
+    /// them.
+    pub fn chip_colors(&self, index: usize) -> Option<[Vec4f; 4]> {
+        self.chips.get(index).copied()
+    }
+
+    pub fn scroll(&self) -> f64 {
+        self.scroll
+    }
+
+    /// Scroll to `scroll`, clamped to the row's ends.
+    pub fn set_scroll(&mut self, cx: &mut Cx, scroll: f64) {
+        let rect = self.area.rect(cx);
+        let scroll = self.track(rect.size.x).clamp(scroll);
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            self.repaint(cx);
+        }
+    }
+
+    /// Bring chip `index` whole into the window, moving the row as little as
+    /// that takes.
+    pub fn show_chip(&mut self, cx: &mut Cx, index: usize) {
+        let rect = self.area.rect(cx);
+        let scroll = self.track(rect.size.x).reveal(self.scroll, index);
+        self.set_scroll(cx, scroll);
+    }
+
+    /// The furthest the row scrolls at the width it was last drawn.
+    pub fn max_scroll(&self, cx: &Cx) -> f64 {
+        self.track(self.area.rect(cx).size.x).max_scroll()
+    }
+
+    /// Where chip `index` stands on the screen, the part of it the window
+    /// shows; None for a chip wholly outside the window, which is not drawn.
+    pub fn chip_rect(&self, cx: &Cx, index: usize) -> Option<Rect> {
+        let rect = self.area.rect(cx);
+        if index >= self.chips.len() || rect.size.x <= 0.0 {
+            return None;
+        }
+        let left = rect.pos.x + index as f64 * (self.chip_width + self.gap) - self.scroll;
+        let from = left.max(rect.pos.x);
+        let to = (left + self.chip_width).min(rect.pos.x + rect.size.x);
+        (to > from).then(|| Rect {
+            pos: dvec2(from, rect.pos.y),
+            size: dvec2(to - from, self.chip_height.min(rect.size.y)),
+        })
+    }
+
+    /// The chip under a point on the screen, and the part of it that shows.
+    pub fn chip_at(&self, cx: &Cx, abs: Vec2d) -> Option<(usize, Rect)> {
+        let rect = self.area.rect(cx);
+        if !rect.contains(abs) {
+            return None;
+        }
+        let index = self.track(rect.size.x).index_at(self.scroll, abs.x - rect.pos.x)?;
+        Some((index, self.chip_rect(cx, index)?))
+    }
+
+    fn track(&self, view: f64) -> ChipTrack {
+        ChipTrack {
+            count: self.chips.len(),
+            chip_width: self.chip_width,
+            gap: self.gap,
+            view,
+        }
+    }
+
+    /// The row and every chip on it. The chips' own area alone is not
+    /// enough: a list that has just emptied has no chip to redraw by.
+    fn repaint(&mut self, cx: &mut Cx) {
+        self.area.redraw(cx);
+        self.draw_chip.redraw(cx);
+    }
+
+    fn set_hot(&mut self, cx: &mut Cx, hot: Option<usize>) {
+        if hot != self.hot {
+            self.hot = hot;
+            self.repaint(cx);
+            cx.widget_action(self.uid, FabPaletteCarouselAction::Hover(hot));
+        }
     }
 }
 
-impl Widget for FabPaletteChip {
+impl Widget for FabPaletteCarousel {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !self.visible {
-            // Nothing drawn and no box claimed. The slot round it keeps its
-            // share of the row all the same, which is the whole point.
-            self.hover = false;
-            return DrawStep::done();
+        cx.begin_turtle(walk, Layout::flow_down());
+        let width = cx.turtle().rect().size.x;
+        let rect = cx.walk_turtle(Walk::new(Size::fill(), Size::Fixed(self.chip_height)));
+        let track = self.track(rect.size.x.max(width));
+        // The width is new on every draw -- the sidebar is dragged wider, a
+        // list comes in shorter -- so the scroll is clamped to what it is
+        // now, and a chip owed a place in the window is given it here.
+        self.scroll = track.clamp(self.scroll);
+        if self.reveal_due {
+            self.reveal_due = false;
+            if let Some(index) = self.chosen {
+                self.scroll = track.reveal(self.scroll, index);
+            }
         }
-        self.draw_chip.hover = if self.hover { 1.0 } else { 0.0 };
-        self.draw_chip.cur = if self.current { 1.0 } else { 0.0 };
-        self.draw_chip.draw_walk(cx, walk);
+        cx.push_clip_rect(rect);
+        let pitch = track.pitch();
+        for index in track.in_view(self.scroll) {
+            let bands = self.chips[index];
+            self.draw_chip.band_0 = bands[0];
+            self.draw_chip.band_1 = bands[1];
+            self.draw_chip.band_2 = bands[2];
+            self.draw_chip.band_3 = bands[3];
+            self.draw_chip.hover = if self.hot == Some(index) { 1.0 } else { 0.0 };
+            self.draw_chip.cur = if self.chosen == Some(index) { 1.0 } else { 0.0 };
+            self.draw_chip.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + index as f64 * pitch - self.scroll, rect.pos.y),
+                    size: dvec2(self.chip_width, self.chip_height),
+                },
+            );
+        }
+        cx.pop_clip_rect();
+        cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
 
     /// Through `hits`, so that a press anywhere else in the host holds the
-    /// pointer and this chip neither lights nor answers while it does; and
-    /// the press it does take holds the pointer against everything else.
+    /// pointer and this row neither lights nor answers while it does; and
+    /// the press it does take holds the pointer against everything else
+    /// until it is let go.
     ///
-    /// The choice is made on the release and over the chip, the way every
-    /// button is: a hand that came down on a palette and slid off it before
-    /// letting go has chosen nothing, and a strip of these is a row of small
-    /// targets side by side where that happens.
+    /// The choice is made on the release, over the chip the press landed on,
+    /// the way every button is -- and only if the row did not move: a hand
+    /// that dragged the row along was looking for a palette, not choosing
+    /// the one that happened to end up under it.
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
-        match event.hits(cx, self.draw_chip.area()) {
-            Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
-                if !self.hover {
-                    self.hover = true;
-                    self.redraw(cx);
-                }
+        let rect = self.area.rect(cx);
+        let track = self.track(rect.size.x);
+        match event.hits(cx, self.area) {
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
+                let hot = track.index_at(self.scroll, fe.abs.x - rect.pos.x);
+                cx.set_cursor(if hot.is_some() { MouseCursor::Hand } else { MouseCursor::Default });
+                self.set_hot(cx, hot);
             }
             Hit::FingerHoverOut(_) => {
-                if self.hover {
-                    self.hover = false;
-                    self.redraw(cx);
+                if self.press.is_none() {
+                    self.set_hot(cx, None);
                 }
             }
-            // Taken, and nothing said: what it buys is the pointer, which is
-            // what stops the chip beside it answering the release.
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.hover = true;
-                self.redraw(cx);
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                cx.set_key_focus(self.area);
+                self.press = Some(CarouselPress {
+                    abs_x: fe.abs.x,
+                    scroll: self.scroll,
+                    dragged: false,
+                });
+            }
+            Hit::FingerMove(fe) => {
+                let Some(mut press) = self.press else {
+                    return;
+                };
+                let moved = fe.abs.x - press.abs_x;
+                if !press.dragged && moved.abs() > CAROUSEL_DRAG_SLOP {
+                    press.dragged = true;
+                    cx.set_cursor(MouseCursor::Grabbing);
+                    self.set_hot(cx, None);
+                }
+                if press.dragged {
+                    // The row goes with the hand: dragging right brings the
+                    // earlier chips back into the window.
+                    let scroll = track.clamp(press.scroll - moved);
+                    if scroll != self.scroll {
+                        self.scroll = scroll;
+                        self.repaint(cx);
+                    }
+                }
+                self.press = Some(press);
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                if fe.is_over {
-                    cx.widget_action(uid, FabPaletteChipAction::Pick);
-                } else if self.hover {
-                    self.hover = false;
-                    self.redraw(cx);
+                let Some(press) = self.press.take() else {
+                    return;
+                };
+                if press.dragged || !fe.is_over {
+                    return;
+                }
+                if let Some(index) = track.index_at(self.scroll, fe.abs.x - rect.pos.x) {
+                    cx.widget_action(uid, FabPaletteCarouselAction::Pick(index));
+                }
+            }
+            Hit::FingerScroll(fs) => {
+                let delta = carousel_wheel(fs.scroll.x, fs.scroll.y);
+                let scroll = track.clamp(self.scroll + delta);
+                if scroll != self.scroll {
+                    self.scroll = scroll;
+                    // What is under the pointer moved; the tooltip and the
+                    // ring follow it.
+                    let hot = track.index_at(scroll, fs.abs.x - rect.pos.x);
+                    self.set_hot(cx, hot);
+                    self.repaint(cx);
+                }
+            }
+            Hit::KeyDown(ke) => {
+                let scroll = match ke.key_code {
+                    KeyCode::ArrowLeft => self.scroll - track.pitch(),
+                    KeyCode::ArrowRight => self.scroll + track.pitch(),
+                    KeyCode::Home => 0.0,
+                    KeyCode::End => track.max_scroll(),
+                    _ => return,
+                };
+                let scroll = track.clamp(scroll);
+                if scroll != self.scroll {
+                    self.scroll = scroll;
+                    self.repaint(cx);
                 }
             }
             _ => {}
@@ -6235,15 +6544,15 @@ mod tests {
         );
     }
 
-    /// The chip is the one control in the kit that is MEANT to be a colour
-    /// the panel knows nothing about: its four bands are the theme being
-    /// offered, and a chip drawn from the panel's table would show the panel
-    /// instead of the palette. So the reading is the other way round -- the
-    /// bands come off the host, and everything the panel owns, which is the
-    /// ring that says which chip is hovered and which is in force, comes off
-    /// the fab table like everything else.
+    /// The carousel's chip is the one face in the kit that is MEANT to be a
+    /// colour the panel knows nothing about: its four bands are the theme
+    /// being offered, and a chip drawn from the panel's table would show the
+    /// panel instead of the palette. So the reading is the other way round --
+    /// the bands come off the host, and everything the panel owns, which is
+    /// the ring that says which chip is hovered and which is in force, comes
+    /// off the fab table like everything else.
     #[test]
-    fn the_palette_chip_shows_the_hosts_colours_and_wears_the_panels_ring() {
+    fn the_palette_carousel_shows_the_hosts_colours_and_wears_the_panels_ring() {
         let src = include_str!("fab_controls.rs")
             .split("#[cfg(test)]")
             .next()
@@ -6256,8 +6565,8 @@ mod tests {
             .find("mod.widgets.FabColorPickBase")
             .expect("the chip is followed by the colour picker")];
         assert!(
-            chip.contains("mod.widgets.FabPaletteChip = "),
-            "the reading stops short of the chip's template"
+            chip.contains("mod.widgets.FabPaletteCarousel = "),
+            "the reading stops short of the carousel's template"
         );
         assert!(!chip.contains("#x"), "the chip writes a colour of its own");
         assert!(
@@ -6278,6 +6587,67 @@ mod tests {
             chip.matches("vec4(0.0, 0.0, 0.0, 1.0)").count() + chip.matches("vec4(band.xyz, 1.0)").count(),
             "the chip's face writes a colour that is neither a band nor a band's opacity"
         );
+    }
+
+    fn a_row_of(count: usize, view: f64) -> ChipTrack {
+        ChipTrack { count, chip_width: 22.0, gap: 3.0, view }
+    }
+
+    /// The row scrolls from its first chip flush left to its last chip
+    /// flush right and no further, and a row the window holds whole does not
+    /// scroll at all.
+    #[test]
+    fn a_row_of_chips_scrolls_between_its_two_ends() {
+        let row = a_row_of(40, 260.0);
+        assert_eq!(row.span(), 40.0 * 25.0 - 3.0);
+        assert_eq!(row.max_scroll(), row.span() - 260.0);
+        assert_eq!(row.clamp(-50.0), 0.0, "the row scrolled back past its first chip");
+        assert_eq!(row.clamp(1e6), row.max_scroll(), "the row scrolled on past its last chip");
+        let short = a_row_of(6, 260.0);
+        assert_eq!(short.max_scroll(), 0.0, "a row the window holds whole still scrolls");
+        assert_eq!(a_row_of(0, 260.0).max_scroll(), 0.0);
+    }
+
+    /// Which chip is under a point, the gap between two belonging to
+    /// neither, and the scroll moving what is under the same point.
+    #[test]
+    fn the_chip_under_a_point_moves_with_the_scroll() {
+        let row = a_row_of(40, 260.0);
+        assert_eq!(row.index_at(0.0, 10.0), Some(0));
+        assert_eq!(row.index_at(0.0, 23.5), None, "a press in the gap chose a palette");
+        assert_eq!(row.index_at(0.0, 26.0), Some(1));
+        assert_eq!(row.index_at(250.0, 10.0), Some(10), "the scroll did not move what is under the point");
+        assert_eq!(row.index_at(0.0, 261.0), None, "a point past the window found a chip");
+        assert_eq!(a_row_of(3, 260.0).index_at(0.0, 200.0), None, "a point past the last chip found one");
+    }
+
+    /// A chip is brought into the window by as little as that takes, and a
+    /// chip already in it leaves the row where it stood.
+    #[test]
+    fn revealing_a_chip_moves_the_row_as_little_as_it_can() {
+        let row = a_row_of(40, 260.0);
+        assert_eq!(row.reveal(0.0, 3), 0.0, "a chip in the window moved the row");
+        // Off to the right: its right edge to the window's.
+        let at = row.reveal(0.0, 20);
+        assert_eq!(at, 20.0 * 25.0 + 22.0 - 260.0);
+        assert_eq!(row.index_at(at, 259.0), Some(20), "the chip revealed is not at the right edge");
+        // Off to the left: its left edge to the window's.
+        assert_eq!(row.reveal(600.0, 5), 125.0);
+        // The last chip, which is also the row's far end.
+        assert_eq!(row.reveal(0.0, 39), row.max_scroll());
+        // The chips drawn are the ones any part of which shows.
+        assert_eq!(row.in_view(0.0), 0..11, "the chip cut by the edge was not drawn");
+        assert_eq!(row.in_view(row.max_scroll()).end, 40);
+    }
+
+    /// A sideways delta and a plain wheel both scroll the row, the larger of
+    /// the two where a trackpad sends both.
+    #[test]
+    fn the_wheel_and_a_sideways_delta_both_move_the_row() {
+        assert_eq!(carousel_wheel(0.0, 30.0), 30.0, "a plain wheel does not move the row");
+        assert_eq!(carousel_wheel(-12.0, 0.0), -12.0, "a sideways delta does not move the row");
+        assert_eq!(carousel_wheel(12.0, 2.0), 12.0, "a trackpad's drift beat the way it was moving");
+        assert_eq!(carousel_wheel(1.0, -9.0), -9.0);
     }
 
     fn cell() -> KnobTurn {

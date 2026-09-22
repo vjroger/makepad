@@ -90,7 +90,7 @@
 
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
-    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabPaletteChip, FabPaletteChipAction, FabSliderAction, FabSliderWidgetRefExt, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
+    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabPaletteCarousel, FabPaletteCarouselAction, FabSliderAction, FabSliderWidgetRefExt, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
     makepad_draw::makepad_platform::devtools,
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     dock::DockWidgetRefExt,
@@ -8286,31 +8286,12 @@ const TB_COLOR_IDS: [LiveId; 4] = [
 ];
 
 /// What each of the four is called, over its control.
-const TB_COLOR_NAMES: [&str; 4] = ["primary", "secondary", "tertiary", "background"];
-
-/// What the line under the strip calls a palette whose colours were named by
-/// hand: not any chip's, whatever chip it started from.
-const TB_OWN_PALETTE: &str = "Your own palette";
-
-/// The palettes on offer under the builder's colours, one slot each.
 ///
-/// How many are shown at once, and therefore what a page of them is. A chip
-/// is four squares stacked and 22 points wide, and ten of them with their
-/// gaps are what the default 280 points of sidebar holds. The engine puts
-/// the six plain harmonies first, so the first page opens with every one of
-/// them and the first of the moods after.
-const TB_CHIP_IDS: [LiveId; 10] = [
-    live_id!(tb_chip_0),
-    live_id!(tb_chip_1),
-    live_id!(tb_chip_2),
-    live_id!(tb_chip_3),
-    live_id!(tb_chip_4),
-    live_id!(tb_chip_5),
-    live_id!(tb_chip_6),
-    live_id!(tb_chip_7),
-    live_id!(tb_chip_8),
-    live_id!(tb_chip_9),
-];
+/// The panel's words and not the engine's: the fourth is the palette's
+/// background colour, which the engine calls that, and "surface" here
+/// because it is the word that fits over its control at the default sidebar
+/// and the one the section's heading over its two sliders uses.
+const TB_COLOR_NAMES: [&str; 4] = ["primary", "secondary", "tertiary", "surface"];
 
 /// How long the mix waits between installs while a weight is being dragged.
 ///
@@ -9042,13 +9023,10 @@ pub struct Tweaker {
     /// One per slider row, in `BuildRow::ALL`'s order.
     #[rust]
     tb_row_uids: [u64; 7],
-    /// One per chip slot, in the order they stand in. A slot with no palette
-    /// on it is zero, the same as a folded section's: an empty slot is hidden
-    /// and must route nothing.
+    /// The carousel of palettes. Zero while the section is folded, as every
+    /// other route into it is.
     #[rust]
-    tb_chip_uids: [u64; 10],
-    #[rust]
-    tb_more_uid: u64,
+    tb_carousel_uid: u64,
     /// The palettes on offer for the favourite that is set, in the engine's
     /// own order. Recomputed only when the colour or the page it is grown for
     /// moves -- it is two dozen themes' worth of arithmetic, and it is the
@@ -9060,9 +9038,14 @@ pub struct Tweaker {
     /// library ships no list and the file need not exist.
     #[rust]
     tb_own_schemes: Vec<Vec<u32>>,
-    /// Which page of the strip is showing.
+    /// The favourite the offers were last grown from, so that a regrowth
+    /// can tell a new colour from the same colour grown for the other page.
     #[rust]
-    tb_page: usize,
+    tb_grown_for: Option<u32>,
+    /// The carousel is owed a return to its first chip on the next draw:
+    /// the offers are a new list, not the old one grown again.
+    #[rust]
+    tb_strip_rewind: bool,
     /// The palette that was chosen off the strip, kept as the thing itself
     /// rather than as an index: the list is rebuilt whenever the favourite
     /// moves, and an index into the old one would outline a different palette.
@@ -10696,39 +10679,28 @@ impl Tweaker {
                         height: fab.row_height_sm
                     }
                 }
-                // ONE PALETTE ON OFFER. The chip itself is the kit's own
-                // control -- four colours in one block that takes a press --
-                // and the View round it is the SLOT, which holds its place in
-                // the row whether or not there is a palette in it. A page
-                // with fewer on it than the row has slots hides the chips and
-                // not the slots, or the last page of a list would close up.
-                //
-                // A fixed width and four times it down, so every colour on a
-                // chip is a square at any sidebar width: a band wider than it
-                // is tall reads as a stripe of the one above it, and the
-                // fourth colour -- the page's own -- was read as nothing at
-                // all. 22 is the narrowest a square can be and still be told
-                // from its neighbours at a glance, and ten of them sit in the
-                // default 280 with room left round them.
-                let TbChipT = View {
-                    width: 22
-                    height: Fit
-                    tb_chip := FabPaletteChip {
-                        width: 22
-                        height: 88
-                    }
-                }
                 // ONE OF THE FOUR COLOURS IN FORCE, under the word that says
                 // which. The View is the column: the word over the control,
                 // both the column's width, so the four divide the row evenly
                 // and every word stands over its own square.
+                //
+                // The word is its own width and the column does not clip it:
+                // with the surprise at the row's end a column is about 50
+                // points at the default sidebar, and a word a point wider
+                // than its column is better run into the gap beside it than
+                // cut to a stump. The fourth is "surface" and not
+                // "background" for the same reason -- the longer word was
+                // cut to "backgroun" there -- and it is the heading over its
+                // two sliders as well, so the colour and its settings share
+                // one name.
                 let TbColorT = View {
                     width: Fill
                     height: Fit
                     flow: Down
                     spacing: 1
+                    clip_x: false
                     tb_color_name := PanelLabelSmall {
-                        width: Fill
+                        width: Fit
                         text: ""
                         max_lines: 1
                     }
@@ -11003,7 +10975,7 @@ impl Tweaker {
                             padding: Inset{left: 0 right: 0 top: 2 bottom: 0}
                             // THE FOUR COLOURS IN FORCE, and the control of
                             // each: the primary, the two companions and the
-                            // background colour. A chip fills all four; any
+                            // surface. A chip fills all four; any
                             // one of them edited makes the palette the
                             // person's own, and the first is also what the
                             // strip below is grown from.
@@ -11014,15 +10986,32 @@ impl Tweaker {
                             // panel is -- wheel, hex or eyedropper off the
                             // app itself. Four of equal width, because the
                             // four are equals: a palette is all of them.
+                            //
+                            // The surprise ends the row, in the one word it
+                            // is: it is a fifth way of setting these four,
+                            // all at once and by chance. It takes its word's
+                            // width and the four share what is left; the row
+                            // stands them on its floor, so the button sits
+                            // level with the squares and not with the names
+                            // over them.
                             tb_seed_row := View {
                                 width: Fill
                                 height: Fit
                                 flow: Right
                                 spacing: 3
+                                align: Align{x: 0.0 y: 1.0}
                                 tb_color_0 := TbColorT {}
                                 tb_color_1 := TbColorT {}
                                 tb_color_2 := TbColorT {}
                                 tb_color_3 := TbColorT {}
+                                tb_random := PanelButton {
+                                    width: Fit
+                                    height: 18
+                                    padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
+                                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                    text: "surprise"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
                             }
                             // WHAT THE FAVOURITE COULD BECOME. Every harmony
                             // in every mood is a couple of dozen palettes,
@@ -11032,88 +11021,17 @@ impl Tweaker {
                             // a row to choose from rather than one theme and
                             // six sliders to hunt the rest with.
                             //
-                            // The first six the engine offers are the six
-                            // harmonies as they are, so the first page is
-                            // what a harmony picker used to be -- which is
-                            // why there is no picker. Ten slots and a "more"
-                            // that walks the pages round: ten is what the
-                            // default sidebar holds of a chip that is four
-                            // squares.
-                            tb_chips := View {
+                            // All of them in one row that scrolls sideways,
+                            // rather than pages of what the sidebar holds:
+                            // a page turned is a press that shows nothing
+                            // until it lands, where a row slid along shows
+                            // every palette it passes. The first six the
+                            // engine offers are the six harmonies as they
+                            // are, so the row opens on what a harmony picker
+                            // used to be -- which is why there is no picker.
+                            tb_carousel := FabPaletteCarousel {
                                 width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 3
-                                tb_chip_0 := TbChipT {}
-                                tb_chip_1 := TbChipT {}
-                                tb_chip_2 := TbChipT {}
-                                tb_chip_3 := TbChipT {}
-                                tb_chip_4 := TbChipT {}
-                                tb_chip_5 := TbChipT {}
-                                tb_chip_6 := TbChipT {}
-                                tb_chip_7 := TbChipT {}
-                                tb_chip_8 := TbChipT {}
-                                tb_chip_9 := TbChipT {}
-                            }
-                            // What the strip is, or which palette of it is
-                            // in force -- the only place the palette is
-                            // named, so it has to be the palette the app is
-                            // wearing. The button is beside the line and not
-                            // over it because a page is turned far more
-                            // often than it is read about.
-                            //
-                            // Where the page stands is on the BUTTON's side
-                            // of the row and not in the line, because it is
-                            // about the button: it appears and goes with it,
-                            // it is the answer to the press, and a colour
-                            // with combinations in it gave the line more
-                            // than a sidebar's width to say without it. The
-                            // wrapper is what carries `visible` for the two
-                            // together -- a Label is not a View and answers
-                            // `set_visible` with nothing at all.
-                            //
-                            // The surprise is at the row's far end: it is
-                            // one more way of choosing a palette, and the
-                            // strip is where palettes are chosen.
-                            tb_sugg_row := View {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 4
-                                align: Align{x: 0.0 y: 0.5}
-                                tb_more_wrap := View {
-                                    width: Fit
-                                    height: Fit
-                                    flow: Right
-                                    spacing: 4
-                                    align: Align{x: 0.0 y: 0.5}
-                                    visible: false
-                                    tb_more := PanelButton {
-                                        width: Fit
-                                        height: 18
-                                        padding: Inset{left: 7 right: 7 top: 1 bottom: 1}
-                                        margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                                        text: "more"
-                                        draw_text +: { text_style +: { font_size: 7.5 } }
-                                    }
-                                    tb_page_read := PanelLabelSmall {
-                                        width: Fit
-                                        text: ""
-                                        max_lines: 1
-                                    }
-                                }
-                                tb_sugg_read := PanelLabelSmall {
-                                    width: Fill
-                                    text: ""
-                                    max_lines: 2
-                                }
-                                tb_random := PanelButton {
-                                    width: Fit
-                                    height: 18
-                                    padding: Inset{left: 7 right: 7 top: 1 bottom: 1}
-                                    text: "surprise"
-                                    draw_text +: { text_style +: { font_size: 7.5 } }
-                                }
+                                height: 88
                             }
                             // The settings, in three groups under a word
                             // each, every one in the unit it is read in. A
@@ -11140,7 +11058,7 @@ impl Tweaker {
                                 PanelLabelSmall {
                                     width: Fill
                                     margin: Inset{top: 3}
-                                    text: "Background"
+                                    text: "Surface"
                                 }
                                 tb_saturation := FabSlider {
                                     height: fab.row_height_sm
@@ -12550,7 +12468,16 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 39] = [
+        // A chip of the builder's carousel is named for the palette it is.
+        // The carousel is one control, so the chip is found by asking it and
+        // not by a path. It is the only place a palette is named: the chip
+        // in force says so by its outline, nothing under the row reads it
+        // out, and a name that shows only while a hand rests on the chip is
+        // as loud as that ought to get.
+        if let Some(label) = self.tb_chip_tip(cx, sidebar, abs) {
+            return Some(label);
+        }
+        let chrome: [(&[LiveId], &str); 38] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -12561,9 +12488,8 @@ impl Tweaker {
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_0), live_id!(tb_color)], "the primary \u{00b7} the palettes below are grown from it, and editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_1), live_id!(tb_color)], "the secondary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_2), live_id!(tb_color)], "the tertiary \u{00b7} editing any of the four makes the palette your own"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_3), live_id!(tb_color)], "the background colour \u{00b7} the page wears its hue, as much of it as Saturation says"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_sugg_row), live_id!(tb_more_wrap), live_id!(tb_more)], "the next handful of palettes for this colour \u{00b7} round to the first again at the end"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_sugg_row), live_id!(tb_random)], "a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_3), live_id!(tb_color)], "the surface \u{00b7} the page wears its hue, as much of it as Saturation says"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_random)], "a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
             (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
@@ -16600,26 +16526,14 @@ impl Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
-            // A palette off the strip. A press and not a drag, so the theme
-            // goes on at once -- and the strip is left exactly as it stands,
-            // because a row that reshuffles itself under the hand choosing
-            // from it is a row nobody can point at twice.
-            if let Some(slot) = self
-                .tb_chip_uids
-                .iter()
-                .position(|uid| *uid != 0 && *uid == widget_action.widget_uid.0)
-            {
-                if let FabPaletteChipAction::Pick = widget_action.cast::<FabPaletteChipAction>() {
-                    self.tb_chip_pressed(slot);
+            // A palette off the carousel. A press and not a drag, so the
+            // theme goes on at once -- and the row is left exactly as it
+            // stands, because a row that reshuffles itself under the hand
+            // choosing from it is a row nobody can point at twice.
+            if self.tb_carousel_uid != 0 && widget_action.widget_uid.0 == self.tb_carousel_uid {
+                if let FabPaletteCarouselAction::Pick(index) = widget_action.cast::<FabPaletteCarouselAction>() {
+                    self.tb_chip_pressed(index);
                     self.redraw_sidebar(cx);
-                }
-            }
-            if self.tb_more_uid != 0 && widget_action.widget_uid.0 == self.tb_more_uid {
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    self.tb_more_pressed();
-                    // The panel and nothing under it: a page turned changes
-                    // what is on offer, not what the app is wearing.
-                    self.redraw_panel(cx);
                 }
             }
             if let Some(index) = self
@@ -18539,11 +18453,7 @@ impl Tweaker {
             };
         }
         self.draw_the_suggestion_strip(cx, &body);
-        self.tb_random_uid = body
-            .child(live_id!(tb_sugg_row))
-            .child(live_id!(tb_random))
-            .widget_uid()
-            .0;
+        self.tb_random_uid = seed_row.child(live_id!(tb_random)).widget_uid().0;
         let rows = body.child(live_id!(tb_rows));
         for (index, which) in BuildRow::ALL.iter().enumerate() {
             let slider = rows.child(which.slot());
@@ -18566,73 +18476,62 @@ impl Tweaker {
         self.tb_color_opened = None;
         self.tb_random_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
-        self.tb_chip_uids = [0; TB_CHIP_IDS.len()];
-        self.tb_more_uid = 0;
+        self.tb_carousel_uid = 0;
     }
 
-    /// The row of palettes on offer, and the line that says what it is.
+    /// The row of palettes on offer, the one in force outlined.
+    ///
+    /// Nothing under it names the palette: the outline is what says which is
+    /// in force, and a line of words under a row of colours was one more
+    /// thing to read about a thing that can be seen. The chip under the
+    /// pointer is named by its tooltip, which asks for nothing until a hand
+    /// rests there.
     ///
     /// Written from the list the section keeps and never computed here: a
     /// draw runs per frame, and two dozen themes' worth of arithmetic per
     /// frame would buy a list that is the same one it was -- the offers only
-    /// move when the favourite or the page it is grown for does.
-    ///
-    /// A slot with no palette on it is hidden AND its route zeroed, for the
-    /// fold's reason: a uid left standing on a chip nobody can see routes a
-    /// press that landed on whatever stands there instead.
+    /// move when the favourite or the page it is grown for does. The
+    /// carousel itself is silent when it is handed what it already has, so
+    /// writing it every draw costs a comparison.
     fn draw_the_suggestion_strip(&mut self, cx: &mut Cx, body: &WidgetRef) {
-        let chips = body.child(live_id!(tb_chips));
-        let outlined = self.tb_chosen_index();
-        for (slot, id) in TB_CHIP_IDS.iter().enumerate() {
-            // The CHIP is hidden and never the slot round it: the slot is
-            // what keeps the chips that are left standing where a full page
-            // puts them, rather than closing up round a gap.
-            let chip = chips.child(*id).child(live_id!(tb_chip));
-            let Some(index) = self.tb_offer_at(slot) else {
-                chip.set_visible(cx, false);
-                self.tb_chip_uids[slot] = 0;
-                continue;
-            };
-            chip.set_visible(cx, true);
-            let colors = self.tb_suggestions[index].colors;
-            if let Some(mut inner) = chip.borrow_mut::<FabPaletteChip>() {
-                let bands: [Vec4f; 4] = colors.map(|packed| {
+        let carousel = body.child(live_id!(tb_carousel));
+        let chips: Vec<[Vec4f; 4]> = self
+            .tb_suggestions
+            .iter()
+            .map(|offer| {
+                offer.colors.map(|packed| {
                     let rgba = rgba_of(packed);
                     vec4(rgba[0], rgba[1], rgba[2], rgba[3])
-                });
-                inner.set_colors(cx, bands);
-                inner.set_current(cx, outlined == Some(index));
+                })
+            })
+            .collect();
+        let chosen = self.tb_chosen_index();
+        if let Some(mut row) = carousel.borrow_mut::<FabPaletteCarousel>() {
+            // Back to the start BEFORE the list goes in: the list going in is
+            // what brings the chip in force into view, and a rewind after it
+            // would scroll that chip straight back out again.
+            if std::mem::take(&mut self.tb_strip_rewind) {
+                row.rewind(cx);
             }
-            self.tb_chip_uids[slot] = chip.widget_uid().0;
+            row.set_chips(cx, &chips, chosen);
         }
-        let row = body.child(live_id!(tb_sugg_row));
-        let wrap = row.child(live_id!(tb_more_wrap));
-        // One page is every palette there is, and a button that turns to the
-        // page it is on is a button that does nothing. Where it stands goes
-        // with it, for the same reason: "1 of 1" is a count of a thing nobody
-        // is counting. Its route goes too -- a press cannot reach what is not
-        // drawn, but a uid standing on a hidden control is the fault the fold
-        // has to clear either way.
-        let pages = self.tb_pages();
-        wrap.set_visible(cx, pages > 1);
-        let more = wrap.child(live_id!(tb_more));
-        self.tb_more_uid = if pages > 1 { more.widget_uid().0 } else { 0 };
-        wrap.child(live_id!(tb_page_read))
-            .set_text(cx, &format!("{} of {pages}", self.tb_page + 1));
-        let line = self.tb_strip_reading();
-        row.child(live_id!(tb_sugg_read)).set_text(cx, &line);
+        self.tb_carousel_uid = carousel.widget_uid().0;
     }
 
-    /// How many pages of palettes the strip has. Never nought: a page that
-    /// cannot be turned is still a page that is showing.
-    fn tb_pages(&self) -> usize {
-        self.tb_suggestions.len().div_ceil(TB_CHIP_IDS.len()).max(1)
-    }
-
-    /// Which palette stands in a slot of the strip, if one does.
-    fn tb_offer_at(&self, slot: usize) -> Option<usize> {
-        let index = self.tb_page * TB_CHIP_IDS.len() + slot;
-        (index < self.tb_suggestions.len()).then_some(index)
+    /// The tooltip for the chip under the pointer: the name its palette is
+    /// offered under, over the part of the chip that shows.
+    fn tb_chip_tip(&self, cx: &Cx, sidebar: &WidgetRef, abs: Vec2d) -> Option<(Rect, String)> {
+        if !self.tb_open {
+            return None;
+        }
+        let carousel = sidebar
+            .child(live_id!(theme_head))
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_carousel));
+        let row = carousel.borrow::<FabPaletteCarousel>()?;
+        let (index, rect) = row.chip_at(cx, abs)?;
+        let offer = self.tb_suggestions.get(index)?;
+        Some((rect, offer.label.clone()))
     }
 
     /// Where the chosen palette stands in the strip, if it is still both
@@ -18652,79 +18551,13 @@ impl Tweaker {
         self.tb_suggestions.iter().position(|offer| offer == chosen)
     }
 
-    /// What the line under the strip says: the palette in force, by the name
-    /// it was offered under, or else what the strip is.
-    ///
-    /// It is the only place the palette is named -- there is no harmony
-    /// picker beside it any more -- so it answers what the app is WEARING
-    /// and not what was last pressed: a chip in force is its own name, four
-    /// colours named by hand are the person's own palette whatever chip they
-    /// started from, and only a palette nobody has moved gets the count.
-    ///
-    /// Where in the pages the strip is standing is not in the line: at the
-    /// panel's own 280 a colour with combinations in it ran the line onto a
-    /// second one, so it sits beside the "more" button, which is what it is
-    /// about anyway.
-    fn tb_strip_reading(&self) -> String {
-        if let Some(index) = self.tb_chosen_index() {
-            return self.tb_suggestions[index].label.clone();
-        }
-        let params = self.tb_builder.params();
-        if params.seeds.is_some() {
-            return TB_OWN_PALETTE.to_string();
-        }
-        if params.favourite != BuilderParams::house(params.dark()).favourite
-            || params.harmony != BuilderParams::house(params.dark()).harmony
-        {
-            // A palette the rule grew and no chip names, which only lasts
-            // until the settle adopts the chip that does: see
-            // `tb_suggest_again`. Its harmony is the whole of what it is.
-            return params.harmony.label().to_string();
-        }
-        let total = self.tb_suggestions.len();
-        // Where the strip is longer than the rule alone would make it, what
-        // the extra is: the combinations this colour turned up in, and the
-        // person's own schemes that hold it. Each only where there are some
-        // -- a count of nought is a line about a book this colour is not in,
-        // or a file they have never made.
-        let combinations = self
-            .tb_suggestions
-            .iter()
-            .filter(|offer| offer.label.starts_with(COMBINATION_LABEL))
-            .count();
-        let own = self
-            .tb_suggestions
-            .iter()
-            .filter(|offer| offer.label == OWN_LABEL)
-            .count();
-        // "for this color" only where the count is the whole line. The words
-        // are true either way, but the colour they point at is in the row
-        // directly above and the strip under that is grown from it, so they
-        // are the line's least-paying words -- and at the panel's own 280 a
-        // colour that turns up combinations needs every point of the row to
-        // say the counts on one line, which is the line's whole job.
-        let mut idle = format!(
-            "{total} {}",
-            if total == 1 { "palette" } else { "palettes" }
-        );
-        if combinations == 0 && own == 0 {
-            idle.push_str(" for this color");
-        }
-        if combinations > 0 {
-            idle.push_str(&format!(" \u{00b7} {combinations} combinations"));
-        }
-        if own > 0 {
-            idle.push_str(&format!(" \u{00b7} {own} of your own"));
-        }
-        idle
-    }
-
     /// Grow the offers again, for the favourite and the page that are set.
     ///
-    /// The page of the strip is brought back into range rather than kept: a
-    /// colour that offers fewer palettes than the one before it can leave the
-    /// strip showing a page that no longer exists, and an empty strip says
-    /// there is nothing to choose when there are ten things to choose.
+    /// A new favourite is a new row, and the carousel goes back to its first
+    /// chip for it: the middle of a row nobody has looked at yet is nowhere
+    /// in particular. The same favourite grown for the other page is the
+    /// same row in other colours, and it keeps its place -- the chip in
+    /// force, if there is one, is brought into view by the carousel itself.
     ///
     /// The chosen palette is carried over where the new list has the same
     /// palette in it -- see [`Tweaker::tb_equivalent_offer`] -- and let go
@@ -18735,13 +18568,14 @@ impl Tweaker {
     /// And a palette the rule grew that no chip is marked for -- what the
     /// surprise leaves, and what letting a chip go leaves -- is given the
     /// chip that IS it: the plain one of its harmony. It is the same four
-    /// colours, so the theme does not move, and the line under the strip
-    /// then names it rather than counting palettes as if none were in force.
+    /// colours, so the theme does not move, and the row then outlines it
+    /// rather than showing no palette in force where one plainly is.
     fn tb_suggest_again(&mut self) {
         let params = self.tb_builder.params();
         self.tb_suggestions = all_suggestions(params.favourite, params.dark(), &self.tb_own_schemes);
-        if self.tb_page >= self.tb_pages() {
-            self.tb_page = 0;
+        if self.tb_grown_for != Some(params.favourite) {
+            self.tb_grown_for = Some(params.favourite);
+            self.tb_strip_rewind = true;
         }
         if self.tb_chosen_index().is_some() {
             return;
@@ -18841,21 +18675,13 @@ impl Tweaker {
     /// person's own scheme is a shade off the one that found it, and a row
     /// that reshuffled itself under the hand that just pointed at it is a row
     /// nobody can point at twice.
-    fn tb_chip_pressed(&mut self, slot: usize) {
-        let Some(index) = self.tb_offer_at(slot) else {
+    fn tb_chip_pressed(&mut self, index: usize) {
+        let Some(offer) = self.tb_suggestions.get(index).cloned() else {
             return;
         };
-        let offer = self.tb_suggestions[index].clone();
         self.tb_builder.set(offer.params(self.tb_builder.params()));
         self.tb_chosen = Some(offer);
         self.tb_built_changed();
-    }
-
-    /// The next eight palettes, round to the first again at the end. Nothing
-    /// is installed: turning a page changes what is on offer and not what the
-    /// app is wearing.
-    fn tb_more_pressed(&mut self) {
-        self.tb_page = (self.tb_page + 1) % self.tb_pages();
     }
 
     /// Open or close the builder section.
@@ -18886,7 +18712,7 @@ impl Tweaker {
             // draw, which is also the one moment the person's own file is
             // worth a look: the section is entered by a press and left by
             // four doors, so a file edited between two visits is read again.
-            self.tb_page = 0;
+            self.tb_grown_for = None;
             self.tb_chosen = None;
             self.tb_suggest_due = false;
             self.tb_read_own_schemes();
@@ -18927,7 +18753,7 @@ impl Tweaker {
         self.tb_own_schemes.clear();
         self.tb_chosen = None;
         self.tb_suggest_due = false;
-        self.tb_page = 0;
+        self.tb_grown_for = None;
         cx.with_vm(|vm| self.tb_builder.leave(vm));
         self.arm_the_saved_themes_pins();
     }
@@ -21384,23 +21210,7 @@ mod tests {
             ("tb_color_3", "TbColorT"),
             ("tb_color", "FabColorPick"),
             ("tb_color_name", "PanelLabelSmall"),
-            ("tb_chips", "View"),
-            ("tb_chip_0", "TbChipT"),
-            ("tb_chip_1", "TbChipT"),
-            ("tb_chip_2", "TbChipT"),
-            ("tb_chip_3", "TbChipT"),
-            ("tb_chip_4", "TbChipT"),
-            ("tb_chip_5", "TbChipT"),
-            ("tb_chip_6", "TbChipT"),
-            ("tb_chip_7", "TbChipT"),
-            ("tb_chip_8", "TbChipT"),
-            ("tb_chip_9", "TbChipT"),
-            ("tb_chip", "FabPaletteChip"),
-            ("tb_sugg_row", "View"),
-            ("tb_more_wrap", "View"),
-            ("tb_more", "PanelButton"),
-            ("tb_page_read", "PanelLabelSmall"),
-            ("tb_sugg_read", "PanelLabelSmall"),
+            ("tb_carousel", "FabPaletteCarousel"),
             ("tb_random", "PanelButton"),
             ("tb_rows", "View"),
             ("tb_saturation", "FabSlider"),
@@ -21429,14 +21239,14 @@ mod tests {
             1,
             "the builder's `TbColorT` is not declared once as a View"
         );
-        // And its chip's slot, which is a View round the control so that a
-        // slot with no palette on it still holds its place in the row, and
-        // the chips left on a short page stand where a full page puts them.
-        assert_eq!(
-            src.matches("let TbChipT = View {").count(),
-            1,
-            "the builder's `TbChipT` is not declared once as a View"
-        );
+        // And the paged strip the carousel replaced is gone, slots, page
+        // button, page count and all: a slot left declared is a slot a
+        // press can still be routed to. So is the line that named the palette
+        // under the row: the outline says which is in force, and nothing may
+        // go on leaning on a line that is not there.
+        for gone in ["TbChipT", "tb_chip_0", "tb_chips :=", "tb_more", "tb_page", "tb_sugg_row", "FabPaletteChip ", "tb_sugg_read", "tb_strip_reading", "Your own palette"] {
+            assert!(!src.contains(gone), "`{gone}` is still in the panel");
+        }
         // The picker's kit, and the popup half with it: a face re-skinned
         // over a stock list is still a list a sheet can reach.
         for (name, ty) in [
@@ -22930,11 +22740,17 @@ line two");
     /// panel, and nothing on the screen tells the difference -- so no test
     /// of a control in this panel calls the method behind it directly.
     fn one_press_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef) {
-        use std::cell::Cell;
-        const WINDOW: WindowId = WindowId(1, 1);
         let face = target.area().rect(cx);
         assert!(face.size.x > 0.0, "the control was never drawn, so the press lands nowhere");
-        let at = face.pos + face.size * 0.5;
+        one_press_at(cx, panel, root, face.pos + face.size * 0.5);
+    }
+
+    /// The same press, at a point rather than on a control: what a chip of
+    /// the carousel needs, since the carousel is one control and the chip is
+    /// a part of it.
+    fn one_press_at(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, at: Vec2d) {
+        use std::cell::Cell;
+        const WINDOW: WindowId = WindowId(1, 1);
         cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
         let down = Event::MouseDown(MouseDownEvent {
             abs: at,
@@ -24752,7 +24568,7 @@ line two");
         let seed_row = body.child(live_id!(tb_seed_row));
         let rows = body.child(live_id!(tb_rows));
         let mut drawn: Vec<(&str, WidgetRef)> = vec![
-            ("tb_random", body.child(live_id!(tb_sugg_row)).child(live_id!(tb_random))),
+            ("tb_random", seed_row.child(live_id!(tb_random))),
             ("tb_read", body.child(live_id!(tb_read))),
         ];
         for which in BuildRow::ALL {
@@ -24848,7 +24664,7 @@ line two");
         let src = include_str!("tweaker.rs");
         let block = &src[src.find("tb_rows := View {").expect("the rows are declared")..];
         let at = |needle: &str| block.find(needle).unwrap_or_else(|| panic!("`{needle}` is not in the rows"));
-        assert!(at("text: \"Background\"") < at("tb_saturation :=") && at("tb_lightness :=") < at("text: \"Text\""));
+        assert!(at("text: \"Surface\"") < at("tb_saturation :=") && at("tb_lightness :=") < at("text: \"Text\""));
         assert!(at("text: \"Text\"") < at("tb_font_size :=") && at("tb_text_contrast :=") < at("text: \"Shape\""));
         assert!(at("text: \"Shape\"") < at("tb_spacing :="));
 
@@ -24902,25 +24718,22 @@ line two");
         panel.tb_color_ended(0, 0xD0_40_80_FF);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        for slot in 0..TB_CHIP_IDS.len() {
-            let rect = a_chip_of(&head, slot).area().rect(&mut cx);
-            assert!(rect.size.x > 0.0, "chip {slot} drew nothing");
+        let row = the_carousel(&head).area().rect(&mut cx);
+        for index in 0..panel.tb_suggestions.len() {
+            let rect = a_chip_in_view(&mut cx, &mut panel, &head, index);
             assert!(
                 (rect.size.y - 4.0 * rect.size.x).abs() < 0.5,
-                "chip {slot} is {} by {}, which is not four squares",
+                "chip {index} is {} by {}, which is not four squares",
                 rect.size.x,
                 rect.size.y
             );
-            let offer = &panel.tb_suggestions[panel.tb_offer_at(slot).expect("a full first page")];
-            assert_eq!(offer.colors[3], offer.seeds.background, "chip {slot}'s fourth square is not its background colour");
+            assert!(
+                rect.pos.x >= row.pos.x - 0.5 && rect.pos.x + rect.size.x <= row.pos.x + row.size.x + 0.5,
+                "chip {index} was shown outside the carousel's window"
+            );
+            let offer = &panel.tb_suggestions[index];
+            assert_eq!(offer.colors[3], offer.seeds.background, "chip {index}'s fourth square is not its background colour");
         }
-        // Squares at the default sidebar: every chip of a full page inside
-        // the row, and none of them squeezed.
-        let row = head.child(live_id!(tb_body)).child(live_id!(tb_chips)).area().rect(&mut cx);
-        let last = a_chip_of(&head, TB_CHIP_IDS.len() - 1).area().rect(&mut cx);
-        assert!(last.pos.x + last.size.x <= row.pos.x + row.size.x + 0.5, "the last chip runs off the row");
-        let first = a_chip_of(&head, 0).area().rect(&mut cx);
-        assert!((first.size.x - last.size.x).abs() < 0.5, "the chips are not one width");
     }
 
     /// The panel, its sidebar and the theme head drawn once with the builder
@@ -24945,23 +24758,139 @@ line two");
         the_build_reload_lands(cx, panel, now);
     }
 
-    /// The chip in a slot of the strip, as the panel addresses it.
-    fn a_chip_of(head: &WidgetRef, slot: usize) -> WidgetRef {
-        head.child(live_id!(tb_body))
-            .child(live_id!(tb_chips))
-            .child(TB_CHIP_IDS[slot])
-            .child(live_id!(tb_chip))
+    /// The builder's carousel of palettes, as the panel addresses it.
+    fn the_carousel(head: &WidgetRef) -> WidgetRef {
+        head.child(live_id!(tb_body)).child(live_id!(tb_carousel))
     }
 
-    /// The strip of palettes draws, and every route into it shuts with the
-    /// section.
+    fn carousel_scroll(head: &WidgetRef) -> f64 {
+        the_carousel(head).borrow::<FabPaletteCarousel>().expect("a carousel").scroll()
+    }
+
+    fn carousel_chosen(head: &WidgetRef) -> Option<usize> {
+        the_carousel(head).borrow::<FabPaletteCarousel>().expect("a carousel").chosen()
+    }
+
+    /// Whether chip `index` is on the screen whole, not cut by the edge.
+    fn a_chip_shown_whole(cx: &mut Cx, head: &WidgetRef, index: usize) -> bool {
+        the_carousel(head)
+            .borrow::<FabPaletteCarousel>()
+            .expect("a carousel")
+            .chip_rect(cx, index)
+            .is_some_and(|rect| (rect.size.x - 22.0).abs() < 0.5)
+    }
+
+    /// Where chip `index` stands on the screen, with the carousel moved by as
+    /// little as it takes to show it whole -- which is what a hand does
+    /// before it presses a chip it cannot yet see.
+    fn a_chip_in_view(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, index: usize) -> Rect {
+        let carousel = the_carousel(head);
+        carousel.borrow_mut::<FabPaletteCarousel>().expect("a carousel").show_chip(cx, index);
+        draw_the_theme_head(cx, panel, head);
+        let row = carousel.borrow::<FabPaletteCarousel>().expect("a carousel");
+        let rect = row.chip_rect(cx, index).unwrap_or_else(|| {
+            panic!(
+                "chip {index} is not on the screen after it was shown: {} chips, scrolled {}, window {:?}",
+                row.len(),
+                row.scroll(),
+                carousel.area().rect(cx)
+            )
+        });
+        drop(row);
+        assert!((rect.size.x - 22.0).abs() < 0.5, "chip {index} is still cut by the edge after it was shown");
+        rect
+    }
+
+    /// A press on chip `index`, taken the whole way a hand takes it.
+    fn a_press_on_chip(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, index: usize) {
+        let rect = a_chip_in_view(cx, panel, head, index);
+        one_press_at(cx, panel, head, rect.pos + rect.size * 0.5);
+    }
+
+    /// A press that travels before it is let go: down at `from`, through
+    /// the move a hand makes, up at `to`. What came of it is handed to the
+    /// panel, as a press is; the actions are returned so a test can say
+    /// that a drag asked for nothing.
+    fn a_drag_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, from: Vec2d, to: Vec2d) -> Vec<Action> {
+        use std::cell::Cell;
+        const WINDOW: WindowId = WindowId(1, 1);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: from,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        let mut actions = cx.capture_actions(|cx| root.handle_event(cx, &down, &mut Scope::empty()));
+        // The cycle a real press is followed by: `set_key_focus` only
+        // records the request, and the focus moves on the cycle that runs
+        // once the press's actions have gone out. A press on the carousel
+        // sends none -- the pick is the release's -- and a cycle with no
+        // action in it never runs, so one that means nothing carries it.
+        cx.action(FabPaletteCarouselAction::None);
+        cx.handle_actions();
+        for (step, at) in [from + (to - from) * 0.5, to].into_iter().enumerate() {
+            let moved = Event::MouseMove(MouseMoveEvent {
+                abs: at,
+                lock_delta: Vec2d::default(),
+                window_id: WINDOW,
+                modifiers: KeyModifiers::default(),
+                handled: Cell::new(Area::Empty),
+                time: 1.1 + step as f64 * 0.1,
+            });
+            actions.extend(cx.capture_actions(|cx| root.handle_event(cx, &moved, &mut Scope::empty())));
+        }
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: to,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.4,
+        });
+        actions.extend(cx.capture_actions(|cx| root.handle_event(cx, &up, &mut Scope::empty())));
+        cx.fingers.first_mouse_button = None;
+        panel.handle_sidebar_actions(cx, &actions);
+        actions
+    }
+
+    /// A wheel or trackpad delta over a point.
+    fn a_scroll_over(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, at: Vec2d, dx: f64, dy: f64) {
+        use std::cell::Cell;
+        use crate::event::{ScrollEvent, ScrollPhase};
+        let scroll = Event::Scroll(ScrollEvent {
+            window_id: WindowId(1, 1),
+            scroll: dvec2(dx, dy),
+            abs: at,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: dx == 0.0,
+            time: 2.0,
+            phase: ScrollPhase::Changed,
+        });
+        let actions = cx.capture_actions(|cx| root.handle_event(cx, &scroll, &mut Scope::empty()));
+        panel.handle_sidebar_actions(cx, &actions);
+    }
+
+    /// The palettes' colours as the carousel is handed them.
+    fn chips_of(offer: &Suggestion) -> [Vec4f; 4] {
+        offer.colors.map(|packed| {
+            let rgba = rgba_of(packed);
+            vec4(rgba[0], rgba[1], rgba[2], rgba[3])
+        })
+    }
+
+    /// The carousel draws every palette on offer, left to right in the
+    /// engine's order, and its route shuts with the section.
     ///
     /// Read off the RECTANGLES and off the chips' own colours, for the reason
     /// every test of this panel is read that way: a DSL name resolves at run
-    /// time, so a misspelt slot compiles, passes anything that only asks what
-    /// the Rust did, and draws air.
+    /// time, so a misspelt control compiles, passes anything that only asks
+    /// what the Rust did, and draws air.
     #[test]
-    fn the_strip_of_palettes_draws_and_folds_away_with_the_section() {
+    fn the_carousel_draws_every_palette_and_folds_away_with_the_section() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
@@ -24969,98 +24898,71 @@ line two");
         let head = the_builder_drawn(&mut cx, &mut panel);
         // A shader that will not compile is not drawn at all, and the box it
         // was going to paint is still claimed: the rectangles below would
-        // all pass over a strip of eight holes. The chip's face is the one
-        // shader in this section, so it is named rather than asked after --
-        // the note is one slot the whole process shares.
+        // all pass over a row of holes. The chip's face is the one shader in
+        // this section, so it is named rather than asked after -- the note
+        // is one slot the whole process shares.
         let noted = crate::makepad_draw::makepad_platform::shader_error::take().unwrap_or_default();
         assert!(
             !noted.contains("FabPaletteChip"),
-            "the chip's face did not compile, so the strip is eight empty boxes: {noted}"
+            "the chip's face did not compile, so the carousel is a row of empty boxes: {noted}"
         );
-        assert!(
-            panel.tb_suggestions.len() > TB_CHIP_IDS.len(),
-            "the house favourite offers fewer palettes than one page, so a full strip is untested"
-        );
-        for slot in 0..TB_CHIP_IDS.len() {
-            let chip = a_chip_of(&head, slot);
-            let rect = chip.area().rect(&mut cx);
-            assert!(
-                rect.size.x > 0.0 && rect.size.y > 0.0,
-                "chip {slot} drew nothing: the strip is a list of names that resolve to air"
-            );
-            assert_ne!(panel.tb_chip_uids[slot], 0, "chip {slot} draws and is routed nowhere");
-            // The colours on it are the palette's, and not whatever the
-            // control was declared with: four black bands is what a strip
-            // nobody wrote to looks like.
-            let showing = chip
-                .borrow::<FabPaletteChip>()
-                .expect("a chip is a FabPaletteChip")
-                .colors();
-            let wanted: [Vec4f; 4] = panel.tb_suggestions[slot].colors.map(|packed| {
-                let rgba = rgba_of(packed);
-                vec4(rgba[0], rgba[1], rgba[2], rgba[3])
-            });
-            assert_eq!(showing, wanted, "chip {slot} is showing a palette that is not the one it stands for");
-        }
-        let row = head.child(live_id!(tb_body)).child(live_id!(tb_sugg_row));
-        let wrap = row.child(live_id!(tb_more_wrap));
-        for (name, part) in [
-            ("tb_more", wrap.child(live_id!(tb_more))),
-            ("tb_page_read", wrap.child(live_id!(tb_page_read))),
-            ("tb_sugg_read", row.child(live_id!(tb_sugg_read))),
-        ] {
-            let rect = part.area().rect(&mut cx);
-            assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "`{name}` drew nothing");
-        }
-        assert_ne!(panel.tb_more_uid, 0, "the page button draws and is routed nowhere");
-        // Where in the pages the strip stands is beside the button and not
-        // in the line: the line at the panel's own width has the palette
-        // counts to say and no room to spare.
+        let count = panel.tb_suggestions.len();
+        let carousel = the_carousel(&head);
+        let row = carousel.area().rect(&mut cx);
+        assert!(row.size.x > 0.0 && row.size.y > 0.0, "the carousel drew nothing");
+        assert_ne!(panel.tb_carousel_uid, 0, "the carousel draws and is routed nowhere");
         assert_eq!(
-            wrap.child(live_id!(tb_page_read)).text(),
-            format!("1 of {}", panel.tb_pages()),
-            "the page count is not beside the button"
+            carousel.borrow::<FabPaletteCarousel>().expect("a carousel").len(),
+            count,
+            "the carousel holds some other number of palettes than are on offer"
+        );
+        // More than the window holds, or none of what follows is about a row
+        // that scrolls -- and the last of them is off the screen at the start.
+        assert!(
+            (count as f64) * 25.0 > row.size.x + 25.0,
+            "the house favourite offers {count} palettes, which the window holds whole"
         );
         assert!(
-            !panel.tb_strip_reading().contains("page"),
-            "the page count is in the line as well: {}",
-            panel.tb_strip_reading()
+            carousel.borrow::<FabPaletteCarousel>().expect("a carousel").chip_rect(&mut cx, count - 1).is_none(),
+            "the last palette is on the screen before the row has moved"
+        );
+        // Every one of them, in turn: on the screen whole once shown, one
+        // chip's pitch along from the one before it, and wearing its own
+        // palette's colours -- four black bands is what a chip nobody wrote
+        // to looks like.
+        for index in 0..count {
+            let rect = a_chip_in_view(&mut cx, &mut panel, &head, index);
+            let along = rect.pos.x - row.pos.x + carousel_scroll(&head);
+            assert!(
+                (along - index as f64 * 25.0).abs() < 0.5,
+                "chip {index} stands {along} along the row, out of its place"
+            );
+            let showing = carousel
+                .borrow::<FabPaletteCarousel>()
+                .expect("a carousel")
+                .chip_colors(index)
+                .expect("a chip for every palette");
+            assert_eq!(
+                showing,
+                chips_of(&panel.tb_suggestions[index]),
+                "chip {index} is showing a palette that is not the one it stands for"
+            );
+        }
+        // Nothing under it but the settings: no line naming the palette or
+        // counting the row, only the section's own spacing between the
+        // carousel's floor and the first heading.
+        let rows = head.child(live_id!(tb_body)).child(live_id!(tb_rows)).area().rect(&mut cx);
+        let between = rows.pos.y - (row.pos.y + row.size.y);
+        assert!(
+            (0.0..=4.0).contains(&between),
+            "{between} points stand between the carousel and the settings: a line is still under the row"
         );
 
-        // Folded, and every one of those routes shut: a uid left standing
-        // routes a press meant for whatever stands there instead.
+        // Folded, and its route shut: a uid left standing routes a press
+        // meant for whatever stands there instead.
         panel.toggle_theme_builder(&mut cx);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_chip_uids, [0; TB_CHIP_IDS.len()]);
-        assert_eq!(panel.tb_more_uid, 0);
-    }
-
-    /// The line under the strip says which colour the count is about only
-    /// where the count is the whole line.
-    ///
-    /// The words are true whatever else the line says, but the colour they
-    /// point at is in the row directly above and the strip between them is
-    /// grown from it, so they are the line's least-paying words -- and at the
-    /// panel's own width a colour that turns up combinations has no room for
-    /// them and the counts both. Counts on one line is what the line is for;
-    /// this is what pays for it.
-    #[test]
-    fn the_line_says_which_colour_only_where_the_count_is_the_whole_line() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let widget = bare_panel(&mut cx);
-        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
-        let _store = a_store_of_its_own(&mut panel);
-        let head = the_builder_drawn(&mut cx, &mut panel);
-        // The house favourite is in the book, so the line has a count to add.
-        let line = panel.tb_strip_reading();
-        assert!(line.contains("combinations"), "the house favourite turns up none, so the line is untested: {line}");
-        assert!(!line.contains("for this color"), "the line spends its width on the colour beside it: {line}");
-
-        // And a strip with nothing to add says what the count is about.
-        panel.tb_suggestions.retain(|offer| offer.harmony.is_some());
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        let line = panel.tb_strip_reading();
-        assert!(line.ends_with(" palettes for this color"), "a count on its own says nothing about what of: {line}");
+        assert_eq!(panel.tb_carousel_uid, 0);
     }
 
     /// A press on a chip, taken the whole way a hand takes it, puts that
@@ -25083,7 +24985,7 @@ line two");
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let before = panel.tb_builder.params();
 
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 2));
+        a_press_on_chip(&mut cx, &mut panel, &head, 2);
         assert_eq!(
             panel.tb_builder.params().seeds,
             Some(offered.seeds),
@@ -25136,7 +25038,7 @@ line two");
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = the_builder_drawn(&mut cx, &mut panel);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 3));
+        a_press_on_chip(&mut cx, &mut panel, &head, 3);
         assert_eq!(panel.tb_chosen_index(), Some(3));
 
         // A redraw is the test, not a formality: the mark is written into
@@ -25144,30 +25046,16 @@ line two");
         the_palette_lands(&mut cx, &mut panel, 0.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(panel.tb_chosen_index(), Some(3), "the redraw lost the chosen palette");
-        assert!(
-            a_chip_of(&head, 3)
-                .borrow::<FabPaletteChip>()
-                .expect("a chip")
-                .is_current(),
-            "the chosen chip is not the one wearing the outline"
-        );
-        assert!(
-            !a_chip_of(&head, 4)
-                .borrow::<FabPaletteChip>()
-                .expect("a chip")
-                .is_current(),
-            "a chip nobody pressed is wearing the outline"
-        );
-        assert!(
-            panel.tb_strip_reading().starts_with(&panel.tb_suggestions[3].label),
-            "the line under the strip does not name the palette that was chosen: {}",
-            panel.tb_strip_reading()
+        assert_eq!(
+            carousel_chosen(&head),
+            Some(3),
+            "the chosen chip is not the one wearing the outline, or a chip nobody pressed is"
         );
 
         // A colour edited by hand, through the route its control takes: the
         // palette is the person's own from then on. The other three stay as
         // they were on the screen, the outline comes off the chip it started
-        // from, the line says whose it is -- and the strip is NOT grown
+        // from -- and the strip is NOT grown
         // again, because only the first colour is what it is grown from.
         let offers = panel.tb_suggestions.clone();
         let was = panel.tb_builder.params().palette();
@@ -25182,18 +25070,19 @@ line two");
         let now = panel.tb_builder.params().palette();
         assert_eq!(now, [was[0], edited, was[2], was[3]], "editing the secondary moved some other colour");
         assert_eq!(panel.tb_chosen_index(), None, "an edited palette left the chip it started from outlined");
-        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE, "the line does not say the palette is their own");
         assert!(panel.tb_apply_at_once, "an edited colour is waiting for a settle nobody is dragging");
         the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_chosen(&head), None, "an edited palette left a chip outlined");
         assert_eq!(panel.tb_suggestions, offers, "editing the secondary grew the strip again");
-        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE, "the settle forgot whose palette it is");
+        assert_eq!(panel.tb_chosen_index(), None, "the settle put the outline back on an edited palette");
 
         // The surprise, over a palette chosen again. It lets the chip go at
         // once, and on the settle the palette it drew is marked by the chip
-        // that IS it -- the plain one of its harmony -- so the line names it
-        // rather than counting palettes as if none were in force.
+        // that IS it -- the plain one of its harmony -- so the row outlines
+        // it rather than showing none in force.
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 1));
+        a_press_on_chip(&mut cx, &mut panel, &head, 1);
         assert_eq!(panel.tb_chosen_index(), Some(1));
         panel.tb_surprise();
         assert_eq!(panel.tb_chosen_index(), None, "the surprise left a chip outlined");
@@ -25204,13 +25093,14 @@ line two");
         let offer = &panel.tb_suggestions[at];
         assert_eq!((offer.harmony, offer.mood), (Some(harmony), None), "some other chip took the surprise's name");
         assert_eq!(panel.tb_builder.params().palette(), drawn, "marking the surprise moved its colours");
-        assert_eq!(panel.tb_strip_reading(), harmony.label(), "the line does not name the surprise's palette");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_chosen(&head), Some(at), "the surprise's palette is not the chip outlined");
 
         // And a new primary, which grows a whole new row of palettes: the
         // one that was chosen is not among them, so nothing is marked and the
         // four on the controls are the person's own.
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 0));
+        a_press_on_chip(&mut cx, &mut panel, &head, 0);
         assert_eq!(panel.tb_chosen_index(), Some(0));
         let chosen = panel.tb_chosen.clone().expect("a palette was chosen");
         panel.tb_color_ended(0, 0x18_C0_4A_FF);
@@ -25218,7 +25108,6 @@ line two");
         assert_eq!(panel.tb_chosen_index(), None, "a new primary left the old palette outlined");
         assert!(panel.tb_chosen.is_none(), "the old palette is still remembered as the chosen one");
         assert_eq!(panel.tb_builder.params().favourite, 0x18_C0_4A_FF, "the strip is not grown from the new primary");
-        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE);
         assert!(
             !panel.tb_suggestions.contains(&chosen),
             "a new primary grew the same palettes, so nothing about dropping it was tested"
@@ -25239,9 +25128,8 @@ line two");
     /// outline, so that the marked chip and the worn theme are one palette
     /// and not two.
     ///
-    /// Without that, the outline came off a palette that was still in force
-    /// and the line under the strip, the one place the palette is named,
-    /// went back to counting palettes as if none were.
+    /// Without that, the outline came off a palette that was still in force,
+    /// and the row said no palette was when one plainly was.
     #[test]
     fn the_other_page_marks_the_palette_that_is_still_in_force() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -25252,7 +25140,7 @@ line two");
 
         // One the rule grew, which is its harmony and its mood: the first
         // six are the plain harmonies, so the seventh is the first mood.
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 6));
+        a_press_on_chip(&mut cx, &mut panel, &head, 6);
         the_palette_lands(&mut cx, &mut panel, 0.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let was = panel.tb_chosen.clone().expect("a palette was chosen");
@@ -25270,13 +25158,11 @@ line two");
             Some(now.seeds),
             "the chip that is marked and the theme that is worn are two different palettes"
         );
-        assert!(at < TB_CHIP_IDS.len(), "the equivalent landed off the page the strip is showing");
+        assert_eq!(carousel_chosen(&head), Some(at), "the marked palette is not the one wearing the outline");
         assert!(
-            a_chip_of(&head, at).borrow::<FabPaletteChip>().expect("a chip").is_current(),
-            "the marked palette is not the one wearing the outline"
+            a_chip_shown_whole(&mut cx, &head, at),
+            "the marked palette is outside the carousel's window"
         );
-
-        assert_eq!(panel.tb_strip_reading(), now.label, "the line does not name the palette in force");
 
         // And one out of the book, which is its name.
         panel.tb_color_ended(0, crate::theme_combinations::COMBINATIONS[0][0]);
@@ -25288,9 +25174,7 @@ line two");
             .position(|offer| offer.label.starts_with(COMBINATION_LABEL))
             .expect("a colour out of the book found no combination");
         let named = panel.tb_suggestions[at].label.clone();
-        panel.tb_page = at / TB_CHIP_IDS.len();
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
+        a_press_on_chip(&mut cx, &mut panel, &head, at);
         the_palette_lands(&mut cx, &mut panel, 3.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(panel.tb_chosen_index(), Some(at));
@@ -25302,7 +25186,7 @@ line two");
         let now = panel.tb_suggestions[at].clone();
         assert_eq!(now.label, named, "some other palette took the outline");
         assert_eq!(panel.tb_builder.params().seeds, Some(now.seeds));
-        assert_eq!(panel.tb_strip_reading(), named, "the line went back to counting palettes");
+        assert_eq!(carousel_chosen(&head), Some(at), "the combination in force is not the chip outlined");
 
         // And a drag that crosses, rather than a release: the strip is owed
         // its regrowth from the first move over the middle, and gets it on
@@ -25333,7 +25217,7 @@ line two");
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let _store = a_store_of_its_own(&mut panel);
         let head = the_builder_drawn(&mut cx, &mut panel);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 1));
+        a_press_on_chip(&mut cx, &mut panel, &head, 1);
         the_palette_lands(&mut cx, &mut panel, 0.0);
         assert!(panel.tb_chosen_index().is_some());
 
@@ -25370,90 +25254,258 @@ line two");
         }
     }
 
-    /// "more" walks the pages round, and a page that cannot fill the strip
-    /// empties the slots it cannot fill rather than leaving stale palettes
-    /// standing in them.
+    /// A press that travels along the carousel moves it with the hand and
+    /// chooses nothing; one that stays put is a press on the chip under it,
+    /// wherever along the row that chip is.
     #[test]
-    fn turning_the_page_walks_round_and_empties_the_slots_it_cannot_fill() {
+    fn a_drag_along_the_carousel_scrolls_it_and_picks_nothing() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = the_builder_drawn(&mut cx, &mut panel);
-        let wrap = head.child(live_id!(tb_body)).child(live_id!(tb_sugg_row)).child(live_id!(tb_more_wrap));
-        let more = wrap.child(live_id!(tb_more));
-        let pages = panel.tb_pages();
-        assert!(pages > 1, "the house favourite offers one page, so paging is untested");
+        let row = the_carousel(&head).area().rect(&mut cx);
+        assert_eq!(carousel_scroll(&head), 0.0, "the carousel opened somewhere along its row");
+        let was = panel.tb_builder.rebuilds();
 
-        // Every page in turn, and round to the first again at the end. The
-        // count beside the button is the answer to the press: it is the only
-        // thing that changes, so a press that did not move it did nothing a
-        // person can see.
-        for page in 1..pages {
-            one_press_on(&mut cx, &mut panel, &head, &more);
-            assert_eq!(panel.tb_page, page, "the page button did not turn the page");
-            draw_the_theme_head(&mut cx, &mut panel, &head);
-            assert_eq!(
-                panel.tb_offer_at(0),
-                Some(page * TB_CHIP_IDS.len()),
-                "the first slot of the page is not the palette that follows the page before it"
-            );
-            assert_eq!(
-                wrap.child(live_id!(tb_page_read)).text(),
-                format!("{} of {pages}", page + 1),
-                "the count beside the button did not follow the page"
-            );
-        }
-        one_press_on(&mut cx, &mut panel, &head, &more);
-        assert_eq!(panel.tb_page, 0, "the last page does not come round to the first");
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-
-        // THE SHORT PAGE. A favourite with no colour in it has no hue for a
-        // harmony to turn, so all six grow the same greys and the two dozen
-        // palettes come out as a handful: fewer than the strip has slots,
-        // which is the case the empty slots exist for.
-        panel.tb_page = pages - 1;
-        let full = a_chip_of(&head, 0).area().rect(&mut cx).size.x;
-        assert!(full > 0.0, "the chips of a full page were never drawn");
-        panel.tb_color_ended(0, 0x80_80_80_FF);
-        the_palette_lands(&mut cx, &mut panel, 1.0);
-        let left = panel.tb_suggestions.len();
-        assert!(left < TB_CHIP_IDS.len(), "a grey favourite still fills the strip, so an empty slot is untested");
-        assert_eq!(panel.tb_page, 0, "the strip is showing a page the new colour does not have");
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        for slot in 0..TB_CHIP_IDS.len() {
-            if slot < left {
-                assert_ne!(panel.tb_chip_uids[slot], 0, "slot {slot} holds a palette and routes nowhere");
-            } else {
-                assert_eq!(panel.tb_chip_uids[slot], 0, "slot {slot} holds no palette and still routes");
-            }
-        }
-        // A slot with no palette in it still holds its share of the row:
-        // the chips that are left stand where they stood, rather than
-        // spreading over the width the missing ones gave up.
-        let short = a_chip_of(&head, 0).area().rect(&mut cx).size.x;
+        // Leftwards by a hundred points: the row follows the hand, so what
+        // stood a hundred points right of the press is under it now.
+        let from = dvec2(row.pos.x + 120.0, row.pos.y + 40.0);
+        let actions = a_drag_on(&mut cx, &mut panel, &head, from, from - dvec2(100.0, 0.0));
         assert!(
-            (short - full).abs() < 0.5,
-            "a short page stretched its chips: {short} where a full page is {full}"
+            (carousel_scroll(&head) - 100.0).abs() < 0.5,
+            "a drag of 100 points moved the row {}",
+            carousel_scroll(&head)
         );
-        // And nothing to turn to, so nothing to turn it with -- the count
-        // goes with the button, because "1 of 1" is a count of a thing
-        // nobody is counting.
-        assert_eq!(panel.tb_pages(), 1);
-        assert_eq!(panel.tb_more_uid, 0, "one page of palettes still offers a button to leave it by");
-        assert_eq!(
-            wrap.child(live_id!(tb_page_read)).area().rect(&mut cx).size.x,
-            0.0,
-            "one page of palettes still says which page it is"
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action.as_widget_action().map(|a| a.cast::<FabPaletteCarouselAction>()), Some(FabPaletteCarouselAction::Pick(_)))),
+            "a drag along the row picked the chip it ended on"
+        );
+        assert_eq!(panel.tb_chosen, None, "a drag along the row chose a palette");
+        assert!(!panel.tb_apply_at_once, "a drag along the row asked for an install");
+        assert_eq!(panel.tb_builder.rebuilds(), was);
+
+        // Dragged past either end, it stops at the end.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        a_drag_on(&mut cx, &mut panel, &head, from, from - dvec2(5000.0, 0.0));
+        let end = the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx);
+        assert!(end > 0.0);
+        assert_eq!(carousel_scroll(&head), end, "a drag ran the row past its last chip");
+        a_drag_on(&mut cx, &mut panel, &head, from, from + dvec2(5000.0, 0.0));
+        assert_eq!(carousel_scroll(&head), 0.0, "a drag ran the row back past its first chip");
+
+        // A hand that wobbles a point or two is still pressing, and a chip
+        // far along the row is chosen and worn like the first one.
+        let far = panel.tb_suggestions.len() - 3;
+        let rect = a_chip_in_view(&mut cx, &mut panel, &head, far);
+        let at = rect.pos + rect.size * 0.5;
+        a_drag_on(&mut cx, &mut panel, &head, at, at + dvec2(2.0, 1.0));
+        assert_eq!(panel.tb_chosen_index(), Some(far), "a press that wobbled did not choose the chip under it");
+        assert!(panel.tb_apply_at_once, "the palette chosen far along the row is not going on at once");
+        panel.tb_settle(&mut cx, 0.5);
+        assert_eq!(panel.tb_builder.rebuilds(), was + 1, "the palette chosen far along the row never went on the app");
+        panel.tb_settle(&mut cx, 1.0);
+        assert_eq!(panel.tb_builder.rebuilds(), was + 1, "the palette went in twice");
+    }
+
+    /// The wheel and a sideways delta both move the carousel, and both stop
+    /// at its ends; the arrow keys step it a chip at a time once it has the
+    /// keyboard.
+    #[test]
+    fn the_wheel_and_a_sideways_delta_scroll_the_carousel_and_stop_at_its_ends() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let row = the_carousel(&head).area().rect(&mut cx);
+        let over = row.pos + row.size * 0.5;
+        let end = the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx);
+        assert!(end > 100.0, "the row barely scrolls, so its ends are untested");
+
+        // A plain wheel: there is nothing vertical over a row one chip high.
+        a_scroll_over(&mut cx, &mut panel, &head, over, 0.0, 40.0);
+        assert_eq!(carousel_scroll(&head), 40.0, "a plain wheel did not move the row");
+        // A sideways delta, back the other way.
+        a_scroll_over(&mut cx, &mut panel, &head, over, -15.0, 0.0);
+        assert_eq!(carousel_scroll(&head), 25.0, "a sideways delta did not move the row");
+        // Both ends hold.
+        a_scroll_over(&mut cx, &mut panel, &head, over, 0.0, 1.0e5);
+        assert_eq!(carousel_scroll(&head), end, "the wheel ran the row past its last chip");
+        a_scroll_over(&mut cx, &mut panel, &head, over, 1.0e5, 0.0);
+        assert_eq!(carousel_scroll(&head), end);
+        a_scroll_over(&mut cx, &mut panel, &head, over, -1.0e5, 0.0);
+        assert_eq!(carousel_scroll(&head), 0.0, "a sideways delta ran the row back past its first chip");
+        // And a wheel anywhere else is not the row's.
+        a_scroll_over(&mut cx, &mut panel, &head, row.pos - dvec2(0.0, 30.0), 0.0, 40.0);
+        assert_eq!(carousel_scroll(&head), 0.0, "a wheel off the row moved it");
+        assert_eq!(panel.tb_chosen, None, "scrolling the row chose a palette");
+
+        // The keyboard, once a press has given it to the row: the gap
+        // between two chips is aimed at no palette, so the press there
+        // takes the keyboard and chooses nothing.
+        a_drag_on(&mut cx, &mut panel, &head, row.pos + dvec2(23.5, 40.0), row.pos + dvec2(23.5, 40.0));
+        assert_eq!(panel.tb_chosen, None, "a press in the gap between two chips chose one");
+        assert!(
+            cx.has_key_focus(the_carousel(&head).area()),
+            "the press left the keyboard elsewhere, so the arrows below reach nothing"
+        );
+        let key = |key_code| {
+            Event::KeyDown(KeyEvent {
+                key_code,
+                is_repeat: false,
+                modifiers: KeyModifiers::default(),
+                time: 3.0,
+            })
+        };
+        head.handle_event(&mut cx, &key(KeyCode::ArrowRight), &mut Scope::empty());
+        assert_eq!(carousel_scroll(&head), 25.0, "the right arrow did not step the row one chip");
+        head.handle_event(&mut cx, &key(KeyCode::End), &mut Scope::empty());
+        assert_eq!(carousel_scroll(&head), end);
+        head.handle_event(&mut cx, &key(KeyCode::ArrowRight), &mut Scope::empty());
+        assert_eq!(carousel_scroll(&head), end, "the arrow ran the row past its last chip");
+        head.handle_event(&mut cx, &key(KeyCode::ArrowLeft), &mut Scope::empty());
+        assert_eq!(carousel_scroll(&head), end - 25.0);
+        head.handle_event(&mut cx, &key(KeyCode::Home), &mut Scope::empty());
+        assert_eq!(carousel_scroll(&head), 0.0);
+    }
+
+    /// The chip in force is brought into the carousel's window when it is
+    /// changed from outside -- here the lightness carried over its middle,
+    /// which grows the row again for the other page and marks the same
+    /// palette in it -- because the outline is the only thing that says
+    /// which palette is in force, and an outline nobody can see says nothing.
+    #[test]
+    fn the_chip_in_force_is_brought_into_view_when_it_changes_from_outside() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        // One the rule grew, far enough along that it is off the screen at
+        // the start of the row.
+        let far = panel
+            .tb_suggestions
+            .iter()
+            .rposition(|offer| offer.harmony.is_some() && offer.mood.is_some())
+            .expect("the rule grew no palette in a mood");
+        a_press_on_chip(&mut cx, &mut panel, &head, far);
+        the_palette_lands(&mut cx, &mut panel, 0.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_chosen_index(), Some(far));
+        // The row scrolled back to its start by hand, the chip out of sight.
+        the_carousel(&head).borrow_mut::<FabPaletteCarousel>().expect("a carousel").set_scroll(&mut cx, 0.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(!a_chip_shown_whole(&mut cx, &head, far), "the chip is on the screen at the row's start, so nothing is tested");
+        // Nothing moved from outside, so nothing moves the row: a redraw is
+        // not a change, and a row that jumped back to the chip in force on
+        // every draw could never be scrolled away from it.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_scroll(&head), 0.0, "a redraw brought the chip in force back into view");
+
+        across_the_middle(&mut panel);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let at = panel.tb_chosen_index().expect("the other page left no chip marked");
+        assert_eq!(carousel_chosen(&head), Some(at), "the carousel outlines some other chip than the one in force");
+        assert!(
+            a_chip_shown_whole(&mut cx, &head, at),
+            "the chip in force changed from outside and was left off the screen"
+        );
+    }
+
+    /// A new favourite grows a new row, and the carousel goes back to its
+    /// start for it. The same favourite grown for the other page is the same
+    /// row in other colours, and it stays where it was.
+    #[test]
+    fn a_new_favourite_puts_the_carousel_back_at_its_start() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let row = the_carousel(&head).area().rect(&mut cx);
+        let over = row.pos + row.size * 0.5;
+
+        // The same favourite, the other page: the row keeps its place.
+        a_scroll_over(&mut cx, &mut panel, &head, over, 0.0, 150.0);
+        assert_eq!(carousel_scroll(&head), 150.0);
+        across_the_middle(&mut panel);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_chosen, None);
+        assert_eq!(carousel_scroll(&head), 150.0, "the same colour grown for the other page lost the row's place");
+
+        // A new favourite, off its own control: back to the start.
+        let offers = panel.tb_suggestions.clone();
+        panel.tb_color_ended(0, 0x22_A0_60_FF);
+        the_palette_lands(&mut cx, &mut panel, 2.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_ne!(panel.tb_suggestions, offers, "the new colour grew the same row, so nothing was tested");
+        assert_eq!(carousel_scroll(&head), 0.0, "a new colour's row opened where the old one was left");
+
+        // And the surprise, which is a new favourite too.
+        a_scroll_over(&mut cx, &mut panel, &head, over, 0.0, 150.0);
+        assert_eq!(carousel_scroll(&head), 150.0);
+        panel.tb_surprise();
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_scroll(&head), 0.0, "the surprise's row opened where the old one was left");
+        // Its palette is one of the six plain harmonies, at the row's start.
+        let at = panel.tb_chosen_index().expect("the surprise's palette is marked by no chip");
+        assert!(a_chip_shown_whole(&mut cx, &head, at), "the surprise's palette is off the screen");
+    }
+
+    /// The surprise stands at the end of the row of four colours, in its
+    /// whole word, and the four share what it leaves; a press on it still
+    /// draws a theme nobody planned. At the default sidebar everything in
+    /// the row is inside it.
+    #[test]
+    fn the_surprise_sits_beside_the_four_colours_and_still_works() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let seed_row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        let surprise = seed_row.child(live_id!(tb_random));
+        assert_eq!(surprise.text(), "surprise", "the surprise is not in its whole word");
+        let button = surprise.area().rect(&mut cx);
+        let row = seed_row.area().rect(&mut cx);
+        assert!(button.size.x > 0.0, "the surprise is not drawn in the row of colours");
+        assert!(
+            button.pos.x + button.size.x <= row.pos.x + row.size.x + 0.5,
+            "the surprise runs off the end of the row"
+        );
+        let squares: Vec<Rect> = TB_COLOR_IDS
+            .iter()
+            .map(|id| seed_row.child(*id).child(live_id!(tb_color)).area().rect(&mut cx))
+            .collect();
+        for (which, square) in squares.iter().enumerate() {
+            assert!(square.size.x > 0.0, "the {} colour is not drawn", TB_COLOR_NAMES[which]);
+            assert!((square.size.x - squares[0].size.x).abs() < 0.5, "the four colours do not share the row equally");
+            assert!(square.pos.x + square.size.x <= button.pos.x, "the {} colour runs under the surprise", TB_COLOR_NAMES[which]);
+        }
+        // The words over them, off the labels: the fourth is "surface", the
+        // word over its two sliders too, and not a "background" that the
+        // default sidebar cut to "backgroun" beside the surprise.
+        let names: Vec<String> = TB_COLOR_IDS
+            .iter()
+            .map(|id| seed_row.child(*id).child(live_id!(tb_color_name)).text())
+            .collect();
+        assert_eq!(names, ["primary", "secondary", "tertiary", "surface"], "the four colours are not named as the panel names them");
+        // Level with the squares, not with the words over them.
+        assert!(
+            (button.pos.y + button.size.y - (squares[0].pos.y + squares[0].size.y)).abs() < 0.5,
+            "the surprise does not stand level with the four colours"
         );
 
-        // A press on an empty slot chooses nothing whatever it is aimed at.
-        let was = panel.tb_chosen.clone();
-        panel.tb_chip_pressed(TB_CHIP_IDS.len() - 1);
-        assert_eq!(panel.tb_chosen, was, "an empty slot chose a palette");
+        let before = panel.tb_builder.params().palette();
+        one_press_on(&mut cx, &mut panel, &head, &surprise);
+        assert_ne!(panel.tb_builder.params().palette(), before, "a press on the surprise drew nothing new");
+        assert_ne!(panel.tb_random_uid, 0);
     }
 
     /// A person's own colour schemes are offered after the ones the rule
-    /// grew, and the line under the strip counts them.
+    /// grew, and one is chosen like any other.
     #[test]
     fn a_palette_file_of_their_own_is_offered_after_the_ones_the_rule_grew() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -25490,23 +25542,13 @@ line two");
                 .all(|offer| offer.label != OWN_LABEL),
             "a scheme of theirs stands before the ones the rule grew"
         );
-        assert!(
-            panel.tb_strip_reading().contains("1 of your own"),
-            "the line under the strip does not count the schemes of their own: {}",
-            panel.tb_strip_reading()
-        );
 
-        // And it is pressable like any other: the page it stands on first.
-        panel.tb_page = first_own / TB_CHIP_IDS.len();
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        let slot = first_own % TB_CHIP_IDS.len();
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, slot));
+        // And it is pressable like any other, wherever along the row it is.
+        a_press_on_chip(&mut cx, &mut panel, &head, first_own);
         assert_eq!(panel.tb_chosen_index(), Some(first_own));
-        assert!(
-            panel.tb_strip_reading().starts_with(OWN_LABEL),
-            "the line under the strip does not name the scheme of their own: {}",
-            panel.tb_strip_reading()
-        );
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_chosen(&head), Some(first_own), "the scheme of their own is not the chip outlined");
 
         // Left and entered again, the file is read again rather than kept.
         panel.toggle_theme_builder(&mut cx);
@@ -25520,55 +25562,68 @@ line two");
         );
     }
 
-    /// The line under the strip names the palette in force whatever kind it
-    /// is, and it is the only thing that does.
+    /// Every kind of palette on the row is outlined while it is in force,
+    /// and named by its tooltip while a hand rests on it.
     ///
     /// The six harmonies are the first six chips and there is no harmony
-    /// picker beside them, so a palette out of the book or out of the
-    /// person's own file is named by the line or by nothing. It opens on
-    /// what the strip is, names a plain harmony by its harmony, a
-    /// combination by its number and a scheme of their own as theirs, and a
-    /// palette whose colours were then edited by hand as their own palette
-    /// -- never the chip it started from.
+    /// picker beside them, and nothing under the row names the palette, so
+    /// a palette out of the book or out of the person's own file is told by
+    /// its outline or by nothing. The row opens with nothing outlined; a
+    /// plain harmony, a combination and a scheme of their own are each
+    /// outlined once pressed; and a palette whose colours were then edited
+    /// by hand is outlined by no chip at all -- never the chip it started
+    /// from.
     #[test]
-    fn the_line_names_the_palette_in_force_whatever_it_is() {
+    fn every_kind_of_palette_is_outlined_while_it_is_in_force() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let store = a_store_of_its_own(&mut panel);
         let head = the_builder_drawn(&mut cx, &mut panel);
-        // Nothing chosen and nothing moved: the line says what the strip is.
-        assert!(
-            panel.tb_strip_reading().contains("palettes"),
-            "an untouched builder names a palette nobody chose: {}",
-            panel.tb_strip_reading()
-        );
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        // Nothing chosen and nothing moved: nothing is outlined.
+        assert_eq!(carousel_chosen(&head), None, "an untouched builder outlines a palette nobody chose");
         // The first six are the six harmonies, in their plain form and by
         // their own names, so the first page is what the picker used to be.
         for (at, harmony) in Harmony::ALL.iter().enumerate() {
             let offer = &panel.tb_suggestions[at];
             assert_eq!((offer.harmony, offer.mood), (Some(*harmony), None), "chip {at} is not the plain {harmony:?}");
         }
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, 5));
-        assert_eq!(panel.tb_strip_reading(), Harmony::ALL[5].label());
+        a_press_on_chip(&mut cx, &mut panel, &head, 5);
+        the_palette_lands(&mut cx, &mut panel, 0.5);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_chosen(&head), Some(5), "the plain harmony pressed is not the chip outlined");
 
         // A colour lifted out of the book, so that the strip has a
         // combination on it to press.
         panel.tb_color_ended(0, crate::theme_combinations::COMBINATIONS[0][0]);
         the_palette_lands(&mut cx, &mut panel, 1.0);
+        // Drawn before a hand can reach it, as a new row always is: the draw
+        // is what puts the new row back at its start.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
         let at = panel
             .tb_suggestions
             .iter()
             .position(|offer| offer.label.starts_with(COMBINATION_LABEL))
             .expect("a colour out of the book found no combination");
         let named = panel.tb_suggestions[at].label.clone();
-        panel.tb_page = at / TB_CHIP_IDS.len();
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
+        a_press_on_chip(&mut cx, &mut panel, &head, at);
         assert_eq!(panel.tb_chosen_index(), Some(at));
         the_palette_lands(&mut cx, &mut panel, 2.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_strip_reading(), named, "the line does not name the combination in force");
+        assert_eq!(carousel_chosen(&head), Some(at), "the combination in force is not the chip outlined");
+        // Its name is on the tooltip over it, and only over it.
+        let rect = a_chip_in_view(&mut cx, &mut panel, &head, at);
+        let (over, said) = panel
+            .tb_chip_tip(&cx, &sidebar, rect.pos + rect.size * 0.5)
+            .expect("the chip in force has no tooltip");
+        assert_eq!(said, named, "the tooltip names some other palette than the chip under it");
+        assert!((over.pos.x - rect.pos.x).abs() < 0.5, "the tooltip is over some other chip");
+        assert_eq!(
+            panel.tb_chip_tip(&cx, &sidebar, rect.pos + dvec2(rect.size.x + 1.5, 40.0)),
+            None,
+            "the gap beside a chip has a tooltip"
+        );
         // The four controls show the four colours of the chip, exactly.
         let row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
         for (which, id) in TB_COLOR_IDS.iter().enumerate() {
@@ -25587,10 +25642,12 @@ line two");
             );
         }
 
-        // Its background colour edited by hand: their own palette now, and
-        // the combination's number is not left on the line.
+        // Its surface edited by hand: their own palette now, and the
+        // combination's outline comes off.
         panel.tb_color_ended(3, 0x2A_40_60_FF);
-        assert_eq!(panel.tb_strip_reading(), TB_OWN_PALETTE);
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_chosen(&head), None, "an edited palette is still outlined as the combination");
         assert_eq!(panel.tb_builder.params().palette()[3], 0x2A_40_60_FF);
 
         // And one of the person's own does what a combination does. The
@@ -25606,23 +25663,17 @@ line two");
         panel.toggle_theme_builder(&mut cx);
         panel.toggle_theme_builder(&mut cx);
         assert_eq!(panel.tb_builder.params().favourite, favourite, "the section came back on some other colour");
-        assert!(
-            panel.tb_strip_reading().contains("palettes"),
-            "the section came back naming a palette: {}",
-            panel.tb_strip_reading()
-        );
         draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(carousel_chosen(&head), None, "the section came back with a palette outlined");
         let at = panel
             .tb_suggestions
             .iter()
             .position(|offer| offer.label == OWN_LABEL)
             .expect("the scheme built round the favourite was not offered");
-        panel.tb_page = at / TB_CHIP_IDS.len();
-        draw_the_theme_head(&mut cx, &mut panel, &head);
-        one_press_on(&mut cx, &mut panel, &head, &a_chip_of(&head, at % TB_CHIP_IDS.len()));
+        a_press_on_chip(&mut cx, &mut panel, &head, at);
         the_palette_lands(&mut cx, &mut panel, 4.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_strip_reading(), OWN_LABEL);
+        assert_eq!(carousel_chosen(&head), Some(at), "the scheme of their own is not the chip outlined");
     }
 
     /// "Save as" while a built theme is in force saves THAT theme.
