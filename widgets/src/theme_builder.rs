@@ -18,6 +18,12 @@
 //! lightness axis only where it could not otherwise be told from the page,
 //! and the companions are the colours the chip showed. No slider moves them.
 //!
+//! The chips offered for a palette are grown from ONE of its four colours,
+//! the primary unless the person says otherwise ([`SeedSlot`]): whichever it
+//! is stays exactly where it is in every chip, and the chips vary the other
+//! three. [`suggestions_from`] and [`all_suggestions_from`] take the slot;
+//! [`suggestions`] and [`all_suggestions`] are the primary's row.
+//!
 //! The house theme is the one exception, and by construction: with the
 //! palette untouched nothing is installed at all, so the roles the rule grew
 //! for the theme files stand, and they are not the house colour the colour
@@ -2826,6 +2832,9 @@ pub struct Suggestion {
     /// of these does not have to be grown again when a slider moves.
     pub colors: [u32; 4],
     pub seeds: SuggestionSeeds,
+    /// Which of the four the row it stands in was grown from: the colour in
+    /// that slot is the seed itself, and the chip varies the other three.
+    pub grown_from: SeedSlot,
 }
 
 impl Suggestion {
@@ -2834,8 +2843,63 @@ impl Suggestion {
     /// person picked, both background sliders, the text contrast and the four
     /// dimensions. A chip is a palette, and trying one on does not undo the
     /// settings a person made on purpose.
+    ///
+    /// One exception, and it follows from what the favourite is for. A chip
+    /// grown from any slot but the primary did not grow its primary from the
+    /// favourite: the colour the person picked is the seed, and it stays in
+    /// its own slot. Left alone, the favourite would be a primary nobody can
+    /// see any more, and a row grown from the primary afterwards would be
+    /// grown from it. So such a chip makes its own primary the favourite.
     pub fn params(&self, base: BuilderParams) -> BuilderParams {
-        BuilderParams { harmony: self.harmony.unwrap_or_default(), seeds: Some(self.seeds), ..base }
+        let favourite = match self.grown_from {
+            SeedSlot::Primary => base.favourite,
+            _ => self.colors[0],
+        };
+        BuilderParams { favourite, harmony: self.harmony.unwrap_or_default(), seeds: Some(self.seeds), ..base }
+    }
+}
+
+/// Which of the four colours in force a row of suggestions is grown from.
+///
+/// A palette is four colours, and a person who has found the one they are
+/// sure of has not always found the primary: it can be the quiet accent, the
+/// one pointed out, or the page. Whichever slot it is, the row keeps that
+/// colour exactly where it is in every chip and offers what the other three
+/// could be.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SeedSlot {
+    #[default]
+    Primary,
+    Secondary,
+    Tertiary,
+    /// The background colour, the palette's fourth.
+    Surface,
+}
+
+impl SeedSlot {
+    pub const ALL: [SeedSlot; 4] = [SeedSlot::Primary, SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface];
+
+    /// Where this slot stands in [`BuilderParams::palette`] and in
+    /// [`Suggestion::colors`].
+    pub fn index(self) -> usize {
+        match self {
+            SeedSlot::Primary => 0,
+            SeedSlot::Secondary => 1,
+            SeedSlot::Tertiary => 2,
+            SeedSlot::Surface => 3,
+        }
+    }
+
+    /// The colour a row for this slot is grown from, off the settings in
+    /// force: the favourite for the primary, which is what the row has always
+    /// been grown from -- a mood chip names a calmer primary and leaves the
+    /// colour picked where it was -- and the colour in that slot for the
+    /// other three.
+    pub fn seed_of(self, params: &BuilderParams) -> u32 {
+        match self {
+            SeedSlot::Primary => params.favourite | 0xFF,
+            slot => params.palette()[slot.index()] | 0xFF,
+        }
     }
 }
 
@@ -2862,14 +2926,24 @@ impl Suggestion {
 /// It is the same list every time for the same colour and appearance, and it
 /// does not depend on the background sliders at all.
 pub fn suggestions(favourite: u32, dark: bool) -> Vec<Suggestion> {
+    suggestions_from(SeedSlot::Primary, favourite, dark)
+}
+
+/// [`suggestions`] grown from the colour in any one of the four slots: the
+/// same six plain harmonies first and the same round robin of moods after,
+/// with `seed` standing in `slot` in every one of them, exactly, and the
+/// other three what the harmony and the mood make of it. What each slot's
+/// seed does is [`grown_at`]. The primary's row is [`suggestions`], byte for
+/// byte, because it is the same code.
+pub fn suggestions_from(slot: SeedSlot, seed: u32, dark: bool) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = Vec::with_capacity(Harmony::ALL.len() * (Mood::ALL.len() + 1));
     for harmony in Harmony::ALL {
-        offer(&mut out, Some(grown(favourite, dark, harmony, None)));
+        offer(&mut out, Some(grown_at(slot, seed, dark, harmony, None)));
     }
     for round in 0..Mood::ALL.len() {
         for (step, harmony) in Harmony::ALL.into_iter().enumerate() {
             let mood = Mood::ALL[(round + step) % Mood::ALL.len()];
-            offer(&mut out, Some(grown(favourite, dark, harmony, Some(mood))));
+            offer(&mut out, Some(grown_at(slot, seed, dark, harmony, Some(mood))));
         }
     }
     out
@@ -2897,13 +2971,24 @@ pub fn suggestions(favourite: u32, dark: bool) -> Vec<Suggestion> {
 /// The library ships no personal list. `own` is read from wherever the caller
 /// keeps one; `theme_store::read_palettes` is where a person's own file is.
 pub fn all_suggestions(favourite: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Suggestion> {
-    let mut out = suggestions(favourite, dark);
-    let built_in = matched(favourite, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
+    all_suggestions_from(SeedSlot::Primary, favourite, dark, own)
+}
+
+/// [`all_suggestions`] grown from the colour in any one of the four slots.
+///
+/// The lists are searched for the SEED, whichever slot it is in: a scheme is
+/// found by the colour of its that stands nearest the seed, laid out again
+/// from the seed by [`adjust_scheme`], and handed its roles by
+/// [`scheme_at`], which puts the seed in its slot and deals the rest out by
+/// the role rule with that slot already taken.
+pub fn all_suggestions_from(slot: SeedSlot, seed: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Suggestion> {
+    let mut out = suggestions_from(slot, seed, dark);
+    let built_in = matched(seed, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
     for (at, scheme) in built_in.into_iter().take(MOST_COMBINATIONS) {
-        offer(&mut out, from_scheme(favourite, dark, &scheme, combination_label(at)));
+        offer(&mut out, scheme_at(slot, seed, dark, &scheme, combination_label(at)));
     }
-    for scheme in matching_schemes(favourite, own, OWN_TOLERANCE) {
-        offer(&mut out, from_scheme(favourite, dark, &scheme, OWN_LABEL.to_string()));
+    for scheme in matching_schemes(seed, own, OWN_TOLERANCE) {
+        offer(&mut out, scheme_at(slot, seed, dark, &scheme, OWN_LABEL.to_string()));
     }
     out
 }
@@ -3187,7 +3272,119 @@ fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Su
         mood,
         colors: [primary, secondary, tertiary, background],
         seeds,
+        grown_from: SeedSlot::Primary,
     }
+}
+
+/// Two hue gaps closer than this are one gap. Every hue here has been through
+/// eight bits a channel, so the two companions of a triad stand 119.8 and
+/// 120.1 degrees off the seed, and which of those is "nearer" is rounding.
+const HUE_TIE: f64 = 1.0;
+
+/// One palette in one harmony and mood, grown from the colour in `slot`.
+///
+/// * The primary: [`grown`], unchanged.
+/// * The secondary and the tertiary: the seed is an accent, so the harmony is
+///   laid round it exactly as it is laid round a primary -- [`grown`] from
+///   the seed -- and the three accents are then dealt out so the seed keeps
+///   its slot. Of the two companions, the primary is the one NEAREST the
+///   seed round the circle when the seed is the secondary, and the one
+///   FARTHEST from it when the seed is the tertiary, and the other takes the
+///   slot left. That is the role rule of [`in_role_order`] read from the
+///   other end: the secondary is the quiet accent beside the primary and the
+///   tertiary the contrast accent across from it. Gaps within [`HUE_TIE`]
+///   are a tie and keep the harmony's order, its secondary first. The
+///   background is the one the rule gave the harmony round the seed.
+/// * The surface: the seed is the background colour, and the accents are
+///   chosen to sit on it -- see [`surface_anchor`] for where the primary
+///   goes. The harmony is laid round that primary as [`grown`] lays it, and
+///   its background is replaced by the seed.
+///
+/// A mood moves the three that are not the seed and never the seed: the
+/// person picked it, and a chip that moved it would be a row grown from
+/// some other colour. For the primary that is the favourite staying where
+/// it was while the chip names a calmer primary, as it always has been.
+fn grown_at(slot: SeedSlot, seed: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Suggestion {
+    let laid = match slot {
+        SeedSlot::Primary => return grown(seed, dark, harmony, mood),
+        SeedSlot::Surface => grown(surface_anchor(harmony, seed, dark), dark, harmony, mood),
+        _ => grown(seed, dark, harmony, mood),
+    };
+    let seed = seed | 0xFF;
+    let [first, second, third, background] = laid.colors;
+    let colors = match slot {
+        SeedSlot::Surface => [first, second, third, seed],
+        _ => {
+            let companions = [second, third];
+            let at = partner_of(slot, seed, &companions);
+            let (primary, other) = (companions[at], companions[1 - at]);
+            match slot {
+                SeedSlot::Secondary => [primary, seed, other, background],
+                _ => [primary, other, seed, background],
+            }
+        }
+    };
+    let [primary, secondary, tertiary, background] = colors;
+    Suggestion {
+        colors,
+        seeds: SuggestionSeeds { primary, secondary, tertiary, background },
+        grown_from: slot,
+        ..laid
+    }
+}
+
+/// Which of `candidates` becomes the primary beside a seed in the secondary
+/// or the tertiary slot: the nearest round the circle for the secondary, the
+/// farthest for the tertiary, the first written where gaps tie.
+fn partner_of(slot: SeedSlot, seed: u32, candidates: &[u32]) -> usize {
+    let mut best = 0;
+    for at in 1..candidates.len() {
+        let (gap, best_gap) = (hue_gap(seed, candidates[at]), hue_gap(seed, candidates[best]));
+        let better = match slot {
+            SeedSlot::Tertiary => gap > best_gap + HUE_TIE,
+            _ => gap < best_gap - HUE_TIE,
+        };
+        if better {
+            best = at;
+        }
+    }
+    best
+}
+
+/// The primary a harmony is laid round when the seed is the background.
+///
+/// The rule that gives a palette its background ([`rule_background`]) puts
+/// the page at a hue that depends only on the harmony and the primary's hue:
+/// the primary's own for a single hue, sixty degrees on for analogous, the
+/// middle of the widest empty stretch the three accents leave for the rest.
+/// So it runs backwards: the primary goes where that rule would have put the
+/// page on the seed's hue. The offset is read off the rule itself, from a
+/// primary at hue nought, so the two cannot drift apart. Where the accents
+/// leave two stretches equally wide -- complementary leaves two halves, a
+/// triad three thirds -- the page is the middle of one of them, as the rule's
+/// is; which one the rule itself would name turns only on where the hues
+/// happen to fall round nought.
+///
+/// The seed's saturation and lightness say nothing about an accent -- how
+/// light the page is belongs to the lightness slider -- so the primary takes
+/// the appearance's house primary's saturation, and its luminance too, which
+/// holds the contrast the house primary stands off the house page at: every
+/// hue then reads on the page as the house colour does. A seed with no hue
+/// has no hue to lay a harmony from, and the accents are laid from the house
+/// primary's instead.
+fn surface_anchor(harmony: Harmony, surface: u32, dark: bool) -> u32 {
+    let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+    let house = roles_for(scheme).primary.base | 0xFF;
+    let (house_hue, house_sat, _) = rgb_to_hsl(house);
+    let y = luminance(house);
+    let (hue, sat, _) = rgb_to_hsl(surface | 0xFF);
+    if sat < HAS_HUE {
+        return at_luminance(house_hue, house_sat, y);
+    }
+    let probe = grown(at_luminance(0.0, house_sat, y), dark, harmony, None);
+    let probe_hue = rgb_to_hsl(probe.colors[0]).0;
+    let offset = ground_hue(harmony, probe_hue, &probe.colors[..3]) - probe_hue;
+    at_luminance(hue - offset, house_sat, y)
 }
 
 /// The background colour the rule gives a palette that did not come with
@@ -3215,14 +3412,21 @@ fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Su
 /// colour for a page to take, and its background is a grey.
 fn rule_background(harmony: Harmony, favourite: u32, mood: Option<Mood>, accents: [u32; 3], dark: bool) -> u32 {
     let (hue, own, _) = rgb_to_hsl(favourite | 0xFF);
-    let ground_hue = match harmony {
-        Harmony::Single => hue,
-        Harmony::Analogous => hue + 60.0,
-        _ => widest_gap(&accents).unwrap_or(hue),
-    };
+    let ground_hue = ground_hue(harmony, hue, &accents);
     let share = mood.map_or(1.0, |mood| mood.rule().colour);
     let sat = if own < HAS_HUE { 0.0 } else { own.clamp(RULE_GROUND_COLOUR.0, RULE_GROUND_COLOUR.1) * share };
     ground_swatch(hsl_to_rgb(ground_hue, sat, 0.5), dark)
+}
+
+/// The hue [`rule_background`] gives the page, for a primary at `hue` and
+/// these accents: the hue half of that rule, on its own so that
+/// [`surface_anchor`] can run it backwards.
+fn ground_hue(harmony: Harmony, hue: f64, accents: &[u32]) -> f64 {
+    match harmony {
+        Harmony::Single => hue,
+        Harmony::Analogous => hue + 60.0,
+        _ => widest_gap(accents).unwrap_or(hue),
+    }
 }
 
 /// The middle of the widest stretch of the hue circle none of these colours
@@ -3280,7 +3484,85 @@ fn from_scheme(favourite: u32, dark: bool, scheme: &[u32], label: String) -> Opt
         None => rule_background(Harmony::House, favourite, None, [primary, secondary, tertiary], dark),
     };
     let seeds = SuggestionSeeds { primary, secondary, tertiary, background };
-    Some(Suggestion { label, harmony: None, mood: None, colors: [primary, secondary, tertiary, background], seeds })
+    Some(Suggestion {
+        label,
+        harmony: None,
+        mood: None,
+        colors: [primary, secondary, tertiary, background],
+        seeds,
+        grown_from: SeedSlot::Primary,
+    })
+}
+
+/// [`from_scheme`] for a seed in any slot: the scheme re-anchored on the
+/// seed, the seed put in its slot exactly, and the rest dealt out by the
+/// role rule with that slot already taken.
+///
+/// * The primary: [`from_scheme`], unchanged.
+/// * The secondary or the tertiary: of the colours after the seed, the
+///   background is taken first, where there is one to spare, exactly as
+///   [`in_role_order`] takes it -- the palette's dark end in a dark theme,
+///   its light end in a light one. Of what is left, the primary is chosen by
+///   [`partner_of`] -- nearest the seed for a secondary, farthest for a
+///   tertiary -- and the first of the rest takes the accent slot still open.
+///   A scheme too short to fill it borrows it from the plain house harmony
+///   round that primary, and one with no background colour gets the rule's.
+/// * The surface: the seed is the background, so every other colour is an
+///   accent. The primary is the one that stands off the seed the most, by
+///   contrast -- it is the colour the page is covered with most -- and the
+///   other two follow it in [`in_role_order`]'s way, the nearer round the
+///   circle the secondary. What a short scheme lacks it borrows from the
+///   plain house harmony round that primary.
+fn scheme_at(slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: String) -> Option<Suggestion> {
+    if slot == SeedSlot::Primary {
+        return from_scheme(seed, dark, scheme, label);
+    }
+    let adjusted = adjust_scheme(seed, scheme);
+    if adjusted.len() < 2 {
+        return None;
+    }
+    let seed = seed | 0xFF;
+    let mut rest: Vec<u32> = adjusted[1..].iter().map(|c| c | 0xFF).collect();
+    let colors = match slot {
+        SeedSlot::Surface => {
+            let mut at = 0;
+            for next in 1..rest.len() {
+                if reads_on(seed, rest[next]) > reads_on(seed, rest[at]) + 1e-9 {
+                    at = next;
+                }
+            }
+            let primary = rest.remove(at);
+            // A stable sort, as in `in_role_order`.
+            rest.sort_by(|a, b| {
+                hue_gap(primary, *a).partial_cmp(&hue_gap(primary, *b)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let plain = grown(primary, dark, Harmony::House, None).colors;
+            [primary, rest.first().copied().unwrap_or(plain[1]), rest.get(1).copied().unwrap_or(plain[2]), seed]
+        }
+        _ => {
+            let ground = (rest.len() >= 3).then(|| rest.remove(page_end(&rest, dark)));
+            let primary = rest.remove(partner_of(slot, seed, &rest));
+            let plain = grown(primary, dark, Harmony::House, None).colors;
+            let (secondary, tertiary) = match slot {
+                SeedSlot::Secondary => (seed, rest.first().copied().unwrap_or(plain[2])),
+                _ => (rest.first().copied().unwrap_or(plain[1]), seed),
+            };
+            let background = match ground {
+                Some(ground) => ground_swatch(ground, dark),
+                None => rule_background(Harmony::House, seed, None, [primary, secondary, tertiary], dark),
+            };
+            [primary, secondary, tertiary, background]
+        }
+    };
+    let [primary, secondary, tertiary, background] = colors;
+    Some(Suggestion {
+        label,
+        harmony: None,
+        mood: None,
+        colors,
+        seeds: SuggestionSeeds { primary, secondary, tertiary, background },
+        grown_from: slot,
+    })
 }
 
 /// Do two suggestions show the same four colours? Whole swatch or nothing: a
@@ -6210,4 +6492,267 @@ mod theme_builder_tests {
         }
     }
 
+
+    /// The colours the seed sweeps grow rows from: hues all round the circle
+    /// at a strong and a soft saturation, a colour out of the book so the
+    /// combinations are offered too, and the three greys.
+    fn seed_colours() -> Vec<u32> {
+        let mut out: Vec<u32> = (0..12).map(|step| hsl_to_rgb(step as f64 * 30.0, 0.85, 0.5)).collect();
+        out.extend((0..6).map(|step| hsl_to_rgb(15.0 + step as f64 * 60.0, 0.4, 0.3)));
+        out.push(COMBINATIONS.iter().find(|row| row.len() == 4).unwrap()[0] | 0xFF);
+        out.extend([0x000000FFu32, 0x808080FF, 0xFFFFFFFF]);
+        out
+    }
+
+    /// Everything the rows grown from the primary offer, folded into one
+    /// number: labels, harmonies, moods, colours and seeds, for a spread of
+    /// favourites on both pages and a person's own list. The number was
+    /// taken off the rows as they stood before a row could be grown from any
+    /// other slot, and checked against that code chip for chip.
+    pub(super) fn prim_digest() -> u64 {
+        let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF], vec![0xCC3344FF, 0x223344FF, 0xEEDDCCFF]];
+        let mut favourites: Vec<u32> = (0..36).map(|step| hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5)).collect();
+        favourites.extend(COMBINATIONS.iter().step_by(5).map(|row| row[0] | 0xFF));
+        favourites.extend([0x000000FFu32, 0x808080FF, 0xFFFFFFFF, 0xFF5C39FF, 0x3366CCFF, 0xCC3344FF]);
+        let mut hash: u64 = 0xCBF29CE484222325;
+        let mut eat = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001B3);
+            }
+        };
+        for favourite in favourites {
+            for dark in [true, false] {
+                for offer in all_suggestions(favourite, dark, &own) {
+                    eat(offer.label.as_bytes());
+                    eat(format!("{:?}{:?}", offer.harmony, offer.mood).as_bytes());
+                    let seeds = offer.seeds;
+                    for colour in offer.colors.into_iter().chain([seeds.primary, seeds.secondary, seeds.tertiary, seeds.background]) {
+                        eat(&colour.to_le_bytes());
+                    }
+                }
+            }
+        }
+        hash
+    }
+
+    /// The primary's row is the row the builder always grew, byte for byte:
+    /// the same chips in the same order under the same names. A seed picker
+    /// that moved one chip for a person who never touches it would be a
+    /// change nobody asked for.
+    #[test]
+    fn a_row_grown_from_the_primary_is_the_row_it_always_was() {
+        assert_eq!(prim_digest(), PRIM_DIGEST, "the primary's row is not the one the builder grew before the seed picker");
+        for dark in [true, false] {
+            assert_eq!(suggestions_from(SeedSlot::Primary, BLUE, dark), suggestions(BLUE, dark));
+            assert!(suggestions(BLUE, dark).iter().all(|offer| offer.grown_from == SeedSlot::Primary));
+        }
+    }
+
+    const PRIM_DIGEST: u64 = 0x9CA3B862C7808459;
+
+    /// Grown from the secondary, the tertiary or the surface, every chip in
+    /// the row -- the rule's, the book's and a person's own -- holds the seed
+    /// in that slot exactly, and the row still offers a choice: the other
+    /// three differ from chip to chip. The first six are the six plain
+    /// harmonies, as they are for the primary.
+    ///
+    /// Seen failing before a row could be grown from any slot but the first,
+    /// where the chips were the primary's row whatever the seed.
+    #[test]
+    fn every_chip_holds_the_seed_in_its_slot_and_varies_the_rest() {
+        let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF], vec![0x3366CCFF, 0x223344FF, 0xEEDDCCFF]];
+        for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
+            for dark in [true, false] {
+                for seed in seed_colours().into_iter().chain([0x3366CCFF]) {
+                    let offered = all_suggestions_from(slot, seed, dark, &own);
+                    let what = format!("{slot:?} {seed:08X} dark={dark}");
+                    for offer in &offered {
+                        assert_eq!(offer.colors[slot.index()], seed | 0xFF, "{what}: {} moved the seed", offer.label);
+                        assert_eq!(offer.grown_from, slot, "{what}: {}", offer.label);
+                        let seeds = offer.seeds;
+                        assert_eq!(offer.colors, [seeds.primary, seeds.secondary, seeds.tertiary, seeds.background], "{what}");
+                    }
+                    let labels: Vec<&str> = offered[..2].iter().map(|s| s.label.as_str()).collect();
+                    assert_eq!(labels, ["Default", "Single hue"], "{what}");
+                    let has_hue = rgb_to_hsl(seed).1 >= HAS_HUE;
+                    if has_hue || slot == SeedSlot::Surface {
+                        let firsts: Vec<(Option<Harmony>, Option<Mood>)> = offered[..6].iter().map(|s| (s.harmony, s.mood)).collect();
+                        assert_eq!(firsts, Harmony::ALL.map(|h| (Some(h), None)).to_vec(), "{what}: the first six are not the plain harmonies");
+                    }
+                    let mut rests: Vec<Vec<u32>> = offered
+                        .iter()
+                        .map(|offer| (0..4).filter(|at| *at != slot.index()).map(|at| offer.colors[at]).collect())
+                        .collect();
+                    rests.sort();
+                    rests.dedup();
+                    assert!(rests.len() >= 4, "{what}: only {} different chips", rests.len());
+                    if has_hue {
+                        assert!(offered.len() >= 20, "{what}: {} chips", offered.len());
+                    }
+                }
+            }
+        }
+        // And the book and a person's own list are searched for the seed.
+        let seed = COMBINATIONS.iter().find(|row| row.len() == 4).unwrap()[2] | 0xFF;
+        for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
+            let offered = all_suggestions_from(slot, seed, true, &[vec![0x10A0F0FF, seed, 0xF0E040FF, 0x202020FF]]);
+            assert!(!book(&offered).is_empty(), "{slot:?}: the book was not searched for the seed");
+            assert_eq!(theirs(&offered), 1, "{slot:?}: their own scheme holding the seed was not offered");
+        }
+    }
+
+    /// The role rule round an accent seed, on the harmony it reads plainest
+    /// in. Complementary lays one companion on the seed's own hue and one
+    /// across from it: with the seed as the secondary, the quiet accent
+    /// beside the primary, the primary is the one on its own hue and the
+    /// tertiary the one across; with the seed as the tertiary, the contrast
+    /// accent across from the primary, the primary is the one across.
+    #[test]
+    fn an_accent_seed_takes_its_slot_and_the_primary_stands_where_the_role_says() {
+        let seed = hsl_to_rgb(200.0, 0.8, 0.5);
+        let hue = |c: u32| rgb_to_hsl(c).0;
+        for dark in [true, false] {
+            let sec = suggestions_from(SeedSlot::Secondary, seed, dark);
+            let plain = sec.iter().find(|s| s.harmony == Some(Harmony::Complementary) && s.mood.is_none()).unwrap();
+            assert!(apart(hue(plain.colors[0]), 200.0) < 3.0, "the secondary's primary is not beside it: {:08X}", plain.colors[0]);
+            assert!(apart(hue(plain.colors[2]), 20.0) < 3.0, "the secondary's tertiary is not across: {:08X}", plain.colors[2]);
+            let tert = suggestions_from(SeedSlot::Tertiary, seed, dark);
+            let plain = tert.iter().find(|s| s.harmony == Some(Harmony::Complementary) && s.mood.is_none()).unwrap();
+            assert!(apart(hue(plain.colors[0]), 20.0) < 3.0, "the tertiary's primary is not across from it: {:08X}", plain.colors[0]);
+            assert!(apart(hue(plain.colors[1]), 200.0) < 3.0, "the tertiary's secondary: {:08X}", plain.colors[1]);
+            // Triadic is a tie either way, and keeps the harmony's order.
+            let triad = sec.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood.is_none()).unwrap();
+            assert!(apart(hue(triad.colors[0]), 320.0) < 3.0, "{:08X}", triad.colors[0]);
+            assert!(apart(hue(triad.colors[2]), 80.0) < 3.0, "{:08X}", triad.colors[2]);
+            // A mood moves the other three and never the seed.
+            let muted = sec.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood == Some(Mood::Muted)).unwrap();
+            assert_eq!(muted.colors[1], seed);
+            assert!(rgb_to_hsl(muted.colors[0]).1 < rgb_to_hsl(triad.colors[0]).1 - 0.2, "the mood left the primary as it was");
+        }
+    }
+
+    /// A surface seed is the page, and the accents are laid where the
+    /// background rule, run forwards from them, would have put that page:
+    /// every plain harmony's own rule gives the seed's hue back. They stand
+    /// off the house page at the house primary's luminance, so they read on
+    /// it as the house colour does, and a grey surface is dressed in the
+    /// house colour's harmonies.
+    #[test]
+    fn a_surface_seed_is_the_page_the_accents_were_laid_for() {
+        let hue = |c: u32| rgb_to_hsl(c).0;
+        for dark in [true, false] {
+            let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+            let house = roles_for(scheme).primary.base;
+            for step in 0..12 {
+                let surface = hsl_to_rgb(step as f64 * 30.0 + 7.0, 0.5, 0.2);
+                let offered = suggestions_from(SeedSlot::Surface, surface, dark);
+                for harmony in Harmony::ALL {
+                    let plain = offered.iter().find(|s| s.harmony == Some(harmony) && s.mood.is_none()).unwrap();
+                    let [primary, secondary, tertiary, page] = plain.colors;
+                    assert_eq!(page, surface);
+                    // Single hue and analogous name one hue; the others the
+                    // middle of a widest stretch the accents leave empty.
+                    let wanted = hue(surface);
+                    match harmony {
+                        Harmony::Single | Harmony::Analogous => {
+                            let forward = ground_hue(harmony, hue(primary), &[primary, secondary, tertiary]);
+                            assert!(apart(forward, wanted) < 3.0, "{harmony:?} on {surface:08X}: the rule puts the page at {forward}");
+                        }
+                        _ => {
+                            let mut hues: Vec<f64> = [primary, secondary, tertiary]
+                                .iter()
+                                .filter(|c| rgb_to_hsl(**c).1 >= HAS_HUE)
+                                .map(|c| hue(*c).rem_euclid(360.0))
+                                .collect();
+                            hues.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                            let gaps: Vec<(f64, f64)> = (0..hues.len())
+                                .map(|at| {
+                                    let to = if at + 1 < hues.len() { hues[at + 1] } else { hues[0] + 360.0 };
+                                    (to - hues[at], (hues[at] + (to - hues[at]) / 2.0).rem_euclid(360.0))
+                                })
+                                .collect();
+                            let widest = gaps.iter().fold(0.0f64, |w, (g, _)| w.max(*g));
+                            assert!(
+                                gaps.iter().any(|(g, middle)| *g > widest - 3.0 && apart(*middle, wanted) < 3.0),
+                                "{harmony:?} on {surface:08X}: the page is not the middle of a widest empty stretch, {gaps:?}"
+                            );
+                        }
+                    }
+                    assert!((luminance(primary) - luminance(house)).abs() < 0.01, "{harmony:?}: {primary:08X} is not as light as the house primary");
+                }
+            }
+            let grey = suggestions_from(SeedSlot::Surface, house_page(scheme), dark);
+            let first = grey[0].colors[0];
+            assert!(apart(hue(first), hue(house)) < 3.0 && rgb_to_hsl(first).1 > 0.3, "a grey surface lost the house colour: {first:08X}");
+        }
+    }
+
+    /// A chip grown from another slot hands its primary to the favourite:
+    /// the colour the person picked is its seed, still in its own slot, and
+    /// a favourite left behind would be a primary nobody can see.
+    #[test]
+    fn a_chip_from_another_slot_makes_its_primary_the_favourite() {
+        let base = BuilderParams { favourite: BLUE, ..BuilderParams::house(true) };
+        let green = hsl_to_rgb(120.0, 0.7, 0.5);
+        for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
+            let chip = &suggestions_from(slot, green, true)[3];
+            let on = chip.params(base);
+            assert_eq!(on.favourite, chip.colors[0], "{slot:?}");
+            assert_eq!(on.palette(), chip.colors, "{slot:?}");
+            assert_eq!(slot.seed_of(&on), green, "{slot:?}: the seed is not where it was picked");
+        }
+        let chip = &suggestions(green, true)[9];
+        assert_eq!(chip.params(base).favourite, BLUE, "a chip of the primary's row moved the colour picked");
+        assert_eq!(SeedSlot::Primary.seed_of(&base), BLUE);
+    }
+
+    /// The readability sweep over the rows every other seed slot grows: the
+    /// rule's chips (every other one, which is every harmony in turn), the
+    /// first of the book's and a person's own, for seeds on three sides of
+    /// the circle, a soft dark one, one out of the book and a grey, on both
+    /// pages, at both ends of the page's lightness with none and all of the
+    /// background colour. Every held pair meets its bar. Thinner than the
+    /// primary's own sweep on purpose: every chip here goes through the same
+    /// `build` that sweep holds to the bar, and what is new is only where the
+    /// four colours come from.
+    #[test]
+    fn every_theme_grown_from_every_seed_slot_reads() {
+        let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
+        let seeds = [
+            hsl_to_rgb(0.0, 0.85, 0.5),
+            hsl_to_rgb(120.0, 0.85, 0.5),
+            hsl_to_rgb(240.0, 0.85, 0.5),
+            hsl_to_rgb(75.0, 0.4, 0.3),
+            COMBINATIONS.iter().find(|row| row.len() == 4).unwrap()[0] | 0xFF,
+            0x808080FF,
+            0x3366CCFF,
+        ];
+        let mut checked = 0;
+        for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
+            for dark in [true, false] {
+                let ends: Vec<(f64, f64)> = slider_ends(dark).into_iter().filter(|(s, _)| *s != 0.5).collect();
+                for seed in seeds {
+                    let offered = all_suggestions_from(slot, seed, dark, &own);
+                    let rule = offered.iter().filter(|s| s.harmony.is_some()).step_by(2);
+                    let lists = offered.iter().filter(|s| s.harmony.is_none()).take(4);
+                    for suggestion in rule.chain(lists) {
+                        for (saturation, lightness) in ends.iter().copied() {
+                            let base = BuilderParams { saturation, lightness, ..BuilderParams::house(dark) };
+                            let built = build(&suggestion.params(base));
+                            assert!(
+                                built.readability.holds(),
+                                "{slot:?} {seed:08X} {} at {saturation}/{lightness}: {:#?}",
+                                suggestion.label,
+                                built.readability.failures
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 3 * 2 * 7 * 12 * 4, "{checked}");
+    }
 }
+

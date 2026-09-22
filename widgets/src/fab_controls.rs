@@ -4560,6 +4560,11 @@ pub struct FabPaletteCarousel {
     chip_height: f64,
     #[live(3.0)]
     gap: f64,
+    /// A host with nothing to offer hides the whole row: hidden, it draws
+    /// nothing, takes no room in its parent and answers no input.
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[rust]
     chips: Vec<[Vec4f; 4]>,
     #[rust]
@@ -4715,6 +4720,9 @@ impl FabPaletteCarousel {
 
 impl Widget for FabPaletteCarousel {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         cx.begin_turtle(walk, Layout::flow_down());
         let width = cx.turtle().rect().size.x;
         let rect = cx.walk_turtle(Walk::new(Size::fill(), Size::Fixed(self.chip_height)));
@@ -4762,6 +4770,9 @@ impl Widget for FabPaletteCarousel {
     /// that dragged the row along was looking for a palette, not choosing
     /// the one that happened to end up under it.
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
         let uid = self.widget_uid();
         let rect = self.area.rect(cx);
         let track = self.track(rect.size.x);

@@ -109,7 +109,7 @@ use crate::{
 };
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
-use crate::theme_builder::{all_suggestions, Applied as Built, BuilderParams, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
+use crate::theme_builder::{all_suggestions_from, Applied as Built, BuilderParams, SeedSlot, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
@@ -8285,13 +8285,34 @@ const TB_COLOR_IDS: [LiveId; 4] = [
     live_id!(tb_color_3),
 ];
 
-/// What each of the four is called, over its control.
+/// What each of the four is called, over its control and in the seed
+/// picker.
 ///
-/// The panel's words and not the engine's: the fourth is the palette's
-/// background colour, which the engine calls that, and "surface" here
-/// because it is the word that fits over its control at the default sidebar
-/// and the one the section's heading over its two sliders uses.
-const TB_COLOR_NAMES: [&str; 4] = ["primary", "secondary", "tertiary", "surface"];
+/// Short words, and the operator's own choice of them: the row now carries
+/// the seed picker and the die beside the four, and whole words would not
+/// fit over squares that narrow at the default sidebar. The panel's usual
+/// rule of writing the whole word gives way here and only here. The fourth
+/// is the palette's background colour, which the engine calls that; the
+/// heading over its two sliders stays "Surface".
+const TB_COLOR_NAMES: [&str; 4] = ["Prim", "Sec", "Tert", "Surf"];
+
+/// The headers over the seed picker and the die, beside the four names.
+const TB_SEED_HEADER: &str = "Seed";
+const TB_ROLL_HEADER: &str = "Roll";
+
+/// What the seed picker lists, in its order: the four slots under the names
+/// over them, and then the choice of no carousel at all.
+const TB_SEED_LABELS: [&str; 5] = ["Prim", "Sec", "Tert", "Surf", "None"];
+
+/// The seed picker's entry for a seed, and back. `None` is the last entry:
+/// no carousel.
+fn tb_seed_entry(seed: Option<SeedSlot>) -> usize {
+    seed.map_or(SeedSlot::ALL.len(), SeedSlot::index)
+}
+
+fn tb_seed_of_entry(entry: usize) -> Option<SeedSlot> {
+    SeedSlot::ALL.get(entry).copied()
+}
 
 /// What a carried builder colour does if let go where it is.
 ///
@@ -8318,14 +8339,15 @@ const TB_INSERT_BAND: f64 = 0.2;
 
 /// The zone a carried colour from square `from` is over, off the four
 /// squares' rects, the top of the row (the names over the squares) and the
-/// left edge of the surprise button.
+/// left edge of what follows them, the seed picker.
 ///
-/// `None` when the drop would change nothing: off the row, on the surprise
-/// (it is a button, not a place in the list, so a drop there is a cancel,
-/// and the zone after the last square stops at its edge), on the carried
+/// `None` when the drop would change nothing: off the row, on the seed
+/// picker or the die (they are controls, not places in the list, so a drop
+/// there is a cancel, and the zone after the last square stops at the
+/// picker's edge), on the carried
 /// colour's own square, or at either insertion point beside it -- slotting
 /// a colour in next to where it already is leaves the order as it was.
-fn tb_drop_zone(squares: &[Rect; 4], top: f64, surprise_x: f64, from: usize, at: DVec2) -> Option<TbDrop> {
+fn tb_drop_zone(squares: &[Rect; 4], top: f64, beyond_x: f64, from: usize, at: DVec2) -> Option<TbDrop> {
     if squares.iter().any(|square| square.size.x <= 0.0) {
         return None;
     }
@@ -8338,7 +8360,7 @@ fn tb_drop_zone(squares: &[Rect; 4], top: f64, surprise_x: f64, from: usize, at:
     }
     let right = |which: usize| squares[which].pos.x + squares[which].size.x;
     let band = |which: usize| squares[which].size.x * TB_INSERT_BAND;
-    let zone = if at.x >= surprise_x.max(right(3)) {
+    let zone = if at.x >= beyond_x.max(right(3)) {
         return None;
     } else if at.x < squares[0].pos.x + band(0) {
         // In front of the first: as far out as a band's width, the same
@@ -9166,10 +9188,20 @@ pub struct Tweaker {
     /// library ships no list and the file need not exist.
     #[rust]
     tb_own_schemes: Vec<Vec<u32>>,
-    /// The favourite the offers were last grown from, so that a regrowth
-    /// can tell a new colour from the same colour grown for the other page.
+    /// The slot and the colour the offers were last grown from, so that a
+    /// regrowth can tell a new seed from the same seed grown for the other
+    /// page.
     #[rust]
-    tb_grown_for: Option<u32>,
+    tb_grown_for: Option<(SeedSlot, u32)>,
+    /// Which of the four colours the carousel is grown from, or `None` for
+    /// no carousel at all. A ROLE and not a colour: it stays on its slot while
+    /// colours are carried from one slot to another under it. The primary to
+    /// begin with, which is the row the section has always grown.
+    #[rust(Some(SeedSlot::Primary))]
+    tb_seed_slot: Option<SeedSlot>,
+    /// The seed picker. Zero while the section is folded.
+    #[rust]
+    tb_seed_uid: u64,
     /// The carousel is owed a return to its first chip on the next draw:
     /// the offers are a new list, not the old one grown again.
     #[rust]
@@ -10078,22 +10110,6 @@ impl Tweaker {
                         arrow_color_disabled: panel.text_muted
                         pixel: fn() {
                             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                            // The arrow goes down FIRST and the face over
-                            // it, exactly as the stock face does it: the
-                            // path leaves a clip behind that the fill reads.
-                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                            let sz = 2.5
-                            sdf.move_to(c.x - sz, c.y - sz + 1.0)
-                            sdf.line_to(c.x + sz, c.y - sz + 1.0)
-                            sdf.line_to(c.x, c.y + sz * 0.25 + 1.0)
-                            sdf.close_path()
-                            sdf.fill_keep(
-                                self.arrow_color
-                                    .mix(self.arrow_color_focus, self.focus)
-                                    .mix(self.arrow_color_hover, self.hover)
-                                    .mix(self.arrow_color_down, self.down)
-                                    .mix(self.arrow_color_disabled, self.disabled)
-                            )
                             sdf.box(
                                 self.border_size
                                 self.border_size
@@ -10115,6 +10131,22 @@ impl Tweaker {
                                     .mix(self.border_color_down, self.down * self.hover)
                                     .mix(self.border_color_disabled, self.disabled)
                                 self.border_size
+                            )
+                            // The arrow goes on AFTER the face, over it.
+                            // Laid first, the face's fill painted straight
+                            // over it and no picker in the panel showed one.
+                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                            let sz = 2.5
+                            sdf.move_to(c.x - sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x + sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x, c.y + sz * 0.25 + 1.0)
+                            sdf.close_path()
+                            sdf.fill(
+                                self.arrow_color
+                                    .mix(self.arrow_color_focus, self.focus)
+                                    .mix(self.arrow_color_hover, self.hover)
+                                    .mix(self.arrow_color_down, self.down)
+                                    .mix(self.arrow_color_disabled, self.disabled)
                             )
                             return sdf.result
                         }
@@ -10813,14 +10845,12 @@ impl Tweaker {
                 // and every word stands over its own square.
                 //
                 // The word is its own width and the column does not clip it:
-                // with the surprise at the row's end a column is about 50
-                // points at the default sidebar, and a word a point wider
-                // than its column is better run into the gap beside it than
-                // cut to a stump. The fourth is "surface" and not
-                // "background" for the same reason -- the longer word was
-                // cut to "backgroun" there -- and it is the heading over its
-                // two sliders as well, so the colour and its settings share
-                // one name.
+                // with the seed and the roll at the row's end a column is
+                // about 40 points at the default sidebar, and a word a point
+                // wider than its column is better run into the gap beside it
+                // than cut to a stump. The words are the operator's own
+                // short ones -- Prim, Sec, Tert, Surf -- which are also the
+                // seed picker's, so a slot is called one thing in both.
                 let TbColorT = View {
                     width: Fill
                     height: Fit
@@ -11119,13 +11149,16 @@ impl Tweaker {
                             // app itself. Four of equal width, because the
                             // four are equals: a palette is all of them.
                             //
-                            // The surprise ends the row, in the one word it
-                            // is: it is a fifth way of setting these four,
-                            // all at once and by chance. It takes its word's
-                            // width and the four share what is left; the row
-                            // stands them on its floor, so the button sits
-                            // level with the squares and not with the names
-                            // over them.
+                            // Then two columns of their own, named the way
+                            // the four are. The seed says which of the four
+                            // the carousel below is grown from, or that there
+                            // is no carousel at all; the roll is a fifth way
+                            // of setting the four, all at once and by chance,
+                            // and it is a die and no word. Both take their
+                            // own width and the four share what is left; the
+                            // row stands them all on its floor, so the
+                            // controls sit level with the squares and not
+                            // with the names over them.
                             tb_seed_row := View {
                                 width: Fill
                                 height: Fit
@@ -11136,13 +11169,62 @@ impl Tweaker {
                                 tb_color_1 := TbColorT {}
                                 tb_color_2 := TbColorT {}
                                 tb_color_3 := TbColorT {}
-                                tb_random := PanelButton {
+                                tb_seed_col := View {
                                     width: Fit
-                                    height: 18
-                                    padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
-                                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
-                                    text: "surprise"
-                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                    height: Fit
+                                    flow: Down
+                                    spacing: 1
+                                    tb_seed_name := PanelLabelSmall {
+                                        width: Fit
+                                        text: ""
+                                        max_lines: 1
+                                    }
+                                    // Wide enough for the widest of its five
+                                    // words and the arrow, and no wider:
+                                    // every point it takes is a point off
+                                    // each of the four squares.
+                                    // Its menu is as narrow as its words:
+                                    // the panel's own is sized for theme
+                                    // names, and at the end of this row it
+                                    // ran off the window's edge.
+                                    tb_seed := PanelDropDown {
+                                        width: 50
+                                        height: 18
+                                        padding: Inset{left: 5 right: 16 top: 1 bottom: 1}
+                                        popup_menu: PanelPopupMenu{width: 64.}
+                                    }
+                                }
+                                tb_roll_col := View {
+                                    width: Fit
+                                    height: Fit
+                                    flow: Down
+                                    spacing: 1
+                                    align: Align{x: 0.5 y: 0.0}
+                                    tb_roll_name := PanelLabelSmall {
+                                        width: Fit
+                                        text: ""
+                                        max_lines: 1
+                                    }
+                                    // A square the squares' height with the
+                                    // die in its middle. No padding, no
+                                    // spacing and no word: a button's empty
+                                    // label still takes the spacing after
+                                    // the icon, which is what pushes an
+                                    // icon-only face's mark off its centre.
+                                    tb_random := PanelButton {
+                                        width: 18
+                                        height: 18
+                                        padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                        margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                        spacing: 0
+                                        align: Align{x: 0.5 y: 0.5}
+                                        text: ""
+                                        icon_walk: Walk{width: 12 height: 12}
+                                        draw_icon +: {
+                                            color: #xd8d8d8
+                                            svg: crate_resource("self:resources/icons/icon_dice.svg")
+                                        }
+                                    }
                                 }
                             }
                             // WHAT THE FAVOURITE COULD BECOME. Every harmony
@@ -11161,6 +11243,11 @@ impl Tweaker {
                             // engine offers are the six harmonies as they
                             // are, so the row opens on what a harmony picker
                             // used to be -- which is why there is no picker.
+                            //
+                            // It is grown from whichever of the four the
+                            // seed picker names, that colour held in its
+                            // slot in every chip; with "None" it is hidden
+                            // and takes no room.
                             tb_carousel := FabPaletteCarousel {
                                 width: Fill
                                 height: 88
@@ -12609,7 +12696,7 @@ impl Tweaker {
         if let Some(label) = self.tb_chip_tip(cx, sidebar, abs) {
             return Some(label);
         }
-        let chrome: [(&[LiveId], &str); 38] = [
+        let chrome: [(&[LiveId], &str); 39] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -12617,11 +12704,12 @@ impl Tweaker {
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_relative)], "the weights share a hundred parts \u{00b7} turning one up takes from the rest"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_random)], "a mix nobody planned \u{00b7} the same press from the same place is the same mix"),
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(tb_fold)], "grow a whole theme from one colour you like \u{00b7} palette, spacing and type together"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_0), live_id!(tb_color)], "the primary \u{00b7} the palettes below are grown from it, and editing any of the four makes the palette your own"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_0), live_id!(tb_color)], "the primary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_1), live_id!(tb_color)], "the secondary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_2), live_id!(tb_color)], "the tertiary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_3), live_id!(tb_color)], "the surface \u{00b7} the page wears its hue, as much of it as Saturation says"),
-            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_random)], "a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_seed_col), live_id!(tb_seed)], "which of the four the palettes below are grown from \u{00b7} it stays in its place in every one of them; None hides them"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_roll_col), live_id!(tb_random)], "roll all four colours: a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
             (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
@@ -16683,6 +16771,12 @@ impl Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
+            if self.tb_seed_uid != 0 && widget_action.widget_uid.0 == self.tb_seed_uid {
+                if let DropDownAction::Select(entry) = widget_action.cast::<DropDownAction>() {
+                    self.tb_seed_chosen(tb_seed_of_entry(entry));
+                    self.redraw_sidebar(cx);
+                }
+            }
             // A palette off the carousel. A press and not a drag, so the
             // theme goes on at once -- and the row is left exactly as it
             // stands, because a row that reshuffles itself under the hand
@@ -18609,8 +18703,24 @@ impl Tweaker {
                 }
             };
         }
+        // The seed picker. Its five entries are written when its uid is new
+        // -- the first draw after the section opens, or after the sidebar
+        // was built again -- and not per frame: `set_labels` redraws.
+        let seed_col = seed_row.child(live_id!(tb_seed_col));
+        seed_col.child(live_id!(tb_seed_name)).set_text(cx, TB_SEED_HEADER);
+        let roll_col = seed_row.child(live_id!(tb_roll_col));
+        roll_col.child(live_id!(tb_roll_name)).set_text(cx, TB_ROLL_HEADER);
+        let seed_pick = seed_col.child(live_id!(tb_seed));
+        let seed_uid = seed_pick.widget_uid().0;
+        if seed_uid != self.tb_seed_uid {
+            seed_pick
+                .as_drop_down()
+                .set_labels(cx, TB_SEED_LABELS.iter().map(|label| label.to_string()).collect());
+            self.tb_seed_uid = seed_uid;
+        }
+        seed_pick.as_drop_down().set_selected_item(cx, tb_seed_entry(self.tb_seed_slot));
         self.draw_the_suggestion_strip(cx, &body);
-        self.tb_random_uid = seed_row.child(live_id!(tb_random)).widget_uid().0;
+        self.tb_random_uid = roll_col.child(live_id!(tb_random)).widget_uid().0;
         let rows = body.child(live_id!(tb_rows));
         for (index, which) in BuildRow::ALL.iter().enumerate() {
             let slider = rows.child(which.slot());
@@ -18635,6 +18745,7 @@ impl Tweaker {
         self.tb_color_target = None;
         self.tb_color_insert = None;
         self.tb_random_uid = 0;
+        self.tb_seed_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
         self.tb_carousel_uid = 0;
     }
@@ -18653,8 +18764,17 @@ impl Tweaker {
     /// move when the favourite or the page it is grown for does. The
     /// carousel itself is silent when it is handed what it already has, so
     /// writing it every draw costs a comparison.
+    ///
+    /// With no seed there is no row: the carousel is hidden, so it takes no
+    /// room and the settings close up under the four colours, and its route
+    /// is shut, so a press where it stood reaches nothing.
     fn draw_the_suggestion_strip(&mut self, cx: &mut Cx, body: &WidgetRef) {
         let carousel = body.child(live_id!(tb_carousel));
+        carousel.set_visible(cx, self.tb_seed_slot.is_some());
+        if self.tb_seed_slot.is_none() {
+            self.tb_carousel_uid = 0;
+            return;
+        }
         let chips: Vec<[Vec4f; 4]> = self
             .tb_suggestions
             .iter()
@@ -18681,7 +18801,7 @@ impl Tweaker {
     /// The tooltip for the chip under the pointer: the name its palette is
     /// offered under, over the part of the chip that shows.
     fn tb_chip_tip(&self, cx: &Cx, sidebar: &WidgetRef, abs: Vec2d) -> Option<(Rect, String)> {
-        if !self.tb_open {
+        if !self.tb_open || self.tb_seed_slot.is_none() {
             return None;
         }
         let carousel = sidebar
@@ -18730,15 +18850,39 @@ impl Tweaker {
     /// chip that IS it: the plain one of its harmony. It is the same four
     /// colours, so the theme does not move, and the row then outlines it
     /// rather than showing no palette in force where one plainly is.
+    ///
+    /// The row is grown from the seed slot's colour ([`SeedSlot::seed_of`]),
+    /// and with no seed there is no row: nothing is grown, and nothing is
+    /// chosen off a row that is not there. A row grown for ANOTHER slot is a
+    /// different row, not the same one in other colours, so nothing is
+    /// carried across to it and nothing on the controls moves: a person
+    /// asking where the chips come from has not asked for another theme. It
+    /// outlines the palette in force if it happens to offer it, as any row
+    /// does.
     fn tb_suggest_again(&mut self) {
+        let Some(slot) = self.tb_seed_slot else {
+            self.tb_suggestions.clear();
+            self.tb_chosen = None;
+            self.tb_grown_for = None;
+            return;
+        };
         let params = self.tb_builder.params();
-        self.tb_suggestions = all_suggestions(params.favourite, params.dark(), &self.tb_own_schemes);
-        if self.tb_grown_for != Some(params.favourite) {
-            self.tb_grown_for = Some(params.favourite);
+        let seed = slot.seed_of(&params);
+        self.tb_suggestions = all_suggestions_from(slot, seed, params.dark(), &self.tb_own_schemes);
+        let same_slot = self.tb_grown_for.is_some_and(|(was, _)| was == slot);
+        if self.tb_grown_for != Some((slot, seed)) {
+            self.tb_grown_for = Some((slot, seed));
             self.tb_strip_rewind = true;
         }
         if self.tb_chosen_index().is_some() {
             return;
+        }
+        // The palette in force, where the row offers it outright.
+        if params.seeds.is_some() {
+            if let Some(offer) = self.tb_suggestions.iter().find(|offer| Some(offer.seeds) == params.seeds).cloned() {
+                self.tb_chosen = Some(offer);
+                return;
+            }
         }
         // Whether the app is STILL WEARING what was chosen, which is the one
         // question that separates a strip grown for the other page from a
@@ -18746,10 +18890,12 @@ impl Tweaker {
         // by hand and the surprise both put other seeds on their way through;
         // the lightness crossing into the other appearance does not, and this
         // is the only door a palette comes back through.
-        let worn = self
-            .tb_chosen
-            .as_ref()
-            .is_some_and(|chosen| params.seeds == Some(chosen.seeds));
+        // Only a row grown for the same slot can carry it: see above.
+        let worn = same_slot
+            && self
+                .tb_chosen
+                .as_ref()
+                .is_some_and(|chosen| params.seeds == Some(chosen.seeds));
         match worn.then(|| self.tb_equivalent_offer()).flatten() {
             Some(offer) => {
                 // On the controls as well as under the outline. The other
@@ -18772,10 +18918,15 @@ impl Tweaker {
         let untouched = params.favourite == BuilderParams::house(params.dark()).favourite
             && params.harmony == BuilderParams::house(params.dark()).harmony;
         if params.seeds.is_none() && !untouched {
+            // By its harmony only in the primary's row: a row grown from
+            // another slot lays the harmony round a different colour, so its
+            // plain chip of that harmony is some other palette, and only the
+            // same four colours will do.
+            let by_harmony = slot == SeedSlot::Primary;
             let plain = self
                 .tb_suggestions
                 .iter()
-                .find(|offer| offer.harmony == Some(params.harmony) && offer.mood.is_none())
+                .find(|offer| by_harmony && offer.harmony == Some(params.harmony) && offer.mood.is_none())
                 .or_else(|| self.tb_suggestions.iter().find(|offer| offer.colors == params.palette()))
                 .cloned();
             if let Some(offer) = plain {
@@ -18976,9 +19127,31 @@ impl Tweaker {
     fn tb_row_set(&mut self, params: BuilderParams) {
         let was_dark = self.tb_builder.params().dark();
         self.tb_builder.set(params);
-        if self.tb_builder.params().dark() != was_dark {
+        if self.tb_builder.params().dark() != was_dark && self.tb_seed_slot.is_some() {
             self.tb_suggest_due = true;
         }
+    }
+
+    /// Whether square `which` is the one the carousel is grown from.
+    fn tb_is_seed(&self, which: usize) -> bool {
+        self.tb_seed_slot.is_some_and(|slot| slot.index() == which)
+    }
+
+    /// The seed picker moved: the carousel is grown from the new slot at
+    /// once, or hidden. A press, and an answer the person is looking for,
+    /// so it does not wait out a settle -- and it installs nothing, since
+    /// asking where the chips come from moves no colour in force.
+    ///
+    /// Hidden, the row is let go whole: no chips, nothing outlined, and
+    /// nothing owed, so a colour edited meanwhile grows nothing for a row
+    /// nobody can see. Shown again, it is grown for what is in force then.
+    fn tb_seed_chosen(&mut self, seed: Option<SeedSlot>) {
+        if seed == self.tb_seed_slot {
+            return;
+        }
+        self.tb_seed_slot = seed;
+        self.tb_suggest_due = false;
+        self.tb_suggest_again();
     }
 
     /// The settings with one of the four colours in force named anew, or
@@ -19002,15 +19175,16 @@ impl Tweaker {
     }
 
     /// One of the four colours under a hand that is still moving it: the
-    /// theme collects on the settle. The first is also what the strip is
-    /// grown from, so its offers are owed a regrowth -- spent on the settle
-    /// as well, never per move round the wheel.
+    /// theme collects on the settle. Where it is the seed slot's, the strip
+    /// is grown from it, so its offers are owed a regrowth -- spent on the
+    /// settle as well, never per move round the wheel. Any other slot's
+    /// colour leaves the strip as it is.
     fn tb_color_moving(&mut self, which: usize, color: u32) {
         let Some(params) = self.tb_with_color(which, color) else {
             return;
         };
         self.tb_builder.set(params);
-        if which == 0 {
+        if self.tb_is_seed(which) {
             self.tb_suggest_due = true;
         }
         self.tb_apply_due = true;
@@ -19028,7 +19202,7 @@ impl Tweaker {
             return;
         };
         self.tb_builder.set(params);
-        if which == 0 {
+        if self.tb_is_seed(which) {
             self.tb_suggest_due = true;
         }
         self.tb_built_changed();
@@ -19043,8 +19217,9 @@ impl Tweaker {
     /// the other end and the rest are in the right order already. It names
     /// the four outright like any edit of a square, so the palette becomes
     /// the person's own unless the new order is itself on offer, and it is a
-    /// drop, so it goes in at once. The strip is grown from the primary, so
-    /// only a drop that changed the primary asks for a new one. A drop that
+    /// drop, so it goes in at once. The strip is grown from the seed slot,
+    /// so only a drop that put a different colour in that slot asks for a
+    /// new one. A drop that
     /// leaves the four as they were -- two squares of one colour traded, say
     /// -- installs nothing.
     fn tb_colors_dropped(&mut self, from: usize, drop: TbDrop) {
@@ -19055,21 +19230,27 @@ impl Tweaker {
             return;
         }
         self.tb_builder.set(params.with_palette(now));
-        if now[0] | 0xFF != was[0] | 0xFF {
-            self.tb_suggest_due = true;
+        // The seed is a role: it stays on its slot, and the row is grown
+        // again only where a different colour came to stand under it.
+        if let Some(slot) = self.tb_seed_slot {
+            if now[slot.index()] | 0xFF != was[slot.index()] | 0xFF {
+                self.tb_suggest_due = true;
+            }
         }
         self.tb_built_changed();
     }
     /// A theme nobody planned, off a seed that walks rather than a clock, so
-    /// that the same press from the same place is the same theme.
+    /// that the same press from the same place is the same theme. The die
+    /// under "Roll" is this press. It leaves the seed picker where it is and
+    /// grows the carousel again for the new colours, unless there is none.
     ///
-    /// The page it is on is the one thing not drawn: a button marked
-    /// "surprise" that also turns a dark room white is a different button,
-    /// and the engine keeps the appearance for that reason.
+    /// The page it is on is the one thing not drawn: a roll of the colours
+    /// that also turns a dark room white is a different button, and the
+    /// engine keeps the appearance for that reason.
     fn tb_surprise(&mut self) {
         self.tb_seed = next_mix_seed(self.tb_seed);
         self.tb_builder.randomize(self.tb_seed);
-        self.tb_suggest_due = true;
+        self.tb_suggest_due = self.tb_seed_slot.is_some();
         self.tb_built_changed();
     }
 
@@ -19846,8 +20027,11 @@ impl Tweaker {
             .filter(|name| name.size.y > 0.0)
             .map(|name| name.pos.y)
             .fold(squares[0].pos.y, f64::min);
-        let surprise = row.child(live_id!(tb_random)).area().rect(cx);
-        tb_drop_zone(&squares, top, surprise.pos.x, from, at)
+        // The row goes on past the four into the seed picker and the die,
+        // and neither is a place in the list: the zone after the last square
+        // stops where the picker begins.
+        let beyond = row.child(live_id!(tb_seed_col)).area().rect(cx);
+        tb_drop_zone(&squares, top, beyond.pos.x, from, at)
     }
 
     /// Show what the drop would be, and only that: the square it would
@@ -21445,6 +21629,11 @@ mod tests {
             ("tb_color", "FabColorPick"),
             ("tb_color_name", "PanelLabelSmall"),
             ("tb_carousel", "FabPaletteCarousel"),
+            ("tb_seed_col", "View"),
+            ("tb_seed_name", "PanelLabelSmall"),
+            ("tb_seed", "PanelDropDown"),
+            ("tb_roll_col", "View"),
+            ("tb_roll_name", "PanelLabelSmall"),
             ("tb_random", "PanelButton"),
             ("tb_rows", "View"),
             ("tb_saturation", "FabSlider"),
@@ -22937,10 +23126,16 @@ line two");
     /// through here first. The uid a press is ROUTED by is taken at the draw
     /// as well, which is the other half of the same reason.
     fn draw_the_theme_head(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef) {
+        draw_the_theme_head_at(cx, panel, head, 320.0);
+    }
+
+    /// The same, in a column `width` points wide: what the sidebar hands
+    /// the head at that width once its own padding is taken off.
+    fn draw_the_theme_head_at(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, width: f64) {
         use crate::makepad_draw::cx_draw::CxDraw;
-        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        let size = Vec2d { x: width, y: 700.0 };
         let pass = DrawPass::new(cx);
-        pass.set_size(cx, SIZE);
+        pass.set_size(cx, size);
         let mut draw_list = DrawList2d::new(cx);
         // A window's overlay, which is what a colour control's popover draws
         // into: a head drawn with one of the builder's popovers up has to
@@ -22952,7 +23147,7 @@ line two");
         cx2d.begin_pass(&pass, None);
         draw_list.begin_always(&mut cx2d);
         overlay.begin(&mut cx2d);
-        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        cx2d.begin_root_turtle(size, Layout::flow_down());
         panel.draw_equalizer(&mut cx2d, head);
         // Both sections, in the order the tab draws them: the builder's fold
         // sits in the picker row beside the mix's, and a test that pressed
@@ -25165,33 +25360,37 @@ line two");
         }
     }
 
-    /// The surprise button ends the row but is not a place in the list: a
-    /// colour let go on it is a cancel, and the zone after the last square
-    /// stops at its left edge.
+    /// The seed picker and the die end the row but are not places in the
+    /// list: a colour let go on either is a cancel, and the zone after the
+    /// last square stops at the picker's left edge.
     #[test]
-    fn the_surprise_button_is_not_a_drop_target() {
+    fn the_seed_picker_and_the_die_are_not_drop_targets() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
         let was = panel.tb_builder.params().palette();
+        let seeds = panel.tb_suggestions.clone();
         panel.tb_apply_due = false;
-        let surprise = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_random)).area().rect(&cx);
-        assert!(surprise.size.x > 0.0, "the surprise was never drawn");
+        let row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        let picker = row.child(live_id!(tb_seed_col)).child(live_id!(tb_seed)).area().rect(&cx);
+        let die = row.child(live_id!(tb_roll_col)).child(live_id!(tb_random)).area().rect(&cx);
+        assert!(picker.size.x > 0.0 && die.size.x > 0.0, "the picker or the die was never drawn");
         let y = a_square_middle(&cx, &head, 0).y;
 
         let mut hand = Carry::down(&mut cx, &mut panel, &head, 0);
         hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
-        hand.move_to(&mut cx, &mut panel, &head, dvec2(surprise.pos.x - 0.5, y));
-        assert_eq!(panel.tb_color_insert, Some(4), "the zone after the last stops short of the surprise's edge");
-        for x in [surprise.pos.x, surprise.pos.x + surprise.size.x * 0.5, surprise.pos.x + surprise.size.x - 1.0] {
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(picker.pos.x - 0.5, y));
+        assert_eq!(panel.tb_color_insert, Some(4), "the zone after the last stops short of the picker's edge");
+        for x in [picker.pos.x, picker.pos.x + picker.size.x * 0.5, die.pos.x, die.pos.x + die.size.x * 0.5, die.pos.x + die.size.x - 1.0] {
             hand.move_to(&mut cx, &mut panel, &head, dvec2(x, y));
-            assert_eq!((panel.tb_color_target, panel.tb_color_insert), (None, None), "the surprise at {x} is a place to drop");
-            assert_eq!(what_the_row_shows(&cx, &head), (vec![], vec![]), "the surprise at {x} shows a drop");
+            assert_eq!((panel.tb_color_target, panel.tb_color_insert), (None, None), "the row at {x} is a place to drop");
+            assert_eq!(what_the_row_shows(&cx, &head), (vec![], vec![]), "the row at {x} shows a drop");
         }
         hand.up(&mut cx, &mut panel, &head);
-        assert_eq!(panel.tb_builder.params().palette(), was, "a drop on the surprise moved a colour");
-        assert!(!panel.tb_apply_due, "a drop on the surprise asked for an install");
+        assert_eq!(panel.tb_builder.params().palette(), was, "a drop on the picker or the die moved a colour");
+        assert!(!panel.tb_apply_due, "a drop on the picker or the die asked for an install");
+        assert_eq!(panel.tb_suggestions, seeds, "a drop on the picker or the die grew the carousel");
     }
 
     /// Swept across the whole row a point at a time, the carry shows one
@@ -25205,7 +25404,7 @@ line two");
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
         let squares = the_four_squares(&cx, &head);
-        let surprise = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_random)).area().rect(&cx);
+        let surprise = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_roll_col)).child(live_id!(tb_random)).area().rect(&cx);
         let y = squares[0].pos.y + squares[0].size.y * 0.5;
 
         let mut hand = Carry::down(&mut cx, &mut panel, &head, 1);
@@ -25320,7 +25519,8 @@ line two");
         let seed_row = body.child(live_id!(tb_seed_row));
         let rows = body.child(live_id!(tb_rows));
         let mut drawn: Vec<(&str, WidgetRef)> = vec![
-            ("tb_random", seed_row.child(live_id!(tb_random))),
+            ("tb_random", seed_row.child(live_id!(tb_roll_col)).child(live_id!(tb_random))),
+            ("tb_seed", seed_row.child(live_id!(tb_seed_col)).child(live_id!(tb_seed))),
             ("tb_read", body.child(live_id!(tb_read))),
         ];
         for which in BuildRow::ALL {
@@ -26207,53 +26407,378 @@ line two");
         assert!(a_chip_shown_whole(&mut cx, &head, at), "the surprise's palette is off the screen");
     }
 
-    /// The surprise stands at the end of the row of four colours, in its
-    /// whole word, and the four share what it leaves; a press on it still
-    /// draws a theme nobody planned. At the default sidebar everything in
-    /// the row is inside it.
+    /// The row is the operator's mockup: headers "Prim Sec Tert Surf Seed
+    /// Roll" over four colour squares, the seed picker and a square die, in
+    /// that order, all of it inside the head at the default sidebar and every
+    /// control standing on the one floor. The die is drawn the way the
+    /// panel's other icon-only buttons are, and it is held to its centre:
+    /// an icon-only face whose glyph sits off its middle with a stray letter
+    /// beside it is the known trap here. A press on it still rolls.
+    ///
+    /// Seen failing on the row it replaces: the fourth name there was
+    /// "surface", the button said "surprise" in words, and there was no
+    /// picker at all.
     #[test]
-    fn the_surprise_sits_beside_the_four_colours_and_still_works() {
+    fn the_seed_row_is_the_mockup_and_the_die_is_centred() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = the_builder_drawn(&mut cx, &mut panel);
+        // The head at the default sidebar, less the sidebar's own padding.
+        let width = DEFAULT_SIDEBAR_WIDTH - 8.0;
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
         let seed_row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
-        let surprise = seed_row.child(live_id!(tb_random));
-        assert_eq!(surprise.text(), "surprise", "the surprise is not in its whole word");
-        let button = surprise.area().rect(&mut cx);
-        let row = seed_row.area().rect(&mut cx);
-        assert!(button.size.x > 0.0, "the surprise is not drawn in the row of colours");
-        assert!(
-            button.pos.x + button.size.x <= row.pos.x + row.size.x + 0.5,
-            "the surprise runs off the end of the row"
-        );
-        let squares: Vec<Rect> = TB_COLOR_IDS
-            .iter()
-            .map(|id| seed_row.child(*id).child(live_id!(tb_color)).area().rect(&mut cx))
-            .collect();
-        for (which, square) in squares.iter().enumerate() {
-            assert!(square.size.x > 0.0, "the {} colour is not drawn", TB_COLOR_NAMES[which]);
-            assert!((square.size.x - squares[0].size.x).abs() < 0.5, "the four colours do not share the row equally");
-            assert!(square.pos.x + square.size.x <= button.pos.x, "the {} colour runs under the surprise", TB_COLOR_NAMES[which]);
-        }
-        // The words over them, off the labels: the fourth is "surface", the
-        // word over its two sliders too, and not a "background" that the
-        // default sidebar cut to "backgroun" beside the surprise.
-        let names: Vec<String> = TB_COLOR_IDS
+        let seed_col = seed_row.child(live_id!(tb_seed_col));
+        let roll_col = seed_row.child(live_id!(tb_roll_col));
+        let die = roll_col.child(live_id!(tb_random));
+        let picker = seed_col.child(live_id!(tb_seed));
+
+        let mut names: Vec<String> = TB_COLOR_IDS
             .iter()
             .map(|id| seed_row.child(*id).child(live_id!(tb_color_name)).text())
             .collect();
-        assert_eq!(names, ["primary", "secondary", "tertiary", "surface"], "the four colours are not named as the panel names them");
-        // Level with the squares, not with the words over them.
-        assert!(
-            (button.pos.y + button.size.y - (squares[0].pos.y + squares[0].size.y)).abs() < 0.5,
-            "the surprise does not stand level with the four colours"
-        );
+        names.push(seed_col.child(live_id!(tb_seed_name)).text());
+        names.push(roll_col.child(live_id!(tb_roll_name)).text());
+        assert_eq!(names, ["Prim", "Sec", "Tert", "Surf", "Seed", "Roll"], "the headers are not the mockup's");
 
+        // Left to right, each control under its own header, nothing past
+        // the head's padding.
+        let mut controls: Vec<Rect> = TB_COLOR_IDS
+            .iter()
+            .map(|id| seed_row.child(*id).child(live_id!(tb_color)).area().rect(&cx))
+            .collect();
+        controls.push(picker.area().rect(&cx));
+        controls.push(die.area().rect(&cx));
+        let mut headers: Vec<Rect> = TB_COLOR_IDS
+            .iter()
+            .map(|id| seed_row.child(*id).child(live_id!(tb_color_name)).area().rect(&cx))
+            .collect();
+        headers.push(seed_col.child(live_id!(tb_seed_name)).area().rect(&cx));
+        headers.push(roll_col.child(live_id!(tb_roll_name)).area().rect(&cx));
+        let head_rect = head.area().rect(&cx);
+        assert!((head_rect.size.x - width).abs() < 0.5, "the head is {} wide, not {width}", head_rect.size.x);
+        for (at, (control, header)) in controls.iter().zip(headers.iter()).enumerate() {
+            let name = &names[at];
+            assert!(control.size.x > 0.0 && control.size.y > 0.0, "`{name}`'s control drew nothing");
+            assert!(header.size.y > 0.0, "the `{name}` header drew nothing");
+            assert!(header.pos.y + header.size.y <= control.pos.y + 0.5, "the `{name}` header is not over its control");
+            assert!(
+                header.pos.x >= control.pos.x - 6.0 && header.pos.x <= control.pos.x + control.size.x,
+                "the `{name}` header does not stand over its control"
+            );
+            assert!(
+                control.pos.x + control.size.x <= head_rect.pos.x + head_rect.size.x - 4.0 + 0.5,
+                "`{name}` runs past the head's padding at the default sidebar"
+            );
+            assert!(
+                (control.pos.y + control.size.y - (controls[0].pos.y + controls[0].size.y)).abs() < 0.5,
+                "`{name}` does not stand on the row's floor"
+            );
+            if at > 0 {
+                assert!(control.pos.x >= controls[at - 1].pos.x + controls[at - 1].size.x, "`{name}` overlaps the one before it");
+            }
+        }
+        for which in 1..4 {
+            assert!((controls[which].size.x - controls[0].size.x).abs() < 0.5, "the four colours do not share the row equally");
+        }
+
+        // The die: a square, its icon dead centre, no word on it.
+        let face = controls[5];
+        assert!((face.size.x - face.size.y).abs() < 0.5, "the die's button is {} by {}", face.size.x, face.size.y);
+        let button = die.borrow::<crate::Button>().expect("the die is a button");
+        let icon = button.draw_icon.area().rect(&cx);
+        assert!(icon.size.x > 0.0 && icon.size.y > 0.0, "the die's icon drew nothing");
+        let (icon_mid, face_mid) = (icon.pos + icon.size * 0.5, face.pos + face.size * 0.5);
+        assert!(
+            (icon_mid.x - face_mid.x).abs() <= 0.5 && (icon_mid.y - face_mid.y).abs() <= 0.5,
+            "the die's icon sits at {icon_mid:?}, off the button's centre {face_mid:?}"
+        );
+        assert!((icon.size.x - 12.0).abs() < 0.5, "the die is {} points wide, not 12", icon.size.x);
+        drop(button);
+        assert_eq!(die.text(), "", "the die carries a word");
+
+        // The heading over the two page sliders is still the whole word.
+        let src = panel_source();
+        let rows = &src[src.find("tb_rows := View {").expect("the rows")..];
+        let first = &rows[..rows.find("tb_saturation := FabSlider").expect("the saturation row")];
+        assert!(first.contains("text: \"Surface\""), "the heading over Saturation and Lightness is not \"Surface\"");
+
+        draw_the_theme_head(&mut cx, &mut panel, &head);
         let before = panel.tb_builder.params().palette();
-        one_press_on(&mut cx, &mut panel, &head, &surprise);
-        assert_ne!(panel.tb_builder.params().palette(), before, "a press on the surprise drew nothing new");
+        one_press_on(&mut cx, &mut panel, &head, &die);
+        assert_ne!(panel.tb_builder.params().palette(), before, "a press on the die drew nothing new");
         assert_ne!(panel.tb_random_uid, 0);
+    }
+
+    /// The seed picker is the panel's own dropdown, lists the four slots
+    /// under the names over them and then "None", in that order, and opens
+    /// on the primary.
+    #[test]
+    fn the_seed_picker_lists_the_four_and_none_and_opens_on_the_primary() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let picker = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_seed_col)).child(live_id!(tb_seed));
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Primary), "the section does not open grown from the primary");
+        assert_eq!(picker.as_drop_down().selected_item(), 0);
+        assert_eq!(picker.as_drop_down().selected_label(), "Prim");
+        assert_ne!(panel.tb_seed_uid, 0, "the picker draws and is routed nowhere");
+        let drop_down = picker.as_drop_down();
+        let mut listed = Vec::new();
+        for entry in 0..7 {
+            drop_down.set_selected_item(&mut cx, entry);
+            listed.push(drop_down.selected_label());
+        }
+        // Past the end it holds at the last: five entries and no more.
+        assert_eq!(listed, ["Prim", "Sec", "Tert", "Surf", "None", "None", "None"]);
+        assert_eq!(TB_SEED_LABELS, ["Prim", "Sec", "Tert", "Surf", "None"]);
+        for (entry, seed) in [(0, Some(SeedSlot::Primary)), (1, Some(SeedSlot::Secondary)), (2, Some(SeedSlot::Tertiary)), (3, Some(SeedSlot::Surface)), (4, None)] {
+            assert_eq!(tb_seed_of_entry(entry), seed);
+            assert_eq!(tb_seed_entry(seed), entry);
+        }
+        // The draw writes the choice back.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(picker.as_drop_down().selected_item(), 0, "the draw did not put the picker back on the seed in force");
+    }
+
+    /// The seed picker, as the panel addresses it.
+    fn the_seed_picker(head: &WidgetRef) -> WidgetRef {
+        head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_seed_col)).child(live_id!(tb_seed))
+    }
+
+    /// Entry `entry` chosen off the seed picker, routed the way the menu's
+    /// choice arrives: as the picker's own action, under the uid the panel
+    /// captured when it drew it.
+    fn a_seed_picked(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, entry: usize) {
+        let uid = the_seed_picker(head).widget_uid();
+        assert_eq!(panel.tb_seed_uid, uid.0, "the seed picker is routed by some other uid");
+        let actions = cx.capture_actions(|cx| cx.widget_action(uid, DropDownAction::Select(entry)));
+        panel.handle_sidebar_actions(cx, &actions);
+        draw_the_theme_head(cx, panel, head);
+    }
+
+    /// What the carousel is showing, off the control and not off the list
+    /// that wrote it.
+    fn carousel_chips(head: &WidgetRef) -> Vec<[Vec4f; 4]> {
+        let row = the_carousel(head);
+        let row = row.borrow::<FabPaletteCarousel>().expect("a carousel");
+        (0..row.len()).map(|at| row.chip_colors(at).expect("a chip")).collect()
+    }
+
+    fn band(packed: u32) -> Vec4f {
+        let rgba = rgba_of(packed);
+        vec4(rgba[0], rgba[1], rgba[2], rgba[3])
+    }
+
+    /// Each entry of the seed picker grows the carousel from the colour in
+    /// the slot it names, and every chip on it holds that colour in that
+    /// slot. Asking where the chips come from moves nothing in force and
+    /// installs nothing.
+    #[test]
+    fn the_seed_picker_grows_the_carousel_from_the_slot_it_names() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let before = panel.tb_builder.params();
+        let palette = before.palette();
+        let rebuilt = panel.tb_builder.rebuilds();
+        let prim = panel.tb_suggestions.clone();
+        for (entry, slot) in [(1, SeedSlot::Secondary), (2, SeedSlot::Tertiary), (3, SeedSlot::Surface), (0, SeedSlot::Primary)] {
+            a_seed_picked(&mut cx, &mut panel, &head, entry);
+            assert_eq!(panel.tb_seed_slot, Some(slot));
+            assert_eq!(the_seed_picker(&head).as_drop_down().selected_item(), entry);
+            let seed = slot.seed_of(&panel.tb_builder.params());
+            let want = all_suggestions_from(slot, seed, before.dark(), &panel.tb_own_schemes);
+            assert_eq!(panel.tb_suggestions, want, "{slot:?}: the carousel is not the row grown from that slot");
+            let shown = carousel_chips(&head);
+            assert_eq!(shown.len(), want.len(), "{slot:?}: the carousel shows another row");
+            if slot != SeedSlot::Primary {
+                assert_eq!(seed, palette[slot.index()] | 0xFF);
+                for (at, chip) in shown.iter().enumerate() {
+                    assert_eq!(chip[slot.index()], band(palette[slot.index()]), "{slot:?}: chip {at} does not hold the seed in its slot");
+                }
+            }
+            assert_eq!(panel.tb_builder.params(), before, "{slot:?}: choosing the seed moved the theme");
+            assert!(!panel.tb_suggest_due, "{slot:?}: the row was left owed");
+            panel.tb_settle(&mut cx, 5.0 + entry as f64);
+            assert_eq!(panel.tb_builder.rebuilds(), rebuilt, "{slot:?}: choosing the seed installed a theme");
+        }
+        assert_eq!(panel.tb_suggestions, prim, "the primary again is not the row it started with");
+        // The palette in force was a chip of the primary's row, and that row
+        // outlines it again.
+        assert!(panel.tb_chosen_index().is_some(), "the primary's row lost the chip in force");
+    }
+
+    /// Only the seed slot's colour grows the carousel again: edited in its
+    /// popover, moved there by a drag, or grown for the other page when the
+    /// lightness crosses its middle. The seed is a ROLE, so it stays on its
+    /// slot while colours are carried under it, and a colour edited or moved
+    /// anywhere else leaves the row as it is.
+    ///
+    /// Seen failing on the rule it replaces, where the primary's colour grew
+    /// the row whatever the seed said.
+    #[test]
+    fn only_the_seed_slots_colour_grows_the_carousel_again() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        a_seed_picked(&mut cx, &mut panel, &head, 1);
+        let mut now = 10.0;
+        let mut lands = |cx: &mut Cx, panel: &mut Tweaker| {
+            now += 1.0;
+            the_palette_lands(cx, panel, now);
+            draw_the_theme_head(cx, panel, &head);
+        };
+
+        // Edits, in the popover's two ways: a drag round the wheel, and a
+        // release or a typed colour.
+        for which in 0..4 {
+            for ended in [false, true] {
+                let offers = panel.tb_suggestions.clone();
+                panel.tb_suggest_due = false;
+                let colour = crate::theme_tokens::hsl_to_rgb(40.0 + 70.0 * which as f64 + if ended { 20.0 } else { 0.0 }, 0.7, 0.5);
+                if ended {
+                    panel.tb_color_ended(which, colour);
+                } else {
+                    panel.tb_color_moving(which, colour);
+                }
+                let why = format!("square {which}, {}", if ended { "let go" } else { "moving" });
+                assert_eq!(panel.tb_suggest_due, which == 1, "{why}: the regrowth does not follow the seed slot");
+                lands(&mut cx, &mut panel);
+                if which == 1 {
+                    assert_ne!(panel.tb_suggestions, offers, "{why}: a new seed left the row as it was");
+                    assert!(carousel_chips(&head).iter().all(|chip| chip[1] == band(colour)), "{why}: a chip does not hold the new seed");
+                } else {
+                    assert_eq!(panel.tb_suggestions, offers, "{why}: another slot's colour grew the row");
+                }
+            }
+        }
+
+        // Drops. (carried, drop, whether slot 1 gets another colour)
+        use TbDrop::*;
+        for (from, drop, moves_seed) in [
+            (0, Swap(2), false),
+            (1, Swap(3), true),
+            (2, Swap(3), false),
+            (3, Insert(0), true),
+            (0, Insert(3), true),
+            (2, Insert(4), false),
+        ] {
+            let offers = panel.tb_suggestions.clone();
+            let was = panel.tb_builder.params().palette();
+            panel.tb_suggest_due = false;
+            panel.tb_colors_dropped(from, drop);
+            let now_palette = panel.tb_builder.params().palette();
+            assert_eq!(now_palette[1] != was[1], moves_seed, "{from} {drop:?}: the case is not the one it says");
+            assert_eq!(panel.tb_suggest_due, moves_seed, "{from} {drop:?}: the regrowth does not follow the seed slot");
+            lands(&mut cx, &mut panel);
+            if moves_seed {
+                assert_ne!(panel.tb_suggestions, offers, "{from} {drop:?}");
+                assert!(carousel_chips(&head).iter().all(|chip| chip[1] == band(now_palette[1])), "{from} {drop:?}: the seed did not stay on its slot");
+            } else {
+                assert_eq!(panel.tb_suggestions, offers, "{from} {drop:?}: a drop off the seed slot grew the row");
+            }
+        }
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Secondary), "a drop carried the seed off its slot");
+
+        // The lightness: inside its half nothing, across the middle a row
+        // for the other page.
+        let dark = panel.tb_builder.params().dark();
+        let (inside, across) = if dark { (20.0, 80.0) } else { (80.0, 20.0) };
+        panel.tb_suggest_due = false;
+        panel.tb_gesture_ended(BuildRow::Lightness, inside);
+        assert!(!panel.tb_suggest_due, "the lightness inside its half grew the row");
+        lands(&mut cx, &mut panel);
+        panel.tb_gesture_ended(BuildRow::Lightness, across);
+        assert!(panel.tb_suggest_due, "the lightness across its middle did not grow the row");
+        lands(&mut cx, &mut panel);
+        let params = panel.tb_builder.params();
+        assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Secondary, SeedSlot::Secondary.seed_of(&params), params.dark(), &panel.tb_own_schemes));
+    }
+
+    /// "None" takes the carousel away altogether: it draws nothing, takes no
+    /// room -- the settings close up under the four colours -- routes no
+    /// press, and outlines nothing. Nothing grows it while it is hidden,
+    /// whatever moves. Choosing a slot again brings it back, grown for what
+    /// is in force then.
+    #[test]
+    fn none_hides_the_carousel_and_a_slot_brings_it_back() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        assert!(panel.tb_chosen_index().is_some());
+        let body = head.child(live_id!(tb_body));
+        let row_rect = |cx: &Cx| body.child(live_id!(tb_seed_row)).area().rect(cx);
+        let rows_rect = |cx: &Cx| body.child(live_id!(tb_rows)).area().rect(cx);
+        let shown_gap = rows_rect(&cx).pos.y - (row_rect(&cx).pos.y + row_rect(&cx).size.y);
+        assert!(shown_gap > 80.0, "the carousel was not between the row and the settings to begin with: {shown_gap}");
+
+        a_seed_picked(&mut cx, &mut panel, &head, 4);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_seed_slot, None);
+        assert_eq!(the_seed_picker(&head).as_drop_down().selected_label(), "None");
+        let carousel = the_carousel(&head).area().rect(&cx);
+        assert!(carousel.size.x == 0.0 && carousel.size.y == 0.0, "the hidden carousel still draws at {carousel:?}");
+        assert!(!the_carousel(&head).visible(), "the carousel was never hidden");
+        let gap = rows_rect(&cx).pos.y - (row_rect(&cx).pos.y + row_rect(&cx).size.y);
+        assert!((0.0..=4.0).contains(&gap), "{gap} points stand between the row and the settings: the hidden carousel takes room");
+        assert_eq!(panel.tb_carousel_uid, 0, "the hidden carousel is still routed");
+        assert_eq!(panel.tb_chosen, None, "the hidden row still has a chip chosen");
+        assert!(panel.tb_suggestions.is_empty(), "the hidden row is still grown");
+
+        // Nothing regrows it while it is hidden.
+        panel.tb_color_ended(0, 0xD0_40_80_FF);
+        assert!(!panel.tb_suggest_due, "an edit grew a hidden row");
+        let dark = panel.tb_builder.params().dark();
+        panel.tb_gesture_ended(BuildRow::Lightness, if dark { 80.0 } else { 20.0 });
+        assert!(!panel.tb_suggest_due, "the lightness crossing grew a hidden row");
+        panel.tb_surprise();
+        assert!(!panel.tb_suggest_due, "the die grew a hidden row");
+        the_palette_lands(&mut cx, &mut panel, 20.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(panel.tb_suggestions.is_empty(), "something grew the hidden row");
+        assert_eq!(the_carousel(&head).area().rect(&cx).size.y, 0.0);
+
+        // Back on the primary, grown for what is in force now.
+        a_seed_picked(&mut cx, &mut panel, &head, 0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let params = panel.tb_builder.params();
+        assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Primary, params.favourite, params.dark(), &panel.tb_own_schemes));
+        let carousel = the_carousel(&head).area().rect(&cx);
+        assert!(carousel.size.x > 0.0 && carousel.size.y > 0.0, "the carousel did not come back");
+        assert_ne!(panel.tb_carousel_uid, 0, "the carousel came back routed nowhere");
+        let gap = rows_rect(&cx).pos.y - (row_rect(&cx).pos.y + row_rect(&cx).size.y);
+        assert!((gap - shown_gap).abs() < 0.5, "the carousel came back at another height");
+    }
+
+    /// The die keeps the seed choice, rolls the four colours as the surprise
+    /// always did, and grows the carousel again from the seed slot's new
+    /// colour.
+    #[test]
+    fn the_die_keeps_the_seed_and_grows_the_carousel_from_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        a_seed_picked(&mut cx, &mut panel, &head, 2);
+        let before = panel.tb_builder.params().palette();
+        let die = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_roll_col)).child(live_id!(tb_random));
+        one_press_on(&mut cx, &mut panel, &head, &die);
+        assert_ne!(panel.tb_builder.params().palette(), before, "the die rolled nothing");
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Tertiary), "the die moved the seed choice");
+        assert!(panel.tb_suggest_due, "the die left the row as it was");
+        the_palette_lands(&mut cx, &mut panel, 30.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(the_seed_picker(&head).as_drop_down().selected_item(), 2);
+        let palette = panel.tb_builder.params().palette();
+        let params = panel.tb_builder.params();
+        assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Tertiary, palette[2], params.dark(), &panel.tb_own_schemes));
+        assert!(carousel_chips(&head).iter().all(|chip| chip[2] == band(palette[2])), "a chip does not hold the rolled tertiary");
     }
 
     /// A person's own colour schemes are offered after the ones the rule
