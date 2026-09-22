@@ -87,6 +87,8 @@ pub enum TokenGroup {
     Size,
     Radius,
     Elevation,
+    /// The moulded-surface material: its light, relief and finish.
+    Material,
     Motion,
     State,
     Type,
@@ -241,6 +243,32 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     color("color_elevation_4", TokenGroup::Elevation, "Shadow colour of a dragged item.", ALL),
     color("color_elevation_5", TokenGroup::Elevation, "Shadow colour of a dialog.", ALL),
     color("color_elevation_shadow", TokenGroup::Elevation, "The opaque colour the elevation shadows are tints of.", ALL),
+
+    // Material. Zero in every shipped theme: the stylesheets turn it on.
+    spec("material_level", TokenGroup::Material, TokenKind::Factor, "Surface material tier: 0 flat, 1 relief, 2 relief with rim, gloss and specular.", 0.0, 2.0, 1.0, ALL),
+    spec("material_light_x", TokenGroup::Material, TokenKind::Factor, "Key light direction, x to the right of the screen.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_y", TokenGroup::Material, TokenKind::Factor, "Key light direction, y down the screen.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_z", TokenGroup::Material, TokenKind::Factor, "Key light direction, z out of the screen toward the viewer.", -1.0, 1.0, 0.01, ALL),
+    spec("material_light_intensity", TokenGroup::Material, TokenKind::Factor, "Strength of the key light every surface shares.", 0.0, 2.0, 0.05, ALL),
+    length("material_led_radius", TokenGroup::Material, "Falloff radius of an indicator light, in points.", 0.0, 64.0, 1.0),
+    spec("material_led_intensity", TokenGroup::Material, TokenKind::Factor, "Brightness of an indicator light.", 0.0, 4.0, 0.05, ALL),
+    length("material_bevel_width", TokenGroup::Material, "Width of the moulded shoulder, in points.", 0.0, 24.0, 0.5),
+    spec("material_bevel_curve", TokenGroup::Material, TokenKind::Factor, "Shoulder profile: 0 a soft pillow, 1 a round moulded edge.", 0.0, 1.0, 0.05, ALL),
+    spec("material_specular", TokenGroup::Material, TokenKind::Factor, "Strength of the specular highlight on a shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_roughness", TokenGroup::Material, TokenKind::Factor, "How broad that highlight is; higher is rougher and duller.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ao", TokenGroup::Material, TokenKind::Opacity, "Contact darkening that hugs the inside edge of a surface.", 0.0, 1.0, 0.01, ALL),
+    spec("material_rim", TokenGroup::Material, TokenKind::Opacity, "Brightness of the lit edge band of a raised face.", 0.0, 1.0, 0.01, ALL),
+    spec("material_gloss", TokenGroup::Material, TokenKind::Opacity, "Strength of the sweep across the top of a glossy face.", 0.0, 1.0, 0.01, ALL),
+    spec("material_glow", TokenGroup::Material, TokenKind::Opacity, "Strength of the emissive halo a lit surface throws.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ink_glow", TokenGroup::Material, TokenKind::Opacity, "How far a label or icon lifts toward the glow colour when lit.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ink_lift", TokenGroup::Material, TokenKind::Factor, "How far past full brightness lit ink is pushed before it clips.", 1.0, 4.0, 0.05, ALL),
+    length("material_inner_radius", TokenGroup::Material, "Blur of the inner shadow along a shaded edge, in points.", 0.0, 32.0, 0.5),
+    length("material_raise", TokenGroup::Material, "How far a raised surface stands off its ground, in points.", 0.0, 24.0, 0.5),
+    length("material_sink", TokenGroup::Material, "How far a sunken surface drops below it, in points.", 0.0, 24.0, 0.5),
+    length("material_press_depth", TokenGroup::Material, "Signed change in elevation while held: past -material_raise it inverts, short of it it deepens.", -32.0, 8.0, 0.5),
+    color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
+    color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
+    color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
     seconds("motion_short_2", "A tenth of a second; a hover or press."),
@@ -2430,7 +2458,7 @@ mod.theme.color_surface=#123456
     /// and the `color_` roles.
     fn is_new_prefix(key: &str) -> bool {
         const PLAIN: &[&str] = &[
-            "radius_", "elevation_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
+            "radius_", "elevation_", "material_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
             "font_label_",
         ];
         if PLAIN.iter().any(|p| key.starts_with(p)) {
@@ -2445,7 +2473,7 @@ mod.theme.color_surface=#123456
         if let Some(rest) = key.strip_prefix("color_") {
             const ROLES: &[&str] = &[
                 "on_", "primary", "secondary", "tertiary", "error_", "warning_", "success", "info", "surface",
-                "outline", "inverse", "scrim", "elevation", "presence", "placeholder",
+                "outline", "inverse", "scrim", "elevation", "material", "presence", "placeholder",
             ];
             return ROLES.iter().any(|p| rest.starts_with(p));
         }
@@ -3161,7 +3189,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 557, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 581, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 

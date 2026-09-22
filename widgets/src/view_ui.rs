@@ -363,6 +363,19 @@ script_mod! {
             border_color_2: instance(vec4(-1))
             border_inset: uniform(vec4(0))
 
+            /** surface material tier: 0 flat, 1 relief, 2 full 0..2 step 1 */
+            material: uniform(theme.material_level)
+            /** key light: xyz direction in UI space, w intensity */
+            material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
+            /** relief: bevel width, profile curve, SIGNED elevation, specular */
+            material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
+            /** finish: ao, rim, gloss, roughness */
+            material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** the ink a lit shoulder is tinted toward */
+            material_light_ink: uniform(theme.color_material_light)
+            /** the ink a shaded shoulder and the occlusion are tinted toward */
+            material_shadow_ink: uniform(theme.color_material_shadow)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
@@ -387,7 +400,20 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                     max(1.0 self.border_radius)
                 )
-                sdf.fill_keep(fill_color)
+                // The material rides between the fill colour and the fill.
+                // At material 0 `shade` hands back rgb untouched, so a theme
+                // that leaves it off draws exactly what it always did.
+                sdf.fill_keep(vec4(Material.shade(
+                    fill_color.rgb
+                    sdf.shape
+                    self.pos
+                    self.material
+                    self.material_light
+                    self.material_relief
+                    self.material_finish
+                    self.material_light_ink
+                    self.material_shadow_ink
+                ), fill_color.a))
                 if self.border_size > 0.0 {
                     sdf.stroke(stroke_color self.border_size)
                 }
