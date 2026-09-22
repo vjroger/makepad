@@ -8138,7 +8138,7 @@ const EQ_ROW_IDS: [LiveId; 8] = [
 
 //// One setting of the theme builder, as a row on the screen.
 ///
-/// The seven are a fixed list and not a table read off `BuilderParams`,
+/// The eight are a fixed list and not a table read off `BuilderParams`,
 /// because each of them is a different question asked in a different unit: a
 /// share of colour reads as parts of a hundred, a contrast as a ratio and a
 /// corner radius as points, and a row that printed 0.62 for the first would
@@ -8153,20 +8153,24 @@ enum BuildRow {
     FontSize,
     FontContrast,
     TextContrast,
+    TextTint,
     Spacing,
     Roundness,
 }
 
 impl BuildRow {
     /// Down the panel in this order, under the three headings the splash
-    /// puts over them: the background's two first, then the text's three,
-    /// then the shape's two.
-    const ALL: [BuildRow; 7] = [
+    /// puts over them: the background's two first, then the text's four --
+    /// the tint last, under the picker that turns it on -- then the shape's
+    /// two. The text colour itself is not here: it is a picker and not a
+    /// slider, and a row that is a different control is a different row.
+    const ALL: [BuildRow; 8] = [
         BuildRow::Saturation,
         BuildRow::Lightness,
         BuildRow::FontSize,
         BuildRow::FontContrast,
         BuildRow::TextContrast,
+        BuildRow::TextTint,
         BuildRow::Spacing,
         BuildRow::Roundness,
     ];
@@ -8180,6 +8184,7 @@ impl BuildRow {
             BuildRow::FontSize => live_id!(tb_font_size),
             BuildRow::FontContrast => live_id!(tb_font_contrast),
             BuildRow::TextContrast => live_id!(tb_text_contrast),
+            BuildRow::TextTint => live_id!(tb_text_tint),
             BuildRow::Spacing => live_id!(tb_spacing),
             BuildRow::Roundness => live_id!(tb_roundness),
         }
@@ -8190,8 +8195,9 @@ impl BuildRow {
     ///
     /// "Text variation" is the step between neighbouring type sizes, named
     /// for what a person sees move; "Text contrast" is how far the body text
-    /// stands off the page. Two different things, and the words keep them
-    /// apart where "font contrast" beside "text contrast" would not.
+    /// stands off the page; "Text tint" is how much of the chosen colour the
+    /// words take. Three different things, and the words keep them apart
+    /// where "font contrast" beside "text contrast" would not.
     fn label(self) -> &'static str {
         match self {
             BuildRow::Saturation => "Saturation",
@@ -8199,6 +8205,7 @@ impl BuildRow {
             BuildRow::FontSize => "Text size",
             BuildRow::FontContrast => "Text variation",
             BuildRow::TextContrast => "Text contrast",
+            BuildRow::TextTint => "Text tint",
             BuildRow::Spacing => "Spacing",
             BuildRow::Roundness => "Roundness",
         }
@@ -8214,6 +8221,7 @@ impl BuildRow {
             BuildRow::FontSize => params.font_size,
             BuildRow::FontContrast => params.font_contrast,
             BuildRow::TextContrast => params.clamped().text_contrast,
+            BuildRow::TextTint => params.text_tint * 100.0,
             BuildRow::Spacing => params.spacing,
             BuildRow::Roundness => params.roundness,
         }
@@ -8221,9 +8229,15 @@ impl BuildRow {
 
     /// Whether the row answers at all. The saturation does not at one
     /// colour: the page is a grey there, and every share of nothing is
-    /// nothing.
+    /// nothing. The text tint does not with no text colour chosen: there is
+    /// no hue for it to be a share of. Both keep the number they hold while
+    /// they are off, so what was set comes back with what turned it off.
     fn enabled(self, params: &BuilderParams) -> bool {
-        !(self == BuildRow::Saturation && params.color_count == 1)
+        match self {
+            BuildRow::Saturation => params.color_count != 1,
+            BuildRow::TextTint => params.text_color.is_some(),
+            _ => true,
+        }
     }
 
     /// The two stops of the track, where they are not the splash's: the text
@@ -8247,6 +8261,7 @@ impl BuildRow {
             BuildRow::FontSize => BuilderParams { font_size: shown, ..params },
             BuildRow::FontContrast => BuilderParams { font_contrast: shown, ..params },
             BuildRow::TextContrast => BuilderParams { text_contrast: shown, ..params },
+            BuildRow::TextTint => BuilderParams { text_tint: shown / 100.0, ..params },
             BuildRow::Spacing => BuilderParams { spacing: shown, ..params },
             BuildRow::Roundness => BuilderParams { roundness: shown, ..params },
         }
@@ -8336,6 +8351,43 @@ fn tb_seed_entry_at(seed: Option<SeedSlot>, count: usize) -> usize {
 
 fn tb_seed_of_entry_at(entry: usize, count: usize) -> Option<SeedSlot> {
     SeedSlot::chosen(count).get(entry).copied()
+}
+
+/// What the text colour picker is called, over it in the row.
+const TB_TEXT_COLOR_HEADER: &str = "Text colour";
+
+/// How much of the colour the words take the first time a slot is chosen.
+/// Plainly coloured and plainly still text: nought would make choosing a
+/// slot do nothing at all, and the whole of it is a shout for a control
+/// somebody has only just pressed.
+const TB_FIRST_TINT: f64 = 0.35;
+
+/// The text colour picker's entry for a slot, and back. "None" is the FIRST
+/// entry here and the last one in the seed picker, and both are right: no
+/// colour is where the words open and it is the answer a person comes back
+/// to, where a carousel grown from nothing is the odd case at the end of a
+/// list of slots.
+///
+/// A slot the count does not choose has no entry and reads as None, which is
+/// where the panel moves it: see `tb_count_chosen`.
+fn tb_text_entry_at(slot: Option<SeedSlot>, count: usize) -> usize {
+    match slot {
+        None => 0,
+        Some(slot) => SeedSlot::chosen(count).iter().position(|at| *at == slot).map_or(0, |at| at + 1),
+    }
+}
+
+fn tb_text_of_entry_at(entry: usize, count: usize) -> Option<SeedSlot> {
+    entry.checked_sub(1).and_then(|at| SeedSlot::chosen(count).get(at).copied())
+}
+
+/// The text colour picker's words for a palette of `count` colours: None and
+/// then the slots the count chooses, in the seed picker's own words, because
+/// they are the same four squares named over the row.
+fn tb_text_labels(count: usize) -> Vec<String> {
+    std::iter::once(TB_SEED_LABELS[SeedSlot::ALL.len()].to_string())
+        .chain(SeedSlot::chosen(count).into_iter().map(|slot| TB_SEED_LABELS[slot.index()].to_string()))
+        .collect()
 }
 
 /// The picker's words for a palette of `count` colours, in its order.
@@ -9249,7 +9301,14 @@ pub struct Tweaker {
     tb_seed_labels_for: usize,
     /// One per slider row, in `BuildRow::ALL`'s order.
     #[rust]
-    tb_row_uids: [u64; 7],
+    tb_row_uids: [u64; 8],
+    /// The text colour picker's route, and the count its entries were last
+    /// written for. Nought while the section is folded, as every other route
+    /// into it is.
+    #[rust]
+    tb_text_color_uid: u64,
+    #[rust]
+    tb_text_labels_for: usize,
     /// The carousel of palettes. Zero while the section is folded, as every
     /// other route into it is.
     #[rust]
@@ -11455,6 +11514,46 @@ impl Tweaker {
                                     precision: 1
                                     unit: ""
                                 }
+                                // WHAT COLOUR THE WORDS ARE. Not a fifth
+                                // colour of the palette: whatever colour was
+                                // picked for text, its lightness would have
+                                // to be moved until it read on the page, so
+                                // all that was ever free is a hue and how
+                                // much of it. So the words are tinted from a
+                                // slot the palette already has, and the row
+                                // is a picker of slots and not a colour
+                                // control -- the same words the seed picker
+                                // uses, in the same order, with None first
+                                // because that is where it opens.
+                                //
+                                // The name column is the sliders' own width,
+                                // so the three rows of the Text group line up
+                                // whatever is in them.
+                                tb_text_color_row := View {
+                                    width: Fill
+                                    height: fab.row_height_sm
+                                    flow: Right
+                                    align: Align{x: 0.0 y: 0.5}
+                                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                                    tb_text_color_name := PanelLabelSmall {
+                                        width: fab.prop_label_width
+                                        text: ""
+                                        max_lines: 1
+                                    }
+                                    tb_text_color := PanelDropDown {
+                                        width: Fill
+                                        height: 18
+                                        padding: Inset{left: 5 right: 16 top: 1 bottom: 1}
+                                        popup_menu: PanelPopupMenu{width: 72.}
+                                    }
+                                }
+                                tb_text_tint := FabSlider {
+                                    height: fab.row_height_sm
+                                    label: "Text tint"
+                                    min: 0.0
+                                    max: 100.0
+                                    step: 1.0
+                                }
                                 PanelLabelSmall {
                                     width: Fill
                                     margin: Inset{top: 3}
@@ -12823,7 +12922,7 @@ impl Tweaker {
         if let Some(label) = self.tb_chip_tip(cx, sidebar, abs) {
             return Some(label);
         }
-        let chrome: [(&[LiveId], &str); 43] = [
+        let chrome: [(&[LiveId], &str); 44] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -12840,6 +12939,7 @@ impl Tweaker {
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_2), live_id!(tb_color)], "the tertiary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_3), live_id!(tb_color)], "the surface \u{00b7} the page wears its hue, as much of it as Saturation says"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_seed_col), live_id!(tb_seed)], "which of the four the palettes below are grown from \u{00b7} it stays in its place in every one of them; None hides them"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_rows), live_id!(tb_text_color_row), live_id!(tb_text_color)], "which of the palette's colours the words are tinted from \u{00b7} Text tint says how much of it; None is text with no colour in it"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_roll_col), live_id!(tb_random)], "roll all four colours: a theme nobody planned \u{00b7} the same press from the same place is the same theme"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
@@ -16909,6 +17009,13 @@ impl Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
+            if self.tb_text_color_uid != 0 && widget_action.widget_uid.0 == self.tb_text_color_uid {
+                if let DropDownAction::Select(entry) = widget_action.cast::<DropDownAction>() {
+                    let count = self.tb_builder.params().color_count;
+                    self.tb_text_color_chosen(tb_text_of_entry_at(entry, count));
+                    self.redraw_sidebar(cx);
+                }
+            }
             if let Some(at) = self
                 .tb_count_uids
                 .iter()
@@ -18903,6 +19010,19 @@ impl Tweaker {
             // and the value it holds is kept for when the count goes up.
             slider.as_fab_slider().set_enabled(cx, which.enabled(&params));
         }
+        // The text colour picker, written when its uid is new or when the
+        // count whose slots it lists has moved, exactly as the seed picker's
+        // entries are and for the same reason: `set_labels` redraws.
+        let color_row = rows.child(live_id!(tb_text_color_row));
+        color_row.child(live_id!(tb_text_color_name)).set_text(cx, TB_TEXT_COLOR_HEADER);
+        let text_pick = color_row.child(live_id!(tb_text_color));
+        let text_uid = text_pick.widget_uid().0;
+        if text_uid != self.tb_text_color_uid || self.tb_text_labels_for != count {
+            text_pick.as_drop_down().set_labels(cx, tb_text_labels(count));
+            self.tb_text_color_uid = text_uid;
+            self.tb_text_labels_for = count;
+        }
+        text_pick.as_drop_down().set_selected_item(cx, tb_text_entry_at(params.text_color, count));
         let reading = self.tb_reading.clone();
         body.child(live_id!(tb_read)).set_text(cx, &reading);
     }
@@ -18918,6 +19038,7 @@ impl Tweaker {
         self.tb_color_insert = None;
         self.tb_random_uid = 0;
         self.tb_seed_uid = 0;
+        self.tb_text_color_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
         self.tb_carousel_uid = 0;
     }
@@ -19331,6 +19452,25 @@ impl Tweaker {
         self.tb_suggest_again();
     }
 
+    /// The text colour picker moved: a press, and one that changes what is
+    /// on the screen, so the theme goes on at once rather than waiting out a
+    /// settle.
+    ///
+    /// A slot chosen where the tint stands at nought brings the tint up with
+    /// it, because a picker that did nothing visible would be a picker
+    /// nobody could tell they had used. A tint somebody has set is left
+    /// exactly where it is -- including the one they set and then turned off
+    /// with None, which is what comes back when they choose a slot again.
+    fn tb_text_color_chosen(&mut self, slot: Option<SeedSlot>) {
+        let params = self.tb_builder.params();
+        if slot == params.text_color {
+            return;
+        }
+        let text_tint = if slot.is_some() && params.text_tint <= 0.0 { TB_FIRST_TINT } else { params.text_tint };
+        self.tb_row_set(BuilderParams { text_color: slot, text_tint, ..params });
+        self.tb_built_changed();
+    }
+
     /// The colour count moved: a press, so the theme goes on at once, and
     /// the carousel is grown again for the new count, since its chips are
     /// now another shape. The seed follows the count down where it has to:
@@ -19346,7 +19486,12 @@ impl Tweaker {
         if count == params.color_count {
             return;
         }
-        self.tb_builder.set(BuilderParams { color_count: count, ..params });
+        // The text colour follows the count down as well, and to None
+        // rather than to the primary: a colour the count derives is the
+        // primary a shade off, and words quietly retinted from a slot
+        // nobody can see any more would be a colour nobody chose.
+        let text_color = params.text_color.filter(|slot| slot.chosen_at(count));
+        self.tb_builder.set(BuilderParams { color_count: count, text_color, ..params });
         if self.tb_seed_slot.is_some_and(|slot| !slot.chosen_at(count)) {
             self.tb_seed_slot = Some(SeedSlot::Primary);
         }
@@ -21878,6 +22023,10 @@ mod tests {
             ("tb_font_size", "FabSlider"),
             ("tb_font_contrast", "FabSlider"),
             ("tb_text_contrast", "FabSlider"),
+            ("tb_text_color_row", "View"),
+            ("tb_text_color_name", "PanelLabelSmall"),
+            ("tb_text_color", "PanelDropDown"),
+            ("tb_text_tint", "FabSlider"),
             ("tb_spacing", "FabSlider"),
             ("tb_roundness", "FabSlider"),
             ("tb_read", "PanelLabelSmall"),
@@ -25846,7 +25995,7 @@ line two");
             .collect();
         assert_eq!(
             names,
-            ["Saturation", "Lightness", "Text size", "Text variation", "Text contrast", "Spacing", "Roundness"],
+            ["Saturation", "Lightness", "Text size", "Text variation", "Text contrast", "Text tint", "Spacing", "Roundness"],
             "the rows do not say what they do"
         );
         // The headings are over the rows they name: the splash's own order.
@@ -25854,7 +26003,11 @@ line two");
         let block = &src[src.find("tb_rows := View {").expect("the rows are declared")..];
         let at = |needle: &str| block.find(needle).unwrap_or_else(|| panic!("`{needle}` is not in the rows"));
         assert!(at("text: \"Surface\"") < at("tb_saturation :=") && at("tb_lightness :=") < at("text: \"Text\""));
-        assert!(at("text: \"Text\"") < at("tb_font_size :=") && at("tb_text_contrast :=") < at("text: \"Shape\""));
+        assert!(at("text: \"Text\"") < at("tb_font_size :=") && at("tb_text_tint :=") < at("text: \"Shape\""));
+        // The tint is under the picker that turns it on, and both are under
+        // the contrast: a control above the thing it depends on is a control
+        // read in the wrong order.
+        assert!(at("tb_text_contrast :=") < at("tb_text_color_row :=") && at("tb_text_color_row :=") < at("tb_text_tint :="));
         assert!(at("text: \"Shape\"") < at("tb_spacing :="));
 
         let house = BuilderParams::house(panel.tb_builder.params().dark());
@@ -26935,6 +27088,153 @@ line two");
         lands(&mut cx, &mut panel);
         let params = panel.tb_builder.params();
         assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Secondary, SeedSlot::Secondary.seed_of(&params), params.dark(), &panel.tb_own_schemes));
+    }
+
+    /// The text colour picker, as the panel addresses it.
+    fn the_text_picker(head: &WidgetRef) -> WidgetRef {
+        head.child(live_id!(tb_body)).child(live_id!(tb_rows)).child(live_id!(tb_text_color_row)).child(live_id!(tb_text_color))
+    }
+
+    /// Entry `entry` chosen off the text colour picker, routed the way the
+    /// menu's choice arrives.
+    fn a_text_colour_picked(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, entry: usize, now: f64) {
+        let uid = the_text_picker(head).widget_uid();
+        assert_eq!(panel.tb_text_color_uid, uid.0, "the text colour picker is routed by some other uid");
+        let actions = cx.capture_actions(|cx| cx.widget_action(uid, DropDownAction::Select(entry)));
+        panel.handle_sidebar_actions(cx, &actions);
+        panel.tb_settle(cx, now);
+        // The reload dance, where there is one to do: two slots of a
+        // single-hue palette make the same theme, and an apply with nothing
+        // to do asks for no reload to land.
+        if std::mem::take(&mut cx.pending_style_reload) {
+            cx.pending_live_edit_request = false;
+            cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+            panel.tb_module_rebuilt();
+            panel.tb_settle(cx, now);
+        }
+        draw_the_theme_head(cx, panel, head);
+    }
+
+    /// The text colour picker lists no colour first and then the slots the
+    /// count chooses, opens on None -- which is the theme the builder has
+    /// always made -- and each choice reaches the settings and goes on at
+    /// once, since a person asking what colour the words are is looking at
+    /// the words.
+    #[test]
+    fn the_text_colour_picker_lists_none_and_the_slots_the_count_chooses() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let picker = the_text_picker(&head);
+        assert_eq!(panel.tb_builder.params().text_color, None, "the section does not open on words with no colour");
+        assert_eq!(picker.as_drop_down().selected_item(), 0);
+        assert_eq!(picker.as_drop_down().selected_label(), "None");
+        assert_ne!(panel.tb_text_color_uid, 0, "the picker draws and is routed nowhere");
+        let drop_down = picker.as_drop_down();
+        let mut listed = Vec::new();
+        for entry in 0..6 {
+            drop_down.set_selected_item(&mut cx, entry);
+            listed.push(drop_down.selected_label());
+        }
+        assert_eq!(listed, ["None", "Prim", "Sec", "Tert", "Surf", "Surf"]);
+        // Every count lists None and its own slots, and the two directions
+        // agree on every entry.
+        for count in COLOR_COUNTS {
+            assert_eq!(tb_text_labels(count).len(), SeedSlot::chosen(count).len() + 1);
+            assert_eq!(tb_text_labels(count)[0], "None");
+            assert_eq!(tb_text_entry_at(None, count), 0);
+            assert_eq!(tb_text_of_entry_at(0, count), None);
+            for (at, slot) in SeedSlot::chosen(count).into_iter().enumerate() {
+                assert_eq!(tb_text_of_entry_at(at + 1, count), Some(slot));
+                assert_eq!(tb_text_entry_at(Some(slot), count), at + 1);
+                assert_eq!(tb_text_labels(count)[at + 1], TB_SEED_LABELS[slot.index()]);
+            }
+            // A slot the count derives has no entry and reads as None.
+            for slot in SeedSlot::ALL.into_iter().filter(|slot| !slot.chosen_at(count)) {
+                assert_eq!(tb_text_entry_at(Some(slot), count), 0, "{count}: {slot:?} is listed");
+            }
+        }
+        // Each entry reaches the settings, and the theme goes on at once.
+        let rebuilt = panel.tb_builder.rebuilds();
+        for (entry, slot) in [(1, SeedSlot::Primary), (2, SeedSlot::Secondary), (3, SeedSlot::Tertiary), (4, SeedSlot::Surface)] {
+            a_text_colour_picked(&mut cx, &mut panel, &head, entry, 1.0 + entry as f64);
+            assert_eq!(panel.tb_builder.params().text_color, Some(slot));
+            assert_eq!(the_text_picker(&head).as_drop_down().selected_item(), entry);
+        }
+        assert!(panel.tb_builder.rebuilds() > rebuilt, "choosing a text colour installed nothing");
+        a_text_colour_picked(&mut cx, &mut panel, &head, 0, 9.0);
+        assert_eq!(panel.tb_builder.params().text_color, None, "None did not take the colour off");
+    }
+
+    /// The tint row is off while the words have no colour, and on the moment
+    /// a slot is chosen. The first slot brings the tint up with it, so that
+    /// the picker does something that can be seen; a tint somebody set is
+    /// kept through None and comes back with the next slot.
+    #[test]
+    fn the_tint_row_waits_for_a_text_colour_and_keeps_what_was_set() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let tint = head.child(live_id!(tb_body)).child(live_id!(tb_rows)).child(BuildRow::TextTint.slot()).as_fab_slider();
+        assert!(!tint.borrow().expect("a slider row").enabled(), "the tint answers with no colour chosen");
+        assert_eq!(panel.tb_builder.params().text_tint, 0.0);
+        // A slot: the row comes on, at a tint that can be seen.
+        a_text_colour_picked(&mut cx, &mut panel, &head, 2, 1.0);
+        assert!(tint.borrow().expect("a slider row").enabled(), "the tint stayed off under a colour");
+        assert_eq!(panel.tb_builder.params().text_tint, TB_FIRST_TINT);
+        assert!((tint.value() - TB_FIRST_TINT * 100.0).abs() < 1e-9, "the row is not on the tint in force");
+        // Moved by hand, then off and on again: the number is kept.
+        panel.tb_gesture_ended(BuildRow::TextTint, 72.0);
+        assert!((panel.tb_builder.params().text_tint - 0.72).abs() < 1e-9);
+        a_text_colour_picked(&mut cx, &mut panel, &head, 0, 2.0);
+        assert!(!tint.borrow().expect("a slider row").enabled(), "the tint stayed on with no colour");
+        assert!((panel.tb_builder.params().text_tint - 0.72).abs() < 1e-9, "None threw the tint away");
+        a_text_colour_picked(&mut cx, &mut panel, &head, 1, 3.0);
+        assert!((panel.tb_builder.params().text_tint - 0.72).abs() < 1e-9, "a second slot moved the tint somebody set");
+    }
+
+    /// The tint is a slot and not a colour, so a colour carried onto the
+    /// slot the words are tinted from retints them, and the picker stays
+    /// where it was. And a count that derives the slot takes the colour off
+    /// the words rather than moving it to a colour nobody chose.
+    #[test]
+    fn the_text_colour_follows_its_slot_and_the_count() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        // Four hues that are four hues: a single-hue palette would tint the
+        // words the same from any slot, which is right and tests nothing.
+        let params = panel.tb_builder.params();
+        panel.tb_row_set(params.with_palette([0x2060E0FF, 0xE8730CFF, 0x30B050FF, params.palette()[3]]));
+        panel.tb_built_changed();
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        a_text_colour_picked(&mut cx, &mut panel, &head, 2, 2.0);
+        assert_eq!(panel.tb_builder.params().text_color, Some(SeedSlot::Secondary));
+        let hue = |panel: &Tweaker| {
+            let built = panel.tb_builder.built().expect("a built theme");
+            crate::theme_tokens::rgb_to_hsl(built.color("color_text").expect("the body ink")).0
+        };
+        let before = hue(&panel);
+        // The secondary and the tertiary trade places: the words follow the
+        // slot and take the colour that is in it now.
+        panel.tb_colors_dropped(2, TbDrop::Swap(1));
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_builder.params().text_color, Some(SeedSlot::Secondary), "the drag carried the choice off its slot");
+        assert!((hue(&panel) - before).abs() > 1.0, "the words did not follow the colour into the slot");
+        assert_eq!(the_text_picker(&head).as_drop_down().selected_item(), 2);
+        // Two colours: the secondary is derived there, so the words go back
+        // to having no colour of their own.
+        panel.tb_count_chosen(2);
+        the_palette_lands(&mut cx, &mut panel, 4.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_builder.params().text_color, None, "the words kept a slot the count derives");
+        assert_eq!(the_text_picker(&head).as_drop_down().selected_item(), 0);
+        assert_eq!(the_text_picker(&head).as_drop_down().selected_label(), "None");
     }
 
     /// "None" takes the carousel away altogether: it draws nothing, takes no

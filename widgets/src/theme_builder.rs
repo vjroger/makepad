@@ -51,6 +51,20 @@
 //! one or a light one. Text contrast is the contrast ratio the body text
 //! holds against that page. See [`BuilderParams`] for each.
 //!
+//! The words have a colour as well, and it is not a fifth colour of the
+//! palette: whatever colour anybody picked for text, its lightness would have
+//! to be moved until it read on the page, so only its HUE and its STRENGTH
+//! were ever free. So the text is tinted from the palette instead --
+//! [`BuilderParams::text_color`] names one of the four slots and
+//! [`BuilderParams::text_tint`] says how much of it the words take. Every ink
+//! that is words on the page takes that hue at that saturation, and its
+//! lightness goes on being solved by the text contrast against the real page,
+//! so the contrast a person set holds whatever colour the words are. Two
+//! kinds of ink are left out: the ones written on a chosen ground rather than
+//! on the page, which belong to the ground they sit on, and a surface ink the
+//! colour cannot carry to its bar on every rung of the ladder, which is drawn
+//! in the plain end after all. Reading comes first, here as everywhere.
+//!
 //! So this module is two things. [`build`] is the translation, and it is
 //! pure: [`BuilderParams`] in, a [`BuiltTheme`] out -- the one script to
 //! evaluate, the roles, and how the result reads -- with no VM anywhere, which
@@ -330,6 +344,30 @@ pub struct BuilderParams {
     pub font_size: f64,
     /// `font_size_contrast`: the step between neighbouring sizes.
     pub font_contrast: f64,
+    /// Which of the palette's four the words take their hue from, or `None`
+    /// for text with no colour in it, which is the default and is every
+    /// theme this builder made before there was a choice.
+    ///
+    /// Text is not a fifth colour, and it could not be one: whatever colour
+    /// was picked for it, its lightness would have to be moved until it read
+    /// on the page, so only its hue and its strength were ever free. Those
+    /// are what this and [`text_tint`](BuilderParams::text_tint) are -- the
+    /// hue comes off a colour the palette already has, and the strength is
+    /// the slider's.
+    ///
+    /// It names a SLOT and not a colour, as the seed picker does: a colour
+    /// dragged or edited into that slot retints the words, because the slot
+    /// is what was chosen.
+    pub text_color: Option<SeedSlot>,
+    /// How much of that colour the words take, nought to one: nought is the
+    /// text as it is without a colour, one is as coloured as the ink can be
+    /// and still stand where the text contrast puts it.
+    ///
+    /// The strength is the slider's own and not the slot colour's, so a
+    /// quiet surface colour tints its text as plainly as a loud primary --
+    /// what the slot is asked for is a hue. A slot with no colour in it has
+    /// no hue to give and leaves the words alone.
+    pub text_tint: f64,
     /// How many of the four colours are chosen, one to four; four is the
     /// default and is the builder as it always was.
     ///
@@ -383,6 +421,8 @@ impl BuilderParams {
             roundness: of("corner_radius", 2.5),
             font_size: of("font_size_base", 10.0),
             font_contrast: of("font_size_contrast", 2.5),
+            text_color: None,
+            text_tint: 0.0,
             color_count: 4,
         }
     }
@@ -421,6 +461,7 @@ impl BuilderParams {
             roundness: within("corner_radius", self.roundness),
             font_size: within("font_size_base", self.font_size),
             font_contrast: within("font_size_contrast", self.font_contrast),
+            text_tint: unit(self.text_tint, 0.0),
             color_count: self.color_count.clamp(1, 4),
             ..self
         };
@@ -2554,7 +2595,8 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
 
     // Everything measured, on the real page and on the house one: the second
     // is what the accents are chosen against as well, see `accent_pins`.
-    let text_moved = page_moved || params.text_contrast != house_text_contrast(scheme);
+    let tint = text_tint_of(&params);
+    let text_moved = page_moved || params.text_contrast != house_text_contrast(scheme) || tint.is_some();
     let known = |bg: u32, fg: u32| {
         let mut colors = page_colors(scheme, bg, fg);
         for (key, rgba) in roles.entries() {
@@ -2562,7 +2604,7 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
         }
         colors.insert("color_error".to_string(), KEPT_ERROR);
         colors.insert("color_warning".to_string(), KEPT_WARNING);
-        let inks = text_inks(scheme, &colors, params.text_contrast, text_moved);
+        let inks = text_inks(scheme, &colors, params.text_contrast, text_moved, tint);
         for (key, rgba, _) in &inks {
             colors.insert(key.to_string(), *rgba);
         }
@@ -2585,7 +2627,7 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
     // palette moved at all. See `ACCENTED`: without this a theme grown from
     // an orange favourite had an orange page and grey controls.
     let under = |colors: &BTreeMap<String, u32>| -> BTreeMap<String, u32> {
-        let quiet = text_inks(scheme, colors, READABLE, true);
+        let quiet = text_inks(scheme, colors, READABLE, true, tint);
         quiet.into_iter().map(|(key, rgba, _)| (key.to_string(), rgba)).collect()
     };
     let pages = Pages {
@@ -2671,6 +2713,83 @@ const TEXT_INKS: &[&str] = &[
     "color_on_surface_variant",
 ];
 
+/// The inks in [`TEXT_INKS`] that are NOT tinted, because they are not
+/// written on the page: the label of a chosen row sits on the secondary's
+/// own ground, and an ink belongs to the ground it is drawn on. Where the
+/// palette has moved, [`ACCENTED`] chooses this one outright and the tint
+/// would never reach it anyway; where it has not, this is what keeps it off.
+const UNTINTED_INKS: &[&str] = &["color_label_inner_active"];
+
+/// The hue the words take and how much of it, worked out from the slot
+/// [`BuilderParams::text_color`] names. See [`tinted_ink`] for why a hue and
+/// a saturation are the whole of what a text colour can be.
+#[derive(Clone, Copy, Debug)]
+struct TextTint {
+    hue: f64,
+    sat: f64,
+}
+
+/// What the text colour comes to for these settings, or `None` where the
+/// words are left with no colour in them: no slot named, the tint at nought,
+/// or a slot holding a colour with no hue to give -- a grey names none, and
+/// what rounding left in one is not a colour anybody chose. All three are the
+/// theme byte for byte as it was before there was a text colour at all.
+fn text_tint_of(params: &BuilderParams) -> Option<TextTint> {
+    let slot = params.text_color?;
+    let sat = params.text_tint.clamp(0.0, 1.0);
+    if sat <= 0.0 {
+        return None;
+    }
+    let (hue, own, _) = rgb_to_hsl(params.palette()[slot.index()] | 0xFF);
+    if own < HAS_HUE {
+        return None;
+    }
+    Some(TextTint { hue, sat })
+}
+
+/// The END the tinted inks are drawn from: the text's hue and saturation at
+/// the lightness that stands `want` off the page, which is the loudest thing
+/// the words have to say. It takes the place of the appearance's plain end,
+/// and every ink is then that colour at an alpha, exactly as every ink in
+/// both theme files is white or black at one.
+///
+/// The hue and the saturation are the setting's and the LIGHTNESS is solved
+/// for, which is the only way round it can be: a contrast ratio against a
+/// page is a statement about luminance and nothing else, so the one thing a
+/// coloured ink cannot also be asked for is how light it is. Solved from the
+/// ratio, the contrast a person set holds exactly, and the colour they chose
+/// is as much of itself as that leaves room for -- which at the top of the
+/// text contrast, on either appearance, is the plain end and no colour at
+/// all. There is nowhere else for it to be.
+///
+/// The lightness is found by halving the interval, and the LEAST one that
+/// reads is the one taken -- exactly what `alpha_for` does with an alpha, and
+/// for the same reason: the ratio asked for is a floor, and an ink that
+/// cleared it by a third of a step would be a theme louder than the one the
+/// slider says. Eight bits of channel make the reading a staircase rather
+/// than a curve, so the answer is read off the quantised colour and not off
+/// the luminance that was solved for.
+fn tinted_ink(scheme: Scheme, page: u32, tint: TextTint, want: f64) -> u32 {
+    let at = |lightness: f64| hsl_to_rgb(tint.hue, tint.sat, lightness);
+    let reads = |lightness: f64| reads_on(page | 0xFF, at(lightness)) >= want;
+    // The plain end is as far as an ink of this hue can go, and at it there
+    // is no hue left: a lightness of one is white whatever it is asked for.
+    let plain = if scheme == Scheme::Light { 0.0 } else { 1.0 };
+    if !reads(plain) {
+        return plain_ink(scheme);
+    }
+    let (mut near, mut far) = (1.0 - plain, plain);
+    for _ in 0..24 {
+        let middle = (near + far) / 2.0;
+        if reads(middle) {
+            far = middle;
+        } else {
+            near = middle;
+        }
+    }
+    at(far)
+}
+
 /// The text inks put to the page at the contrast asked for, each with
 /// whether it has to be pinned: all of them where the page or the contrast
 /// moved, and otherwise only a surface ink the file's own page somehow
@@ -2691,7 +2810,25 @@ const TEXT_INKS: &[&str] = &[
 /// surface inks the library HOLDS to a bar, on every rung of the surface
 /// ladder, are then raised as far as it takes to clear it there, and failing
 /// that to the plain end, which is `settle_ink`'s rule.
-fn text_inks(scheme: Scheme, colors: &BTreeMap<String, u32>, target: f64, moved: bool) -> Vec<(&'static str, u32, bool)> {
+///
+/// A `tint` is the text colour, and it changes ONE thing: which colour the
+/// alphas are spent on. The ratio each voice wants is worked out first and in
+/// the same words, and the end those ratios are reached from is the tint's
+/// hue at the lightness the loudest of them needs ([`tinted_ink`]) instead of
+/// white or black. So the text contrast goes on saying exactly what it said,
+/// the quieter voices keep their distance from the body in a coloured theme
+/// as in a grey one, and every ink is still translucent -- which is what lets
+/// a word written on a control's ground rather than on the page follow that
+/// ground instead of standing on it like a sticker. An opaque ink of the
+/// right lightness for the page is the wrong lightness for the ground beside
+/// it, and that is a disabled label at 1.3 to 1 on the grey it sits on.
+fn text_inks(
+    scheme: Scheme,
+    colors: &BTreeMap<String, u32>,
+    target: f64,
+    moved: bool,
+    tint: Option<TextTint>,
+) -> Vec<(&'static str, u32, bool)> {
     let page = colors.get("color_bg_app").copied().unwrap_or(BLACK);
     let house = house_page(scheme);
     let nothing = BTreeMap::new();
@@ -2699,6 +2836,29 @@ fn text_inks(scheme: Scheme, colors: &BTreeMap<String, u32>, target: f64, moved:
         return Vec::new();
     };
     let body_house = reads_on(house, body);
+    let want_of = |base: u32| target * reads_on(house, base) / body_house;
+    let surface = |key: &str| key == "color_on_surface" || key == "color_on_surface_variant";
+    // The colour the tinted inks are drawn from, made to carry the loudest
+    // voice it has to: an end quieter than that would leave an ink at the
+    // whole of its alpha and still short of the ratio it was promised, and no
+    // voice may be made quieter by a colour.
+    //
+    // The two surface inks are not counted, and that is what leaves a dark
+    // theme any colour at all: the dark file writes `color_on_surface` as
+    // pure white, which is the most its page can give, so an end that had to
+    // carry it would be white itself and there would be nothing left to tint
+    // with. They are served below instead -- by the tinted end where it
+    // reaches their bar, and by the plain end where it does not.
+    let end = tint.filter(|_| moved).map(|tint| {
+        let loudest = TEXT_INKS
+            .iter()
+            .filter(|key| !UNTINTED_INKS.contains(*key) && !surface(key))
+            .filter_map(|key| file_value(scheme, key, &nothing))
+            .map(want_of)
+            .fold(target, f64::max)
+            .min(reads_on(page, plain_ink(scheme)));
+        tinted_ink(scheme, page, tint, loudest)
+    });
     let mut out = Vec::new();
     for key in TEXT_INKS {
         let Some(base) = file_value(scheme, key, &nothing) else {
@@ -2713,11 +2873,29 @@ fn text_inks(scheme: Scheme, colors: &BTreeMap<String, u32>, target: f64, moved:
             }
             continue;
         }
-        let want = target * reads_on(house, base) / body_house;
-        let mut ink = alpha_for(page, base, want);
-        if *key == "color_on_surface" || *key == "color_on_surface_variant" {
+        let want = want_of(base);
+        let from = match end {
+            Some(end) if !UNTINTED_INKS.contains(key) => end,
+            _ => base,
+        };
+        // The least alpha that stands the ratio off the page, and then as
+        // much more of it as the ladder this ink is held to asks for.
+        let raised = |from: u32| {
+            let mut ink = alpha_for(page, from, want);
             while ink & 0xFF < 0xFF && !holds_its_bar(colors, key, ink) {
                 ink += 1;
+            }
+            ink
+        };
+        let mut ink = alpha_for(page, from, want);
+        if surface(key) {
+            ink = raised(from);
+            // A surface ink the tint cannot carry is drawn in the plain end
+            // after all, as an untinted theme has it: it is held to a bar on
+            // every rung of the ladder, and a rung a person cannot read is
+            // worse than a word that is not the colour they chose.
+            if end.is_some() && !holds_its_bar(colors, key, ink) {
+                ink = raised(base);
             }
             ink = settle_ink(colors, key, ink);
         }
@@ -2869,6 +3047,11 @@ fn random_params_on(seed: u64, dark: Option<bool>) -> BuilderParams {
         roundness: stepped(0.0, 8.0),
         font_size: stepped(9.0, 12.0),
         font_contrast: stepped(1.5, 3.5),
+        // Not drawn, and not because it could not be: a roll is a palette,
+        // and words that changed colour with it would be the one thing on
+        // the screen a person cannot go back to by pressing again.
+        text_color: None,
+        text_tint: 0.0,
         color_count: 4,
     };
     let (least, most) = params.text_contrast_range();
@@ -4293,11 +4476,13 @@ impl ThemeBuilder {
     /// drawn inside the half of the slider the page is in.
     ///
     /// Nor is the number of colours: a person who has said they want two is
-    /// rolled two.
+    /// rolled two. Nor the text colour, for the same reason: it is a choice
+    /// about the words and not one of the palette's colours, and a roll that
+    /// undid it would be a roll of two different things.
     pub fn randomize(&mut self, seed: u64) {
         let dark = self.params.dark();
-        let color_count = self.params.color_count;
-        self.set(BuilderParams { color_count, ..random_params_on(seed, Some(dark)) });
+        let BuilderParams { color_count, text_color, text_tint, .. } = self.params;
+        self.set(BuilderParams { color_count, text_color, text_tint, ..random_params_on(seed, Some(dark)) });
     }
 
     /// Back to the settings the builder opened on, which takes the built
@@ -4679,8 +4864,12 @@ mod theme_builder_tests {
                 check(vm, BuilderParams { text_contrast: most, ..chip });
                 // The house palette on a page the lightness slider moved.
                 check(vm, BuilderParams { lightness: if dark { 0.1 } else { 0.95 }, ..BuilderParams::house(dark) });
+                // And the words in a colour: every tinted ink is a pin, so a
+                // tint the VM resolved differently would be a theme whose
+                // text is not the colour this measured.
+                check(vm, BuilderParams { text_color: Some(SeedSlot::Primary), text_tint: 0.7, ..chip });
             }
-            assert_eq!(evaluated, 12 * 2 * 5 + 2 * 4);
+            assert_eq!(evaluated, 12 * 2 * 5 + 2 * 5);
         });
     }
 
@@ -5469,6 +5658,170 @@ mod theme_builder_tests {
             }
         }
     }
+
+    /// How far two hues stand apart on the circle, the short way round.
+    fn hue_apart(a: f64, b: f64) -> f64 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    /// A text colour of None is the theme there was before there was one, to
+    /// the byte -- and so are the two ways of asking for no colour with a
+    /// slot named: the tint at nought, and a slot holding a grey, which has
+    /// no hue to give.
+    ///
+    /// The whole default rests on this. Every digest, every house test and
+    /// every theme anybody has saved was built with no text colour, and a
+    /// build that moved so much as an alpha under the new default would have
+    /// moved all of them.
+    #[test]
+    fn no_text_colour_is_the_theme_there_was_before() {
+        for dark in [true, false] {
+            let chip = suggestions(BLUE, dark)[3].params(BuilderParams::house(dark));
+            for base in [BuilderParams::house(dark), chip] {
+                let plain = build(&base);
+                for same in [
+                    BuilderParams { text_color: Some(SeedSlot::Primary), text_tint: 0.0, ..base },
+                    BuilderParams { text_color: Some(SeedSlot::Secondary), text_tint: 0.0, ..base },
+                    // A slot carrying a grey: the hue rounding left in it is
+                    // not a colour anybody chose.
+                    BuilderParams {
+                        text_color: Some(SeedSlot::Primary),
+                        text_tint: 1.0,
+                        ..base.with_palette([0x808080FF, 0x808080FF, 0x808080FF, base.palette()[3]])
+                    },
+                ] {
+                    let built = build(&same);
+                    let want = build(&BuilderParams { text_color: None, text_tint: 0.0, ..same });
+                    assert_eq!(built.colors, want.colors, "{same:?}");
+                    assert_eq!(built.overrides, want.overrides, "{same:?}");
+                    assert_eq!(built.script, want.script, "{same:?}");
+                }
+                // And no text colour is what the house settings open on.
+                assert_eq!((plain.params.text_color, plain.params.text_tint), (None, 0.0));
+            }
+        }
+    }
+
+    /// With a slot named and the tint up, every ink that is words on the page
+    /// wears that slot's hue -- and the text contrast still says exactly what
+    /// it said: the body ink stands off the real page at the ratio asked for,
+    /// and the quieter voices stay quieter.
+    ///
+    /// Asked on the house palette, where the accent mapping pins nothing, so
+    /// what is measured is the text and not a colour some control row chose.
+    /// The one ink left out is the label of a chosen row: it is written on
+    /// the secondary's ground and belongs to it.
+    #[test]
+    fn the_words_take_the_slot_s_hue_and_keep_their_contrast() {
+        for dark in [true, false] {
+            let house = BuilderParams::house(dark);
+            for slot in SeedSlot::ALL {
+                let hue = rgb_to_hsl(house.palette()[slot.index()] | 0xFF).0;
+                if rgb_to_hsl(house.palette()[slot.index()] | 0xFF).1 < HAS_HUE {
+                    continue;
+                }
+                for tint in [0.35, 1.0] {
+                    let params = BuilderParams { text_color: Some(slot), text_tint: tint, ..house };
+                    let built = build(&params);
+                    let page = built.color("color_bg_app").unwrap();
+                    let body = built.color("color_text").unwrap();
+                    let stands = reads_on(page, body);
+                    assert!(stands >= params.text_contrast - 1e-9, "{stands} under the contrast asked for");
+                    let mut tinted = 0;
+                    for key in TEXT_INKS {
+                        if UNTINTED_INKS.contains(key) {
+                            continue;
+                        }
+                        let ink = built.color(key).unwrap();
+                        let (ink_hue, ink_sat, _) = rgb_to_hsl(ink);
+                        // Every voice is drawn from the one tinted end, so
+                        // every one of them is that hue exactly, whatever
+                        // alpha it is spent at. The two surface inks are the
+                        // exception the engine states: the dark file asks
+                        // `color_on_surface` for the most its page has, and
+                        // at the ceiling there is no colour left to give.
+                        if ink_sat <= 0.02 {
+                            assert!(surface_ink(key), "{key} has no colour in it at all");
+                            continue;
+                        }
+                        assert!(hue_apart(ink_hue, hue) < 4.0, "{key} is {ink_hue:.0} and not {hue:.0}");
+                        // And on the page, where the words are read: a grey
+                        // page mixes nothing of its own into them.
+                        let seen = over(page, ink);
+                        assert!(hue_apart(rgb_to_hsl(seen).0, hue) < 12.0, "{key} reads as {seen:08X}");
+                        tinted += 1;
+                    }
+                    assert!(tinted >= TEXT_INKS.len() - UNTINTED_INKS.len() - 2, "only {tinted} inks took the colour");
+                    for quiet in ["color_text_placeholder", "color_text_meta", "color_text_disabled"] {
+                        assert!(reads_on(page, built.color(quiet).unwrap()) <= stands + 1e-9, "{quiet}");
+                    }
+                    assert!(built.readability.holds(), "{:#?}", built.readability.failures);
+                }
+            }
+        }
+    }
+
+    /// The tint is the slot's and not the colour's: a palette whose colours
+    /// have been carried onto one another retints the words with whatever is
+    /// in the named slot now. The same rule the seed picker follows, and for
+    /// the same reason -- what was chosen was a place in the palette.
+    #[test]
+    fn the_tint_follows_the_slot_through_a_drag() {
+        for dark in [true, false] {
+            let orange = 0xE8730CFF;
+            let blue = BLUE;
+            let base = BuilderParams { text_color: Some(SeedSlot::Secondary), text_tint: 0.8, ..BuilderParams::house(dark) };
+            let ink_hue = |params: &BuilderParams| rgb_to_hsl(build(params).color("color_text").unwrap()).0;
+            let first = base.with_palette([blue, orange, blue, base.palette()[3]]);
+            let swapped = base.with_palette([orange, blue, blue, base.palette()[3]]);
+            assert!(hue_apart(ink_hue(&first), rgb_to_hsl(orange).0) < 10.0);
+            assert!(hue_apart(ink_hue(&swapped), rgb_to_hsl(blue).0) < 10.0);
+        }
+    }
+
+    /// And a tinted theme reads. The same sweep the untinted one gets --
+    /// every hue, both background sliders, both appearances, both ends of the
+    /// text contrast -- with the words coloured from each slot in turn, so
+    /// that a pair the tint moved is a pair this fails on.
+    #[test]
+    fn every_tinted_theme_reads() {
+        let mut built_themes = 0;
+        for step in 0..6 {
+            for slot in SeedSlot::ALL {
+                for tint in [0.35, 1.0] {
+                    for saturation in [0.0, 1.0] {
+                        for lightness in lightness_ends() {
+                            let params = BuilderParams {
+                                favourite: hsl_to_rgb(step as f64 * 60.0 + 11.0, 0.85, 0.5),
+                                harmony: Harmony::ALL[step % Harmony::ALL.len()],
+                                saturation,
+                                lightness,
+                                text_color: Some(slot),
+                                text_tint: tint,
+                                ..BuilderParams::house(true)
+                            };
+                            let (least, most) = params.text_contrast_range();
+                            for text_contrast in [params.clamped().text_contrast, least, most] {
+                                let params = BuilderParams { text_contrast, ..params };
+                                let built = build(&params);
+                                assert!(built.readability.holds(), "{params:?}: {:#?}", built.readability.failures);
+                                built_themes += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(built_themes, 6 * 4 * 2 * 2 * 5 * 3);
+    }
+
+    /// The two inks the library holds to a bar on a whole ladder of
+    /// surfaces, which the tint gives way to where it cannot carry them.
+    fn surface_ink(key: &str) -> bool {
+        key == "color_on_surface" || key == "color_on_surface_variant"
+    }
+
 
     /// Every text ink is a key both files declare, and nothing left out of
     /// the set derives from one in it: a pin lands after the object has
