@@ -951,6 +951,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
             width: fab.swatch_width
             height: 16
             with_alpha: true
+            // The ring colour a square lights with as a swap target, so the
+            // two marks of one carry read as one family, and a round-ended
+            // bar so it reads as a mark and not as a stray line of the row.
+            draw_insert +: {
+                color: fab.color_focus_ring
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.rect_size.x * 0.5)
+                    sdf.fill(self.color)
+                    return sdf.result
+                }
+            }
             popover: View{
                 width: 244
                 height: Fit
@@ -4956,6 +4968,14 @@ pub struct FabColorPick {
     /// The copy of the swatch that rides under the pointer.
     #[live]
     draw_lifted: DrawFabSwatch,
+    /// The bar that marks a gap the carried colour would be slotted into
+    /// (see [`FabColorPick::set_insert_bar`]).
+    #[live]
+    draw_insert: DrawColor,
+    /// Where that bar stands, window-local, while the host says the colour
+    /// would go in between rather than onto another square.
+    #[rust]
+    insert_bar: Option<Rect>,
     /// A press on a draggable swatch that has not been let go: where it
     /// landed, and whether the popover was up when it did (a press that shut
     /// the popover does not open it again on the release).
@@ -5037,6 +5057,22 @@ impl FabColorPick {
         self.draw_swatch.target > 0.0
     }
 
+    /// Stand an insertion bar at `bar` (window-local) while this swatch's
+    /// colour is carried, or take it down with `None`. The host says where,
+    /// because the gaps are between squares only it knows of; the carried
+    /// swatch draws it, because the carry's overlay floats over the row and
+    /// the gap it marks belongs to no square.
+    pub fn set_insert_bar(&mut self, cx: &mut Cx, bar: Option<Rect>) {
+        if self.insert_bar != bar {
+            self.insert_bar = bar;
+            self.redraw_carry(cx);
+        }
+    }
+
+    pub fn insert_bar(&self) -> Option<Rect> {
+        self.insert_bar
+    }
+
     /// The press has travelled: the colour is off the swatch.
     fn start_carry(&mut self, cx: &mut Cx, at: DVec2) {
         self.carrying = true;
@@ -5056,6 +5092,8 @@ impl FabColorPick {
         self.carrying = false;
         self.carry_scope = None;
         self.draw_swatch.lifted = 0.0;
+        // A bar outliving the carry would mark a gap nothing is going into.
+        self.insert_bar = None;
         self.redraw_carry(cx);
     }
 
@@ -5376,6 +5414,11 @@ impl Widget for FabColorPick {
             let mut lifted = Walk::fixed(anchor.size.x - 2.0 * inset, anchor.size.y);
             lifted.abs_pos = Some(dvec2(self.carry_at.x - self.grab.x + inset, anchor.pos.y - 6.0));
             self.draw_lifted.draw_walk(cx, lifted);
+            // After the copy, because the copy hangs over the very gap the
+            // pointer is in, and a bar under it would be hidden by it.
+            if let Some(bar) = self.insert_bar {
+                self.draw_insert.draw_abs(cx, bar);
+            }
             cx.end_pass_sized_turtle();
             self.overlay_list.as_mut().unwrap().end(cx);
         }

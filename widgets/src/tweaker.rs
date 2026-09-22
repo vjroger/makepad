@@ -8293,6 +8293,123 @@ const TB_COLOR_IDS: [LiveId; 4] = [
 /// and the one the section's heading over its two sliders uses.
 const TB_COLOR_NAMES: [&str; 4] = ["primary", "secondary", "tertiary", "surface"];
 
+/// What a carried builder colour does if let go where it is.
+///
+/// The four names are the roles and never move; the colours under them are
+/// an ordered list whose position is the role. So there are two drops: onto
+/// another colour, which trades the two, and into a gap, which moves the
+/// carried colour there and closes the list up behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TbDrop {
+    /// Onto the middle of this square: the two trade roles.
+    Swap(usize),
+    /// Into this insertion point, 0 in front of the first square to 4 after
+    /// the last: the carried colour goes there and every colour between its
+    /// old place and the new one shifts one role.
+    Insert(usize),
+}
+
+/// How much of a square, from each of its sides, belongs to the gap beside
+/// it rather than to the square. The row's own gap is three points, far too
+/// thin to hit on purpose, so a fifth of each neighbour goes with it; the
+/// middle three fifths stay the square's, wide enough that a trade is not a
+/// near miss either.
+const TB_INSERT_BAND: f64 = 0.2;
+
+/// The zone a carried colour from square `from` is over, off the four
+/// squares' rects, the top of the row (the names over the squares) and the
+/// left edge of the surprise button.
+///
+/// `None` when the drop would change nothing: off the row, on the surprise
+/// (it is a button, not a place in the list, so a drop there is a cancel,
+/// and the zone after the last square stops at its edge), on the carried
+/// colour's own square, or at either insertion point beside it -- slotting
+/// a colour in next to where it already is leaves the order as it was.
+fn tb_drop_zone(squares: &[Rect; 4], top: f64, surprise_x: f64, from: usize, at: DVec2) -> Option<TbDrop> {
+    if squares.iter().any(|square| square.size.x <= 0.0) {
+        return None;
+    }
+    let bottom = squares.iter().map(|square| square.pos.y + square.size.y).fold(f64::MIN, f64::max);
+    // The row's own gap above and below, so a hand a point off the squares'
+    // line has not left the row.
+    let slack = 2.0;
+    if at.y < top - slack || at.y >= bottom + slack {
+        return None;
+    }
+    let right = |which: usize| squares[which].pos.x + squares[which].size.x;
+    let band = |which: usize| squares[which].size.x * TB_INSERT_BAND;
+    let zone = if at.x >= surprise_x.max(right(3)) {
+        return None;
+    } else if at.x < squares[0].pos.x + band(0) {
+        // In front of the first: as far out as a band's width, the same
+        // reach the gaps between squares have.
+        if at.x < squares[0].pos.x - band(0) {
+            return None;
+        }
+        TbDrop::Insert(0)
+    } else if at.x >= right(3) - band(3) {
+        TbDrop::Insert(4)
+    } else {
+        // Walked left to right: a square's middle, then the gap after it
+        // with the bands on either side, up to the last square's middle,
+        // whose far band the branch above has already taken.
+        (0..4)
+            .find_map(|which| {
+                if at.x < right(which) - band(which) {
+                    Some(TbDrop::Swap(which))
+                } else if which < 3 && at.x < squares[which + 1].pos.x + band(which + 1) {
+                    Some(TbDrop::Insert(which + 1))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(TbDrop::Insert(4))
+    };
+    match zone {
+        TbDrop::Swap(to) if to == from => None,
+        TbDrop::Insert(point) if point == from || point == from + 1 => None,
+        zone => Some(zone),
+    }
+}
+
+/// Where the insertion bar for `point` stands: centred in its gap -- in
+/// front of the first square and after the last as far out as the gaps
+/// between them are wide -- two points wide, and tall enough to stand out
+/// above the carried copy, which rides a little over the row.
+fn tb_insert_bar(squares: &[Rect; 4], point: usize) -> Rect {
+    let right = |which: usize| squares[which].pos.x + squares[which].size.x;
+    let gap = (squares[1].pos.x - right(0)).max(0.0);
+    let x = match point {
+        0 => squares[0].pos.x - gap * 0.5,
+        4 => right(3) + gap * 0.5,
+        _ => (right(point - 1) + squares[point].pos.x) * 0.5,
+    };
+    let width = 2.0;
+    let square = squares[point.min(3)];
+    Rect {
+        pos: dvec2(x - width * 0.5, square.pos.y - 8.0),
+        size: dvec2(width, square.size.y + 10.0),
+    }
+}
+
+/// The four colours after a drop: traded, or the carried one moved to the
+/// insertion point and the rest closed up behind it.
+fn tb_dropped_palette(palette: [u32; 4], from: usize, drop: TbDrop) -> [u32; 4] {
+    let mut out = palette;
+    match drop {
+        TbDrop::Swap(to) => out.swap(from, to),
+        TbDrop::Insert(point) => {
+            let mut list: Vec<u32> = palette.to_vec();
+            let carried = list.remove(from);
+            // Taken out first, so a point past its old place is one earlier.
+            let to = if point > from { point - 1 } else { point };
+            list.insert(to, carried);
+            out.copy_from_slice(&list);
+        }
+    }
+    out
+}
+
 /// How long the mix waits between installs while a weight is being dragged.
 ///
 /// An install is a module rebuild -- the blend itself, the sheet off, the
@@ -9018,14 +9135,17 @@ pub struct Tweaker {
     /// parked for the rows.
     #[rust]
     tb_color_opened: Option<usize>,
-    /// The one of the four colours being carried to another square, and
-    /// the square it would land on if let go now (never its own). Nothing
-    /// installs while it is carried: the swap is one gesture, and it goes
-    /// in on the drop.
+    /// The one of the four colours being carried, and what it would do if
+    /// let go now: the square it would trade with (never its own), or the
+    /// insertion point it would move to (never one beside its own place).
+    /// At most one of the two. Nothing installs while it is carried: the
+    /// drop is one gesture, and it goes in on the drop.
     #[rust]
     tb_color_carried: Option<usize>,
     #[rust]
     tb_color_target: Option<usize>,
+    #[rust]
+    tb_color_insert: Option<usize>,
     #[rust]
     tb_random_uid: u64,
     /// One per slider row, in `BuildRow::ALL`'s order.
@@ -10712,8 +10832,9 @@ impl Tweaker {
                         text: ""
                         max_lines: 1
                     }
-                    // Carried to another square, it trades colours with
-                    // that one: the names are the roles and stay put.
+                    // Carried onto another square, it trades colours with
+                    // that one; into a gap, it moves there and the others
+                    // close up. The names are the roles and stay put.
                     tb_color := FabColorPick {
                         width: Fill
                         height: 18
@@ -16516,30 +16637,30 @@ impl Tweaker {
                         self.tb_color_opened = Some(which);
                         self.redraw_panel(cx);
                     }
-                    // A colour carried to another square. The names stay
-                    // where they are, because they are the roles; the colours
-                    // under them move.
+                    // A colour carried onto another square or into a gap.
+                    // The names stay where they are, because they are the
+                    // roles; the colours under them move.
                     FabColorPickAction::DragStarted => {
                         self.tb_color_carried = Some(which);
                         self.tb_color_opened = None;
-                        self.tb_mark_target(cx, None);
+                        self.tb_mark_drop(cx, None);
                     }
                     FabColorPickAction::DragMoved(at) => {
-                        let target = self.tb_slot_at(cx, at).filter(|slot| *slot != which);
-                        self.tb_mark_target(cx, target);
+                        let drop = self.tb_drop_at(cx, which, at);
+                        self.tb_mark_drop(cx, drop);
                     }
                     FabColorPickAction::DragDropped(at) => {
-                        let target = self.tb_slot_at(cx, at).filter(|slot| *slot != which);
+                        let drop = self.tb_drop_at(cx, which, at);
                         self.tb_color_carried = None;
-                        self.tb_mark_target(cx, None);
-                        if let Some(to) = target {
-                            self.tb_colors_swapped(which, to);
+                        self.tb_mark_drop(cx, None);
+                        if let Some(drop) = drop {
+                            self.tb_colors_dropped(which, drop);
                         }
                         self.redraw_panel(cx);
                     }
                     FabColorPickAction::DragCancelled => {
                         self.tb_color_carried = None;
-                        self.tb_mark_target(cx, None);
+                        self.tb_mark_drop(cx, None);
                     }
                     // The popover's own eyedropper: the host owns it,
                     // because it is the host that knows the window. Armed
@@ -18512,6 +18633,7 @@ impl Tweaker {
         self.tb_color_opened = None;
         self.tb_color_carried = None;
         self.tb_color_target = None;
+        self.tb_color_insert = None;
         self.tb_random_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
         self.tb_carousel_uid = 0;
@@ -18912,25 +19034,28 @@ impl Tweaker {
         self.tb_built_changed();
     }
 
-    /// One colour carried onto another square: the two trade roles and the
-    /// other two stay put.
+    /// One colour let go onto another square, where the two trade roles and
+    /// the other two stay put, or into a gap, where it moves and the ones it
+    /// passed close up behind it, each one role along.
     ///
-    /// A trade rather than an insert that shifts the rest along, because a
-    /// shift changes up to four roles in one gesture and the hand only
-    /// pointed at two. It names the four outright like any edit of a square,
-    /// so the palette becomes the person's own unless the traded one is
-    /// itself on offer, and it is a drop, so it goes in at once. The strip
-    /// is grown from the primary, so only a trade that moved the primary
-    /// asks for a new one. Two squares of one colour trade nothing.
-    fn tb_colors_swapped(&mut self, from: usize, to: usize) {
+    /// Both, because a hand reordering four colours wants either: a trade
+    /// when two are simply the wrong way round, a move when one belongs at
+    /// the other end and the rest are in the right order already. It names
+    /// the four outright like any edit of a square, so the palette becomes
+    /// the person's own unless the new order is itself on offer, and it is a
+    /// drop, so it goes in at once. The strip is grown from the primary, so
+    /// only a drop that changed the primary asks for a new one. A drop that
+    /// leaves the four as they were -- two squares of one colour traded, say
+    /// -- installs nothing.
+    fn tb_colors_dropped(&mut self, from: usize, drop: TbDrop) {
         let params = self.tb_builder.params();
-        let mut palette = params.palette();
-        if from == to || palette[from] | 0xFF == palette[to] | 0xFF {
+        let was = params.palette();
+        let now = tb_dropped_palette(was, from, drop);
+        if now.iter().zip(was.iter()).all(|(a, b)| a | 0xFF == b | 0xFF) {
             return;
         }
-        palette.swap(from, to);
-        self.tb_builder.set(params.with_palette(palette));
-        if from == 0 || to == 0 {
+        self.tb_builder.set(params.with_palette(now));
+        if now[0] | 0xFF != was[0] | 0xFF {
             self.tb_suggest_due = true;
         }
         self.tb_built_changed();
@@ -19707,37 +19832,48 @@ impl Tweaker {
         TB_COLOR_IDS.iter().map(|id| row.child(*id).child(live_id!(tb_color))).collect()
     }
 
-    /// Which of the four squares a carried colour is over: the column under
-    /// the name, as far as the gap beside it, so the pointer is never over
-    /// nothing between two squares. Nothing off the row.
-    fn tb_slot_at(&self, cx: &Cx, at: DVec2) -> Option<usize> {
-        let controls = self.tb_color_controls();
-        let rects: Vec<Rect> = controls.iter().map(|c| c.area().rect(cx)).collect();
+    /// What a colour carried from square `from` would do if let go at `at`:
+    /// see [`tb_drop_zone`]. Nothing before the row is drawn.
+    fn tb_drop_at(&self, cx: &Cx, from: usize, at: DVec2) -> Option<TbDrop> {
         let row = self.sidebar.as_ref()?.child(live_id!(theme_head)).child(live_id!(tb_body)).child(live_id!(tb_seed_row));
-        let names: Vec<Rect> = TB_COLOR_IDS
+        let squares: Vec<Rect> = self.tb_color_controls().iter().map(|c| c.area().rect(cx)).collect();
+        let squares: [Rect; 4] = squares.try_into().ok()?;
+        // The names stand over the squares and are part of the row a hand
+        // aims at: the column under a name is that square's.
+        let top = TB_COLOR_IDS
             .iter()
             .map(|id| row.child(*id).child(live_id!(tb_color_name)).area().rect(cx))
-            .collect();
-        (0..rects.len()).find(|which| {
-            let square = rects[*which];
-            if square.size.x <= 0.0 {
-                return false;
-            }
-            let half_gap = 2.0;
-            let top = names.get(*which).filter(|n| n.size.y > 0.0).map_or(square.pos.y, |n| n.pos.y.min(square.pos.y));
-            at.x >= square.pos.x - half_gap
-                && at.x < square.pos.x + square.size.x + half_gap
-                && at.y >= top - half_gap
-                && at.y < square.pos.y + square.size.y + half_gap
-        })
+            .filter(|name| name.size.y > 0.0)
+            .map(|name| name.pos.y)
+            .fold(squares[0].pos.y, f64::min);
+        let surprise = row.child(live_id!(tb_random)).area().rect(cx);
+        tb_drop_zone(&squares, top, surprise.pos.x, from, at)
     }
 
-    /// Light the square a carried colour would land on, and only that one.
-    fn tb_mark_target(&mut self, cx: &mut Cx, target: Option<usize>) {
+    /// Show what the drop would be, and only that: the square it would
+    /// trade with lit, or the bar in the gap it would go into, never both,
+    /// because a hand told two things at once cannot know which it gets.
+    /// The bar is drawn by the carried square, whose overlay floats over
+    /// the row.
+    fn tb_mark_drop(&mut self, cx: &mut Cx, drop: Option<TbDrop>) {
+        let target = match drop {
+            Some(TbDrop::Swap(to)) => Some(to),
+            _ => None,
+        };
+        let insert = match drop {
+            Some(TbDrop::Insert(point)) => Some(point),
+            _ => None,
+        };
         self.tb_color_target = target;
-        for (which, control) in self.tb_color_controls().into_iter().enumerate() {
+        self.tb_color_insert = insert;
+        let controls = self.tb_color_controls();
+        let squares: Vec<Rect> = controls.iter().map(|c| c.area().rect(cx)).collect();
+        let bar = insert.zip(<[Rect; 4]>::try_from(squares).ok()).map(|(point, squares)| tb_insert_bar(&squares, point));
+        let carried = self.tb_color_carried;
+        for (which, control) in controls.into_iter().enumerate() {
             if let Some(mut pick) = control.borrow_mut::<FabColorPick>() {
                 pick.set_drop_target(cx, target == Some(which));
+                pick.set_insert_bar(cx, if carried == Some(which) { bar } else { None });
             }
         }
         self.redraw_panel(cx);
@@ -24620,6 +24756,11 @@ line two");
         /// with no event loop here nothing else ends it, and a square still
         /// holding the pointer would hear the next carry's moves as its own.
         down: Event,
+        /// The square pressed. A frame drawn mid-carry moves the square to a
+        /// new area and the capture with it, so the area the press was
+        /// claimed by no longer names the capture, and the square's area as
+        /// it is now has to be let go as well.
+        which: usize,
     }
 
     impl Carry {
@@ -24645,7 +24786,7 @@ line two");
                 time: 5.0,
             });
             Self::send(cx, panel, head, &down);
-            Carry { at, time: 5.0, down }
+            Carry { at, time: 5.0, down, which }
         }
 
         fn move_to(&mut self, cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, at: Vec2d) {
@@ -24682,6 +24823,13 @@ line two");
                 let taken = e.handled.get();
                 self.down.unhandle(cx, &taken);
             }
+            let square = head
+                .child(live_id!(tb_body))
+                .child(live_id!(tb_seed_row))
+                .child(TB_COLOR_IDS[self.which])
+                .child(live_id!(tb_color))
+                .area();
+            self.down.unhandle(cx, &square);
             cx.fingers.first_mouse_button = None;
         }
     }
@@ -24890,6 +25038,222 @@ line two");
         let before = &src[..at];
         let control = before.rfind("tb_color := FabColorPick {").expect("the carry is not on the builder's colour");
         assert!(at - control < 200, "the carry is declared on something other than the builder's colour");
+    }
+
+    fn a_square_rect(cx: &Cx, head: &WidgetRef, which: usize) -> Rect {
+        head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(TB_COLOR_IDS[which]).child(live_id!(tb_color)).area().rect(cx)
+    }
+
+    fn the_four_squares(cx: &Cx, head: &WidgetRef) -> [Rect; 4] {
+        [0, 1, 2, 3].map(|which| a_square_rect(cx, head, which))
+    }
+
+    /// A point in insertion point `point`'s zone: the middle of the gap, or,
+    /// with `on_band`, a tenth of a square into the neighbour after it (the
+    /// one before it for the point after the last), so both halves of the
+    /// zone are aimed at.
+    fn an_insertion_point(cx: &Cx, head: &WidgetRef, point: usize, on_band: bool) -> Vec2d {
+        let squares = the_four_squares(cx, head);
+        let y = squares[0].pos.y + squares[0].size.y * 0.5;
+        let right = |which: usize| squares[which].pos.x + squares[which].size.x;
+        let x = match (point, on_band) {
+            (0, false) => squares[0].pos.x - 1.0,
+            (4, false) => right(3) + 1.0,
+            (4, true) => right(3) - squares[3].size.x * 0.1,
+            (_, false) => (right(point - 1) + squares[point].pos.x) * 0.5,
+            (_, true) => squares[point].pos.x + squares[point].size.x * 0.1,
+        };
+        dvec2(x, y)
+    }
+
+    /// Which squares are lit as a place to trade with, and the bar the
+    /// carried square stands, if any.
+    fn what_the_row_shows(cx: &Cx, head: &WidgetRef) -> (Vec<usize>, Vec<Rect>) {
+        let picks: Vec<WidgetRef> = TB_COLOR_IDS
+            .iter()
+            .map(|id| head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(*id).child(live_id!(tb_color)))
+            .collect();
+        let lit = (0..4).filter(|w| picks[*w].borrow::<FabColorPick>().unwrap().is_drop_target()).collect();
+        let bars = picks.iter().filter_map(|p| p.borrow::<FabColorPick>().unwrap().insert_bar()).collect();
+        (lit, bars)
+    }
+
+    /// A colour let go in a gap, in front of the first or after the last
+    /// moves there, and every colour between its old place and the new one
+    /// shifts one role to close up behind it. The names stay put. While it
+    /// is carried the gap shows a bar and no square is lit; the drop goes in
+    /// at once as the person's own palette, and the carousel is grown again
+    /// only when the primary changed.
+    #[test]
+    fn a_colour_dropped_in_a_gap_moves_there_and_the_rest_close_up() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+
+        // (carried, insertion point, the new order as old indices, why)
+        let cases: [(usize, usize, [usize; 4], &str); 8] = [
+            (3, 0, [3, 0, 1, 2], "the surface in front of the first is the primary, and the three it passed shift right"),
+            (0, 4, [1, 2, 3, 0], "the primary after the last is the surface, and the other three shift left"),
+            (0, 2, [1, 0, 2, 3], "the primary between the secondary and the tertiary is the secondary"),
+            (0, 3, [1, 2, 0, 3], "the primary between the tertiary and the surface is the tertiary"),
+            (3, 1, [0, 3, 1, 2], "the surface between the primary and the secondary is the secondary"),
+            (1, 3, [0, 2, 1, 3], "the secondary between the tertiary and the surface is the tertiary"),
+            (2, 0, [2, 0, 1, 3], "the tertiary in front of the first is the primary"),
+            (1, 4, [0, 2, 3, 1], "the secondary after the last is the surface"),
+        ];
+        for (round, (from, point, order, why)) in cases.into_iter().enumerate() {
+            let was = panel.tb_builder.params().palette();
+            let rebuilt = panel.tb_builder.rebuilds();
+            panel.tb_apply_due = false;
+            panel.tb_suggest_due = false;
+            let mut hand = Carry::down(&mut cx, &mut panel, &head, from);
+            hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
+            assert_eq!(panel.tb_color_carried, Some(from), "{why}: the carry never started");
+            let there = an_insertion_point(&cx, &head, point, round % 2 == 1);
+            hand.move_to(&mut cx, &mut panel, &head, there);
+            assert_eq!(panel.tb_color_insert, Some(point), "{why}: the gap under the pointer is not the one marked");
+            assert_eq!(panel.tb_color_target, None, "{why}: a square is lit over a gap");
+            let (lit, bars) = what_the_row_shows(&cx, &head);
+            assert!(lit.is_empty(), "{why}: squares {lit:?} lit over a gap");
+            assert_eq!(bars.len(), 1, "{why}: {} insertion bars over one gap", bars.len());
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+            assert!(!panel.tb_apply_due, "{why}: a colour still being carried asked for an install");
+            assert_eq!(panel.tb_builder.params().palette(), was, "{why}: the palette moved before the drop");
+            hand.up(&mut cx, &mut panel, &head);
+
+            let now = panel.tb_builder.params().palette();
+            assert_eq!(now, order.map(|old| was[old]), "{why}");
+            assert_eq!((panel.tb_color_carried, panel.tb_color_insert), (None, None), "{why}: the drop left the carry marked");
+            assert!(what_the_row_shows(&cx, &head).1.is_empty(), "{why}: the bar outlived the drop");
+            assert!(panel.tb_apply_due && panel.tb_apply_at_once, "{why}: the drop is waiting for a settle nobody is dragging");
+            assert_eq!(panel.tb_suggest_due, order[0] != 0, "{why}: the carousel's regrowth does not follow the primary");
+            assert_eq!(panel.tb_chosen_index(), None, "{why}: a reordered palette left its chip outlined");
+            the_palette_lands(&mut cx, &mut panel, 1.0 + round as f64);
+            assert_eq!(panel.tb_builder.rebuilds(), rebuilt + 1, "{why}: the move did not go in once");
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+        }
+    }
+
+    /// The two insertion points on either side of a colour's own square
+    /// would put it back where it is: they mark nothing, and a drop there
+    /// changes nothing and installs nothing.
+    #[test]
+    fn the_gaps_beside_a_colours_own_square_change_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let was = panel.tb_builder.params().palette();
+        panel.tb_apply_due = false;
+        for from in 0..4 {
+            for point in [from, from + 1] {
+                for on_band in [false, true] {
+                    let mut hand = Carry::down(&mut cx, &mut panel, &head, from);
+                    hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
+                    let there = an_insertion_point(&cx, &head, point, on_band);
+                    hand.move_to(&mut cx, &mut panel, &head, there);
+                    let how = format!("square {from}, point {point}, band {on_band}");
+                    assert_eq!((panel.tb_color_target, panel.tb_color_insert), (None, None), "{how}: a drop that changes nothing is marked");
+                    assert_eq!(what_the_row_shows(&cx, &head), (vec![], vec![]), "{how}");
+                    hand.up(&mut cx, &mut panel, &head);
+                    assert_eq!(panel.tb_builder.params().palette(), was, "{how}: the order moved");
+                    assert!(!panel.tb_apply_due, "{how}: a drop that changed nothing asked for an install");
+                    draw_the_theme_head(&mut cx, &mut panel, &head);
+                }
+            }
+        }
+    }
+
+    /// The surprise button ends the row but is not a place in the list: a
+    /// colour let go on it is a cancel, and the zone after the last square
+    /// stops at its left edge.
+    #[test]
+    fn the_surprise_button_is_not_a_drop_target() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let was = panel.tb_builder.params().palette();
+        panel.tb_apply_due = false;
+        let surprise = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_random)).area().rect(&cx);
+        assert!(surprise.size.x > 0.0, "the surprise was never drawn");
+        let y = a_square_middle(&cx, &head, 0).y;
+
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 0);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(surprise.pos.x - 0.5, y));
+        assert_eq!(panel.tb_color_insert, Some(4), "the zone after the last stops short of the surprise's edge");
+        for x in [surprise.pos.x, surprise.pos.x + surprise.size.x * 0.5, surprise.pos.x + surprise.size.x - 1.0] {
+            hand.move_to(&mut cx, &mut panel, &head, dvec2(x, y));
+            assert_eq!((panel.tb_color_target, panel.tb_color_insert), (None, None), "the surprise at {x} is a place to drop");
+            assert_eq!(what_the_row_shows(&cx, &head), (vec![], vec![]), "the surprise at {x} shows a drop");
+        }
+        hand.up(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_builder.params().palette(), was, "a drop on the surprise moved a colour");
+        assert!(!panel.tb_apply_due, "a drop on the surprise asked for an install");
+    }
+
+    /// Swept across the whole row a point at a time, the carry shows one
+    /// thing or nothing: a lit square or a bar, never both. The bar stands
+    /// in a gap and touches no square, and the zones come in the row's
+    /// order with a fifth of each square going to the gap beside it.
+    #[test]
+    fn the_insertion_bar_and_the_lit_square_are_never_shown_together() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let squares = the_four_squares(&cx, &head);
+        let surprise = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(live_id!(tb_random)).area().rect(&cx);
+        let y = squares[0].pos.y + squares[0].size.y * 0.5;
+
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 1);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
+        let mut seen: Vec<Option<TbDrop>> = Vec::new();
+        let mut x = squares[0].pos.x - 30.0;
+        while x < surprise.pos.x + surprise.size.x + 10.0 {
+            hand.move_to(&mut cx, &mut panel, &head, dvec2(x, y));
+            let (lit, bars) = what_the_row_shows(&cx, &head);
+            assert!(lit.is_empty() || bars.is_empty(), "at {x} square {lit:?} is lit and a bar stands");
+            assert!(lit.len() <= 1 && bars.len() <= 1, "at {x}: {lit:?} lit, {} bars", bars.len());
+            for bar in &bars {
+                for (which, square) in squares.iter().enumerate() {
+                    assert!(!bar.intersects(*square), "at {x} the bar {bar:?} runs into square {which} {square:?}");
+                }
+                assert!(bar.size.y > squares[0].size.y, "the bar is no taller than the squares");
+            }
+            let shown = match (panel.tb_color_target, panel.tb_color_insert) {
+                (Some(_), Some(_)) => panic!("at {x} the carry is both a trade and a move"),
+                (Some(to), None) => Some(TbDrop::Swap(to)),
+                (None, Some(point)) => Some(TbDrop::Insert(point)),
+                (None, None) => None,
+            };
+            assert_eq!(lit.first().copied(), panel.tb_color_target, "at {x} the lit square is not the marked one");
+            assert_eq!(bars.len(), panel.tb_color_insert.iter().count(), "at {x} the bar does not follow the marked gap");
+            if seen.last() != Some(&shown) {
+                seen.push(shown);
+            }
+            x += 1.0;
+        }
+        hand.up(&mut cx, &mut panel, &head);
+        use TbDrop::*;
+        assert_eq!(
+            seen,
+            // Its own square and the gaps either side of it are one
+            // stretch of nothing.
+            vec![None, Some(Insert(0)), Some(Swap(0)), None, Some(Swap(2)), Some(Insert(3)), Some(Swap(3)), Some(Insert(4)), None],
+            "the zones across the row, carrying the secondary"
+        );
+
+        // A fifth of a square to the gap: just inside it is still the gap,
+        // just past it is the square.
+        let w = squares[2].size.x;
+        let top = squares[0].pos.y;
+        assert_eq!(tb_drop_zone(&squares, top, surprise.pos.x, 0, dvec2(squares[2].pos.x + w * 0.19, y)), Some(Insert(2)));
+        assert_eq!(tb_drop_zone(&squares, top, surprise.pos.x, 0, dvec2(squares[2].pos.x + w * 0.21, y)), Some(Swap(2)));
+        assert_eq!(tb_drop_zone(&squares, top, surprise.pos.x, 0, dvec2(squares[1].pos.x + squares[1].size.x - w * 0.19, y)), Some(Insert(2)));
+        assert_eq!(tb_drop_zone(&squares, top, surprise.pos.x, 0, dvec2(squares[2].pos.x + w * 0.5, y + 40.0)), None, "below the row is a drop");
     }
 
     /// A press on the colour popover where it hangs over the app is the
