@@ -1239,8 +1239,9 @@ const ACCENTED: &[Accented] = {
             from: Primary,
             reaches: Ink { alt: OnPrimaryContainer, on: BOXES, need: LEGIBLE },
         },
-        // The value fill: a slider's filled part, a progress bar, the wheel
-        // and time pickers' amount.
+        // The value fill: a slider's filled part, a progress bar, a wave.
+        // Nothing is written on it (see `WRITTEN`), which is why it may be
+        // chosen against its track alone.
         Accented {
             tokens: &[
                 "color_val", "color_val_hover", "color_val_focus", "color_val_drag",
@@ -1263,8 +1264,9 @@ const ACCENTED: &[Accented] = {
         },
         // The ground under a selected row: a drop down's chosen item, a menu
         // row, a combo box, a file tree's selected file, and the on-state of
-        // anything built out of a radio. `color_highlight` is the file
-        // tree's own name for the same thing.
+        // anything built out of a radio, the wheel picker's band and the
+        // time picker's chosen plate. `color_highlight` is the file tree's
+        // own name for the same thing.
         Accented {
             tokens: &["color_outset_active", "color_outset_1_active", "color_outset_2_active", "color_highlight"],
             from: SecondaryContainer,
@@ -1372,6 +1374,221 @@ const ACCENTED: &[Accented] = {
     ]
 };
 
+/// Words a widget writes on a ground: which widget files, the grounds -- one
+/// per state the words are drawn in, the ones a pointer, a focus or a press
+/// puts up as well as the one at rest -- the ink, and the bar the words
+/// answer to.
+struct Written {
+    widgets: &'static [&'static str],
+    grounds: &'static [&'static str],
+    ink: &'static str,
+    need: f64,
+}
+
+/// The bar disabled words answer to. Lower than the one for words, because
+/// a disabled control says it cannot be used partly by being quieter, and
+/// the library holds none of its own themes to more; not nothing, because
+/// the words still say what the control is.
+const DISABLED_WORDS: f64 = LEGIBLE;
+
+/// Every place a widget in this crate writes words on a ground the mapping
+/// colours, state by state.
+///
+/// [`ACCENTED`] was written from the grounds' side: each row that makes a
+/// ground names the ONE ink it gives way to. That is enough only where one
+/// ink is ever written on it, and it was not. The WheelPicker wrote the body
+/// ink on a slider's value fill, which the mapping pushes dark on a light
+/// page to stand off its track and holds to nothing else, because nothing is
+/// ever written on a fill -- and the digits in the band went dark on dark,
+/// and darker again under the pointer. So this is the other side: what the
+/// widgets actually draw, read off their templates, one row per ink with
+/// every state's ground in it. A build measures every pair here, and every
+/// ground the mapping leans or chooses gives way to every ink written on it
+/// and not only to its row's own (see [`accent_pins`]).
+///
+/// `written_words_are_all_measured` holds the list to the widget files: a
+/// file that draws text and reads an accented ground has to have that ground
+/// either here or in [`UNWRITTEN`], with the reason, so a widget that starts
+/// writing on a coloured ground cannot do it unmeasured.
+///
+/// The disabled grounds are not accented -- the mapping leaves them at the
+/// base theme's washes -- but they are in the list all the same, because the
+/// page under them is the builder's, and a disabled label that reads on the
+/// house page need not read on a page the lightness slider moved.
+const WRITTEN: &[Written] = {
+    /// The faces a label is written in the middle of.
+    const FACES: &[&str] = &["button.rs", "drop_down.rs", "combo_box.rs", "drop_down2.rs"];
+    /// The fields a value is typed or shown in.
+    const FIELDS: &[&str] =
+        &["text_input.rs", "number_field.rs", "tag_field.rs", "tree_select.rs", "value_input.rs", "dropzone.rs"];
+    /// A chosen row, in every widget that marks one: the menus and lists, the
+    /// file tree, a radio drawn as a tab, the time picker's plate and the
+    /// wheel picker's band.
+    const CHOSEN: &[&str] = &[
+        "combo_box.rs", "drop_down2.rs", "popup_menu.rs", "file_tree.rs", "radio_button.rs",
+        "time_picker.rs", "wheel_picker.rs",
+    ];
+    &[
+        // ------------------------------------------ the faces of the controls
+        Written {
+            widgets: FACES,
+            grounds: &["color_outset", "color_outset_1", "color_outset_2"],
+            ink: "color_label_inner",
+            need: READABLE,
+        },
+        Written {
+            widgets: FACES,
+            grounds: &["color_outset_focus", "color_outset_1_focus", "color_outset_2_focus"],
+            ink: "color_label_inner_focus",
+            need: READABLE,
+        },
+        Written {
+            widgets: &["button.rs", "drop_down.rs", "combo_box.rs", "drop_down2.rs", "popup_menu.rs"],
+            grounds: &["color_outset_hover", "color_outset_1_hover", "color_outset_2_hover"],
+            ink: "color_label_inner_hover",
+            need: READABLE,
+        },
+        Written {
+            widgets: FACES,
+            grounds: &["color_outset_down", "color_outset_1_down", "color_outset_2_down"],
+            ink: "color_label_inner_down",
+            need: READABLE,
+        },
+        // A radio drawn as a tab writes its label on the field at rest.
+        Written { widgets: &["radio_button.rs"], grounds: &["color_inset"], ink: "color_label_inner", need: READABLE },
+        // ----------------------------------------------------- a chosen row
+        Written {
+            widgets: CHOSEN,
+            grounds: &["color_outset_active", "color_outset_1_active", "color_outset_2_active", "color_highlight"],
+            ink: "color_label_inner_active",
+            need: READABLE,
+        },
+        // ------------------------------------------------------- the fields
+        Written { widgets: FIELDS, grounds: &["color_inset"], ink: "color_text", need: READABLE },
+        Written { widgets: FIELDS, grounds: &["color_inset_hover"], ink: "color_text_hover", need: READABLE },
+        Written { widgets: FIELDS, grounds: &["color_inset_focus"], ink: "color_text_focus", need: READABLE },
+        Written { widgets: &["text_input.rs"], grounds: &["color_inset_down"], ink: "color_text_down", need: READABLE },
+        Written {
+            widgets: &["text_input.rs"],
+            grounds: &["color_inset_empty"],
+            ink: "color_text_placeholder",
+            need: LEGIBLE,
+        },
+        // The quieter line a drop zone, a tree select and a waveform write
+        // under or beside their main words.
+        Written {
+            widgets: &["dropzone.rs", "tree_select.rs", "waveform.rs"],
+            grounds: &["color_inset", "color_inset_hover", "color_inset_focus", "color_inset_drag"],
+            ink: "color_text_meta",
+            need: LEGIBLE,
+        },
+        // A slider's value, where the slider draws its field round it.
+        Written { widgets: &["slider.rs"], grounds: &["color_inset"], ink: "color_text_val", need: READABLE },
+        Written { widgets: &["slider.rs"], grounds: &["color_inset_hover"], ink: "color_text_hover", need: READABLE },
+        Written { widgets: &["slider.rs"], grounds: &["color_inset_focus"], ink: "color_text_focus", need: READABLE },
+        Written { widgets: &["slider.rs"], grounds: &["color_inset_drag"], ink: "color_text_down", need: READABLE },
+        // The time picker's values that were not chosen, at rest and under
+        // the pointer, and the wheel picker's rows away from its band.
+        Written {
+            widgets: &["time_picker.rs"],
+            grounds: &["color_inset", "color_inset_hover"],
+            ink: "color_label_inner_inactive",
+            need: READABLE,
+        },
+        Written {
+            widgets: &["wheel_picker.rs"],
+            grounds: &["color_inset", "color_inset_hover", "color_inset_focus", "color_inset_drag"],
+            ink: "color_label_outer_off",
+            need: LEGIBLE,
+        },
+        // ------------------------------------------------- selected words
+        Written {
+            widgets: &["text_input.rs", "rich_text.rs", "text_flow.rs"],
+            grounds: &["color_selection_hover", "color_selection_focus", "color_selection_down"],
+            ink: "color_text",
+            need: READABLE,
+        },
+        Written {
+            widgets: &["html.rs", "markdown.rs"],
+            grounds: &["color_selection_focus"],
+            ink: "color_label_inner",
+            need: READABLE,
+        },
+        // The selection inside a slider's value, which is only ever up while
+        // the value has the focus.
+        Written {
+            widgets: &["slider.rs"],
+            grounds: &["color_bg_highlight_inline"],
+            ink: "color_text_focus",
+            need: READABLE,
+        },
+        // ------------------------------------------------------ disabled
+        Written {
+            widgets: &["popup_menu.rs"],
+            grounds: &["color_outset_disabled"],
+            ink: "color_label_inner_disabled",
+            need: DISABLED_WORDS,
+        },
+        Written {
+            widgets: &["wheel_picker.rs"],
+            grounds: &["color_outset_disabled"],
+            ink: "color_label_inner",
+            need: DISABLED_WORDS,
+        },
+        Written {
+            widgets: &["time_picker.rs"],
+            grounds: &["color_outset_disabled"],
+            ink: "color_label_inner_inactive",
+            need: DISABLED_WORDS,
+        },
+    ]
+};
+
+/// The accented grounds a widget that draws words reads and writes none of
+/// them on, each with why: the gate test's other half. A ground belongs here
+/// only where the words really are somewhere else.
+const UNWRITTEN: &[(&str, &[&str], &str)] = &[
+    (
+        "check_box.rs",
+        &["color_inset", "color_inset_active", "color_inset_down", "color_inset_focus", "color_inset_hover"],
+        "the box; its label is written beside it, on the page",
+    ),
+    (
+        "radio_button.rs",
+        &["color_inset_active", "color_inset_down", "color_inset_focus", "color_inset_hover"],
+        "the round radio's box; its label is beside it, on the page",
+    ),
+    (
+        "carousel.rs",
+        &["color_inset", "color_inset_drag", "color_inset_focus", "color_inset_hover"],
+        "the frame round the cards; the words are on the cards",
+    ),
+    ("kanban.rs", &["color_drag_target_preview"], "a veil laid over the cards and seen through, not a ground"),
+    (
+        "range_slider.rs",
+        &[
+            "color_inset", "color_inset_drag", "color_inset_focus", "color_inset_hover",
+            "color_val", "color_val_drag", "color_val_focus", "color_val_hover",
+        ],
+        "the track and its fill; the label is outside the track, on the page",
+    ),
+    ("radio_group.rs", &["color_val_focus"], "a ring round the group, not a ground"),
+    (
+        "slider.rs",
+        &[
+            "color_val", "color_val_hover", "color_val_focus", "color_val_drag",
+            "color_val_1", "color_val_1_hover", "color_val_1_focus", "color_val_1_drag",
+            "color_val_2", "color_val_2_hover", "color_val_2_focus", "color_val_2_drag",
+        ],
+        "the value fill; the round face's readout runs over it near the top of the travel and is NOT held: slider.rs is upstream's, and a plate under the readout would change every theme's slider, so it waits on the operator",
+    ),
+    (
+        "waveform.rs",
+        &["color_val", "color_val_hover", "color_val_focus", "color_val_drag"],
+        "the wave; the region names along the lane's foot sit on a plate of the page",
+    ),
+];
+
 /// Every ground the mapping reads and every ink it protects, so that a build
 /// can resolve them once and the gate test can hold every one of them to the
 /// theme files.
@@ -1389,7 +1606,33 @@ fn accent_grounds() -> Vec<&'static str> {
             Reaches::Named | Reaches::Veil => {}
         }
     }
+    for written in WRITTEN {
+        written.grounds.iter().for_each(|key| want(key));
+        want(written.ink);
+    }
     out
+}
+
+/// A ground carried along its own lightness, keeping its hue, saturation
+/// and alpha, just far enough for every ink given to read on it at its bar,
+/// laid over the page: toward whichever end gets there in the shorter move.
+/// `None` where neither end does.
+fn stand_off(fill: u32, inks: &[(u32, f64)], page: u32) -> Option<u32> {
+    let (h, s, l) = rgb_to_hsl(fill);
+    let alpha = fill & 0xFF;
+    let at = |l: f64| (hsl_to_rgb(h, s, l) & 0xFFFF_FF00) | alpha;
+    let reads = |rgba: u32| inks.iter().all(|(ink, need)| reads_on(over(page, rgba), *ink) >= *need);
+    (1..=100)
+        .map(|step| step as f64 * 0.01)
+        .flat_map(|by| [l - by, l + by])
+        .filter(|l| (0.0..=1.0).contains(l))
+        .map(at)
+        .find(|rgba| reads(*rgba))
+}
+
+/// The inks [`WRITTEN`] says are written on a token, each with its bar.
+fn written_on(token: &str) -> impl Iterator<Item = (&'static str, f64)> + Clone + '_ {
+    WRITTEN.iter().filter(move |w| w.grounds.contains(&token)).map(|w| (w.ink, w.need))
 }
 
 /// Whether the settings name a palette that is not the house one: a
@@ -1590,7 +1833,20 @@ fn accent_pins<'a>(
                             let pins = if std::ptr::eq(under, real) { &pinned } else { &steady };
                             let grounds: Vec<u32> = on.iter().filter_map(|key| ground(pins, under, key)).collect();
                             let base = file_value(scheme, token, under.colors);
-                            let bar = accent_bar(need, base.map(|base| worst_reading(&grounds, base)));
+                            // Words are held to the bar for words, however
+                            // far short of it the base theme's own label
+                            // falls. The allowance is for marks and rings,
+                            // which a base theme draws grey on grey and a
+                            // palette only has to draw no worse; a chosen
+                            // row's label let down to the dark theme's three
+                            // to one was a secondary ink at three to one on
+                            // the secondary's own ground, which is the band
+                            // of a WheelPicker nobody could read.
+                            let bar = if need >= READABLE {
+                                need
+                            } else {
+                                accent_bar(need, base.map(|base| worst_reading(&grounds, base)))
+                            };
                             (grounds, bar)
                         };
                         let clears = |ink: u32, under: &Under| {
@@ -1648,15 +1904,23 @@ fn accent_pins<'a>(
                     Reaches::Lean { most, ink, need, waits } => {
                         let Some(base) = base else { continue };
                         let leant = |amount: f64| (vm_mix(base, source, amount) & 0xFFFF_FF00) | (base & 0xFF);
-                        let bar_on = |under: &Under| {
+                        // The row's own ink first, then every other ink a
+                        // widget writes on this token: a fill that gave way
+                        // to its label and not to the hover label or the
+                        // placeholder drawn on it too still swallowed words.
+                        let inks = std::iter::once((ink, need)).chain(written_on(token));
+                        let bar_on = |under: &Under, ink: &str, need: f64| {
                             let pins = if std::ptr::eq(under, real) { &pinned } else { &steady };
                             let ink_rgba = under.quiet.get(ink).copied().or_else(|| raw(pins, under, ink))?;
                             let bar = accent_bar(need, Some(reads_on(over(under.page, base), ink_rgba)));
                             Some((ink_rgba, bar))
                         };
-                        let Some((_, real_bar)) = bar_on(real) else { continue };
+                        let Some((_, real_bar)) = bar_on(real, ink, need) else { continue };
                         let reads = |amount: f64, under: &Under| {
-                            bar_on(under).is_none_or(|(ink_rgba, bar)| reads_on(over(under.page, leant(amount)), ink_rgba) >= bar)
+                            inks.clone().all(|(ink, need)| {
+                                bar_on(under, ink, need)
+                                    .is_none_or(|(ink_rgba, bar)| reads_on(over(under.page, leant(amount)), ink_rgba) >= bar)
+                            })
                         };
                         // As far as the lean asks, and then back off a
                         // twentieth at a time until the label on the fill
@@ -1677,6 +1941,17 @@ fn accent_pins<'a>(
                         if !repaired(ink) {
                             out.pairs.push((token.to_string(), ink.to_string(), real_bar));
                         }
+                        // And every other ink written on it, at the bar the
+                        // lean gave way to, so the reading asks what the
+                        // choice was made against.
+                        for (written, need) in written_on(token) {
+                            if written == ink || repaired(written) {
+                                continue;
+                            }
+                            if let Some((_, bar)) = bar_on(real, written, need) {
+                                out.pairs.push((token.to_string(), written.to_string(), bar));
+                            }
+                        }
                         leant(amount)
                     }
                 };
@@ -1685,6 +1960,61 @@ fn accent_pins<'a>(
                     steady.insert(token, value);
                 }
             }
+        }
+    }
+    // A chosen ground the words on it still cannot be read on. The ink row
+    // above has already done what an ink can -- the palette's own member,
+    // its other one, then the plainer of black and white -- and on some
+    // palettes even that stands a quarter short on a container of middling
+    // lightness. So the ground gives way instead: the same hue and
+    // saturation, carried lighter or darker, whichever is the shorter way,
+    // until the words on it read. A selection a person cannot read the
+    // chosen row in is worse than a selection a shade off the palette.
+    for row in ACCENTED {
+        let Reaches::Ground { .. } = row.reaches else { continue };
+        for token in row.tokens {
+            let Some(fill) = pinned.get(token).copied() else { continue };
+            let inks: Vec<(u32, f64)> = written_on(token)
+                .filter_map(|(ink, need)| raw(&pinned, real, ink).map(|rgba| (rgba, need)))
+                .collect();
+            if inks.iter().all(|(ink, need)| reads_on(over(real.page, fill), *ink) >= *need) {
+                continue;
+            }
+            if let Some(moved) = stand_off(fill, &inks, real.page) {
+                pinned.insert(token, moved);
+            }
+        }
+    }
+    // Every pair a widget writes, measured whether or not a row above chose
+    // either half of it: the reading is what says a built theme can be read,
+    // and a pair it never looks at is a pair nothing stops from failing. The
+    // bar is the row's own or what the ground the base theme gives it would
+    // manage under the same ink, whichever is lower, as for every other pair
+    // the mapping answers for.
+    for written in WRITTEN {
+        for key in written.grounds {
+            if out.pairs.iter().any(|(g, i, _)| g == key && i == written.ink) {
+                continue;
+            }
+            let (Some(_), Some(ink), Some(base)) = (
+                ground(&pinned, real, key),
+                real.quiet.get(written.ink).copied().or_else(|| raw(&pinned, real, written.ink)),
+                file_value(scheme, key, real.colors),
+            ) else {
+                continue;
+            };
+            // Asked with the quietest ink the text contrast allows, as the
+            // choices above are: a louder one only reads better on the same
+            // ground, so what holds here holds under every text contrast.
+            let chosen = ACCENTED
+                .iter()
+                .any(|row| matches!(row.reaches, Reaches::Ground { .. }) && row.tokens.contains(key));
+            let bar = if chosen {
+                written.need
+            } else {
+                accent_bar(written.need, Some(reads_on(over(real.page, base), ink)))
+            };
+            out.pairs.push((key.to_string(), written.ink.to_string(), bar));
         }
     }
     // The grounds and the inks, where the theme does not already carry one:
@@ -5638,6 +5968,245 @@ mod theme_builder_tests {
             let mine = off_the_list(&offered, OWN_LABEL);
             assert!(apart(rgb_to_hsl(mine.seeds.secondary).0, 250.0) < 1.0, "{scheme:08X?} made the grey the secondary");
             assert_eq!(rgb_to_hsl(mine.seeds.tertiary).1, 0.0, "{scheme:08X?} did not put the grey across the circle");
+        }
+    }
+
+    /// What a widget template says a property reads: the key after `theme.`
+    /// on the first line that opens with `property: `, inside the block that
+    /// opens with `within` where one is named. Read off the widget's own text
+    /// so that a test about a widget's colours is a test about the colours
+    /// the widget really draws with, and follows it when it changes.
+    fn template_token(source: &str, within: Option<&str>, property: &str) -> String {
+        let opening = format!("{property}: ");
+        let from = within.map(|block| source.find(block).expect("the block is in the template")).unwrap_or(0);
+        let line = source[from..]
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(&opening))
+            .unwrap_or_else(|| panic!("no {property} in the template"));
+        let at = line.find("theme.").unwrap_or_else(|| panic!("{property} reads no token: {line}")) + "theme.".len();
+        line[at..].chars().take_while(|c| is_key_char(*c)).collect()
+    }
+
+    /// A token of a built theme, whether the build pinned it, measured it or
+    /// left it to the base theme's file.
+    fn resolved(built: &BuiltTheme, key: &str) -> u32 {
+        file_value(built.scheme, key, &built.colors).unwrap_or_else(|| panic!("{key} has no value"))
+    }
+
+    /// Every palette the readability sweeps build, handed over one at a time
+    /// with a name for it: each rule-grown suggestion for a hue every ten
+    /// degrees and for the three greys, and each combination out of the book
+    /// a middling colour finds, on both pages, at both ends of the page's
+    /// lightness and with none, half and all of the background colour.
+    fn each_swept_palette(mut each: impl FnMut(String, &BuiltTheme)) {
+        let mut at = |label: &str, favourite: u32, dark: bool, suggestion: &Suggestion| {
+            for (saturation, lightness) in slider_ends(dark) {
+                let base = BuilderParams { saturation, lightness, ..BuilderParams::house(dark) };
+                let built = build(&suggestion.params(base));
+                each(format!("{label} for {favourite:08X} at {saturation}/{lightness}"), &built);
+            }
+        };
+        for dark in [true, false] {
+            for step in 0..36 {
+                let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
+                for suggestion in suggestions(favourite, dark) {
+                    at(&suggestion.label, favourite, dark, &suggestion);
+                }
+                let middling = hsl_to_rgb(step as f64 * 10.0, 0.55, 0.5);
+                for suggestion in book(&all_suggestions(middling, dark, &[])) {
+                    at(&suggestion.label, middling, dark, suggestion);
+                }
+            }
+            for favourite in [0x000000FFu32, 0x808080FF, 0xFFFFFFFF] {
+                for suggestion in suggestions(favourite, dark) {
+                    at(&suggestion.label, favourite, dark, &suggestion);
+                }
+            }
+        }
+    }
+
+    /// The WheelPicker's band in each state it has, as the template draws
+    /// it: the well of that state, the band laid over it, and the ink of the
+    /// row in the band, with the bar that state's words answer to. Read off
+    /// the widget's own text, so the test follows the widget when it moves.
+    fn wheel_band_states() -> Vec<(&'static str, String, String, String, f64)> {
+        let source = include_str!("wheel_picker.rs");
+        let well = |property: &str| template_token(source, Some("draw_bg +: {"), property);
+        let band = |property: &str| template_token(source, None, property);
+        let ink = template_token(source, None, "color_selected");
+        let disabled_ink = template_token(source, None, "color_selected_disabled");
+        vec![
+            ("rest", well("color"), band("band_color"), ink.clone(), READABLE),
+            ("hover", well("color_hover"), band("band_color_hover"), ink.clone(), READABLE),
+            ("focus", well("color_focus"), band("band_color_focus"), ink.clone(), READABLE),
+            ("drag", well("color_drag"), band("band_color_drag"), ink, READABLE),
+            ("disabled", well("color_disabled"), band("band_color_disabled"), disabled_ink, DISABLED_WORDS),
+        ]
+    }
+
+    /// How the ink of the row in the band reads in one state: the band laid
+    /// over the well and the well over the page, which is the colour a
+    /// person actually reads the digits against.
+    fn band_reading(built: &BuiltTheme, well: &str, band: &str, ink: &str) -> f64 {
+        let page = resolved(built, "color_bg_app");
+        let ground = over(over(page, resolved(built, well)), resolved(built, band));
+        reads_on(ground, resolved(built, ink))
+    }
+
+    /// The report that started this: a palette grown on a LIGHT page made
+    /// the WheelPicker's band a dark green and left the digits in it dark
+    /// too, and darker still under the pointer. The band borrowed the value
+    /// fill, which the mapping pushes dark to stand off its track, and wrote
+    /// the body ink on it, which nothing ever held to a fill because nothing
+    /// is ever written on one.
+    ///
+    /// So: over every palette the sweeps build, in every state the band has
+    /// -- at rest, under the pointer, focused, spinning and disabled -- the
+    /// ink of the row in the band reads on the band at the bar for words,
+    /// and a disabled one at the bar for disabled words.
+    #[test]
+    fn the_wheel_pickers_band_reads_on_every_built_palette() {
+        let states = wheel_band_states();
+        let (mut checked, mut failed) = (0, 0);
+        let mut failures: Vec<String> = Vec::new();
+        each_swept_palette(|label, built| {
+            for (state, well, band, ink, need) in &states {
+                let stands = band_reading(built, well, band, ink);
+                if stands < *need {
+                    failed += 1;
+                    if failures.len() < 12 {
+                        failures.push(format!("{state}: {ink} on {band} = {stands:.2} in {label}"));
+                    }
+                }
+            }
+            checked += 1;
+        });
+        assert!(checked > 10_000, "the sweep only built {checked} palettes");
+        assert!(failed == 0, "{failed} of {} readings fail, the first of them {failures:#?}", checked * states.len());
+    }
+
+    /// The band changes the widget everywhere, not only under a built
+    /// palette, so it has to read on the two themes the library ships as
+    /// well, in every state: at the bar, or where the theme's own chosen
+    /// row does not reach it -- the dark theme's menus write their chosen
+    /// item at about three to one -- no worse than that. That second half
+    /// is what keeps a hover from paling the band toward its digits, which
+    /// the obvious louder rung did, to 2.3.
+    #[test]
+    fn the_wheel_pickers_band_reads_on_both_base_themes() {
+        for dark in [true, false] {
+            let built = build(&BuilderParams::house(dark));
+            let states = wheel_band_states();
+            let (_, well, band, ink, _) = &states[0];
+            let selection = band_reading(&built, well, band, ink);
+            for (state, well, band, ink, need) in &states {
+                let stands = band_reading(&built, well, band, ink);
+                let bar = need.min(selection);
+                assert!(stands >= bar, "{}: {state}: {ink} on {band} = {stands:.2}, wants {bar:.2}", built.scheme.theme_name());
+            }
+        }
+    }
+
+    /// The band is a selection, so it wears what a selected row wears: the
+    /// ground a menu, a list and a file tree draw their chosen row on, and
+    /// the ink they write it in. Held here and not left to the band tests,
+    /// because a band that read well in some other pair of tokens would pass
+    /// those and still not be the theme's selection.
+    #[test]
+    fn the_wheel_pickers_band_is_drawn_in_the_selected_row_tokens() {
+        let selected = ACCENTED
+            .iter()
+            .find(|row| matches!(row.reaches, Reaches::Ground { ink: "color_label_inner_active", .. }))
+            .expect("the mapping has a selected-row ground");
+        for (state, _, band, ink, _) in wheel_band_states() {
+            if state == "disabled" {
+                assert_eq!(band, "color_outset_disabled");
+                assert_eq!(ink, "color_label_inner");
+                continue;
+            }
+            assert!(selected.tokens.contains(&band.as_str()), "{state}: {band} is not a selected-row ground");
+            assert_eq!(ink, "color_label_inner_active", "{state}");
+        }
+        // And the time picker's plate, which marks its chosen value the same way.
+        let source = include_str!("time_picker.rs");
+        let plate = template_token(source, Some("draw_row +: {"), "color_active");
+        let chosen = template_token(source, Some("draw_text_active +: {"), "color");
+        assert!(selected.tokens.contains(&plate.as_str()), "{plate}");
+        assert_eq!(chosen, "color_label_inner_active");
+    }
+
+    /// Every pair [`WRITTEN`] names is measured by a built palette's reading,
+    /// and every accented ground a widget that draws words reads is either
+    /// in [`WRITTEN`] under that widget or in [`UNWRITTEN`] with a reason.
+    /// A widget that starts writing on a coloured ground fails here until
+    /// the pair is listed -- and, being listed, measured and given way to.
+    #[test]
+    fn written_words_are_all_measured() {
+        // Which tokens are grounds: every token a row makes a ground, a lean
+        // or a veil of, and the value fills, which are drawn as inks on a
+        // track but are grounds to anything written on them.
+        let grounds: Vec<&str> = ACCENTED
+            .iter()
+            .filter(|row| {
+                matches!(row.reaches, Reaches::Ground { .. } | Reaches::Lean { .. } | Reaches::Veil)
+                    || row.tokens.iter().any(|key| key.starts_with("color_val"))
+            })
+            .flat_map(|row| row.tokens.iter().copied())
+            .collect();
+        let reads = |text: &str, key: &str| {
+            text.match_indices(&format!("theme.{key}")).any(|(at, found)| {
+                !text[at + found.len()..].chars().next().is_some_and(is_key_char)
+            })
+        };
+        // Every widget file that draws words and reads an accented ground,
+        // found on disk, so a new one cannot be missed by a list.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the widget sources") {
+            let path = entry.expect("an entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            if !name.ends_with(".rs") || name.starts_with("theme_") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let draws_words = text.contains("draw_text") || text.contains("text_style") || text.contains("DrawText");
+            if draws_words && grounds.iter().any(|key| reads(&text, key)) {
+                files.push((name, text));
+            }
+        }
+        assert!(files.len() > 20, "only {} widget files found", files.len());
+        for (file, text) in &files {
+            for key in &grounds {
+                if !reads(text, key) {
+                    continue;
+                }
+                let written = WRITTEN.iter().any(|w| w.widgets.contains(&file.as_str()) && w.grounds.contains(key));
+                let unwritten = UNWRITTEN.iter().any(|(f, keys, _)| f == file && keys.contains(key));
+                assert!(written || unwritten, "{file} reads {key}: say what it writes on it, or why it writes nothing");
+                assert!(!(written && unwritten), "{file}: {key} is both written on and not");
+            }
+        }
+        // Every name is a token both base themes declare.
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let keys = crate::theme_tokens::theme_keys(scheme.source());
+            for written in WRITTEN {
+                for key in written.grounds.iter().chain(std::iter::once(&written.ink)) {
+                    assert!(keys.contains(key), "{key} is not a key of {}", scheme.theme_name());
+                }
+            }
+        }
+        // And every pair is one a built palette's reading measures, on both
+        // pages.
+        for dark in [true, false] {
+            let params = BuilderParams { favourite: 0x2E8B57FF, ..BuilderParams::house(dark) };
+            let built = build(&params);
+            for written in WRITTEN {
+                for key in written.grounds {
+                    let measured = built.accent_pairs.iter().any(|(g, i, _)| g == key && i == written.ink);
+                    assert!(measured, "{} on {key} is not measured on a {} page", written.ink, built.scheme.theme_name());
+                }
+            }
         }
     }
 
