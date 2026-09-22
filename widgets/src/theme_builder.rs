@@ -24,6 +24,19 @@
 //! three. [`suggestions_from`] and [`all_suggestions_from`] take the slot;
 //! [`suggestions`] and [`all_suggestions`] are the primary's row.
 //!
+//! A palette need not be four colours, though, because a fourth accent is
+//! the hardest colour there is to find ([`BuilderParams::color_count`]). At
+//! three the tertiary is not chosen: it is a tonal step of the primary, its
+//! hue at another lightness, so the tick, the caret and the selection still
+//! stand apart from the primary's fill. At two the secondary is a step of the
+//! primary as well, the other way, and the interface is one accent on its
+//! surface. At one the surface goes too, to a grey with no hue at all, so
+//! the page can still be made lighter or darker and never more coloured.
+//! What is derived is not a choice, so nothing asks for it: the colours
+//! chosen before are kept under it ([`BuilderParams::chosen_palette`]) and
+//! come back when the count goes up, and the chips are grown for the count
+//! ([`all_suggestions_for`]).
+//!
 //! The house theme is the one exception, and by construction: with the
 //! palette untouched nothing is installed at all, so the roles the rule grew
 //! for the theme files stand, and they are not the house colour the colour
@@ -119,9 +132,9 @@
 
 use crate::desktop_style::{self, DesktopStyle, StyleSheet};
 use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
-use crate::theme_combinations::COMBINATIONS;
+use crate::theme_combinations::{COMBINATIONS, PAIRS};
 use crate::theme_tokens::{
-    base_theme_keys, held_pairs, hsl_to_rgb, over, reads_on, rgb_to_hsl, roles_for, roles_from_colors,
+    base_theme_keys, family_from_color, held_pairs, hsl_to_rgb, over, reads_on, rgb_to_hsl, roles_for, roles_from_colors,
     theme_module_script, theme_script_body, theme_source_with_globals, token_spec, Appearance, BlendTheme,
     RoleSource, DERIVED_ROLES, KEPT_ERROR, KEPT_WARNING, LEGIBLE, READABLE,
 };
@@ -317,7 +330,33 @@ pub struct BuilderParams {
     pub font_size: f64,
     /// `font_size_contrast`: the step between neighbouring sizes.
     pub font_contrast: f64,
+    /// How many of the four colours are chosen, one to four; four is the
+    /// default and is the builder as it always was.
+    ///
+    /// The ones not chosen are derived from the primary, never asked for:
+    /// at three the tertiary, at two the secondary and the tertiary, and at
+    /// one the surface as well, which is then a grey (see
+    /// [`BuilderParams::palette`]). They are derived rather than dropped,
+    /// because every token the mapping pins still wants a family, and they
+    /// are derived rather than stored, so the colours a person chose before
+    /// stay in [`seeds`](BuilderParams::seeds) under them and come back the
+    /// moment the count goes up again.
+    pub color_count: usize,
 }
+
+/// The counts a palette can have, fewest first.
+pub const COLOR_COUNTS: [usize; 4] = [1, 2, 3, 4];
+
+/// How far a colour derived from the primary stands from it, as the contrast
+/// ratio between the two. Far enough that a tick on its ground or a caret by
+/// a filled button is a second colour and not the first one again, and near
+/// enough that it is still plainly the same colour a shade on.
+const TONAL_CONTRAST: f64 = 1.6;
+
+/// The lightnesses a tonal step may land on. Past these a colour is nearly
+/// black or white and its hue is gone, which is the one thing a step of the
+/// primary has to keep.
+const TONAL_RANGE: (f64, f64) = (0.12, 0.88);
 
 impl BuilderParams {
     /// The theme the library ships, in one appearance: the house colour in
@@ -344,6 +383,7 @@ impl BuilderParams {
             roundness: of("corner_radius", 2.5),
             font_size: of("font_size_base", 10.0),
             font_contrast: of("font_size_contrast", 2.5),
+            color_count: 4,
         }
     }
 
@@ -381,6 +421,7 @@ impl BuilderParams {
             roundness: within("corner_radius", self.roundness),
             font_size: within("font_size_base", self.font_size),
             font_contrast: within("font_size_contrast", self.font_contrast),
+            color_count: self.color_count.clamp(1, 4),
             ..self
         };
         let (least, most) = out.text_contrast_range();
@@ -447,11 +488,25 @@ impl BuilderParams {
     /// grew for the theme files stand, and those are what this hands back,
     /// with the house page -- a grey -- as the fourth. The moment the palette
     /// moves, the primary IS the colour picked.
+    ///
+    /// Under four colours ([`BuilderParams::color_count`]) the ones not
+    /// chosen are the ones [`derived_palette`] makes of the primary, and
+    /// this is what the theme is built from; [`BuilderParams::chosen_palette`]
+    /// is what stands under them.
     pub fn palette(&self) -> [u32; 4] {
+        derived_palette(self.chosen_palette(), self.color_count, self.dark())
+    }
+
+    /// The four colours as they were chosen, whatever the count: at four
+    /// this is [`BuilderParams::palette`], and under four the slots the count
+    /// derives still hold what the person had in them. A panel edits and
+    /// reorders these, so a colour hidden by a lower count is never
+    /// overwritten by what was derived over it.
+    pub fn chosen_palette(&self) -> [u32; 4] {
         if let Some(seeds) = self.seeds {
             return [seeds.primary, seeds.secondary, seeds.tertiary, seeds.background];
         }
-        if !palette_moved(self) {
+        if !colors_named(self) {
             let roles = roles_for(self.scheme());
             return [roles.primary.base, roles.secondary.base, roles.tertiary.base, house_page(self.scheme())];
         }
@@ -465,8 +520,9 @@ impl BuilderParams {
     /// a suggestion had named goes. The sliders and the dimensions stay.
     ///
     /// Literal colours are used as they are, moved only as far as reading
-    /// demands, so `with_palette(p).palette() == p`, and a suggestion's
-    /// settings and `with_palette(suggestion.colors)` build the same theme.
+    /// demands, so `with_palette(p).chosen_palette() == p` -- and at four
+    /// colours `palette()` too -- and a suggestion's settings and
+    /// `with_palette(suggestion.colors)` build the same theme.
     pub fn with_palette(self, palette: [u32; 4]) -> Self {
         let [primary, secondary, tertiary, background] = palette.map(|color| color | 0xFF);
         Self {
@@ -1660,9 +1716,154 @@ fn written_on(token: &str) -> impl Iterator<Item = (&'static str, f64)> + Clone 
 /// which is what [`ThemeBuilder::apply`] promises and what the three house
 /// tests hold it to. The two background sliders are not in it: they move
 /// the grounds, and the grounds are not the accents.
+///
+/// A count under four moves it as well: its derived colours are the
+/// primary's steps and not the house families, so there is nothing of the
+/// house palette left to stand.
 fn palette_moved(params: &BuilderParams) -> bool {
+    colors_named(params) || params.color_count < 4
+}
+
+/// Whether the four colours themselves were moved off the house ones: a
+/// favourite, a harmony, or colours named. [`palette_moved`] without the
+/// count, which is what decides what stands UNDER a count.
+fn colors_named(params: &BuilderParams) -> bool {
     let house = SeedColors::HOUSE.primary;
     (params.favourite | 0xFF) != (house | 0xFF) || params.harmony != Harmony::House || params.seeds.is_some()
+}
+
+/// The palette a count makes of four chosen colours: at four the colours
+/// as they are, and under it the slots [`SeedSlot::chosen_at`] leaves out
+/// derived from the primary.
+///
+/// * The tertiary, at three and below, is a tonal step of the primary, AWAY
+///   from the page -- lighter on a dark one, darker on a light one -- where
+///   the band below has room for it, so the colour of what is pointed out,
+///   the tick among it, stands off the page at least as well as the primary
+///   does and apart from the primary's fill.
+/// * The secondary, at two and below, is a step the other way, so a ticked
+///   box's ground and the tick on it are two lightnesses of the one hue and
+///   never the same colour.
+/// * The surface, at one, is the grey of the appearance's house page: no
+///   hue, so the saturation slider has nothing to bring up, and the
+///   lightness slider still carries the page from dark to light.
+///
+/// Same hue and saturation as the primary, HSL lightness alone moved: a
+/// step is the primary a shade on, and a family grown from it is the
+/// primary's family in another voice.
+///
+/// The steps are taken from the primary AS IT WILL READ, and inside the band
+/// of lightness the rule leaves a colour of that hue alone in, because the
+/// rule moves any accent that cannot be seen off the page -- and a step
+/// toward the page from a primary already at the edge would be carried
+/// straight back onto the primary, two families of one colour. A step is
+/// measured in contrast, [`TONAL_CONTRAST`] of it, and not in lightness: a
+/// yellow a fifth lighter is hardly a different yellow, a blue a fifth
+/// lighter is another blue. Where a side of the band is too short for a
+/// whole step it is shortened to fit, and where one side is short the two
+/// may both go the other way, one step and two, whichever leaves the three
+/// colours furthest apart. What comes out needs no moving, and reads as
+/// every chosen colour does.
+fn derived_palette(chosen: [u32; 4], count: usize, dark: bool) -> [u32; 4] {
+    let count = count.clamp(1, 4);
+    if count == 4 {
+        return chosen;
+    }
+    let [primary, secondary, _, surface] = chosen;
+    let primary = primary | 0xFF;
+    let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+    let reference = house_page(scheme);
+    let (hue, sat, _) = rgb_to_hsl(primary);
+    let (low, high) = TONAL_RANGE;
+    let lightness = |color: u32| rgb_to_hsl(color | 0xFF).2;
+    // Where the primary will stand, and the page's end of the band: the
+    // nearest the page a colour of this hue is let stand.
+    let at = lightness(family_from_color(scheme, primary, reference).base);
+    let away = if dark { 1.0 } else { -1.0 };
+    let (edge_from, ink_end) = if dark { (low, high) } else { (high, low) };
+    let page_end = lightness(family_from_color(scheme, hsl_to_rgb(hue, sat, edge_from), reference).base);
+    // How far the band runs each way from the primary, in lightness, and a
+    // colour `along` it: toward the ink where `along` is positive.
+    let toward_ink = ((ink_end - at) * away).max(0.0);
+    let toward_page = ((at - page_end) * away).max(0.0);
+    let step = |along: f64| hsl_to_rgb(hue, sat, (at + away * along).clamp(low, high));
+    // The place `want` of contrast on from `from`, going `dir` (+1 toward the
+    // ink, -1 toward the page) no further than `end`. Contrast only grows
+    // with the distance at one hue and saturation, so halving finds it.
+    let reach = |from: f64, dir: f64, end: f64, want: f64| {
+        let room = (end - from) * dir;
+        if room <= 0.0 {
+            return from;
+        }
+        if reads_on(step(from), step(end)) <= want {
+            return end;
+        }
+        let (mut near, mut far) = (0.0f64, room);
+        for _ in 0..30 {
+            let middle = (near + far) / 2.0;
+            if reads_on(step(from), step(from + dir * middle)) < want {
+                near = middle;
+            } else {
+                far = middle;
+            }
+        }
+        from + dir * far
+    };
+    let (ink_end, page_end) = (toward_ink, -toward_page);
+    // What the whole of each side stands off the primary: two steps on one
+    // side share it, each taking its square root.
+    let (ink_room, page_room) = (reads_on(step(0.0), step(ink_end)), reads_on(step(0.0), step(page_end)));
+    let one = |dir: f64| {
+        let end = if dir > 0.0 { ink_end } else { page_end };
+        reach(0.0, dir, end, TONAL_CONTRAST)
+    };
+    let two = |dir: f64| {
+        let (end, room) = if dir > 0.0 { (ink_end, ink_room) } else { (page_end, page_room) };
+        let each = TONAL_CONTRAST.min(room.sqrt());
+        let first = reach(0.0, dir, end, each);
+        (first, reach(first, dir, end, each))
+    };
+    // How far apart the colours of a choice stand: the least contrast
+    // between any two of them, the primary included.
+    let apart = |alongs: &[f64]| {
+        let mut colors = vec![step(0.0)];
+        colors.extend(alongs.iter().map(|along| step(*along)));
+        let mut least = f64::INFINITY;
+        for a in 0..colors.len() {
+            for b in a + 1..colors.len() {
+                least = least.min(reads_on(colors[a], colors[b]));
+            }
+        }
+        least
+    };
+    let (secondary_along, tertiary_along) = if count == 3 {
+        // Toward the ink wherever that stands off the primary as well as
+        // toward the page would, since the tick has to stand off the page.
+        let (ink, page) = (one(1.0), one(-1.0));
+        if apart(&[ink]) + 1e-9 >= apart(&[page]) {
+            (0.0, ink)
+        } else {
+            (0.0, page)
+        }
+    } else {
+        // Either side of the primary -- the tick toward the ink, its ground
+        // toward the page -- or both along one side, one step and two:
+        // whichever leaves the three furthest apart, either side first.
+        let (ink_first, ink_second) = two(1.0);
+        let (page_first, page_second) = two(-1.0);
+        let choices = [(one(-1.0), one(1.0)), (ink_first, ink_second), (page_second, page_first)];
+        let mut best = choices[0];
+        for choice in &choices[1..] {
+            if apart(&[choice.0, choice.1]) > apart(&[best.0, best.1]) + 1e-9 {
+                best = *choice;
+            }
+        }
+        best
+    };
+    let tertiary = step(tertiary_along);
+    let secondary = if count <= 2 { step(secondary_along) } else { secondary | 0xFF };
+    let surface = if count == 1 { ground_swatch(BLACK, dark) } else { surface | 0xFF };
+    [primary, secondary, tertiary, surface]
 }
 
 /// How far the GROUNDS of the controls lean toward the palette's background
@@ -2668,6 +2869,7 @@ fn random_params_on(seed: u64, dark: Option<bool>) -> BuilderParams {
         roundness: stepped(0.0, 8.0),
         font_size: stepped(9.0, 12.0),
         font_contrast: stepped(1.5, 3.5),
+        color_count: 4,
     };
     let (least, most) = params.text_contrast_range();
     params.text_contrast = least + (most - least) * text_share;
@@ -2845,6 +3047,11 @@ pub struct Suggestion {
     /// Which of the four the row it stands in was grown from: the colour in
     /// that slot is the seed itself, and the chip varies the other three.
     pub grown_from: SeedSlot,
+    /// How many colours it was grown for, which is how many squares its chip
+    /// shows. Under four, the slots the count derives hold the derived
+    /// colours in [`colors`](Suggestion::colors) and in the seeds, so the
+    /// chip is exactly the palette it builds.
+    pub color_count: usize,
 }
 
 impl Suggestion {
@@ -2860,12 +3067,60 @@ impl Suggestion {
     /// its own slot. Left alone, the favourite would be a primary nobody can
     /// see any more, and a row grown from the primary afterwards would be
     /// grown from it. So such a chip makes its own primary the favourite.
+    ///
+    /// A chip grown for fewer than four colours names only the ones it
+    /// shows. The slots its count derives keep what the settings had in them,
+    /// so a person who tries a two-colour chip and goes back to four finds
+    /// their own secondary and tertiary again, not the steps the chip was
+    /// derived with.
     pub fn params(&self, base: BuilderParams) -> BuilderParams {
         let favourite = match self.grown_from {
             SeedSlot::Primary => base.favourite,
             _ => self.colors[0],
         };
-        BuilderParams { favourite, harmony: self.harmony.unwrap_or_default(), seeds: Some(self.seeds), ..base }
+        let mut seeds = self.seeds;
+        if self.color_count < 4 {
+            let kept = base.chosen_palette();
+            let slots = [&mut seeds.primary, &mut seeds.secondary, &mut seeds.tertiary, &mut seeds.background];
+            for (slot, value) in SeedSlot::ALL.into_iter().zip(slots) {
+                if !slot.chosen_at(self.color_count) {
+                    *value = kept[slot.index()] | 0xFF;
+                }
+            }
+        }
+        BuilderParams {
+            favourite,
+            harmony: self.harmony.unwrap_or_default(),
+            seeds: Some(seeds),
+            color_count: self.color_count,
+            ..base
+        }
+    }
+
+    /// Whether these settings are wearing this palette: its count, and the
+    /// colours it shows named in the slots that show them. At four that is
+    /// every seed, exactly; under four the derived slots are left out, since
+    /// they hold whatever the person chose before and no chip names them.
+    pub fn worn_by(&self, params: &BuilderParams) -> bool {
+        let Some(seeds) = params.seeds else {
+            return false;
+        };
+        if self.color_count == 4 {
+            return params.color_count == 4 && seeds == self.seeds;
+        }
+        let worn = [seeds.primary, seeds.secondary, seeds.tertiary, seeds.background];
+        let own = [self.seeds.primary, self.seeds.secondary, self.seeds.tertiary, self.seeds.background];
+        params.color_count == self.color_count
+            && SeedSlot::ALL
+                .into_iter()
+                .filter(|slot| slot.chosen_at(self.color_count))
+                .all(|slot| worn[slot.index()] == own[slot.index()])
+    }
+
+    /// The colours its chip shows, in slot order: all four at four, and
+    /// under it only the chosen ones.
+    pub fn shown(&self) -> Vec<u32> {
+        SeedSlot::chosen(self.color_count).into_iter().map(|slot| self.colors[slot.index()]).collect()
     }
 }
 
@@ -2889,6 +3144,26 @@ pub enum SeedSlot {
 impl SeedSlot {
     pub const ALL: [SeedSlot; 4] = [SeedSlot::Primary, SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface];
 
+    /// Whether this slot is chosen at a count, rather than derived from the
+    /// primary. The order they go in is the order of how hard they are to
+    /// find: the tertiary first, a third accent being what a person least
+    /// often has in mind, then the secondary, and the surface last of all,
+    /// because a page is something everyone has an opinion about. The
+    /// primary is always chosen: everything else is grown from it.
+    pub fn chosen_at(self, count: usize) -> bool {
+        match self {
+            SeedSlot::Primary => true,
+            SeedSlot::Secondary => count >= 3,
+            SeedSlot::Tertiary => count >= 4,
+            SeedSlot::Surface => count >= 2,
+        }
+    }
+
+    /// The slots chosen at a count, in slot order.
+    pub fn chosen(count: usize) -> Vec<SeedSlot> {
+        SeedSlot::ALL.into_iter().filter(|slot| slot.chosen_at(count)).collect()
+    }
+
     /// Where this slot stands in [`BuilderParams::palette`] and in
     /// [`Suggestion::colors`].
     pub fn index(self) -> usize {
@@ -2905,7 +3180,13 @@ impl SeedSlot {
     /// been grown from -- a mood chip names a calmer primary and leaves the
     /// colour picked where it was -- and the colour in that slot for the
     /// other three.
+    ///
+    /// A slot the count derives is not a seed anybody chose, and its row is
+    /// the primary's: see [`SeedSlot::chosen_at`].
     pub fn seed_of(self, params: &BuilderParams) -> u32 {
+        if !self.chosen_at(params.color_count) {
+            return SeedSlot::Primary.seed_of(params);
+        }
         match self {
             SeedSlot::Primary => params.favourite | 0xFF,
             slot => params.palette()[slot.index()] | 0xFF,
@@ -3001,6 +3282,253 @@ pub fn all_suggestions_from(slot: SeedSlot, seed: u32, dark: bool, own: &[Vec<u3
         offer(&mut out, scheme_at(slot, seed, dark, &scheme, OWN_LABEL.to_string()));
     }
     out
+}
+
+/// What a one-colour chip of the colour itself is called, and what one off
+/// the book's own colours is. The moods are called by the mood.
+pub const PLAIN_LABEL: &str = "Plain";
+/// The words before the colour in [`book_color_label`].
+pub const BOOK_COLOR_LABEL: &str = "From the book";
+
+/// What a chip of one of the book's own colours is called: the words and
+/// the colour, since the colours carry no number of their own and it is the
+/// name a chip is found again by when the page flips.
+pub fn book_color_label(color: u32) -> String {
+    format!("{BOOK_COLOR_LABEL}, #{:06X}", color >> 8)
+}
+
+/// What the book's pair at `at` in [`PAIRS`] is called: the book numbers
+/// its pairs from one, so the label is the number it carries there.
+pub fn pair_label(at: usize) -> String {
+    format!("{COMBINATION_LABEL} {}", at + 1)
+}
+
+/// [`suggestions_from`] for a palette of `count` colours: the rule's own
+/// chips, shaped to the count, each one the palette it builds.
+///
+/// * Four: [`suggestions_from`], exactly.
+/// * Three: each of those with its FARTHER companion let go, which is the
+///   one a third accent would have been -- the nearer stays as the
+///   secondary, beside the primary as it always was -- and the tertiary
+///   derived. A row grown from the secondary keeps its seed where it is.
+/// * Two: the primary and the surface of each, the rest derived. The
+///   moods and each harmony's own background are what still set the chips
+///   apart, and two that came out the same are one chip.
+/// * One: the colour itself and its three moods, each alone on a grey.
+///
+/// A slot the count does not choose cannot be a seed, and a row asked for
+/// one is the primary's.
+pub fn suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool) -> Vec<Suggestion> {
+    let count = count.clamp(1, 4);
+    let slot = if slot.chosen_at(count) { slot } else { SeedSlot::Primary };
+    if count == 4 {
+        return suggestions_from(slot, seed, dark);
+    }
+    let mut out = Vec::new();
+    if count == 1 {
+        offer(&mut out, Some(single(seed, PLAIN_LABEL.to_string(), None, Some(Harmony::House), dark)));
+        for mood in Mood::ALL {
+            offer(&mut out, Some(single(in_mood(seed, Some(mood)), capitalised(mood.label()), Some(mood), Some(Harmony::House), dark)));
+        }
+        return out;
+    }
+    for grown in suggestions_from(slot, seed, dark) {
+        let [primary, secondary, tertiary, background] = grown.colors;
+        let secondary = match slot {
+            SeedSlot::Secondary => secondary,
+            _ if hue_gap(primary, tertiary) < hue_gap(primary, secondary) - HUE_TIE => tertiary,
+            _ => secondary,
+        };
+        offer(&mut out, Some(shaped(grown, [primary, secondary, tertiary, background], count, dark)));
+    }
+    out
+}
+
+/// [`all_suggestions_from`] for a palette of `count` colours: the rule's
+/// chips from [`suggestions_for`], then the book's, then the person's own.
+///
+/// The book offers what it has for the count. Four colours are the
+/// four-colour combinations as they always were; three are its threes, an
+/// accent pair and the page; two are its PAIRS ([`PAIRS`]), an accent and a
+/// page, which is the one shape a pair is the whole of. One colour is the
+/// book's own colours, every colour that appears in its combinations, the
+/// nearest to the pick first by [`color_distance`], each alone as the
+/// primary: at one colour there is nothing to combine, and a dictionary of
+/// colours somebody chose by eye is what is left to offer.
+///
+/// A person's own scheme serves every count: a longer one is cut down by
+/// the role rule and a shorter one is filled by derivation, see
+/// [`scheme_for`].
+pub fn all_suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Suggestion> {
+    let count = count.clamp(1, 4);
+    let slot = if slot.chosen_at(count) { slot } else { SeedSlot::Primary };
+    if count == 4 {
+        return all_suggestions_from(slot, seed, dark, own);
+    }
+    let mut out = suggestions_for(count, slot, seed, dark);
+    if count == 1 {
+        let mut colors = book_colors();
+        // A stable sort, so two colours equally near stay in the book's order.
+        colors.sort_by(|a, b| {
+            color_distance(seed, *a).partial_cmp(&color_distance(seed, *b)).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for color in colors.into_iter().take(MOST_COMBINATIONS) {
+            offer(&mut out, Some(single(color, book_color_label(color), None, None, dark)));
+        }
+    } else {
+        let book: Vec<(String, Vec<u32>)> = if count == 3 {
+            // The threes are the table's first rows, so a place among them
+            // is a place in the table.
+            matched(seed, COMBINATIONS.iter().copied().take_while(|row| row.len() == 3), OWN_TOLERANCE)
+                .into_iter()
+                .map(|(at, scheme)| (combination_label(at), scheme))
+                .collect()
+        } else {
+            matched(seed, PAIRS.iter().copied(), OWN_TOLERANCE)
+                .into_iter()
+                .map(|(at, scheme)| (pair_label(at), scheme))
+                .collect()
+        };
+        for (label, scheme) in book.into_iter().take(MOST_COMBINATIONS) {
+            offer(&mut out, scheme_for(count, slot, seed, dark, &scheme, label));
+        }
+    }
+    for scheme in matching_schemes(seed, own, OWN_TOLERANCE) {
+        offer(&mut out, scheme_for(count, slot, seed, dark, &scheme, OWN_LABEL.to_string()));
+    }
+    out
+}
+
+/// Every colour the book's combinations are made of, once each, in the order
+/// the book first uses it: its pairs first, then the table of threes and
+/// fours. The book's own dictionary of colours, in other words.
+pub fn book_colors() -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for row in PAIRS.iter().chain(COMBINATIONS.iter()) {
+        for color in row.iter() {
+            if !out.contains(color) {
+                out.push(*color);
+            }
+        }
+    }
+    out
+}
+
+/// A mood's word as a chip is called by it on its own, "Muted", where the
+/// rule's chips carry it after a harmony, "Triadic, muted".
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// A chip for a palette of one colour: that colour as the primary and the
+/// rest derived from it.
+///
+/// The pick's own chips are in the house harmony, so a flip of the page
+/// finds them again by their mood, as it finds the rule's; a colour off the
+/// book is in none, and is found again by its name, as a list's is.
+fn single(primary: u32, label: String, mood: Option<Mood>, harmony: Option<Harmony>, dark: bool) -> Suggestion {
+    let primary = primary | 0xFF;
+    let colors = derived_palette([primary, primary, primary, primary], 1, dark);
+    let [primary, secondary, tertiary, background] = colors;
+    Suggestion {
+        label,
+        harmony,
+        mood,
+        colors,
+        seeds: SuggestionSeeds { primary, secondary, tertiary, background },
+        grown_from: SeedSlot::Primary,
+        color_count: 1,
+    }
+}
+
+/// A four-colour chip cut to a count: the colours it keeps chosen, the rest
+/// derived, under its own name and harmony.
+fn shaped(grown: Suggestion, chosen: [u32; 4], count: usize, dark: bool) -> Suggestion {
+    let colors = derived_palette(chosen, count, dark);
+    let [primary, secondary, tertiary, background] = colors;
+    Suggestion {
+        colors,
+        seeds: SuggestionSeeds { primary, secondary, tertiary, background },
+        color_count: count,
+        ..grown
+    }
+}
+
+/// One scheme off a list, matched and dressed as a chip for a palette of
+/// `count` colours, under three: [`scheme_at`] is the four-colour case.
+///
+/// The roles are dealt by the same rule, cut short. With the seed in the
+/// primary or the secondary, the surface is the scheme's page end -- its
+/// dark end in a dark theme, its light end in a light one -- where there is
+/// a colour to spare for it, and the accent is the colour left nearest the
+/// seed round the circle, or for a secondary seed the primary beside it.
+/// With the seed on the surface, the primary is the colour that stands off
+/// it the most, as it is at four. What a short scheme lacks is filled the
+/// way the count fills it: an accent by a tonal step of the primary, a
+/// surface by the rule's background.
+fn scheme_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: String) -> Option<Suggestion> {
+    let adjusted: Vec<u32> = adjust_scheme(seed, scheme).into_iter().map(|c| c | 0xFF).collect();
+    if adjusted.is_empty() {
+        return None;
+    }
+    let seed = seed | 0xFF;
+    let mut rest: Vec<u32> = adjusted[1..].to_vec();
+    let step_of = |primary: u32| derived_palette([primary; 4], 2, dark)[1];
+    let chosen = match slot {
+        SeedSlot::Surface => {
+            let primary = if rest.is_empty() {
+                surface_anchor(Harmony::House, seed, dark)
+            } else {
+                let mut at = 0;
+                for next in 1..rest.len() {
+                    if reads_on(seed, rest[next]) > reads_on(seed, rest[at]) + 1e-9 {
+                        at = next;
+                    }
+                }
+                rest.remove(at)
+            };
+            // A stable sort, as in `in_role_order`.
+            rest.sort_by(|a, b| {
+                hue_gap(primary, *a).partial_cmp(&hue_gap(primary, *b)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let secondary = rest.first().copied().unwrap_or_else(|| step_of(primary));
+            [primary, secondary, primary, seed]
+        }
+        _ => {
+            // An accent is wanted beside the seed at three and not at two,
+            // so the page is only taken where that leaves one.
+            let spare = if count >= 3 { rest.len() >= 2 } else { !rest.is_empty() };
+            let ground = spare.then(|| rest.remove(page_end(&rest, dark)));
+            let (primary, secondary) = match slot {
+                SeedSlot::Secondary if !rest.is_empty() => (rest.remove(partner_of(slot, seed, &rest)), seed),
+                SeedSlot::Secondary => (grown(seed, dark, Harmony::House, None).colors[1], seed),
+                _ => {
+                    let anchor = adjusted[0];
+                    rest.sort_by(|a, b| {
+                        hue_gap(anchor, *a).partial_cmp(&hue_gap(anchor, *b)).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    (anchor, rest.first().copied().unwrap_or_else(|| step_of(anchor)))
+                }
+            };
+            let background = match ground {
+                Some(ground) => ground_swatch(ground, dark),
+                None => rule_background(Harmony::House, primary, None, [primary, secondary, step_of(primary)], dark),
+            };
+            [primary, secondary, primary, background]
+        }
+    };
+    let colors = derived_palette(chosen, count, dark);
+    let [primary, secondary, tertiary, background] = colors;
+    Some(Suggestion {
+        label,
+        harmony: None,
+        mood: None,
+        colors,
+        seeds: SuggestionSeeds { primary, secondary, tertiary, background },
+        grown_from: slot,
+        color_count: count,
+    })
 }
 
 /// One more palette on the strip, unless it is one that is already on it.
@@ -3283,6 +3811,7 @@ fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Su
         colors: [primary, secondary, tertiary, background],
         seeds,
         grown_from: SeedSlot::Primary,
+        color_count: 4,
     }
 }
 
@@ -3501,6 +4030,7 @@ fn from_scheme(favourite: u32, dark: bool, scheme: &[u32], label: String) -> Opt
         colors: [primary, secondary, tertiary, background],
         seeds,
         grown_from: SeedSlot::Primary,
+        color_count: 4,
     })
 }
 
@@ -3572,6 +4102,7 @@ fn scheme_at(slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: Strin
         colors,
         seeds: SuggestionSeeds { primary, secondary, tertiary, background },
         grown_from: slot,
+        color_count: 4,
     })
 }
 
@@ -3760,9 +4291,13 @@ impl ThemeBuilder {
     /// one thing not drawn: a button marked "surprise me" that also flips a
     /// dark room to a white one is a different button, so the lightness is
     /// drawn inside the half of the slider the page is in.
+    ///
+    /// Nor is the number of colours: a person who has said they want two is
+    /// rolled two.
     pub fn randomize(&mut self, seed: u64) {
         let dark = self.params.dark();
-        self.set(random_params_on(seed, Some(dark)));
+        let color_count = self.params.color_count;
+        self.set(BuilderParams { color_count, ..random_params_on(seed, Some(dark)) });
     }
 
     /// Back to the settings the builder opened on, which takes the built
@@ -6801,6 +7336,301 @@ mod theme_builder_tests {
             }
         }
         assert!(checked > 3 * 2 * 7 * 12 * 4, "{checked}");
+    }
+
+    /// A palette with four colours named outright, all of them far apart,
+    /// at a count, on a page.
+    fn counted(count: usize, dark: bool) -> BuilderParams {
+        let four = [hsl_to_rgb(210.0, 0.75, 0.5), hsl_to_rgb(30.0, 0.8, 0.55), hsl_to_rgb(120.0, 0.6, 0.45), hsl_to_rgb(300.0, 0.6, 0.5)];
+        BuilderParams { color_count: count, ..BuilderParams::house(dark).with_palette(four) }
+    }
+
+    fn is_grey(rgba: u32) -> bool {
+        let [r, g, b] = [rgba >> 24, (rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF];
+        r == g && g == b
+    }
+
+    /// Four colours is the builder as it was: the same chips for every
+    /// slot, the same palette, and nothing derived. The digest and the house
+    /// tests hold the rest of it.
+    #[test]
+    fn four_colours_is_the_builder_as_it_always_was() {
+        let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
+        for dark in [true, false] {
+            assert_eq!(BuilderParams::house(dark).color_count, 4);
+            for slot in SeedSlot::ALL {
+                for seed in [BLUE, 0x808080FF, COMBINATIONS[130][1] | 0xFF] {
+                    assert_eq!(all_suggestions_for(4, slot, seed, dark, &own), all_suggestions_from(slot, seed, dark, &own), "{slot:?} {seed:08X}");
+                }
+            }
+            let params = counted(4, dark);
+            assert_eq!(params.palette(), params.chosen_palette());
+            assert!(!palette_moved(&BuilderParams::house(dark)));
+        }
+    }
+
+    /// One colour: the page is a grey at every setting of the saturation --
+    /// no hue in the page, the panel ground or any rung stepped off them --
+    /// and the saturation changes nothing at all, while the lightness still
+    /// carries the page from dark to light.
+    ///
+    /// Seen failing with the surface left chosen at one, where the page wore
+    /// the fourth colour's hue as far as the saturation said.
+    #[test]
+    fn one_colour_is_a_grey_page_at_any_saturation_and_the_lightness_still_moves_it() {
+        for dark in [true, false] {
+            let lightnesses = if dark { [0.05, 0.3, 0.5] } else { [0.55, 0.8, 1.0] };
+            let mut pages = Vec::new();
+            for lightness in lightnesses {
+                let at = |saturation: f64| build(&BuilderParams { saturation, lightness, ..counted(1, dark) });
+                let full = at(1.0);
+                for key in ["color_bg_app", "color_fg_app", "color_surface", "color_surface_dim", "color_surface_bright", "color_surface_container"] {
+                    let rgba = full.color(key).unwrap_or_else(|| panic!("{key} not built"));
+                    assert!(is_grey(rgba), "dark={dark} at {lightness}: {key} is {rgba:08X}, not a grey");
+                }
+                for saturation in [0.0, 0.5] {
+                    let other = at(saturation);
+                    assert_eq!(other.colors, full.colors, "dark={dark} at {lightness}: the saturation at {saturation} moved a colour");
+                    assert_eq!(other.overrides, full.overrides, "dark={dark} at {lightness}: the saturation at {saturation} moved a pin");
+                }
+                pages.push(luminance(full.color("color_bg_app").unwrap()));
+            }
+            assert!(pages[0] < pages[1] && pages[1] < pages[2], "dark={dark}: the lightness did not move the page: {pages:?}");
+        }
+    }
+
+    /// Under four colours the ones not chosen are the primary's own hue at
+    /// another lightness: a family of the built theme grown from each shares
+    /// the primary's hue and stands off its base, and at two and one the
+    /// secondary and the tertiary stand off each other too, so a tick is not
+    /// drawn in the colour of the ground it is on.
+    #[test]
+    fn the_derived_families_are_the_primarys_hue_a_step_away() {
+        let hue = |c: u32| rgb_to_hsl(c | 0xFF).0;
+        for dark in [true, false] {
+            for step in 0..12 {
+                let primary = hsl_to_rgb(step as f64 * 30.0 + 5.0, 0.75, if dark { 0.6 } else { 0.4 });
+                for count in [1, 2, 3] {
+                    let mut params = counted(count, dark);
+                    if let Some(seeds) = params.seeds.as_mut() {
+                        seeds.primary = primary;
+                    }
+                    let built = build(&params);
+                    let roles = built.roles;
+                    let what = format!("{primary:08X} at {count} dark={dark}");
+                    let mut derived = vec![("tertiary", roles.tertiary.base)];
+                    if count <= 2 {
+                        derived.push(("secondary", roles.secondary.base));
+                    }
+                    for (name, base) in &derived {
+                        assert!(apart(hue(*base), hue(roles.primary.base)) < 6.0, "{what}: the {name} {base:08X} is not the primary's hue");
+                        assert!(
+                            contrast_of(*base, roles.primary.base) > 1.3,
+                            "{what}: the {name} {base:08X} is the primary {:08X} again",
+                            roles.primary.base
+                        );
+                    }
+                    if count <= 2 {
+                        assert!(contrast_of(roles.secondary.base, roles.tertiary.base) > 1.3, "{what}: the secondary {:08X} and the tertiary {:08X} are one colour ({:08X?})", roles.secondary.base, roles.tertiary.base, params.palette());
+                    }
+                    if count == 3 {
+                        assert_eq!(params.palette()[1], params.chosen_palette()[1], "{what}: the secondary is chosen at three");
+                    }
+                }
+            }
+        }
+    }
+
+    /// What a lower count hides is still chosen under it, and comes back
+    /// whole when the count goes up again -- through the settings, and
+    /// through a chip of the lower count tried on meanwhile.
+    ///
+    /// Seen failing with a chip naming its derived colours as seeds, where a
+    /// person who tried a two-colour chip lost their own secondary and
+    /// tertiary to it.
+    #[test]
+    fn what_a_lower_count_hides_comes_back_when_it_goes_up() {
+        for dark in [true, false] {
+            let four = counted(4, dark);
+            let mine = four.chosen_palette();
+            for count in [1, 2, 3] {
+                let low = BuilderParams { color_count: count, ..four };
+                assert_ne!(low.palette(), mine, "{count}: nothing was derived");
+                assert_eq!(low.chosen_palette(), mine, "{count}: the chosen four moved");
+                assert_eq!(BuilderParams { color_count: 4, ..low }.palette(), mine, "{count}: the four did not come back");
+                let chip = all_suggestions_for(count, SeedSlot::Primary, four.favourite, dark, &[])[1].clone();
+                let on = chip.params(low);
+                assert_eq!(on.palette(), chip.colors, "{count}: the chip is not the palette it builds");
+                assert!(chip.worn_by(&on), "{count}: the chip is not worn by its own settings");
+                let back = BuilderParams { color_count: 4, ..on }.palette();
+                for slot in SeedSlot::ALL.into_iter().filter(|slot| !slot.chosen_at(count)) {
+                    assert_eq!(back[slot.index()], mine[slot.index()] | 0xFF, "{count}: the {slot:?} the chip hid did not come back");
+                }
+            }
+        }
+    }
+
+    /// Which slots each count chooses, and a seed on one it does not grows
+    /// the primary's row.
+    #[test]
+    fn a_count_chooses_its_slots_and_a_derived_one_is_no_seed() {
+        let names = |count| SeedSlot::chosen(count);
+        assert_eq!(names(4), SeedSlot::ALL.to_vec());
+        assert_eq!(names(3), [SeedSlot::Primary, SeedSlot::Secondary, SeedSlot::Surface]);
+        assert_eq!(names(2), [SeedSlot::Primary, SeedSlot::Surface]);
+        assert_eq!(names(1), [SeedSlot::Primary]);
+        let params = counted(2, true);
+        assert_eq!(SeedSlot::Tertiary.seed_of(&params), SeedSlot::Primary.seed_of(&params));
+        assert_eq!(SeedSlot::Surface.seed_of(&params), params.palette()[3] | 0xFF);
+        assert_eq!(
+            all_suggestions_for(2, SeedSlot::Secondary, BLUE, true, &[]),
+            all_suggestions_for(2, SeedSlot::Primary, BLUE, true, &[])
+        );
+    }
+
+    /// A chip shows as many squares as the palette has colours, and every
+    /// chip, whatever its source, is grown for the count it was asked for.
+    #[test]
+    fn a_chip_shows_as_many_squares_as_there_are_colours() {
+        let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF], vec![0x3366CCFF]];
+        for count in COLOR_COUNTS {
+            for slot in SeedSlot::chosen(count) {
+                for dark in [true, false] {
+                    for seed in [BLUE, 0x3366CCFF, PAIRS[4][0] | 0xFF, 0x808080FF] {
+                        let offered = all_suggestions_for(count, slot, seed, dark, &own);
+                        // A grey has no hue for a harmony to turn, and its
+                        // chips collapse into a handful.
+                        let least = if rgb_to_hsl(seed).1 < HAS_HUE { 1 } else { 4 };
+                        assert!(offered.len() >= least, "{count} {slot:?} {seed:08X}: {} chips", offered.len());
+                        for offer in &offered {
+                            assert_eq!(offer.color_count, count);
+                            assert_eq!(offer.shown().len(), count, "{count}: {} shows {:?}", offer.label, offer.shown());
+                            let seeds = offer.seeds;
+                            assert_eq!(offer.colors, [seeds.primary, seeds.secondary, seeds.tertiary, seeds.background]);
+                            assert_eq!(offer.colors, derived_palette(offer.colors, count, dark), "{count}: {} is not derived", offer.label);
+                            if slot != SeedSlot::Primary {
+                                assert_eq!(offer.colors[slot.index()], seed | 0xFF, "{count} {slot:?}: {} moved the seed", offer.label);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One colour's chips are single colours: the pick itself, then its
+    /// three moods, then the book's own colours nearest the pick, nearest
+    /// first, each alone as the primary on a grey.
+    #[test]
+    fn one_colours_chips_are_the_pick_its_moods_and_the_books_colours() {
+        for dark in [true, false] {
+            let seed = hsl_to_rgb(20.0, 0.8, 0.5);
+            let offered = all_suggestions_for(1, SeedSlot::Primary, seed, dark, &[]);
+            let firsts: Vec<(u32, Option<Mood>)> = offered[..4].iter().map(|s| (s.colors[0], s.mood)).collect();
+            assert_eq!(
+                firsts,
+                [(seed, None), (in_mood(seed, Some(Mood::Muted)), Some(Mood::Muted)), (in_mood(seed, Some(Mood::Pastel)), Some(Mood::Pastel)), (in_mood(seed, Some(Mood::Deep)), Some(Mood::Deep))]
+            );
+            assert_eq!(offered[0].label, PLAIN_LABEL);
+            let book: Vec<&Suggestion> = offered.iter().filter(|s| s.label.starts_with(BOOK_COLOR_LABEL)).collect();
+            assert!(book.len() >= 20, "{} of the book's colours", book.len());
+            let dictionary = book_colors();
+            for pair in book.windows(2) {
+                assert!(color_distance(seed, pair[0].colors[0]) <= color_distance(seed, pair[1].colors[0]) + 1e-9, "not nearest first");
+            }
+            for offer in &offered {
+                assert!(is_grey(offer.colors[3]), "{}: the page of a one-colour chip is {:08X}", offer.label, offer.colors[3]);
+                if offer.label.starts_with(BOOK_COLOR_LABEL) {
+                    assert!(dictionary.contains(&offer.colors[0]), "{} is not one of the book's colours", offer.label);
+                }
+            }
+        }
+        // The dictionary is every colour the combinations are made of, once.
+        let dictionary = book_colors();
+        assert_eq!(dictionary.len(), 159);
+        assert!(PAIRS.iter().chain(COMBINATIONS.iter()).all(|row| row.iter().all(|c| dictionary.contains(c))));
+    }
+
+    /// Two colours bring the book's pairs back, as an accent and a page, and
+    /// three its threes: each under the number it carries in the book, the
+    /// pairs one to a hundred and twenty and the threes the next hundred and
+    /// twenty. Four is the threes and fours as it always was.
+    #[test]
+    fn two_colours_offer_the_books_pairs_and_three_its_threes() {
+        let numbers = |offered: &[Suggestion]| -> Vec<usize> {
+            offered
+                .iter()
+                .filter_map(|s| s.label.strip_prefix(&format!("{COMBINATION_LABEL} ")))
+                .map(|n| n.parse().unwrap())
+                .collect()
+        };
+        let mut pairs_seen = 0;
+        for dark in [true, false] {
+            for at in [0, 17, 64, 119] {
+                let seed = PAIRS[at][0] | 0xFF;
+                let two = all_suggestions_for(2, SeedSlot::Primary, seed, dark, &[]);
+                let found = numbers(&two);
+                assert!(found.iter().all(|n| (1..=120).contains(n)), "{found:?}");
+                pairs_seen += found.len();
+                // The pair of the seed's own colour is on the strip, or a
+                // chip the same colours is, which is the one a strip keeps:
+                // the accent, and the pair's other colour as the page at the
+                // page's lightness.
+                let own = scheme_for(2, SeedSlot::Primary, seed, dark, PAIRS[at], pair_label(at)).unwrap();
+                assert_eq!(own.colors[0], seed);
+                assert_eq!(own.colors[3], ground_swatch(PAIRS[at][1], dark));
+                assert!(two.iter().any(|s| the_same_palette(s, &own)), "pair {} is not offered for its own colour: {found:?}", at + 1);
+            }
+            let seed = COMBINATIONS[3][0] | 0xFF;
+            let three = numbers(&all_suggestions_for(3, SeedSlot::Primary, seed, dark, &[]));
+            assert!(!three.is_empty() && three.iter().all(|n| (121..=240).contains(n)), "{three:?}");
+        }
+        assert!(pairs_seen > 8, "{pairs_seen}");
+    }
+
+    /// The readability sweep, for every count under four: the rule's chips,
+    /// the book's and a person's own, grown from every slot a count chooses,
+    /// for hues round the circle, a soft dark one, a colour of the book's and
+    /// a grey, on both pages at both ends of the lightness, with none and all
+    /// of the saturation -- and a palette named by hand at each count. Every
+    /// held pair meets its bar, the derived colours' included.
+    #[test]
+    fn every_theme_of_fewer_colours_reads() {
+        let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
+        let mut seeds: Vec<u32> = (0..6).map(|step| hsl_to_rgb(step as f64 * 60.0 + 10.0, 0.85, 0.5)).collect();
+        seeds.extend([hsl_to_rgb(75.0, 0.4, 0.3), PAIRS[9][0] | 0xFF, COMBINATIONS[5][0] | 0xFF, 0x808080FF, 0xFFFFFFFF, 0x000000FF]);
+        let mut checked = 0;
+        for count in [1, 2, 3] {
+            for dark in [true, false] {
+                let ends: Vec<(f64, f64)> = slider_ends(dark).into_iter().filter(|(s, _)| *s != 0.5).collect();
+                for (saturation, lightness) in ends.iter().copied() {
+                    let base = BuilderParams { saturation, lightness, ..counted(count, dark) };
+                    let built = build(&base);
+                    assert!(built.readability.holds(), "by hand at {count} {saturation}/{lightness}: {:#?}", built.readability.failures);
+                }
+                for slot in SeedSlot::chosen(count) {
+                    for seed in seeds.iter().copied() {
+                        let offered = all_suggestions_for(count, slot, seed, dark, &own);
+                        let rule = offered.iter().filter(|s| s.harmony.is_some()).step_by(2);
+                        let lists = offered.iter().filter(|s| s.harmony.is_none()).step_by(3).take(4);
+                        for suggestion in rule.chain(lists) {
+                            for (saturation, lightness) in ends.iter().copied() {
+                                let base = BuilderParams { saturation, lightness, color_count: count, ..BuilderParams::house(dark) };
+                                let built = build(&suggestion.params(base));
+                                assert!(
+                                    built.readability.holds(),
+                                    "{count} {slot:?} {seed:08X} {} at {saturation}/{lightness}: {:#?}",
+                                    suggestion.label,
+                                    built.readability.failures
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "{checked}");
     }
 }
 

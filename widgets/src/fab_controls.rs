@@ -909,6 +909,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             band_1: vec4(0.0, 0.0, 0.0, 1.0)
             band_2: vec4(0.0, 0.0, 0.0, 1.0)
             band_3: vec4(0.0, 0.0, 0.0, 1.0)
+            bands: 4.0
             hover: 0.0
             cur: 0.0
             pixel: fn() {
@@ -916,12 +917,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 2.0)
                 // The band under this fragment, chosen by three steps rather
                 // than by branching: a chip is small and every fragment of it
-                // takes this path.
+                // takes this path. A step at or past the chip's foot never
+                // fires, which is how a chip of fewer bands shows fewer.
                 let y = self.pos.y
                 let mut band = self.band_0
-                band = band.mix(self.band_1, step(0.25, y))
-                band = band.mix(self.band_2, step(0.5, y))
-                band = band.mix(self.band_3, step(0.75, y))
+                band = band.mix(self.band_1, step(1.0 / self.bands, y))
+                band = band.mix(self.band_2, step(2.0 / self.bands, y))
+                band = band.mix(self.band_3, step(3.0 / self.bands, y))
                 sdf.fill_keep(vec4(band.xyz, 1.0))
                 // The ring is how the chip in force is told from the rest,
                 // so it thickens as well as lights: a row of chips at this
@@ -937,7 +939,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
          * each, four colours stacked with the first on top, the one in force
          * outlined. A chip is four times as tall as it is wide, so each of
          * its colours is a square; the row is one chip high and as wide as
-         * it is given. */
+         * it is given. A host showing palettes of fewer colours says how
+         * many, and the chips and the row come down to that many squares. */
         mod.widgets.FabPaletteCarousel = set_type_default() do mod.widgets.FabPaletteCarouselBase{
             width: Fill
             height: 88
@@ -4373,7 +4376,7 @@ impl Widget for FabPaletteStrip {
 // ===========================================================================
 
 /// Four colours stacked in one quad, rounded as a whole: one chip of the
-/// carousel.
+/// carousel. Or fewer: `bands` says how many, and each is still a square.
 ///
 /// One quad and not four: a chip is one thing to a hand -- it is pressed, it
 /// is outlined, it is the palette -- and four boxes with a corner each would
@@ -4396,6 +4399,10 @@ pub struct DrawFabPaletteChip {
     pub band_2: Vec4f,
     #[live]
     pub band_3: Vec4f,
+    /// How many of the four bands the chip shows, one to four: a palette of
+    /// fewer colours is a shorter chip of the same squares.
+    #[live]
+    pub bands: f32,
     #[live]
     pub hover: f32,
     /// The chip the host is wearing: a ring that stays on without a pointer.
@@ -4567,6 +4574,10 @@ pub struct FabPaletteCarousel {
     visible: bool,
     #[rust]
     chips: Vec<[Vec4f; 4]>,
+    /// How many of each chip's four colours are shown, the top ones: see
+    /// [`FabPaletteCarousel::set_bands`].
+    #[rust(4)]
+    bands: usize,
     #[rust]
     chosen: Option<usize>,
     #[rust]
@@ -4611,6 +4622,30 @@ impl FabPaletteCarousel {
         self.chosen = chosen;
         self.reveal_due = chosen.is_some();
         self.repaint(cx);
+    }
+
+    /// How many colours each chip shows, one to four, the top ones of the
+    /// four it was handed. `chip_height` is a chip of all four, so a row of
+    /// palettes of two is half as tall and every colour is still a square:
+    /// the row takes the height of what it shows, and the host's layout
+    /// closes up under it rather than keeping room for colours nobody chose.
+    /// Silent when it is already that, like [`FabPaletteCarousel::set_chips`].
+    pub fn set_bands(&mut self, cx: &mut Cx, bands: usize) {
+        let bands = bands.clamp(1, 4);
+        if bands != self.bands {
+            self.bands = bands;
+            self.repaint(cx);
+        }
+    }
+
+    pub fn bands(&self) -> usize {
+        self.bands
+    }
+
+    /// The height of a chip, and of the row: `chip_height` shared over the
+    /// four and given to the bands shown.
+    fn shown_height(&self) -> f64 {
+        self.chip_height * self.bands as f64 / 4.0
     }
 
     /// Back to the first chip, for a list that is a new one rather than the
@@ -4679,7 +4714,7 @@ impl FabPaletteCarousel {
         let to = (left + self.chip_width).min(rect.pos.x + rect.size.x);
         (to > from).then(|| Rect {
             pos: dvec2(from, rect.pos.y),
-            size: dvec2(to - from, self.chip_height.min(rect.size.y)),
+            size: dvec2(to - from, self.shown_height().min(rect.size.y)),
         })
     }
 
@@ -4723,9 +4758,16 @@ impl Widget for FabPaletteCarousel {
         if !self.visible {
             return DrawStep::done();
         }
+        // The row is as tall as its chips, whatever height it was declared
+        // at: a declared height is the height of a chip of four.
+        let height = self.shown_height();
+        let walk = match walk.height {
+            Size::Fixed(_) => Walk { height: Size::Fixed(height), ..walk },
+            _ => walk,
+        };
         cx.begin_turtle(walk, Layout::flow_down());
         let width = cx.turtle().rect().size.x;
-        let rect = cx.walk_turtle(Walk::new(Size::fill(), Size::Fixed(self.chip_height)));
+        let rect = cx.walk_turtle(Walk::new(Size::fill(), Size::Fixed(height)));
         let track = self.track(rect.size.x.max(width));
         // The width is new on every draw -- the sidebar is dragged wider, a
         // list comes in shorter -- so the scroll is clamped to what it is
@@ -4745,13 +4787,14 @@ impl Widget for FabPaletteCarousel {
             self.draw_chip.band_1 = bands[1];
             self.draw_chip.band_2 = bands[2];
             self.draw_chip.band_3 = bands[3];
+            self.draw_chip.bands = self.bands as f32;
             self.draw_chip.hover = if self.hot == Some(index) { 1.0 } else { 0.0 };
             self.draw_chip.cur = if self.chosen == Some(index) { 1.0 } else { 0.0 };
             self.draw_chip.draw_abs(
                 cx,
                 Rect {
                     pos: dvec2(rect.pos.x + index as f64 * pitch - self.scroll, rect.pos.y),
-                    size: dvec2(self.chip_width, self.chip_height),
+                    size: dvec2(self.chip_width, height),
                 },
             );
         }
@@ -6871,6 +6914,9 @@ mod tests {
         for band in ["self.band_0", "self.band_1", "self.band_2", "self.band_3"] {
             assert!(chip.contains(band), "the chip no longer paints `{band}`");
         }
+        // And how many of them: a palette of fewer colours is a chip of
+        // fewer squares, and the steps between bands are read off it.
+        assert!(chip.contains("step(1.0 / self.bands, y)"), "the chip no longer shows as many bands as it is told");
         for ink in ["fab.color_border", "fab.color_focus_ring"] {
             assert!(chip.contains(ink), "the chip's ring no longer comes from `{ink}`");
         }

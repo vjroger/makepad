@@ -281,6 +281,137 @@ pub const COMBINATIONS: &[&[u32]] = &[
     &[0xC1C494FF, 0x437742FF, 0x253122FF, 0x501345FF], // 348
 ];
 
+/// The same book's two-colour combinations, numbers 1 to 120, from the same
+/// data set and under the same notice as the table above, and in the same
+/// form: the book's order, its numbers in the comments.
+///
+/// Apart from the others because they answer a different question. A pair is
+/// half of a four-colour theme, which is why the table above leaves them
+/// out; it is the whole of a two-colour one, an accent and the page it
+/// stands on, and that is what the builder offers them for.
+pub const PAIRS: &[&[u32]] = &[
+    &[0xD96629FF, 0x0093A5FF], // 1
+    &[0xF99D1BFF, 0x12354EFF], // 2
+    &[0xBB7125FF, 0xFFEFAEFF], // 3
+    &[0xC5A56EFF, 0x59256AFF], // 4
+    &[0x437742FF, 0x064F6EFF], // 5
+    &[0xF48067FF, 0x051230FF], // 6
+    &[0xF37420FF, 0xB4CDC2FF], // 7
+    &[0xC27544FF, 0xB5B1D8FF], // 8
+    &[0x642D5EFF, 0x80719EFF], // 9
+    &[0xC27544FF, 0x8B835BFF], // 10
+    &[0xEBD3A2FF, 0xA2B0ADFF], // 11
+    &[0xC5A56EFF, 0x099197FF], // 12
+    &[0xBB7125FF, 0x8C4C62FF], // 13
+    &[0xF27291FF, 0xFBE6A0FF], // 14
+    &[0x00978DFF, 0xB5B1D8FF], // 15
+    &[0x82241FFF, 0xA7D4E4FF], // 16
+    &[0xDA525DFF, 0x00B49BFF], // 17
+    &[0xD1B0A7FF, 0x4E1D4CFF], // 18
+    &[0x653514FF, 0x87C540FF], // 19
+    &[0x78CDD0FF, 0xCA92A8FF], // 20
+    &[0xF48067FF, 0x00B49BFF], // 21
+    &[0xFFF200FF, 0x1C4286FF], // 22
+    &[0xFDC57EFF, 0x9A72AAFF], // 23
+    &[0x644B1EFF, 0x8C4C62FF], // 24
+    &[0xC55347FF, 0xBCE4E5FF], // 25
+    &[0xF3A257FF, 0x71502FFF], // 26
+    &[0xF8B6BAFF, 0x34454CFF], // 27
+    &[0x762C19FF, 0x051230FF], // 28
+    &[0x84875EFF, 0x97ACC8FF], // 29
+    &[0xAB2439FF, 0xA2B0ADFF], // 30
+    &[0xDD4027FF, 0xFFEFAEFF], // 31
+    &[0xD8A37BFF, 0x87C540FF], // 32
+    &[0xBB7125FF, 0x34454CFF], // 33
+    &[0xF37F94FF, 0xB6BFC1FF], // 34
+    &[0xB59392FF, 0xA62C37FF], // 35
+    &[0xC19F2CFF, 0xB5DECCFF], // 36
+    &[0xA84222FF, 0x59256AFF], // 37
+    &[0x1A7444FF, 0x1C4286FF], // 38
+    &[0xCC1236FF, 0x005B8DFF], // 39
+    &[0xC56127FF, 0xB2B73EFF], // 40
+    &[0x8B835BFF, 0x78CDD0FF], // 41
+    &[0xE2B540FF, 0x4F4086FF], // 42
+    &[0xF8B6BAFF, 0xA36AA5FF], // 43
+    &[0x00908AFF, 0x5A82B3FF], // 44
+    &[0xFDD4BDFF, 0xF8ED43FF], // 45
+    &[0xF37420FF, 0x111314FF], // 46
+    &[0xC55347FF, 0xC0A9B3FF], // 47
+    &[0xB73F74FF, 0x005B8DFF], // 48
+    &[0xA7D4E4FF, 0x006EB8FF], // 49
+    &[0xEBD3A2FF, 0x4E1D4CFF], // 50
+    &[0xA62C37FF, 0x006EB8FF], // 51
+    &[0xF5ECC2FF, 0x111314FF], // 52
+    &[0xF99D1BFF, 0x4E1D4CFF], // 53
+    &[0x00978DFF, 0xA5C8D1FF], // 54
+    &[0xD46D7AFF, 0xFFFFFFFF], // 55
+    &[0xC0A9B3FF, 0x4F4086FF], // 56
+    &[0x7A4456FF, 0x34454CFF], // 57
+    &[0x793327FF, 0x00B49BFF], // 58
+    &[0xF37F94FF, 0xB09F36FF], // 59
+    &[0xFFEFAEFF, 0x12354EFF], // 60
+    &[0xC7D14FFF, 0x501345FF], // 61
+    &[0xFFF200FF, 0x111314FF], // 62
+    &[0x6D4145FF, 0x0093A5FF], // 63
+    &[0xA36AA5FF, 0x66629CFF], // 64
+    &[0xC19F2CFF, 0x78CDD0FF], // 65
+    &[0xD6B43EFF, 0x6B7140FF], // 66
+    &[0x5A82B3FF, 0x12354EFF], // 67
+    &[0xB59392FF, 0xFFF200FF], // 68
+    &[0xA1A39AFF, 0x111314FF], // 69
+    &[0xBB7125FF, 0x555832FF], // 70
+    &[0xAB2439FF, 0xD8A37BFF], // 71
+    &[0xF5ECC2FF, 0xA7D4E4FF], // 72
+    &[0x71502FFF, 0x8FA071FF], // 73
+    &[0xB5DECCFF, 0x099197FF], // 74
+    &[0xA7D4E4FF, 0x40456AFF], // 75
+    &[0xFFEFAEFF, 0xA1A39AFF], // 76
+    &[0xDA525DFF, 0x064F6EFF], // 77
+    &[0xEEB480FF, 0x62C6BFFF], // 78
+    &[0x762C19FF, 0x099197FF], // 79
+    &[0xF5ECC2FF, 0x9A72AAFF], // 80
+    &[0xF3A257FF, 0xA1A39AFF], // 81
+    &[0x793327FF, 0x4E1D4CFF], // 82
+    &[0xC1C494FF, 0x40456AFF], // 83
+    &[0xFDD4BDFF, 0x112F2CFF], // 84
+    &[0xC56127FF, 0x007190FF], // 85
+    &[0xBB7125FF, 0x00B49BFF], // 86
+    &[0xF8B6BAFF, 0xB2B73EFF], // 87
+    &[0xFDD4BDFF, 0x006EB8FF], // 88
+    &[0xF99D1BFF, 0x40456AFF], // 89
+    &[0xF37F94FF, 0xA36AA5FF], // 90
+    &[0x6D4145FF, 0xC16B27FF], // 91
+    &[0xF58E84FF, 0x00978DFF], // 92
+    &[0xB09F36FF, 0xA5C8D1FF], // 93
+    &[0xEBD3A2FF, 0x004F46FF], // 94
+    &[0x793327FF, 0x1E0E3FFF], // 95
+    &[0xE2B540FF, 0x837E31FF], // 96
+    &[0xF8B6BAFF, 0xC55347FF], // 97
+    &[0x762C19FF, 0x40456AFF], // 98
+    &[0xFFEFAEFF, 0x0093A5FF], // 99
+    &[0x96874DFF, 0x80719EFF], // 100
+    &[0xE0B3B6FF, 0x1C4286FF], // 101
+    &[0xEBD3A2FF, 0xC16B27FF], // 102
+    &[0xC27544FF, 0x4E1D4CFF], // 103
+    &[0xA62C37FF, 0xF5ECC2FF], // 104
+    &[0xE0B3B6FF, 0x719470FF], // 105
+    &[0x007190FF, 0x1E0E3FFF], // 106
+    &[0xFFDD00FF, 0x848061FF], // 107
+    &[0xF37F94FF, 0xA84222FF], // 108
+    &[0xFFEFAEFF, 0x42533EFF], // 109
+    &[0x7C4226FF, 0x4B3317FF], // 110
+    &[0xFFEFAEFF, 0xAFD472FF], // 111
+    &[0xF48067FF, 0x111314FF], // 112
+    &[0xFDD4BDFF, 0x4B3317FF], // 113
+    &[0xFCB315FF, 0x007190FF], // 114
+    &[0xFBE6A0FF, 0xF15A30FF], // 115
+    &[0xE0B3B6FF, 0x6450A1FF], // 116
+    &[0xCC1236FF, 0x111314FF], // 117
+    &[0xE2B540FF, 0x4B3317FF], // 118
+    &[0xA5C8D1FF, 0x12354EFF], // 119
+    &[0xE0B3B6FF, 0xAB2439FF], // 120
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +435,17 @@ mod tests {
     fn the_rows_are_in_the_books_order() {
         assert!(COMBINATIONS[..120].iter().all(|row| row.len() == 3));
         assert!(COMBINATIONS[120..].iter().all(|row| row.len() == 4));
+    }
+
+    /// The pairs are the book's first hundred and twenty, two colours each,
+    /// every colour opaque, and none of them a row of the table above.
+    #[test]
+    fn the_pairs_are_the_books_first_hundred_and_twenty() {
+        assert_eq!(PAIRS.len(), 120);
+        for (at, row) in PAIRS.iter().enumerate() {
+            assert_eq!(row.len(), 2, "pair {} is not two colours", at + 1);
+            assert!(row.iter().all(|rgba| rgba & 0xFF == 0xFF), "pair {} has a colour that is not opaque", at + 1);
+            assert!(!PAIRS[..at].contains(row), "pair {} is in the table twice", at + 1);
+        }
     }
 }

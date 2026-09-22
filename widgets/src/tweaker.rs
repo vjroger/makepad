@@ -109,7 +109,7 @@ use crate::{
 };
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
-use crate::theme_builder::{all_suggestions_from, Applied as Built, BuilderParams, SeedSlot, Suggestion, ThemeBuilder, COMBINATION_LABEL, OWN_LABEL};
+use crate::theme_builder::{all_suggestions_for, Applied as Built, BuilderParams, SeedSlot, Suggestion, ThemeBuilder, COLOR_COUNTS, COMBINATION_LABEL, OWN_LABEL};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
@@ -8219,6 +8219,13 @@ impl BuildRow {
         }
     }
 
+    /// Whether the row answers at all. The saturation does not at one
+    /// colour: the page is a grey there, and every share of nothing is
+    /// nothing.
+    fn enabled(self, params: &BuilderParams) -> bool {
+        !(self == BuildRow::Saturation && params.color_count == 1)
+    }
+
     /// The two stops of the track, where they are not the splash's: the text
     /// contrast runs from what reads to what the page allows, and the page
     /// moves with the background rows, so its stops are worked out on every
@@ -8307,11 +8314,53 @@ const TB_SEED_LABELS: [&str; 5] = ["Prim", "Sec", "Tert", "Surf", "None"];
 /// The seed picker's entry for a seed, and back. `None` is the last entry:
 /// no carousel.
 fn tb_seed_entry(seed: Option<SeedSlot>) -> usize {
-    seed.map_or(SeedSlot::ALL.len(), SeedSlot::index)
+    tb_seed_entry_at(seed, 4)
 }
 
 fn tb_seed_of_entry(entry: usize) -> Option<SeedSlot> {
-    SeedSlot::ALL.get(entry).copied()
+    tb_seed_of_entry_at(entry, 4)
+}
+
+/// The same for a palette of `count` colours, whose picker lists only the
+/// slots the count chooses and then "None": a colour that is derived is not
+/// one anybody can grow a row from. A seed on a slot the count does not
+/// choose has no entry, and reads as the primary's, which is where the
+/// panel moves it.
+fn tb_seed_entry_at(seed: Option<SeedSlot>, count: usize) -> usize {
+    let shown = SeedSlot::chosen(count);
+    match seed {
+        None => shown.len(),
+        Some(slot) => shown.iter().position(|at| *at == slot).unwrap_or(0),
+    }
+}
+
+fn tb_seed_of_entry_at(entry: usize, count: usize) -> Option<SeedSlot> {
+    SeedSlot::chosen(count).get(entry).copied()
+}
+
+/// The picker's words for a palette of `count` colours, in its order.
+fn tb_seed_labels(count: usize) -> Vec<String> {
+    SeedSlot::chosen(count)
+        .into_iter()
+        .map(|slot| TB_SEED_LABELS[slot.index()].to_string())
+        .chain(std::iter::once(TB_SEED_LABELS[SeedSlot::ALL.len()].to_string()))
+        .collect()
+}
+
+/// The rungs of the colour count, in `COLOR_COUNTS` order, and the word
+/// over them.
+const TB_COUNT_IDS: [LiveId; 4] = [
+    live_id!(tb_count_1),
+    live_id!(tb_count_2),
+    live_id!(tb_count_3),
+    live_id!(tb_count_4),
+];
+const TB_COUNT_HEADER: &str = "Colours";
+
+/// Where each of the four slots stands among the squares a count shows, in
+/// slot order: the order the row draws them and the drops are counted in.
+fn tb_shown_slots(count: usize) -> Vec<usize> {
+    SeedSlot::chosen(count).into_iter().map(SeedSlot::index).collect()
 }
 
 /// What a carried builder colour does if let go where it is.
@@ -8327,6 +8376,11 @@ enum TbDrop {
     /// Into this insertion point, 0 in front of the first square to 4 after
     /// the last: the carried colour goes there and every colour between its
     /// old place and the new one shifts one role.
+    ///
+    /// Both count among the squares SHOWN. A palette of fewer colours hides
+    /// the ones it derives, and those are not places in the list: a colour
+    /// carried at two moves between the primary and the surface and nowhere
+    /// else, and the insertion points run 0 to the number shown.
     Insert(usize),
 }
 
@@ -8347,10 +8401,11 @@ const TB_INSERT_BAND: f64 = 0.2;
 /// picker's edge), on the carried
 /// colour's own square, or at either insertion point beside it -- slotting
 /// a colour in next to where it already is leaves the order as it was.
-fn tb_drop_zone(squares: &[Rect; 4], top: f64, beyond_x: f64, from: usize, at: DVec2) -> Option<TbDrop> {
-    if squares.iter().any(|square| square.size.x <= 0.0) {
+fn tb_drop_zone(squares: &[Rect], top: f64, beyond_x: f64, from: usize, at: DVec2) -> Option<TbDrop> {
+    if squares.is_empty() || squares.iter().any(|square| square.size.x <= 0.0) {
         return None;
     }
+    let last = squares.len() - 1;
     let bottom = squares.iter().map(|square| square.pos.y + square.size.y).fold(f64::MIN, f64::max);
     // The row's own gap above and below, so a hand a point off the squares'
     // line has not left the row.
@@ -8360,7 +8415,7 @@ fn tb_drop_zone(squares: &[Rect; 4], top: f64, beyond_x: f64, from: usize, at: D
     }
     let right = |which: usize| squares[which].pos.x + squares[which].size.x;
     let band = |which: usize| squares[which].size.x * TB_INSERT_BAND;
-    let zone = if at.x >= beyond_x.max(right(3)) {
+    let zone = if at.x >= beyond_x.max(right(last)) {
         return None;
     } else if at.x < squares[0].pos.x + band(0) {
         // In front of the first: as far out as a band's width, the same
@@ -8369,23 +8424,23 @@ fn tb_drop_zone(squares: &[Rect; 4], top: f64, beyond_x: f64, from: usize, at: D
             return None;
         }
         TbDrop::Insert(0)
-    } else if at.x >= right(3) - band(3) {
-        TbDrop::Insert(4)
+    } else if at.x >= right(last) - band(last) {
+        TbDrop::Insert(last + 1)
     } else {
         // Walked left to right: a square's middle, then the gap after it
         // with the bands on either side, up to the last square's middle,
         // whose far band the branch above has already taken.
-        (0..4)
+        (0..=last)
             .find_map(|which| {
                 if at.x < right(which) - band(which) {
                     Some(TbDrop::Swap(which))
-                } else if which < 3 && at.x < squares[which + 1].pos.x + band(which + 1) {
+                } else if which < last && at.x < squares[which + 1].pos.x + band(which + 1) {
                     Some(TbDrop::Insert(which + 1))
                 } else {
                     None
                 }
             })
-            .unwrap_or(TbDrop::Insert(4))
+            .unwrap_or(TbDrop::Insert(last + 1))
     };
     match zone {
         TbDrop::Swap(to) if to == from => None,
@@ -8398,16 +8453,19 @@ fn tb_drop_zone(squares: &[Rect; 4], top: f64, beyond_x: f64, from: usize, at: D
 /// front of the first square and after the last as far out as the gaps
 /// between them are wide -- two points wide, and tall enough to stand out
 /// above the carried copy, which rides a little over the row.
-fn tb_insert_bar(squares: &[Rect; 4], point: usize) -> Rect {
+fn tb_insert_bar(squares: &[Rect], point: usize) -> Rect {
     let right = |which: usize| squares[which].pos.x + squares[which].size.x;
-    let gap = (squares[1].pos.x - right(0)).max(0.0);
+    let last = squares.len().saturating_sub(1);
+    // A lone square has no gap beside it to measure; the row's own three
+    // points is what one would be.
+    let gap = if last == 0 { 3.0 } else { (squares[1].pos.x - right(0)).max(0.0) };
     let x = match point {
         0 => squares[0].pos.x - gap * 0.5,
-        4 => right(3) + gap * 0.5,
+        _ if point > last => right(last) + gap * 0.5,
         _ => (right(point - 1) + squares[point].pos.x) * 0.5,
     };
     let width = 2.0;
-    let square = squares[point.min(3)];
+    let square = squares[point.min(last)];
     Rect {
         pos: dvec2(x - width * 0.5, square.pos.y - 8.0),
         size: dvec2(width, square.size.y + 10.0),
@@ -8415,18 +8473,29 @@ fn tb_insert_bar(squares: &[Rect; 4], point: usize) -> Rect {
 }
 
 /// The four colours after a drop: traded, or the carried one moved to the
-/// insertion point and the rest closed up behind it.
-fn tb_dropped_palette(palette: [u32; 4], from: usize, drop: TbDrop) -> [u32; 4] {
+/// insertion point and the rest closed up behind it -- among the squares
+/// shown. `shown` are the slots on the row in order, `from` and the drop
+/// count along them, and a slot not shown keeps its colour whatever moves
+/// round it.
+fn tb_dropped_among(palette: [u32; 4], shown: &[usize], from: usize, drop: TbDrop) -> [u32; 4] {
+    let list: Vec<u32> = shown.iter().map(|slot| palette[*slot]).collect();
+    let moved = tb_dropped_list(&list, from, drop);
     let mut out = palette;
+    for (slot, color) in shown.iter().zip(moved) {
+        out[*slot] = color;
+    }
+    out
+}
+
+fn tb_dropped_list(palette: &[u32], from: usize, drop: TbDrop) -> Vec<u32> {
+    let mut out = palette.to_vec();
     match drop {
         TbDrop::Swap(to) => out.swap(from, to),
         TbDrop::Insert(point) => {
-            let mut list: Vec<u32> = palette.to_vec();
-            let carried = list.remove(from);
+            let carried = out.remove(from);
             // Taken out first, so a point past its old place is one earlier.
             let to = if point > from { point - 1 } else { point };
-            list.insert(to, carried);
-            out.copy_from_slice(&list);
+            out.insert(to, carried);
         }
     }
     out
@@ -9170,6 +9239,14 @@ pub struct Tweaker {
     tb_color_insert: Option<usize>,
     #[rust]
     tb_random_uid: u64,
+    /// The four rungs of the colour count, in `COLOR_COUNTS` order. Zero
+    /// while the section is folded.
+    #[rust]
+    tb_count_uids: [u64; 4],
+    /// The count the seed picker's entries were last written for, so they
+    /// are written again when it moves and not on every draw.
+    #[rust]
+    tb_seed_labels_for: usize,
     /// One per slider row, in `BuildRow::ALL`'s order.
     #[rust]
     tb_row_uids: [u64; 7],
@@ -11159,6 +11236,56 @@ impl Tweaker {
                             // row stands them all on its floor, so the
                             // controls sit level with the squares and not
                             // with the names over them.
+                            //
+                            // Over it, on a line of its own, how many of the
+                            // four are chosen at all. A fourth accent is the
+                            // hardest colour to find, so a palette can be
+                            // three, two or one, and the colours it no longer
+                            // chooses are derived from the primary and their
+                            // squares hidden -- the ones left share the row.
+                            // Rungs lit like the mix's, and left-aligned so
+                            // the row under it keeps the shape it was given.
+                            tb_count_row := View {
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 2
+                                align: Align{x: 0.0 y: 0.5}
+                                tb_count_name := PanelLabelSmall {
+                                    width: Fit
+                                    margin: Inset{right: 4}
+                                    text: ""
+                                    max_lines: 1
+                                }
+                                tb_count_1 := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "1"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                tb_count_2 := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "2"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                tb_count_3 := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "3"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                tb_count_4 := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "4"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                            }
                             tb_seed_row := View {
                                 width: Fill
                                 height: Fit
@@ -12696,7 +12823,7 @@ impl Tweaker {
         if let Some(label) = self.tb_chip_tip(cx, sidebar, abs) {
             return Some(label);
         }
-        let chrome: [(&[LiveId], &str); 39] = [
+        let chrome: [(&[LiveId], &str); 43] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
@@ -12704,6 +12831,10 @@ impl Tweaker {
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_relative)], "the weights share a hundred parts \u{00b7} turning one up takes from the rest"),
             (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_random)], "a mix nobody planned \u{00b7} the same press from the same place is the same mix"),
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(tb_fold)], "grow a whole theme from one colour you like \u{00b7} palette, spacing and type together"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_count_row), live_id!(tb_count_1)], "one colour: the primary alone on a grey page \u{00b7} Lightness still moves the page, Saturation has nothing to colour"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_count_row), live_id!(tb_count_2)], "two colours: the primary on its surface \u{00b7} the other accents are shades of the primary"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_count_row), live_id!(tb_count_3)], "three colours: no tertiary to find \u{00b7} it is a shade of the primary"),
+            (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_count_row), live_id!(tb_count_4)], "four colours: every one of them your choice \u{00b7} a colour hidden by fewer comes back here"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_0), live_id!(tb_color)], "the primary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_1), live_id!(tb_color)], "the secondary \u{00b7} editing any of the four makes the palette your own"),
             (&[live_id!(theme_head), live_id!(tb_body), live_id!(tb_seed_row), live_id!(tb_color_2), live_id!(tb_color)], "the tertiary \u{00b7} editing any of the four makes the palette your own"),
@@ -16773,7 +16904,18 @@ impl Tweaker {
             }
             if self.tb_seed_uid != 0 && widget_action.widget_uid.0 == self.tb_seed_uid {
                 if let DropDownAction::Select(entry) = widget_action.cast::<DropDownAction>() {
-                    self.tb_seed_chosen(tb_seed_of_entry(entry));
+                    let count = self.tb_builder.params().color_count;
+                    self.tb_seed_chosen(tb_seed_of_entry_at(entry, count));
+                    self.redraw_sidebar(cx);
+                }
+            }
+            if let Some(at) = self
+                .tb_count_uids
+                .iter()
+                .position(|uid| *uid != 0 && *uid == widget_action.widget_uid.0)
+            {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.tb_count_chosen(COLOR_COUNTS[at]);
                     self.redraw_sidebar(cx);
                 }
             }
@@ -16792,7 +16934,9 @@ impl Tweaker {
                 .iter()
                 .position(|uid| *uid != 0 && *uid == widget_action.widget_uid.0)
             {
-                if let Some(which) = BuildRow::ALL.get(index).copied() {
+                // A row that is off answers nothing, whatever reached it.
+                let params = self.tb_builder.params();
+                if let Some(which) = BuildRow::ALL.get(index).copied().filter(|which| which.enabled(&params)) {
                     match widget_action.cast::<FabSliderAction>() {
                         // Every move lands here and NOT in an install: see
                         // `tb_row_moved`, and `eq_weight_moved` for why.
@@ -18672,10 +18816,33 @@ impl Tweaker {
         }
         let params = self.tb_builder.params();
         let palette = params.palette();
+        let count = params.color_count;
+        // How many colours, each rung lit for the count in force.
+        let count_row = body.child(live_id!(tb_count_row));
+        count_row.child(live_id!(tb_count_name)).set_text(cx, TB_COUNT_HEADER);
+        for (at, id) in TB_COUNT_IDS.iter().enumerate() {
+            let rung = count_row.child(*id);
+            self.tb_count_uids[at] = rung.widget_uid().0;
+            set_button_fill(cx, rung, COLOR_COUNTS[at] == count);
+        }
         let seed_row = body.child(live_id!(tb_seed_row));
         let opened = self.tb_color_opened;
         for (which, id) in TB_COLOR_IDS.iter().enumerate() {
             let column = seed_row.child(*id);
+            // A colour the count derives is not a choice, so it has no
+            // square: the ones chosen share the row. Hidden and not routed,
+            // and its popover shut if it was up when the count came down.
+            let shown = SeedSlot::ALL[which].chosen_at(count);
+            column.set_visible(cx, shown);
+            if !shown {
+                self.tb_color_uids[which] = 0;
+                if let Some(mut pick) = column.child(live_id!(tb_color)).borrow_mut::<FabColorPick>() {
+                    if pick.is_open() {
+                        pick.close_popover(cx, false);
+                    }
+                }
+                continue;
+            }
             column.child(live_id!(tb_color_name)).set_text(cx, TB_COLOR_NAMES[which]);
             let control = column.child(live_id!(tb_color));
             self.tb_color_uids[which] = control.widget_uid().0;
@@ -18703,22 +18870,22 @@ impl Tweaker {
                 }
             };
         }
-        // The seed picker. Its five entries are written when its uid is new
-        // -- the first draw after the section opens, or after the sidebar
-        // was built again -- and not per frame: `set_labels` redraws.
+        // The seed picker. Its entries are written when its uid is new -- the
+        // first draw after the section opens, or after the sidebar was built
+        // again -- or when the count they list the slots of has moved, and
+        // not per frame: `set_labels` redraws.
         let seed_col = seed_row.child(live_id!(tb_seed_col));
         seed_col.child(live_id!(tb_seed_name)).set_text(cx, TB_SEED_HEADER);
         let roll_col = seed_row.child(live_id!(tb_roll_col));
         roll_col.child(live_id!(tb_roll_name)).set_text(cx, TB_ROLL_HEADER);
         let seed_pick = seed_col.child(live_id!(tb_seed));
         let seed_uid = seed_pick.widget_uid().0;
-        if seed_uid != self.tb_seed_uid {
-            seed_pick
-                .as_drop_down()
-                .set_labels(cx, TB_SEED_LABELS.iter().map(|label| label.to_string()).collect());
+        if seed_uid != self.tb_seed_uid || self.tb_seed_labels_for != count {
+            seed_pick.as_drop_down().set_labels(cx, tb_seed_labels(count));
             self.tb_seed_uid = seed_uid;
+            self.tb_seed_labels_for = count;
         }
-        seed_pick.as_drop_down().set_selected_item(cx, tb_seed_entry(self.tb_seed_slot));
+        seed_pick.as_drop_down().set_selected_item(cx, tb_seed_entry_at(self.tb_seed_slot, count));
         self.draw_the_suggestion_strip(cx, &body);
         self.tb_random_uid = roll_col.child(live_id!(tb_random)).widget_uid().0;
         let rows = body.child(live_id!(tb_rows));
@@ -18731,6 +18898,10 @@ impl Tweaker {
                 slider.as_fab_slider().set_range(cx, min, max);
             }
             slider.as_fab_slider().set_value(cx, which.shown(&params));
+            // One colour has a grey page, and a grey has no saturation to
+            // take a share of: the row is drawn greyed and answers nothing,
+            // and the value it holds is kept for when the count goes up.
+            slider.as_fab_slider().set_enabled(cx, which.enabled(&params));
         }
         let reading = self.tb_reading.clone();
         body.child(live_id!(tb_read)).set_text(cx, &reading);
@@ -18740,6 +18911,7 @@ impl Tweaker {
     /// without drawing it: the fold, and the section being left.
     fn tb_shut_routes(&mut self) {
         self.tb_color_uids = [0; 4];
+        self.tb_count_uids = [0; 4];
         self.tb_color_opened = None;
         self.tb_color_carried = None;
         self.tb_color_target = None;
@@ -18775,18 +18947,23 @@ impl Tweaker {
             self.tb_carousel_uid = 0;
             return;
         }
+        // A chip shows the colours its palette chooses and no others, top
+        // first: the derived ones are not what a person is choosing between.
+        let bands = self.tb_builder.params().color_count;
         let chips: Vec<[Vec4f; 4]> = self
             .tb_suggestions
             .iter()
             .map(|offer| {
-                offer.colors.map(|packed| {
-                    let rgba = rgba_of(packed);
+                let shown = offer.shown();
+                std::array::from_fn(|at| {
+                    let rgba = rgba_of(shown.get(at).copied().unwrap_or(0x000000FF));
                     vec4(rgba[0], rgba[1], rgba[2], rgba[3])
                 })
             })
             .collect();
         let chosen = self.tb_chosen_index();
         if let Some(mut row) = carousel.borrow_mut::<FabPaletteCarousel>() {
+            row.set_bands(cx, bands);
             // Back to the start BEFORE the list goes in: the list going in is
             // what brings the chip in force into view, and a rewind after it
             // would scroll that chip straight back out again.
@@ -18825,7 +19002,7 @@ impl Tweaker {
     /// time here.
     fn tb_chosen_index(&self) -> Option<usize> {
         let chosen = self.tb_chosen.as_ref()?;
-        if self.tb_builder.params().seeds != Some(chosen.seeds) {
+        if !chosen.worn_by(&self.tb_builder.params()) {
             return None;
         }
         self.tb_suggestions.iter().position(|offer| offer == chosen)
@@ -18868,7 +19045,7 @@ impl Tweaker {
         };
         let params = self.tb_builder.params();
         let seed = slot.seed_of(&params);
-        self.tb_suggestions = all_suggestions_from(slot, seed, params.dark(), &self.tb_own_schemes);
+        self.tb_suggestions = all_suggestions_for(params.color_count, slot, seed, params.dark(), &self.tb_own_schemes);
         let same_slot = self.tb_grown_for.is_some_and(|(was, _)| was == slot);
         if self.tb_grown_for != Some((slot, seed)) {
             self.tb_grown_for = Some((slot, seed));
@@ -18879,7 +19056,7 @@ impl Tweaker {
         }
         // The palette in force, where the row offers it outright.
         if params.seeds.is_some() {
-            if let Some(offer) = self.tb_suggestions.iter().find(|offer| Some(offer.seeds) == params.seeds).cloned() {
+            if let Some(offer) = self.tb_suggestions.iter().find(|offer| offer.worn_by(&params)).cloned() {
                 self.tb_chosen = Some(offer);
                 return;
             }
@@ -18895,7 +19072,7 @@ impl Tweaker {
             && self
                 .tb_chosen
                 .as_ref()
-                .is_some_and(|chosen| params.seeds == Some(chosen.seeds));
+                .is_some_and(|chosen| chosen.worn_by(&params));
         match worn.then(|| self.tb_equivalent_offer()).flatten() {
             Some(offer) => {
                 // On the controls as well as under the outline. The other
@@ -19154,6 +19331,34 @@ impl Tweaker {
         self.tb_suggest_again();
     }
 
+    /// The colour count moved: a press, so the theme goes on at once, and
+    /// the carousel is grown again for the new count, since its chips are
+    /// now another shape. The seed follows the count down where it has to:
+    /// a slot that is derived now is no row to grow from, so the primary's
+    /// is grown instead. Nothing else moves. The colours the lower count
+    /// hides stay chosen under it, so going back up finds them.
+    ///
+    /// The chip in force is the one the new row offers for the same
+    /// colours, if it offers one: `tb_suggest_again` looks for it as it does
+    /// for any palette in force.
+    fn tb_count_chosen(&mut self, count: usize) {
+        let params = self.tb_builder.params();
+        if count == params.color_count {
+            return;
+        }
+        self.tb_builder.set(BuilderParams { color_count: count, ..params });
+        if self.tb_seed_slot.is_some_and(|slot| !slot.chosen_at(count)) {
+            self.tb_seed_slot = Some(SeedSlot::Primary);
+        }
+        // Another count is another row, not the same one grown again, so
+        // nothing chosen off the old one is carried across by name.
+        self.tb_chosen = None;
+        self.tb_grown_for = None;
+        self.tb_suggest_due = false;
+        self.tb_suggest_again();
+        self.tb_built_changed();
+    }
+
     /// The settings with one of the four colours in force named anew, or
     /// `None` where it was already that colour.
     ///
@@ -19164,9 +19369,13 @@ impl Tweaker {
     /// on the screen. The "already that colour" answer matters because a
     /// popover closed without a change still reports its colour, and a look
     /// at a square must not turn a chip into somebody's own palette.
+    ///
+    /// The four as CHOSEN, which under four colours is not the four in force:
+    /// the slots the count derives keep what the person had in them, and an
+    /// edit of a square that shows is not a reason to lose them.
     fn tb_with_color(&self, which: usize, color: u32) -> Option<BuilderParams> {
         let params = self.tb_builder.params();
-        let mut palette = params.palette();
+        let mut palette = params.chosen_palette();
         if palette[which] | 0xFF == color | 0xFF {
             return None;
         }
@@ -19222,10 +19431,18 @@ impl Tweaker {
     /// new one. A drop that
     /// leaves the four as they were -- two squares of one colour traded, say
     /// -- installs nothing.
+    ///
+    /// `from` is the carried square's slot and the drop counts along the
+    /// squares shown ([`TbDrop`]): under four colours the hidden slots are
+    /// not places in the list, and what they hold stays where it is.
     fn tb_colors_dropped(&mut self, from: usize, drop: TbDrop) {
         let params = self.tb_builder.params();
-        let was = params.palette();
-        let now = tb_dropped_palette(was, from, drop);
+        let shown = tb_shown_slots(params.color_count);
+        let Some(from) = shown.iter().position(|slot| *slot == from) else {
+            return;
+        };
+        let was = params.chosen_palette();
+        let now = tb_dropped_among(was, &shown, from, drop);
         if now.iter().zip(was.iter()).all(|(a, b)| a | 0xFF == b | 0xFF) {
             return;
         }
@@ -20015,15 +20232,23 @@ impl Tweaker {
 
     /// What a colour carried from square `from` would do if let go at `at`:
     /// see [`tb_drop_zone`]. Nothing before the row is drawn.
+    ///
+    /// Over the squares shown only: `from` is the carried square's slot, and
+    /// the drop that comes back counts along the squares the count shows.
     fn tb_drop_at(&self, cx: &Cx, from: usize, at: DVec2) -> Option<TbDrop> {
         let row = self.sidebar.as_ref()?.child(live_id!(theme_head)).child(live_id!(tb_body)).child(live_id!(tb_seed_row));
-        let squares: Vec<Rect> = self.tb_color_controls().iter().map(|c| c.area().rect(cx)).collect();
-        let squares: [Rect; 4] = squares.try_into().ok()?;
+        let shown = tb_shown_slots(self.tb_builder.params().color_count);
+        let from = shown.iter().position(|slot| *slot == from)?;
+        let controls = self.tb_color_controls();
+        let squares: Vec<Rect> = shown.iter().filter_map(|slot| controls.get(*slot)).map(|c| c.area().rect(cx)).collect();
+        if squares.len() != shown.len() {
+            return None;
+        }
         // The names stand over the squares and are part of the row a hand
         // aims at: the column under a name is that square's.
-        let top = TB_COLOR_IDS
+        let top = shown
             .iter()
-            .map(|id| row.child(*id).child(live_id!(tb_color_name)).area().rect(cx))
+            .map(|slot| row.child(TB_COLOR_IDS[*slot]).child(live_id!(tb_color_name)).area().rect(cx))
             .filter(|name| name.size.y > 0.0)
             .map(|name| name.pos.y)
             .fold(squares[0].pos.y, f64::min);
@@ -20039,9 +20264,13 @@ impl Tweaker {
     /// because a hand told two things at once cannot know which it gets.
     /// The bar is drawn by the carried square, whose overlay floats over
     /// the row.
+    ///
+    /// The drop counts along the squares shown, and the square it lights is
+    /// named here by its slot.
     fn tb_mark_drop(&mut self, cx: &mut Cx, drop: Option<TbDrop>) {
+        let shown = tb_shown_slots(self.tb_builder.params().color_count);
         let target = match drop {
-            Some(TbDrop::Swap(to)) => Some(to),
+            Some(TbDrop::Swap(to)) => shown.get(to).copied(),
             _ => None,
         };
         let insert = match drop {
@@ -20051,8 +20280,10 @@ impl Tweaker {
         self.tb_color_target = target;
         self.tb_color_insert = insert;
         let controls = self.tb_color_controls();
-        let squares: Vec<Rect> = controls.iter().map(|c| c.area().rect(cx)).collect();
-        let bar = insert.zip(<[Rect; 4]>::try_from(squares).ok()).map(|(point, squares)| tb_insert_bar(&squares, point));
+        let squares: Vec<Rect> = shown.iter().filter_map(|slot| controls.get(*slot)).map(|c| c.area().rect(cx)).collect();
+        let bar = insert
+            .filter(|_| !squares.is_empty() && squares.len() == shown.len())
+            .map(|point| tb_insert_bar(&squares, point));
         let carried = self.tb_color_carried;
         for (which, control) in controls.into_iter().enumerate() {
             if let Some(mut pick) = control.borrow_mut::<FabColorPick>() {
@@ -21259,7 +21490,7 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme_builder::Harmony;
+    use crate::theme_builder::{all_suggestions_from, Harmony};
 
     #[test]
     fn the_theme_picker_offers_every_base_theme_and_every_sheet_the_library_ships() {
@@ -21621,6 +21852,12 @@ mod tests {
             ("eq_read", "PanelLabelSmall"),
             ("tb_fold", "PanelButton"),
             ("tb_body", "View"),
+            ("tb_count_row", "View"),
+            ("tb_count_name", "PanelLabelSmall"),
+            ("tb_count_1", "PanelButton"),
+            ("tb_count_2", "PanelButton"),
+            ("tb_count_3", "PanelButton"),
+            ("tb_count_4", "PanelButton"),
             ("tb_seed_row", "View"),
             ("tb_color_0", "TbColorT"),
             ("tb_color_1", "TbColorT"),
@@ -28107,5 +28344,287 @@ line two");
             panel.next_frame, frame,
             "and asked for a frame to pay a debt nobody owes"
         );
+    }
+
+    /// The colour count's rung for `count`, as the panel addresses it.
+    fn the_count_rung(head: &WidgetRef, count: usize) -> WidgetRef {
+        head.child(live_id!(tb_body)).child(live_id!(tb_count_row)).child(TB_COUNT_IDS[count - 1])
+    }
+
+    /// A press on the colour count's rung for `count`, and the head drawn
+    /// again with whatever it installed landed.
+    fn a_count_pressed(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, count: usize, now: f64) {
+        let rung = the_count_rung(head, count);
+        one_press_on(cx, panel, head, &rung);
+        the_palette_lands(cx, panel, now);
+        draw_the_theme_head(cx, panel, head);
+    }
+
+    fn the_row(head: &WidgetRef, which: BuildRow) -> WidgetRef {
+        head.child(live_id!(tb_body)).child(live_id!(tb_rows)).child(which.slot())
+    }
+
+    /// The count is a row of four rungs on a line of its own over the seed
+    /// row, named "Colours", left-aligned, and it opens on four. It fits the
+    /// default sidebar and moves nothing on the row under it.
+    #[test]
+    fn the_colour_count_is_four_rungs_over_the_seed_row_and_opens_on_four() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let width = DEFAULT_SIDEBAR_WIDTH - 8.0;
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+        assert_eq!(panel.tb_builder.params().color_count, 4);
+        let body = head.child(live_id!(tb_body));
+        let row = body.child(live_id!(tb_count_row)).area().rect(&cx);
+        let seeds = body.child(live_id!(tb_seed_row)).area().rect(&cx);
+        assert!(row.size.y > 0.0 && row.pos.y + row.size.y <= seeds.pos.y + 0.5, "the count is not over the seed row: {row:?} {seeds:?}");
+        assert_eq!(body.child(live_id!(tb_count_row)).child(live_id!(tb_count_name)).text(), "Colours");
+        let mut right = row.pos.x;
+        for count in COLOR_COUNTS {
+            let rung = the_count_rung(&head, count);
+            let face = rung.area().rect(&cx);
+            assert!(face.size.x > 0.0, "the rung for {count} never drew");
+            assert!(face.pos.x >= right - 0.5, "the rungs are out of order");
+            right = face.pos.x + face.size.x;
+            assert_eq!(rung.text(), count.to_string());
+            assert_eq!(panel.tb_count_uids[count - 1], rung.widget_uid().0, "the rung for {count} is routed by another uid");
+        }
+        assert!(right <= seeds.pos.x + seeds.size.x + 0.5, "the rungs run off the sidebar at its default width");
+        // Left-aligned: the row starts where the seed row does, and its
+        // rungs are near that edge rather than pushed off to the far one.
+        assert!((row.pos.x - seeds.pos.x).abs() < 0.5, "the count row does not start where the seed row does");
+        let first = the_count_rung(&head, 1).area().rect(&cx);
+        assert!(first.pos.x - row.pos.x < 60.0, "the rungs are not at the row's left: {first:?} in {row:?}");
+    }
+
+    /// One colour: only the primary's square, the Saturation row greyed and
+    /// deaf to a press on it, the Lightness row moving a page that stays
+    /// grey, and the saturation that was set back in force at four.
+    ///
+    /// Seen failing with the row left on at one, where the press on its
+    /// name put the saturation back to its top under a page it cannot
+    /// colour.
+    #[test]
+    fn one_colour_greys_the_saturation_row_and_hands_its_value_back_at_four() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        panel.tb_gesture_ended(BuildRow::Saturation, 30.0);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let four = panel.tb_builder.params();
+        assert!((four.saturation - 0.3).abs() < 1e-9);
+
+        a_count_pressed(&mut cx, &mut panel, &head, 1, 2.0);
+        let one = panel.tb_builder.params();
+        assert_eq!(one.color_count, 1, "the rung did not set the count");
+        let seed_row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        for (which, id) in TB_COLOR_IDS.iter().enumerate() {
+            let square = seed_row.child(*id).child(live_id!(tb_color)).area().rect(&cx);
+            assert_eq!(square.size.x > 0.0, which == 0, "square {which} at one colour: {square:?}");
+            assert_eq!(panel.tb_color_uids[which] != 0, which == 0, "square {which} is routed at one colour");
+        }
+        let saturation = the_row(&head, BuildRow::Saturation);
+        assert!(!saturation.as_fab_slider().enabled(), "the Saturation row is on at one colour");
+        assert!(the_row(&head, BuildRow::Lightness).as_fab_slider().enabled());
+        // A press on its name is the row's reset, and it answers nothing.
+        let face = saturation.area().rect(&cx);
+        one_press_at(&mut cx, &mut panel, &head, face.pos + dvec2(8.0, face.size.y * 0.5));
+        let uid = saturation.widget_uid();
+        let actions = cx.capture_actions(|cx| {
+            cx.widget_action(uid, FabSliderAction::Changed(90.0));
+            cx.widget_action(uid, FabSliderAction::Reset);
+        });
+        panel.handle_sidebar_actions(&mut cx, &actions);
+        assert!((panel.tb_builder.params().saturation - 0.3).abs() < 1e-9, "the greyed row moved the saturation");
+
+        // The lightness still carries the page, and it stays a grey.
+        let page = |panel: &Tweaker| panel.tb_builder.built().and_then(|built| built.color("color_bg_app")).expect("a page");
+        let before = page(&panel);
+        let dark = one.dark();
+        panel.tb_gesture_ended(BuildRow::Lightness, if dark { 10.0 } else { 95.0 });
+        let after = page(&panel);
+        assert_ne!(before, after, "the lightness did not move the page at one colour");
+        for rgba in [before, after] {
+            assert!(rgba >> 24 == (rgba >> 16) & 0xFF && (rgba >> 16) & 0xFF == (rgba >> 8) & 0xFF, "the page at one colour is {rgba:08X}");
+        }
+
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        a_count_pressed(&mut cx, &mut panel, &head, 4, 4.0);
+        let back = panel.tb_builder.params();
+        assert!(the_row(&head, BuildRow::Saturation).as_fab_slider().enabled(), "the Saturation row stayed off at four");
+        assert!((back.saturation - 0.3).abs() < 1e-9, "the saturation did not come back");
+        assert_eq!(back.palette(), four.palette(), "the four colours did not come back");
+    }
+
+    /// The seed picker lists the slots a count chooses and "None", and a
+    /// seed on a slot the count comes down past moves to the primary.
+    #[test]
+    fn the_seed_picker_lists_only_the_slots_the_count_chooses() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let listed = |cx: &mut Cx, head: &WidgetRef| {
+            let drop_down = the_seed_picker(head).as_drop_down();
+            let was = drop_down.selected_item();
+            let mut out = Vec::new();
+            for entry in 0..5 {
+                drop_down.set_selected_item(cx, entry);
+                out.push(drop_down.selected_label());
+            }
+            drop_down.set_selected_item(cx, was);
+            out.dedup();
+            out
+        };
+        assert_eq!(listed(&mut cx, &head), ["Prim", "Sec", "Tert", "Surf", "None"]);
+        a_seed_picked(&mut cx, &mut panel, &head, 2);
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Tertiary));
+        a_count_pressed(&mut cx, &mut panel, &head, 3, 1.0);
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Primary), "the seed stayed on a slot the count derives");
+        assert_eq!(listed(&mut cx, &head), ["Prim", "Sec", "Surf", "None"]);
+        a_count_pressed(&mut cx, &mut panel, &head, 2, 2.0);
+        assert_eq!(listed(&mut cx, &head), ["Prim", "Surf", "None"]);
+        a_seed_picked(&mut cx, &mut panel, &head, 1);
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Surface), "the second entry at two is not the surface");
+        assert_eq!(the_seed_picker(&head).as_drop_down().selected_label(), "Surf");
+        a_count_pressed(&mut cx, &mut panel, &head, 1, 3.0);
+        assert_eq!(listed(&mut cx, &head), ["Prim", "None"]);
+        assert_eq!(panel.tb_seed_slot, Some(SeedSlot::Primary));
+        a_seed_picked(&mut cx, &mut panel, &head, 1);
+        assert_eq!(panel.tb_seed_slot, None, "the last entry at one is not None");
+        for count in COLOR_COUNTS {
+            let slots = SeedSlot::chosen(count);
+            for (entry, slot) in slots.iter().enumerate() {
+                assert_eq!(tb_seed_of_entry_at(entry, count), Some(*slot));
+                assert_eq!(tb_seed_entry_at(Some(*slot), count), entry);
+            }
+            assert_eq!(tb_seed_of_entry_at(slots.len(), count), None);
+            assert_eq!(tb_seed_entry_at(None, count), slots.len());
+        }
+    }
+
+    /// A count grows the carousel again, as the engine grows it for that
+    /// count, in chips of as many squares -- the chip and the row as tall as
+    /// the colours shown -- and outlines the chip that is the palette in
+    /// force if the row offers one. What a count hides comes back when it
+    /// goes up, through an edit and a chip at the lower count both.
+    ///
+    /// Seen failing with an edit naming the four in force, where the colours
+    /// a lower count derived overwrote the ones it had hidden.
+    #[test]
+    fn a_count_regrows_the_carousel_and_what_it_hides_comes_back() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let mine = panel.tb_builder.params().palette();
+        let rebuilt = panel.tb_builder.rebuilds();
+        let mut now = 10.0;
+        for count in [3, 2, 1, 4] {
+            now += 1.0;
+            a_count_pressed(&mut cx, &mut panel, &head, count, now);
+            let params = panel.tb_builder.params();
+            assert_eq!(params.color_count, count);
+            let want = all_suggestions_for(count, SeedSlot::Primary, params.favourite, params.dark(), &panel.tb_own_schemes);
+            assert_eq!(panel.tb_suggestions, want, "{count}: the carousel is not the row for {count} colours");
+            let carousel = the_carousel(&head);
+            let row = carousel.borrow::<FabPaletteCarousel>().expect("a carousel");
+            assert_eq!(row.bands(), count, "{count}: the chips show another number of squares");
+            let chip = row.chip_rect(&cx, 0).expect("a first chip");
+            assert!((chip.size.y - 22.0 * count as f64).abs() < 0.5, "{count}: a chip is {} tall", chip.size.y);
+            assert!((carousel.area().rect(&cx).size.y - 22.0 * count as f64).abs() < 0.5, "{count}: the row keeps room it does not show");
+            for (at, offer) in want.iter().enumerate().take(6) {
+                let bands = row.chip_colors(at).expect("a chip");
+                for (band, colour) in offer.shown().iter().enumerate() {
+                    assert_eq!(bands[band], band_of(*colour), "{count}: chip {at} band {band}");
+                }
+            }
+            drop(row);
+            let worn = want.iter().position(|offer| offer.worn_by(&params));
+            assert_eq!(panel.tb_chosen_index(), worn, "{count}: the chip in force is not the one outlined");
+        }
+        assert!(panel.tb_builder.rebuilds() > rebuilt, "a count installed nothing");
+        assert_eq!(panel.tb_builder.params().palette(), mine, "four again is not the palette four had");
+
+        // An edit at two, and a chip at two: the secondary and the tertiary
+        // two hid are there again at four.
+        a_count_pressed(&mut cx, &mut panel, &head, 2, 20.0);
+        let edited = crate::theme_tokens::hsl_to_rgb(160.0, 0.6, 0.5);
+        panel.tb_color_ended(0, edited);
+        panel.tb_color_ended(3, crate::theme_tokens::hsl_to_rgb(250.0, 0.4, 0.3));
+        the_palette_lands(&mut cx, &mut panel, 21.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        // Read before the install lands: a four that came back as the steps
+        // two derived would be the theme two already had, and install nothing.
+        one_press_on(&mut cx, &mut panel, &head, &the_count_rung(&head, 4));
+        let back = panel.tb_builder.params().palette();
+        assert_eq!(back[0], edited | 0xFF);
+        assert_eq!([back[1], back[2]], [mine[1] | 0xFF, mine[2] | 0xFF], "the colours two hid were lost to an edit");
+        the_palette_lands(&mut cx, &mut panel, 22.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        a_count_pressed(&mut cx, &mut panel, &head, 2, 23.0);
+        panel.tb_chip_pressed(3);
+        the_palette_lands(&mut cx, &mut panel, 24.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(panel.tb_chosen_index().is_some(), "the chip pressed at two is not outlined");
+        a_count_pressed(&mut cx, &mut panel, &head, 4, 25.0);
+        let back = panel.tb_builder.params().palette();
+        assert_eq!([back[1], back[2]], [mine[1] | 0xFF, mine[2] | 0xFF], "the colours two hid were lost to a chip");
+    }
+
+    fn band_of(packed: u32) -> Vec4f {
+        let rgba = rgba_of(packed);
+        vec4(rgba[0], rgba[1], rgba[2], rgba[3])
+    }
+
+    /// A drag works over the squares a count shows and nowhere else: at two
+    /// the primary and the surface trade, the drop zones are the two squares
+    /// and the three gaps round them, and the colours two hides stay where
+    /// they are.
+    #[test]
+    fn a_colour_is_carried_among_the_squares_shown_only() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        a_count_pressed(&mut cx, &mut panel, &head, 2, 1.0);
+        let was = panel.tb_builder.params().chosen_palette();
+        let seed_row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        let square = |slot: usize| seed_row.child(TB_COLOR_IDS[slot]).child(live_id!(tb_color)).area().rect(&cx);
+        let (prim, surf) = (square(0), square(3));
+        assert!(prim.size.x > 0.0 && surf.size.x > 0.0 && square(1).size.x == 0.0 && square(2).size.x == 0.0);
+        // The two share the row the four had.
+        assert!(prim.size.x > 40.0, "the two squares did not take the row: {prim:?}");
+        let middle = |rect: Rect| rect.pos + rect.size * 0.5;
+        assert_eq!(panel.tb_drop_at(&cx, 0, middle(surf)), Some(TbDrop::Swap(1)), "the surface is not a place to drop the primary");
+        assert_eq!(panel.tb_drop_at(&cx, 3, middle(prim)), Some(TbDrop::Swap(0)));
+        assert_eq!(panel.tb_drop_at(&cx, 0, dvec2(surf.pos.x + surf.size.x - 2.0, middle(surf).y)), Some(TbDrop::Insert(2)));
+        assert_eq!(panel.tb_drop_at(&cx, 1, middle(surf)), None, "a hidden square was carried");
+        panel.tb_mark_drop(&mut cx, Some(TbDrop::Swap(1)));
+        assert_eq!(panel.tb_color_target, Some(3), "the lit square is not the surface");
+        panel.tb_mark_drop(&mut cx, None);
+        panel.tb_colors_dropped(0, TbDrop::Swap(1));
+        let now = panel.tb_builder.params().chosen_palette();
+        assert_eq!(now, [was[3], was[1], was[2], was[0]], "the trade at two moved a hidden colour");
+        panel.tb_colors_dropped(3, TbDrop::Insert(0));
+        assert_eq!(panel.tb_builder.params().chosen_palette(), was, "the move at two did not put the two back");
+        panel.tb_colors_dropped(1, TbDrop::Swap(0));
+        assert_eq!(panel.tb_builder.params().chosen_palette(), was, "a hidden square was dropped");
+        // The zones over two squares, on their own.
+        let two = [Rect { pos: dvec2(0.0, 10.0), size: dvec2(50.0, 16.0) }, Rect { pos: dvec2(53.0, 10.0), size: dvec2(50.0, 16.0) }];
+        assert_eq!(tb_drop_zone(&two, 0.0, 200.0, 0, dvec2(78.0, 18.0)), Some(TbDrop::Swap(1)));
+        assert_eq!(tb_drop_zone(&two, 0.0, 200.0, 0, dvec2(101.0, 18.0)), Some(TbDrop::Insert(2)));
+        assert_eq!(tb_drop_zone(&two, 0.0, 200.0, 1, dvec2(2.0, 18.0)), Some(TbDrop::Insert(0)));
+        assert_eq!(tb_drop_zone(&two, 0.0, 200.0, 0, dvec2(51.5, 18.0)), None, "the gap beside the carried square is a drop");
+        let bar = tb_insert_bar(&two, 2);
+        assert!(bar.pos.x > 103.0, "the bar after the last of two stands at {bar:?}");
+        // And one square is no row to carry a colour along.
+        assert_eq!(tb_dropped_among(was, &[0], 0, TbDrop::Insert(1)), was);
     }
 }
