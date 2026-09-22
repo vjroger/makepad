@@ -100,7 +100,8 @@
 //! mapping that fixes it: a table from the built roles to the older tokens
 //! those controls do read, with all three brand families spent deliberately
 //! -- the primary on the value and the main action, the secondary on what is
-//! selected or on, the tertiary on what is being pointed out -- so that an
+//! selected or on, the tertiary on what is being pointed out, the tick and
+//! the dot among it -- so that an
 //! ordinary screen of ordinary controls shows the palette rather than one
 //! colour of it. Read that table's own doc for what is in it and what is
 //! not. None of it touches a widget file: which token a widget reads is not
@@ -1134,13 +1135,16 @@ struct Accented {
 /// Three voices, and a control kind always wears the same one, so that the
 /// colour says what a thing IS and not merely that somebody chose a palette:
 ///
-/// * The primary is the main action and the VALUE: value fills, check and
-///   radio marks, and the focus ring, which is the app saying where you are.
+/// * The primary is the main action and the VALUE: value fills and the focus
+///   ring, which is the app saying where you are.
 /// * The secondary is SELECTION and the on-state: the ground under a ticked
 ///   box, a chosen radio, a selected row in a menu, a drop down or a file
 ///   tree, the label on the tab you are on.
-/// * The tertiary POINTS THINGS OUT: selected text, the caret, and the
-///   preview of where a drag would land.
+/// * The tertiary POINTS THINGS OUT: the tick in a check box and the dot in
+///   a radio, selected text, the caret, and the preview of where a drag would
+///   land. The marks are here because without them the third colour showed
+///   only when something was typed into or dragged; on them it is on every
+///   screen that has a ticked box, drawn on the secondary's ground.
 ///
 /// And the grounds of the controls at rest, under the pointer and pressed
 /// wear none of the three. They are BACKGROUNDS -- a row of buttons is part
@@ -1239,12 +1243,6 @@ const ACCENTED: &[Accented] = {
             from: Primary,
             reaches: Ink { alt: OnPrimaryContainer, on: PAGES, need: LEGIBLE },
         },
-        // The mark: a check box's tick, a radio's dot, a menu row's tick.
-        Accented {
-            tokens: &["color_mark_active", "color_mark_active_hover", "color_mark_focus", "color_mark_down"],
-            from: Primary,
-            reaches: Ink { alt: OnPrimaryContainer, on: BOXES, need: LEGIBLE },
-        },
         // The value fill: a slider's filled part, a progress bar, a wave.
         // Nothing is written on it (see `WRITTEN`), which is why it may be
         // chosen against its track alone.
@@ -1260,9 +1258,9 @@ const ACCENTED: &[Accented] = {
         // ---------------------------------------------- THE SECONDARY: what
         // is selected, and what is on.
         //
-        // The ground of a ticked box and a chosen radio. Its ink is the mark
-        // above, which this table also chooses, so the ground is taken
-        // outright and the mark follows it.
+        // The ground of a ticked box and a chosen radio. Its ink is the mark,
+        // the tertiary's row below, which this table also chooses, so the
+        // ground is taken outright and the mark follows it.
         Accented {
             tokens: &["color_inset_active"],
             from: SecondaryContainer,
@@ -1372,6 +1370,18 @@ const ACCENTED: &[Accented] = {
             tokens: &["color_text_cursor"],
             from: Tertiary,
             reaches: Ink { alt: OnTertiaryContainer, on: &["color_inset", "color_bg_app"], need: LEGIBLE },
+        },
+        // The mark: a check box's tick, a radio's dot, a menu row's tick and
+        // a switch's knob while it is on. A tick points out that a thing is
+        // chosen, and it is the one piece of the third colour an ordinary
+        // screen of controls shows at rest -- without it the tertiary lived
+        // only in a selection and a caret. It is read on the ticked box, the
+        // secondary's ground below, so a ticked box is two of the palette's
+        // colours at once and the pair is measured like any other.
+        Accented {
+            tokens: &["color_mark_active", "color_mark_active_hover", "color_mark_focus", "color_mark_down"],
+            from: Tertiary,
+            reaches: Ink { alt: OnTertiaryContainer, on: BOXES, need: LEGIBLE },
         },
         // Where a drag would land, in a dock and on a board. Drawn over the
         // content it would replace, so it keeps the base theme's alpha and
@@ -4312,17 +4322,18 @@ mod theme_builder_tests {
             }
             // And what they are instead is the colour that was picked. The
             // two the library keeps the accent under are the accent itself;
-            // the mark and the fill are whichever member of the primary
+            // the ring and the fill are whichever member of the primary
             // family reads where they are drawn, and in the light theme that
             // is the deeper one, because an accent at the lightness a light
             // theme gives it cannot be told from a field that is nearly the
             // page. Both are the favourite's hue, which is the part a person
-            // sees.
+            // sees. (The mark is the tertiary's, so it is off the greys above
+            // but not in this hue.)
             for key in ["color_focus", "color_ctrl_selected"] {
                 assert_eq!(at(key), at("color_primary"), "{key} is not the accent");
             }
             let hue = rgb_to_hsl(ORANGE).0;
-            for key in ["color_mark_active", "color_val", "color_val_2", "color_bevel_focus"] {
+            for key in ["color_val", "color_val_2", "color_bevel_focus"] {
                 assert!(apart(rgb_to_hsl(at(key)).0, hue) < 12.0, "{key} is not the favourite's hue");
             }
             // Pinned, not merely predicted: the script carries them.
@@ -4368,7 +4379,7 @@ mod theme_builder_tests {
                 }
             };
             // The main action and the value.
-            for key in ["color_focus", "color_bevel_focus", "color_mark_active", "color_val", "color_val_2"] {
+            for key in ["color_focus", "color_bevel_focus", "color_val", "color_val_2"] {
                 assert_eq!(family(key), "primary", "{key} on dark={dark}");
             }
             // Selection and the on-state.
@@ -4388,8 +4399,8 @@ mod theme_builder_tests {
                 let hue = rgb_to_hsl(over(at("color_bg_app"), at(key))).0;
                 assert!(apart(hue, ground) < 6.0, "{key} on dark={dark} is at {hue}, the background at {ground}");
             }
-            // What is being pointed out.
-            for key in ["color_selection_focus", "color_bg_highlight_inline", "color_text_cursor"] {
+            // What is being pointed out, the tick and the dot among it.
+            for key in ["color_selection_focus", "color_bg_highlight_inline", "color_text_cursor", "color_mark_active"] {
                 assert_eq!(family(key), "tertiary", "{key} on dark={dark}");
             }
             // And all three are genuinely different colours, so that the
@@ -4398,6 +4409,43 @@ mod theme_builder_tests {
             assert!(apart(hue_of("color_val"), hue_of("color_outset_active")) > 60.0);
             assert!(apart(hue_of("color_val"), hue_of("color_selection_focus")) > 60.0);
             assert!(apart(hue_of("color_outset_active"), hue_of("color_selection_focus")) > 60.0);
+        }
+    }
+
+    /// What the operator approved, having paged through a triadic palette:
+    /// the third colour barely showed on an ordinary screen -- a text
+    /// selection, a caret, an avatar -- so the tick and the dot moved to it.
+    /// A ticked box then reads as a tertiary mark on a secondary ground, and
+    /// the focus ring and the value fill are what keep the primary.
+    ///
+    /// Triadic for the same reason as the test above: three families 120
+    /// degrees apart are three answers, and a tick still drawn from the
+    /// primary fails the first assertion. Each mark is asked for its family
+    /// outright, not its hue, because a mark that cannot be told from its
+    /// box gives way to the family's container ink.
+    #[test]
+    fn a_triadic_palette_puts_the_tertiary_on_the_tick_and_the_dot() {
+        for dark in [true, false] {
+            let params = BuilderParams {
+                favourite: 0xE8730CFF,
+                harmony: Harmony::Triadic,
+                saturation: 1.0,
+                ..BuilderParams::house(dark)
+            };
+            let built = build(&params);
+            let of = |family: &str, key: &str| {
+                [format!("color_{family}"), format!("color_{family}_container"), format!("color_on_{family}_container")]
+                    .iter()
+                    .any(|role| built.color(role).is_some() && built.color(role) == built.color(key))
+            };
+            for key in ["color_mark_active", "color_mark_active_hover", "color_mark_focus", "color_mark_down"] {
+                assert!(of("tertiary", key), "{key} is not the tertiary on dark={dark}");
+            }
+            for key in ["color_bevel_focus", "color_bevel_inset_1_focus", "color_val", "color_val_1"] {
+                assert!(of("primary", key), "{key} is not the primary on dark={dark}");
+            }
+            assert!(of("secondary", "color_inset_active"), "the ticked box is not the secondary on dark={dark}");
+            assert!(built.readability.holds(), "{:#?}", built.readability.failures);
         }
     }
 
@@ -4517,7 +4565,7 @@ mod theme_builder_tests {
             // asks for the family and the readability sweep asks the rest.
             for (key, family) in [
                 ("color_focus", "primary"),
-                ("color_mark_active", "primary"),
+                ("color_mark_active", "tertiary"),
                 ("color_val", "primary"),
                 ("color_inset_active", "secondary"),
                 ("color_outset_active", "secondary"),
