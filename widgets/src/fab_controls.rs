@@ -660,12 +660,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
             ..mod.draw.DrawQuad
             hover: 0.0
             open: 0.0
+            lifted: 0.0
+            target: 0.0
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, fab.radius)
-                sdf.fill_keep(vec4(self.swatch.xyz, 1.0))
-                let ring = fab.color_border.mix(fab.color_focus_ring, max(self.hover, self.open))
-                sdf.stroke(ring, 1.0)
+                // A colour carried off its square leaves the square most of
+                // the way to an empty field, so the hand can see where it
+                // came from and that it is no longer there.
+                sdf.fill_keep(vec4(self.swatch.xyz, 1.0).mix(fab.color_input, self.lifted * 0.75))
+                // The square a colour left is not the one in the hand, so it
+                // gives up its hover ring while it is empty.
+                let lit = max(max(self.hover, self.open) * (1.0 - self.lifted), self.target)
+                let ring = fab.color_border.mix(fab.color_focus_ring, lit)
+                sdf.stroke(ring, 1.0 + self.target)
                 return sdf.result
             }
         }
@@ -4842,6 +4850,13 @@ pub struct DrawFabSwatch {
     pub hover: f32,
     #[live]
     pub open: f32,
+    /// The colour has been carried off this square (see
+    /// [`FabColorPick::draggable`]).
+    #[live]
+    pub lifted: f32,
+    /// A carried colour would land on this square if let go now.
+    #[live]
+    pub target: f32,
     #[live]
     pub swatch: Vec4f,
 }
@@ -4863,6 +4878,16 @@ pub enum FabColorPickAction {
     /// A palette cell was clicked: the host binds the property to the
     /// named colour; the popover has closed without publishing a value.
     PalettePick(String),
+    /// A press on a [`FabColorPick::draggable`] swatch travelled past the
+    /// slop: the colour is being carried, and no popover will open.
+    DragStarted,
+    /// The carried colour's pointer, window-local.
+    DragMoved(DVec2),
+    /// Let go here. What lands where is the host's to decide.
+    DragDropped(DVec2),
+    /// Escape, Back, the other button or the window going away: the carry
+    /// is off and nothing is to change.
+    DragCancelled,
     #[default]
     None,
 }
@@ -4915,6 +4940,41 @@ pub struct FabColorPick {
     /// The area the lock was taken with: the swatch's, as it was then.
     #[rust]
     lock_area: Area,
+    /// The colour can be carried off the swatch to somewhere else. Off by
+    /// default, because a swatch that carries has to open its popover on
+    /// the release instead of the press -- it cannot know before the
+    /// pointer has moved or not which of the two the press was -- and every
+    /// picker that never carries keeps the press it has always had.
+    ///
+    /// Only the gesture lives here: a press that travels past
+    /// [`KNOB_DRAG_SLOP`] reports `DragStarted`, the pointer while it moves
+    /// and where it was let go, and a lifted copy of the swatch follows the
+    /// pointer sideways. What the drop means is the host's, which knows
+    /// where the other squares are.
+    #[live]
+    draggable: bool,
+    /// The copy of the swatch that rides under the pointer.
+    #[live]
+    draw_lifted: DrawFabSwatch,
+    /// A press on a draggable swatch that has not been let go: where it
+    /// landed, and whether the popover was up when it did (a press that shut
+    /// the popover does not open it again on the release).
+    #[rust]
+    press: Option<(DVec2, bool)>,
+    /// The press has travelled past the slop and is carrying the colour.
+    #[rust]
+    carrying: bool,
+    /// Where the pointer is while it carries.
+    #[rust]
+    carry_at: DVec2,
+    /// Where on the swatch the press took hold, so the copy hangs from the
+    /// pointer at that spot rather than jumping to centre on it.
+    #[rust]
+    grab: DVec2,
+    /// Held while the colour is carried, so Escape calls the carry off
+    /// rather than whatever the swatch sits in front of.
+    #[rust]
+    carry_scope: Option<CancelScope>,
 }
 
 /// A picker dropped while it is open (its page rebuilt on a theme or story
@@ -4955,6 +5015,67 @@ impl FabColorPick {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Whether the colour is being carried off the swatch.
+    pub fn is_carrying(&self) -> bool {
+        self.carrying
+    }
+
+    /// Light the swatch as the place a carried colour would land. The host
+    /// says so, because only the host knows which square is under the
+    /// pointer.
+    pub fn set_drop_target(&mut self, cx: &mut Cx, on: bool) {
+        let target = if on { 1.0 } else { 0.0 };
+        if self.draw_swatch.target != target {
+            self.draw_swatch.target = target;
+            self.draw_swatch.redraw(cx);
+        }
+    }
+
+    pub fn is_drop_target(&self) -> bool {
+        self.draw_swatch.target > 0.0
+    }
+
+    /// The press has travelled: the colour is off the swatch.
+    fn start_carry(&mut self, cx: &mut Cx, at: DVec2) {
+        self.carrying = true;
+        self.carry_at = at;
+        self.carry_scope = Some(self.begin_cancel_scope(cx));
+        self.draw_swatch.lifted = 1.0;
+        let uid = self.widget_uid();
+        cx.widget_action(uid, FabColorPickAction::DragStarted);
+        cx.widget_action(uid, FabColorPickAction::DragMoved(at));
+        self.redraw_carry(cx);
+    }
+
+    /// The carry over, however it ended: the press forgotten, the swatch
+    /// back, the copy gone. Says nothing; the caller names the ending.
+    fn end_carry(&mut self, cx: &mut Cx) {
+        self.press = None;
+        self.carrying = false;
+        self.carry_scope = None;
+        self.draw_swatch.lifted = 0.0;
+        self.redraw_carry(cx);
+    }
+
+    /// Called off: nothing is to change.
+    fn cancel_carry(&mut self, cx: &mut Cx) {
+        let was = self.carrying;
+        self.end_carry(cx);
+        if was {
+            cx.widget_action(self.widget_uid(), FabColorPickAction::DragCancelled);
+        }
+    }
+
+    fn redraw_carry(&mut self, cx: &mut Cx) {
+        if let Some(list) = &self.overlay_list {
+            list.redraw(cx);
+        }
+        self.draw_swatch.redraw(cx);
+        // The copy floats in the window's overlay, over whatever the pointer
+        // crosses, and that has to be drawn again where the copy has left.
+        cx.redraw_all();
     }
 
     /// Take the pointer for the open popover.
@@ -5235,6 +5356,28 @@ impl Widget for FabColorPick {
             self.panel_rect = self.popover.area().rect(cx);
             cx.end_pass_sized_turtle();
             self.overlay_list.as_mut().unwrap().end(cx);
+        } else if self.carrying {
+            // The carried copy, in the same overlay the popover would use
+            // (the two are never up together: a carry shuts the popover).
+            // It follows the pointer sideways and keeps the swatch's line,
+            // because the squares it can land on are a row.
+            let anchor = self.draw_swatch.area().rect(cx);
+            let overlay_list = self.overlay_list.as_mut().unwrap();
+            overlay_list.begin_overlay_reuse(cx);
+            let pass_size = cx.current_pass_size();
+            cx.begin_root_turtle(pass_size, Layout::flow_down());
+            let rgba = self.rgba();
+            self.draw_lifted.swatch = vec4(rgba[0], rgba[1], rgba[2], rgba[3]);
+            self.draw_lifted.hover = 1.0;
+            // Lifted a little off the row and a little narrower than the
+            // squares, so the ring of the square it would land on shows round
+            // it rather than under it.
+            let inset = 4.0_f64.min(anchor.size.x * 0.1);
+            let mut lifted = Walk::fixed(anchor.size.x - 2.0 * inset, anchor.size.y);
+            lifted.abs_pos = Some(dvec2(self.carry_at.x - self.grab.x + inset, anchor.pos.y - 6.0));
+            self.draw_lifted.draw_walk(cx, lifted);
+            cx.end_pass_sized_turtle();
+            self.overlay_list.as_mut().unwrap().end(cx);
         }
         DrawStep::done()
     }
@@ -5411,9 +5554,107 @@ impl Widget for FabColorPick {
             }
         }
 
+        // A carry is called off the way a knob's turn is: Escape or Back
+        // when it is this carry's to take, the other button, or the window
+        // going away under the hand. The press is forgotten with it, so the
+        // release that follows opens nothing.
+        if self.press.is_some() {
+            // A key nothing claimed is this carry's as well: the press holds
+            // the pointer, so no other gesture is under way to take it.
+            let ours = |cx: &Cx, scope: &Option<CancelScope>| {
+                scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) || (scope.is_some() && !cx.has_cancel_owner())
+            };
+            let off = match event {
+                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => ours(cx, &self.carry_scope),
+                Event::BackPressed { .. } => ours(cx, &self.carry_scope) && event.back_pressed(),
+                Event::MouseDown(me) => me.button.is_secondary(),
+                Event::WindowLostFocus(_) => true,
+                _ => false,
+            };
+            if off {
+                self.cancel_carry(cx);
+                return;
+            }
+        }
+
         // Named as the lock's own, so the swatch still hears the press that
         // shuts its popover while the popover holds the pointer.
         let swatch = self.draw_swatch.area();
+        if self.draggable {
+            // THE POINTER-CAPTURE RULE: the press holds the pointer until the
+            // release, so a carry across the other squares lights none of
+            // them by itself and presses nothing on the way. A plain hit and
+            // not a sweep: a sweep lets go of the pointer the moment it
+            // leaves the swatch, which is where every carry goes. Only the
+            // press on the swatch of an open popover has to name the lock
+            // to be heard; the popover shuts on it, and every event after it
+            // is asked plainly, which finds the capture by its area alone.
+            let hit = if self.open {
+                event.hits_with_sweep_area(cx, swatch, swatch)
+            } else {
+                event.hits(cx, swatch)
+            };
+            match hit {
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.draw_swatch.hover = 1.0;
+                    self.draw_swatch.redraw(cx);
+                }
+                Hit::FingerHoverOut(_) => {
+                    self.draw_swatch.hover = 0.0;
+                    self.draw_swatch.redraw(cx);
+                }
+                Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                    // A press on the swatch of an open popover shuts it now,
+                    // as it always has: whether it then carries or not, the
+                    // popover is not wanted over the row, and a carry must
+                    // not leave the pointer locked behind it.
+                    let was_open = self.open;
+                    if self.open {
+                        self.close_popover(cx, false);
+                    }
+                    self.press = Some((fe.abs, was_open));
+                    self.carrying = false;
+                    self.grab = fe.abs - self.draw_swatch.area().rect(cx).pos;
+                }
+                Hit::FingerMove(fe) => {
+                    let Some((at, _)) = self.press else {
+                        return;
+                    };
+                    if !self.carrying {
+                        // The kit's slop, measured either way: a hand that
+                        // only meant to click wobbles, and a wobble that
+                        // carried would make every click a gamble.
+                        if (fe.abs - at).length() < KNOB_DRAG_SLOP {
+                            return;
+                        }
+                        self.start_carry(cx, fe.abs);
+                        return;
+                    }
+                    self.carry_at = fe.abs;
+                    cx.widget_action(uid, FabColorPickAction::DragMoved(fe.abs));
+                    self.redraw_carry(cx);
+                }
+                Hit::FingerUp(fe) => {
+                    let Some((_, was_open)) = self.press else {
+                        return;
+                    };
+                    if self.carrying {
+                        self.end_carry(cx);
+                        cx.widget_action(uid, FabColorPickAction::DragDropped(fe.abs));
+                    } else {
+                        self.press = None;
+                        if !was_open {
+                            self.open_popover(cx);
+                        }
+                    }
+                    self.draw_swatch.hover = if fe.is_over && fe.device.has_hovers() { 1.0 } else { 0.0 };
+                    self.draw_swatch.redraw(cx);
+                }
+                _ => {}
+            }
+            return;
+        }
         match event.hits_with_sweep_area(cx, swatch, swatch) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
@@ -8523,5 +8764,171 @@ mod fab_color_pick_shield {
         assert!(cx.sweep_lock_area().is_some(), "the second popover never took the pointer");
         other.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
         assert_eq!(cx.sweep_lock_area(), None, "the first popover's lock outlived it");
+    }
+
+    // ---- carrying a colour off a draggable swatch ----
+
+    fn carrier(cx: &mut Cx) -> (WidgetRef, Target) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pick := FabColorPick{width: 60. height: 20. draggable: true}
+                    plain := FabColorPick{width: 60. height: 20. margin: Inset{top: 40.}}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        (root, target)
+    }
+
+    fn carry_said(actions: &ActionsBuf, pick: &WidgetRef) -> Vec<&'static str> {
+        actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+            .filter(|action| action.widget_uid == pick.widget_uid())
+            .filter_map(|action| match action.cast::<FabColorPickAction>() {
+                FabColorPickAction::DragStarted => Some("started"),
+                FabColorPickAction::DragMoved(_) => Some("moved"),
+                FabColorPickAction::DragDropped(_) => Some("dropped"),
+                FabColorPickAction::DragCancelled => Some("cancelled"),
+                FabColorPickAction::Opened => Some("opened"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn escape() -> Event {
+        Event::KeyDown(KeyEvent {
+            key_code: KeyCode::Escape,
+            is_repeat: false,
+            modifiers: KeyModifiers::default(),
+            time: 1.15,
+        })
+    }
+
+    /// A draggable swatch opens on the release, because only the release
+    /// says the press did not travel; one that carried opens nothing and
+    /// reports the carry from start to drop.
+    #[test]
+    fn a_draggable_swatch_opens_on_the_release_and_carries_past_the_slop() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = carrier(&mut cx);
+        let pick = root.child(live_id!(pick));
+        let at = middle(&cx, pick.area());
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+
+        let down = press(at);
+        let mut all = send(&mut cx, &root, &down);
+        assert!(!is_open(&pick), "a draggable swatch opened on the press, before it could know");
+        all.extend(send(&mut cx, &root, &release(at)));
+        down.unhandle(&mut cx, &claimed(&down));
+        assert!(is_open(&pick), "a press and release on a draggable swatch did not open it");
+        assert_eq!(carry_said(&all, &pick), vec!["opened"]);
+        pick.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+
+        // A wobble under the slop is still a click.
+        let down = press(at);
+        let mut all = send(&mut cx, &root, &down);
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(KNOB_DRAG_SLOP - 1.0, 1.0))));
+        all.extend(send(&mut cx, &root, &release(at + dvec2(KNOB_DRAG_SLOP - 1.0, 1.0))));
+        down.unhandle(&mut cx, &claimed(&down));
+        assert!(is_open(&pick), "a wobble under the slop carried instead of opening");
+        assert_eq!(carry_said(&all, &pick), vec!["opened"]);
+        pick.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+
+        // Past the slop: a carry, and no popover.
+        let down = press(at);
+        let mut all = send(&mut cx, &root, &down);
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(20.0, 0.0))));
+        assert!(pick.borrow::<FabColorPick>().unwrap().is_carrying(), "a press that travelled is not carrying");
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(80.0, 0.0))));
+        all.extend(send(&mut cx, &root, &release(at + dvec2(80.0, 0.0))));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert!(!is_open(&pick), "a carried colour opened its popover on the drop");
+        assert!(!pick.borrow::<FabColorPick>().unwrap().is_carrying(), "the drop left the colour carried");
+        assert_eq!(carry_said(&all, &pick), vec!["started", "moved", "moved", "dropped"]);
+    }
+
+    /// Escape calls a carry off, and the release after it drops nothing and
+    /// opens nothing.
+    #[test]
+    fn escape_calls_a_carry_off_and_the_release_after_it_says_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = carrier(&mut cx);
+        let pick = root.child(live_id!(pick));
+        let at = middle(&cx, pick.area());
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut all = send(&mut cx, &root, &down);
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(30.0, 0.0))));
+        all.extend(send(&mut cx, &root, &escape()));
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(60.0, 0.0))));
+        all.extend(send(&mut cx, &root, &release(at + dvec2(60.0, 0.0))));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert_eq!(carry_said(&all, &pick), vec!["started", "moved", "cancelled"]);
+        assert!(!is_open(&pick), "the release after Escape opened the popover");
+    }
+
+    /// A carry that starts on the swatch of an open popover shuts it first,
+    /// and lets go of the pointer the popover held.
+    #[test]
+    fn a_carry_from_an_open_popover_shuts_it_and_leaves_no_lock() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = carrier(&mut cx);
+        let pick = root.child(live_id!(pick));
+        pick.borrow_mut::<FabColorPick>().unwrap().open_popover(&mut cx);
+        target.draw(&mut cx, &root);
+        assert!(cx.sweep_lock_area().is_some(), "the open popover never took the pointer");
+        let at = middle(&cx, pick.area());
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut all = send(&mut cx, &root, &down);
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(30.0, 0.0))));
+        assert!(!is_open(&pick), "the popover is still up under a carry");
+        assert_eq!(cx.sweep_lock_area(), None, "the carry left the popover's lock held");
+        target.draw(&mut cx, &root);
+        // Off the swatch, where every carry goes: the press that shut the
+        // popover had to name its lock to be heard, and a capture left
+        // naming it lets go of the pointer at the swatch's edge.
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(120.0, 0.0))));
+        assert!(pick.borrow::<FabColorPick>().unwrap().is_carrying(), "the carry dropped at the swatch's edge");
+        all.extend(send(&mut cx, &root, &release(at + dvec2(120.0, 0.0))));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert!(!is_open(&pick), "the drop opened the popover again");
+        assert_eq!(cx.sweep_lock_area(), None);
+        assert_eq!(carry_said(&all, &pick), vec!["started", "moved", "moved", "dropped"]);
+    }
+
+    /// A picker that did not ask to carry keeps the press it always had: it
+    /// opens on the way down, and a press that travels carries nothing.
+    #[test]
+    fn a_picker_that_did_not_ask_to_carry_never_does() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = carrier(&mut cx);
+        let plain = root.child(live_id!(plain));
+        assert!(!plain.borrow::<FabColorPick>().unwrap().draggable, "the type default carries");
+        let at = middle(&cx, plain.area());
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut all = send(&mut cx, &root, &down);
+        assert!(is_open(&plain), "a plain picker stopped opening on the press");
+        all.extend(send(&mut cx, &root, &moved(at + dvec2(40.0, 0.0))));
+        all.extend(send(&mut cx, &root, &release(at + dvec2(40.0, 0.0))));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert_eq!(carry_said(&all, &plain), vec!["opened"], "a plain picker carried");
+        plain.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
     }
 }

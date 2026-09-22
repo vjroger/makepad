@@ -9018,6 +9018,14 @@ pub struct Tweaker {
     /// parked for the rows.
     #[rust]
     tb_color_opened: Option<usize>,
+    /// The one of the four colours being carried to another square, and
+    /// the square it would land on if let go now (never its own). Nothing
+    /// installs while it is carried: the swap is one gesture, and it goes
+    /// in on the drop.
+    #[rust]
+    tb_color_carried: Option<usize>,
+    #[rust]
+    tb_color_target: Option<usize>,
     #[rust]
     tb_random_uid: u64,
     /// One per slider row, in `BuildRow::ALL`'s order.
@@ -10704,9 +10712,12 @@ impl Tweaker {
                         text: ""
                         max_lines: 1
                     }
+                    // Carried to another square, it trades colours with
+                    // that one: the names are the roles and stay put.
                     tb_color := FabColorPick {
                         width: Fill
                         height: 18
+                        draggable: true
                     }
                 }
                 View {
@@ -16505,6 +16516,31 @@ impl Tweaker {
                         self.tb_color_opened = Some(which);
                         self.redraw_panel(cx);
                     }
+                    // A colour carried to another square. The names stay
+                    // where they are, because they are the roles; the colours
+                    // under them move.
+                    FabColorPickAction::DragStarted => {
+                        self.tb_color_carried = Some(which);
+                        self.tb_color_opened = None;
+                        self.tb_mark_target(cx, None);
+                    }
+                    FabColorPickAction::DragMoved(at) => {
+                        let target = self.tb_slot_at(cx, at).filter(|slot| *slot != which);
+                        self.tb_mark_target(cx, target);
+                    }
+                    FabColorPickAction::DragDropped(at) => {
+                        let target = self.tb_slot_at(cx, at).filter(|slot| *slot != which);
+                        self.tb_color_carried = None;
+                        self.tb_mark_target(cx, None);
+                        if let Some(to) = target {
+                            self.tb_colors_swapped(which, to);
+                        }
+                        self.redraw_panel(cx);
+                    }
+                    FabColorPickAction::DragCancelled => {
+                        self.tb_color_carried = None;
+                        self.tb_mark_target(cx, None);
+                    }
                     // The popover's own eyedropper: the host owns it,
                     // because it is the host that knows the window. Armed
                     // with the name of THIS colour, so the pixel that is
@@ -18474,6 +18510,8 @@ impl Tweaker {
     fn tb_shut_routes(&mut self) {
         self.tb_color_uids = [0; 4];
         self.tb_color_opened = None;
+        self.tb_color_carried = None;
+        self.tb_color_target = None;
         self.tb_random_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
         self.tb_carousel_uid = 0;
@@ -18869,6 +18907,30 @@ impl Tweaker {
         };
         self.tb_builder.set(params);
         if which == 0 {
+            self.tb_suggest_due = true;
+        }
+        self.tb_built_changed();
+    }
+
+    /// One colour carried onto another square: the two trade roles and the
+    /// other two stay put.
+    ///
+    /// A trade rather than an insert that shifts the rest along, because a
+    /// shift changes up to four roles in one gesture and the hand only
+    /// pointed at two. It names the four outright like any edit of a square,
+    /// so the palette becomes the person's own unless the traded one is
+    /// itself on offer, and it is a drop, so it goes in at once. The strip
+    /// is grown from the primary, so only a trade that moved the primary
+    /// asks for a new one. Two squares of one colour trade nothing.
+    fn tb_colors_swapped(&mut self, from: usize, to: usize) {
+        let params = self.tb_builder.params();
+        let mut palette = params.palette();
+        if from == to || palette[from] | 0xFF == palette[to] | 0xFF {
+            return;
+        }
+        palette.swap(from, to);
+        self.tb_builder.set(params.with_palette(palette));
+        if from == 0 || to == 0 {
             self.tb_suggest_due = true;
         }
         self.tb_built_changed();
@@ -19643,6 +19705,42 @@ impl Tweaker {
         };
         let row = sidebar.child(live_id!(theme_head)).child(live_id!(tb_body)).child(live_id!(tb_seed_row));
         TB_COLOR_IDS.iter().map(|id| row.child(*id).child(live_id!(tb_color))).collect()
+    }
+
+    /// Which of the four squares a carried colour is over: the column under
+    /// the name, as far as the gap beside it, so the pointer is never over
+    /// nothing between two squares. Nothing off the row.
+    fn tb_slot_at(&self, cx: &Cx, at: DVec2) -> Option<usize> {
+        let controls = self.tb_color_controls();
+        let rects: Vec<Rect> = controls.iter().map(|c| c.area().rect(cx)).collect();
+        let row = self.sidebar.as_ref()?.child(live_id!(theme_head)).child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        let names: Vec<Rect> = TB_COLOR_IDS
+            .iter()
+            .map(|id| row.child(*id).child(live_id!(tb_color_name)).area().rect(cx))
+            .collect();
+        (0..rects.len()).find(|which| {
+            let square = rects[*which];
+            if square.size.x <= 0.0 {
+                return false;
+            }
+            let half_gap = 2.0;
+            let top = names.get(*which).filter(|n| n.size.y > 0.0).map_or(square.pos.y, |n| n.pos.y.min(square.pos.y));
+            at.x >= square.pos.x - half_gap
+                && at.x < square.pos.x + square.size.x + half_gap
+                && at.y >= top - half_gap
+                && at.y < square.pos.y + square.size.y + half_gap
+        })
+    }
+
+    /// Light the square a carried colour would land on, and only that one.
+    fn tb_mark_target(&mut self, cx: &mut Cx, target: Option<usize>) {
+        self.tb_color_target = target;
+        for (which, control) in self.tb_color_controls().into_iter().enumerate() {
+            if let Some(mut pick) = control.borrow_mut::<FabColorPick>() {
+                pick.set_drop_target(cx, target == Some(which));
+            }
+        }
+        self.redraw_panel(cx);
     }
 }
 
@@ -22778,10 +22876,12 @@ line two");
     }
 
     /// A press with BOTH halves routed through the panel: a colour control
-    /// opens its popover on the way down, so the actions that matter are
-    /// the ones `one_press_on` hands to the frame instead. The release is
-    /// sent all the same -- a press left down keeps the pointer, and the
-    /// next press would go to the control still holding it.
+    /// opens its popover on one half or the other -- the builder's, which
+    /// can be carried, on the release, since only the release says the
+    /// press did not travel -- so the actions of both go to the panel, where
+    /// `one_press_on` hands the down's to the frame instead. And a press
+    /// left down keeps the pointer, so the next press would go to the
+    /// control still holding it.
     fn a_press_down_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef) {
         use std::cell::Cell;
         const WINDOW: WindowId = WindowId(1, 1);
@@ -22798,7 +22898,7 @@ line two");
             time: 1.0,
         });
         let actions = cx.capture_actions(|cx| root.handle_event(cx, &down, &mut Scope::empty()));
-        assert!(!actions.is_empty(), "the press produced no action whatever");
+        let said = !actions.is_empty();
         panel.handle_sidebar_actions(cx, &actions);
         let up = Event::MouseUp(MouseUpEvent {
             abs: at,
@@ -22809,7 +22909,12 @@ line two");
         });
         let actions = cx.capture_actions(|cx| root.handle_event(cx, &up, &mut Scope::empty()));
         cx.fingers.first_mouse_button = None;
+        assert!(said || !actions.is_empty(), "the press produced no action whatever");
         panel.handle_sidebar_actions(cx, &actions);
+        // No event loop here ends the capture on the release; a control
+        // still holding the pointer would hear the next press's moves.
+        let taken = if let Event::MouseDown(e) = &down { e.handled.get() } else { Area::Empty };
+        down.unhandle(cx, &taken);
     }
 
     /// A folder for this panel's themes that is this test's alone, removed
@@ -24504,6 +24609,289 @@ line two");
         }));
         cx.fingers.first_mouse_button = None;
     }
+    /// A hand carrying one of the builder's colours: down on a square, the
+    /// moves, and the release (or Escape), each routed the panel's own way --
+    /// the popover's owner, then the head -- and what came of each handed
+    /// to the panel as a press is.
+    struct Carry {
+        at: Vec2d,
+        time: f64,
+        /// The press, kept so its capture can be let go after the release:
+        /// with no event loop here nothing else ends it, and a square still
+        /// holding the pointer would hear the next carry's moves as its own.
+        down: Event,
+    }
+
+    impl Carry {
+        const WINDOW: WindowId = WindowId(1, 1);
+
+        fn send(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, event: &Event) {
+            let actions = cx.capture_actions(|cx| {
+                panel.popover_first(cx, event, &mut Scope::empty());
+                head.handle_event(cx, event, &mut Scope::empty());
+            });
+            panel.handle_sidebar_actions(cx, &actions);
+        }
+
+        fn down(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, which: usize) -> Carry {
+            let at = a_square_middle(cx, head, which);
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, Self::WINDOW));
+            let down = Event::MouseDown(MouseDownEvent {
+                abs: at,
+                button: MouseButton::PRIMARY,
+                window_id: Self::WINDOW,
+                modifiers: KeyModifiers::default(),
+                handled: std::cell::Cell::new(Area::Empty),
+                time: 5.0,
+            });
+            Self::send(cx, panel, head, &down);
+            Carry { at, time: 5.0, down }
+        }
+
+        fn move_to(&mut self, cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, at: Vec2d) {
+            self.at = at;
+            self.time += 0.05;
+            Self::send(cx, panel, head, &Event::MouseMove(MouseMoveEvent {
+                abs: at,
+                lock_delta: Vec2d::default(),
+                window_id: Self::WINDOW,
+                modifiers: KeyModifiers::default(),
+                time: self.time,
+                handled: std::cell::Cell::new(Area::Empty),
+            }));
+        }
+
+        fn escape(&mut self, cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef) {
+            Self::send(cx, panel, head, &Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape,
+                is_repeat: false,
+                modifiers: KeyModifiers::default(),
+                time: self.time,
+            }));
+        }
+
+        fn up(self, cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef) {
+            Self::send(cx, panel, head, &Event::MouseUp(MouseUpEvent {
+                abs: self.at,
+                button: MouseButton::PRIMARY,
+                window_id: Self::WINDOW,
+                modifiers: KeyModifiers::default(),
+                time: self.time + 0.05,
+            }));
+            if let Event::MouseDown(e) = &self.down {
+                let taken = e.handled.get();
+                self.down.unhandle(cx, &taken);
+            }
+            cx.fingers.first_mouse_button = None;
+        }
+    }
+
+    fn a_square_middle(cx: &Cx, head: &WidgetRef, which: usize) -> Vec2d {
+        let square = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(TB_COLOR_IDS[which])
+            .child(live_id!(tb_color))
+            .area()
+            .rect(cx);
+        assert!(square.size.x > 0.0, "the {} colour was never drawn", TB_COLOR_NAMES[which]);
+        square.pos + square.size * 0.5
+    }
+
+    /// The builder ready for a carry: a chip chosen and in force, so the
+    /// four squares are four different colours and the strip has grown.
+    fn a_builder_with_a_palette_on(cx: &mut Cx, panel: &mut Tweaker) -> WidgetRef {
+        let head = the_builder_drawn(cx, panel);
+        a_press_on_chip(cx, panel, &head, 1);
+        the_palette_lands(cx, panel, 0.0);
+        draw_the_theme_head(cx, panel, &head);
+        let palette = panel.tb_builder.params().palette();
+        for a in 0..4 {
+            for b in a + 1..4 {
+                assert_ne!(palette[a] | 0xFF, palette[b] | 0xFF, "two squares share a colour, so a trade of them tests nothing");
+            }
+        }
+        head
+    }
+
+    /// A colour carried onto another square trades places with the colour
+    /// there, and only those two move: the names over them are the roles and
+    /// stay put. Nothing goes in while the colour is carried; the drop is a
+    /// commit and goes in at once, and a trade that moved the primary grows
+    /// the carousel from the new one.
+    #[test]
+    fn a_colour_carried_onto_another_square_trades_places_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let was = panel.tb_builder.params().palette();
+        let offers = panel.tb_suggestions.clone();
+        let rebuilt = panel.tb_builder.rebuilds();
+
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 0);
+        let over_the_tertiary = a_square_middle(&cx, &head, 2);
+        let start = hand.at;
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(start.x + 10.0, start.y));
+        assert_eq!(panel.tb_color_carried, Some(0), "a press that travelled did not carry the primary");
+        assert_eq!(panel.tb_color_target, None, "the primary's own square is lit as a place to land");
+        hand.move_to(&mut cx, &mut panel, &head, over_the_tertiary);
+        assert_eq!(panel.tb_color_target, Some(2), "the square under the carried colour is not lit");
+        let lit: Vec<bool> = TB_COLOR_IDS
+            .iter()
+            .map(|id| {
+                head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(*id).child(live_id!(tb_color))
+                    .borrow::<FabColorPick>().expect("a colour control").is_drop_target()
+            })
+            .collect();
+        assert_eq!(lit, vec![false, false, true, false], "some square other than the one under the pointer is lit");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(over_the_tertiary.x, over_the_tertiary.y + 300.0));
+        assert_eq!(panel.tb_color_target, None, "a pointer off the row lights a square");
+        hand.move_to(&mut cx, &mut panel, &head, over_the_tertiary);
+        assert!(!panel.tb_apply_due, "a colour still being carried asked for an install");
+        assert_eq!(panel.tb_builder.params().palette(), was, "the palette moved before the drop");
+        hand.up(&mut cx, &mut panel, &head);
+
+        let now = panel.tb_builder.params().palette();
+        assert_eq!(now, [was[2], was[1], was[0], was[3]], "the drop did not trade exactly the primary and the tertiary");
+        assert_eq!(panel.tb_color_carried, None);
+        assert_eq!(panel.tb_color_target, None, "the drop left a square lit");
+        assert!(panel.tb_apply_due && panel.tb_apply_at_once, "the drop is waiting for a settle nobody is dragging");
+        panel.tb_settle(&mut cx, 1.0);
+        assert_eq!(panel.tb_builder.rebuilds(), rebuilt + 1, "the trade did not go in once");
+        assert_eq!(panel.tb_builder.params().favourite, was[2], "the carousel is not grown from the new primary");
+        assert_ne!(panel.tb_suggestions, offers, "a new primary left the carousel as it was");
+        let square = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(TB_COLOR_IDS[0]).child(live_id!(tb_color));
+        assert!(!square.borrow::<FabColorPick>().expect("a colour control").is_open(), "the drop opened a popover");
+    }
+
+    /// A trade that leaves the primary where it is leaves the carousel as
+    /// it is: it is grown from the primary alone.
+    #[test]
+    fn a_trade_that_leaves_the_primary_alone_does_not_grow_the_carousel() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let was = panel.tb_builder.params().palette();
+        let offers = panel.tb_suggestions.clone();
+
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 1);
+        let there = a_square_middle(&cx, &head, 2);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
+        hand.move_to(&mut cx, &mut panel, &head, there);
+        hand.up(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_builder.params().palette(), [was[0], was[2], was[1], was[3]]);
+        assert_eq!(panel.tb_chosen_index(), None, "a traded palette left the chip it started from outlined");
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        assert_eq!(panel.tb_suggestions, offers, "a trade of the secondary and the tertiary grew the carousel again");
+    }
+
+    /// A press and release that does not travel still opens the colour's
+    /// popover and trades nothing, and so does a wobble under the slop. A
+    /// carry let go on its own square, off the row, or called off with
+    /// Escape changes nothing and installs nothing.
+    #[test]
+    fn a_carry_that_lands_nowhere_changes_nothing_and_a_click_still_opens() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let was = panel.tb_builder.params().palette();
+        let square = |which: usize| {
+            head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(TB_COLOR_IDS[which]).child(live_id!(tb_color))
+        };
+        let is_open = |which: usize| square(which).borrow::<FabColorPick>().expect("a colour control").is_open();
+
+        let hand = Carry::down(&mut cx, &mut panel, &head, 0);
+        hand.up(&mut cx, &mut panel, &head);
+        assert!(is_open(0), "a click on the primary no longer opens its popover");
+        assert_eq!(panel.tb_color_opened, Some(0));
+        square(0).borrow_mut::<FabColorPick>().expect("a colour control").close_popover(&mut cx, false);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 1);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 2.0, hand.at.y + 1.0));
+        assert_eq!(panel.tb_color_carried, None, "a wobble under the slop carried");
+        hand.up(&mut cx, &mut panel, &head);
+        assert!(is_open(1), "a wobble under the slop did not open the popover");
+        square(1).borrow_mut::<FabColorPick>().expect("a colour control").close_popover(&mut cx, false);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.tb_apply_due = false;
+
+        // Its own square, off the row, and Escape over another square.
+        for how in ["home", "off", "escape"] {
+            let mut hand = Carry::down(&mut cx, &mut panel, &head, 0);
+            let home = hand.at;
+            hand.move_to(&mut cx, &mut panel, &head, dvec2(home.x + 12.0, home.y));
+            assert_eq!(panel.tb_color_carried, Some(0), "{how}: the carry never started");
+            match how {
+                "home" => hand.move_to(&mut cx, &mut panel, &head, home),
+                "off" => hand.move_to(&mut cx, &mut panel, &head, dvec2(home.x, home.y + 300.0)),
+                _ => {
+                    let there = a_square_middle(&cx, &head, 3);
+                    hand.move_to(&mut cx, &mut panel, &head, there);
+                    assert_eq!(panel.tb_color_target, Some(3));
+                    hand.escape(&mut cx, &mut panel, &head);
+                    assert_eq!(panel.tb_color_carried, None, "Escape did not call the carry off");
+                    assert_eq!(panel.tb_color_target, None, "Escape left a square lit");
+                }
+            }
+            hand.up(&mut cx, &mut panel, &head);
+            assert_eq!(panel.tb_builder.params().palette(), was, "{how}: a carry that landed nowhere moved a colour");
+            assert!(!panel.tb_apply_due, "{how}: a carry that landed nowhere asked for an install");
+            assert!((0..4).all(|w| !is_open(w)), "{how}: a carry opened a popover");
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+        }
+    }
+
+    /// A carry begun on the square whose popover is up shuts the popover
+    /// and leaves nothing holding the pointer, before or after the drop.
+    #[test]
+    fn a_carry_from_an_open_builder_popover_shuts_it_and_holds_no_lock() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        let was = panel.tb_builder.params().palette();
+        let square = |which: usize| {
+            head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(TB_COLOR_IDS[which]).child(live_id!(tb_color))
+        };
+        let hand = Carry::down(&mut cx, &mut panel, &head, 0);
+        hand.up(&mut cx, &mut panel, &head);
+        assert!(square(0).borrow::<FabColorPick>().unwrap().is_open());
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(cx.sweep_lock_area().is_some(), "the popover never took the pointer");
+
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 0);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 12.0, hand.at.y));
+        assert!(!square(0).borrow::<FabColorPick>().unwrap().is_open(), "the popover is up under the carry");
+        assert_eq!(cx.sweep_lock_area(), None, "the carry left the popover's lock held");
+        assert_eq!(panel.tb_color_carried, Some(0), "a press on the open square could not carry");
+        let there = a_square_middle(&cx, &head, 1);
+        hand.move_to(&mut cx, &mut panel, &head, there);
+        assert_eq!(panel.tb_color_carried, Some(0), "the carry from the open square dropped at its edge");
+        assert_eq!(panel.tb_builder.params().palette(), was, "the carry from the open square dropped at its edge");
+        hand.up(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_builder.params().palette(), [was[1], was[0], was[2], was[3]]);
+        assert!((0..4).all(|w| !square(w).borrow::<FabColorPick>().unwrap().is_open()), "two popovers, or one after a drop");
+        assert_eq!(cx.sweep_lock_area(), None);
+    }
+
+    /// Only the builder's four carry. Every other colour picker the panel
+    /// draws is declared from the plain type, which does not.
+    #[test]
+    fn only_the_builders_colours_can_be_carried() {
+        let src = include_str!("tweaker.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(src.matches("draggable: true").count(), 1, "some other picker carries, or the builder's do not");
+        let at = src.find("draggable: true").unwrap();
+        let before = &src[..at];
+        let control = before.rfind("tb_color := FabColorPick {").expect("the carry is not on the builder's colour");
+        assert!(at - control < 200, "the carry is declared on something other than the builder's colour");
+    }
+
     /// A press on the colour popover where it hangs over the app is the
     /// popover's, and so is the rest of a drag that began there, wherever
     /// the pointer goes before it is let go.
