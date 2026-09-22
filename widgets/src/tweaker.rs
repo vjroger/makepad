@@ -1138,6 +1138,9 @@ pub(crate) struct TweakSession {
     spec_weights: [f64; 3],
     /// The open colour popover's window rect, for /tweak/state.
     popup: Option<Rect>,
+    /// A press went down inside the open popover and has not come up yet.
+    /// See [`TweakSession::popover_takes`].
+    popup_grip: bool,
     /// A remote lock on the pulse mix (deterministic grabs): the pulse
     /// holds that tone instead of animating. None animates.
     pulse_lock: Option<f32>,
@@ -1268,6 +1271,32 @@ fn session() -> &'static Mutex<TweakSession> {
 }
 
 impl TweakSession {
+    /// Whether this pointer event over the app belongs to the open colour
+    /// popover rather than to picking.
+    ///
+    /// A press inside the popover is its own, and it holds the pointer until
+    /// it is let go, wherever the pointer goes meanwhile: a drag round the
+    /// hue ring overshoots the popover's edge all the time, and the wheel
+    /// already follows a pointer it holds anywhere, as long as the moves
+    /// reach it. A grip outlives nothing: a popover that shut while held
+    /// takes the grip with it, and the next press decides afresh.
+    fn popover_takes(&mut self, kind: PointerKind, abs: Vec2d) -> bool {
+        let inside = self.popup.is_some_and(|rect| rect.contains(abs));
+        let held = self.popup_grip && self.popup.is_some();
+        match kind {
+            PointerKind::Down => {
+                self.popup_grip = inside;
+                inside
+            }
+            PointerKind::Move => held || inside,
+            PointerKind::Up => {
+                self.popup_grip = false;
+                held
+            }
+            PointerKind::Scroll => false,
+        }
+    }
+
     /// Pull the pinned notes in, once per process. Anything already open in
     /// this session wins over the stored copy — the human is looking at it.
     fn load_notes(&mut self) {
@@ -1487,6 +1516,7 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
             s.hover = None;
             s.down_consumed = false;
             s.live_stroke = None;
+            s.popup_grip = false;
             drop(s);
             // Shift+F10 closes the whole design surface: the exploded view goes
             // with the panel (deferred toggle — performed pre-dispatch at
@@ -2303,6 +2333,14 @@ pub fn window_intercept(
         return false;
     }
 
+    // The colour popover overhangs the app, and it is drawn over everything
+    // below: a press on it, and the whole drag that follows, is the panel's
+    // and never a pick. A move inside it is too (its palette strip hovers).
+    if session().lock().unwrap().popover_takes(kind, abs) {
+        tweaker.handle_event(cx, event, &mut Scope::empty());
+        return true;
+    }
+
     // A pin badge is a mark on the canvas that opens its note. It is checked
     // before anything else picks, because it sits ON the widget it belongs to
     // and a click there means the note, not the widget. With the selection
@@ -2601,13 +2639,6 @@ pub fn window_intercept(
 
     match kind {
         PointerKind::Move => {
-            // The colour popover overhangs the body: a move inside it is
-            // the panel's (its palette strip hovers), not a hover-pick.
-            let popup = session().lock().unwrap().popup;
-            if popup.is_some_and(|rect| rect.contains(abs)) {
-                tweaker.handle_event(cx, event, &mut Scope::empty());
-                return true;
-            }
             // The doc tooltip closes when the pointer leaves into the body
             // (the panel never sees these moves).
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
@@ -18877,6 +18908,17 @@ impl Tweaker {
         self.tb_apply_at_once = false;
         self.tb_theme_stands = false;
         self.tb_reading.clear();
+        // A colour's popover shuts with the section. Left open it holds the
+        // pointer for a popover nobody can see any more, and every control
+        // in the app turns its hits away until the next time the section is
+        // opened and the popover is found still up. Shut before the routes
+        // are, so what it reports on the way out finds no route to a builder
+        // that has gone.
+        for control in self.tb_color_controls() {
+            if let Some(mut pick) = control.borrow_mut::<FabColorPick>() {
+                pick.close_popover(cx, false);
+            }
+        }
         self.tb_shut_routes();
         // The offers go with the section: they are grown from a favourite
         // that is about to stop being one, and the person's own file is
@@ -19714,6 +19756,70 @@ impl Tweaker {
     }
 }
 
+impl Tweaker {
+    /// A pointer inside the open popover goes to its owner before the rest
+    /// of the sidebar.
+    ///
+    /// The popover draws above the list but its row is last in event
+    /// order, so the rows underneath claimed hovers and presses first
+    /// (first claimant wins). Pointer events inside the popover go to
+    /// its row before the list; the list's pass then finds them handled.
+    ///
+    /// The builder's four colours are owners too, and they are not rows. Their
+    /// popover hangs over the builder's own palette chips and sliders, which
+    /// come first in the head, so a press on the wheel where a chip lay
+    /// underneath picked the chip's palette instead, and one over a slider
+    /// dragged the slider. Only the presses that fell between controls
+    /// reached the wheel, which is what made its pucks move only sometimes.
+    fn popover_first(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let pointer = match event {
+            Event::MouseMove(e) => Some(e.abs),
+            Event::MouseDown(e) => Some(e.abs),
+            Event::MouseUp(e) => Some(e.abs),
+            _ => None,
+        };
+        let Some(abs) = pointer else {
+            return;
+        };
+        if !self.open_popup.is_some_and(|rect| rect.contains(abs)) {
+            return;
+        }
+        let owner = self
+            .visible
+            .iter()
+            .find(|v| {
+                v.item
+                    .child(live_id!(swatch))
+                    .borrow::<FabColorPick>()
+                    .is_some_and(|p| p.is_open())
+            })
+            .map(|v| v.item.clone());
+        if let Some(item) = owner {
+            item.handle_event(cx, event, scope);
+            return;
+        }
+        let Some(which) = self.tb_color_opened else {
+            return;
+        };
+        let Some(control) = self.tb_color_controls().into_iter().nth(which) else {
+            return;
+        };
+        if control.borrow::<FabColorPick>().is_some_and(|p| p.is_open()) {
+            control.handle_event(cx, event, scope);
+        }
+    }
+
+    /// The builder's four colour controls, in `TB_COLOR_IDS` order; none
+    /// before the sidebar is built.
+    fn tb_color_controls(&self) -> Vec<WidgetRef> {
+        let Some(sidebar) = self.sidebar.clone() else {
+            return Vec::new();
+        };
+        let row = sidebar.child(live_id!(theme_head)).child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        TB_COLOR_IDS.iter().map(|id| row.child(*id).child(live_id!(tb_color))).collect()
+    }
+}
+
 impl Widget for Tweaker {
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if !tweak_is_on() {
@@ -20447,33 +20553,7 @@ impl Widget for Tweaker {
         // the property list underneath it.
         let swallow_scroll = matches!(event, Event::Scroll(e)
             if self.open_popup.is_some_and(|rect| rect.contains(e.abs)));
-        // The popover draws above the list but its row is last in event
-        // order, so the rows underneath claimed hovers and presses first
-        // (first claimant wins). Pointer events inside the popover go to
-        // its row before the list; the list's pass then finds them handled.
-        let pointer = match event {
-            Event::MouseMove(e) => Some(e.abs),
-            Event::MouseDown(e) => Some(e.abs),
-            Event::MouseUp(e) => Some(e.abs),
-            _ => None,
-        };
-        if let Some(abs) = pointer {
-            if self.open_popup.is_some_and(|rect| rect.contains(abs)) {
-                let owner = self
-                    .visible
-                    .iter()
-                    .find(|v| {
-                        v.item
-                            .child(live_id!(swatch))
-                            .borrow::<FabColorPick>()
-                            .is_some_and(|p| p.is_open())
-                    })
-                    .map(|v| v.item.clone());
-                if let Some(item) = owner {
-                    item.handle_event(cx, event, scope);
-                }
-            }
-        }
+        self.popover_first(cx, event, scope);
         if let Some(sidebar) = self.sidebar.clone() {
             if !swallow_scroll {
                 sidebar.handle_event(cx, event, scope);
@@ -24457,6 +24537,192 @@ line two");
         assert_eq!(panel.tb_builder.params().seeds, None, "opening and shutting a popover named a palette");
         assert!(!panel.tb_apply_due, "a look at a colour asked for an install");
     }
+
+    /// A builder colour's popover holds the pointer while it is up, and lets
+    /// go of it however the panel shuts it: the draw shutting an older one
+    /// under a newer, the section folding, and the panel going off.
+    ///
+    /// The fold was the one that leaked. It shut the section's routes but
+    /// not the popover, which stayed open under a body nobody drew, still
+    /// holding the lock that turns every other hit in the app away.
+    #[test]
+    fn a_builder_colour_popover_lets_go_of_the_pointer_however_it_shuts() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+        let control = |which: usize| row.child(TB_COLOR_IDS[which]).child(live_id!(tb_color));
+        let is_open = |which: usize| control(which).borrow::<FabColorPick>().expect("a colour control").is_open();
+        let open = |cx: &mut Cx, panel: &mut Tweaker, which: usize| {
+            control(which).borrow_mut::<FabColorPick>().expect("a colour control").open_popover(cx);
+            panel.tb_color_opened = Some(which);
+            assert!(cx.sweep_lock_area().is_some(), "the {} colour's popover never took the pointer", TB_COLOR_NAMES[which]);
+        };
+
+        open(&mut cx, &mut panel, 0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        open(&mut cx, &mut panel, 2);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(!is_open(0), "the draw left the older popover up");
+        control(2).borrow_mut::<FabColorPick>().expect("a colour control").close_popover(&mut cx, false);
+        assert_eq!(cx.sweep_lock_area(), None, "the popover the draw shut kept the pointer");
+
+        open(&mut cx, &mut panel, 1);
+        panel.toggle_theme_builder(&mut cx);
+        assert!(!panel.tb_open, "the fold did not fold");
+        assert!(!is_open(1), "the fold left the popover up under the folded section");
+        assert_eq!(cx.sweep_lock_area(), None, "the fold left the pointer locked");
+
+        panel.toggle_theme_builder(&mut cx);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        open(&mut cx, &mut panel, 3);
+        panel.cancel_interactions(&mut cx);
+        assert!(!is_open(3), "the panel went off with the popover up");
+        assert_eq!(cx.sweep_lock_area(), None, "the panel went off and left the pointer locked");
+    }
+
+    /// A drag round a builder colour's hue ring reaches the ring, and keeps
+    /// it through the install that lands in the middle of it.
+    ///
+    /// The press is the half that failed. Twelve o'clock on the ring lies
+    /// over one of the palette chips, and the chip came first in the head,
+    /// so it took the press and the wheel never heard of it; only presses
+    /// that fell between the controls underneath moved a puck.
+    ///
+    /// The install is the half that was suspected and holds. The settle
+    /// installs while the hand is still moving, and an install is a module
+    /// rebuild and a redraw of the head the popover hangs off. The wheel
+    /// holds the pointer by its drawn area, so a redraw that lost that area
+    /// would leave the puck where the install caught it.
+    #[test]
+    fn a_drag_round_a_builder_colour_reaches_the_ring_and_outlives_the_install() {
+        use std::cell::Cell;
+        const WINDOW: WindowId = WindowId(1, 1);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let control = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(TB_COLOR_IDS[0])
+            .child(live_id!(tb_color));
+        a_press_down_on(&mut cx, &mut panel, &head, &control);
+        assert!(control.borrow::<FabColorPick>().expect("a colour control").is_open());
+        // Twice, as the park test says: the head reads the popover's measure
+        // on the frame after it drew. Then the wipe that hands it to the
+        // event side.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.popups_start_over();
+        assert!(panel.open_popup.is_some(), "the builder's popover was never parked");
+        let wheel = control.child(live_id!(wheel));
+        let face = wheel.area().rect(&cx);
+        assert!(face.size.x > 100.0, "the popover's wheel never drew");
+        let size = face.size.x.min(face.size.y);
+        let centre = face.pos + face.size * 0.5;
+        let mid = (crate::fab_controls::RING_OUTER + crate::fab_controls::RING_INNER) * 0.5 * size;
+        // Twelve, three, six and nine o'clock on the ring: hues 0, 1/4, 1/2, 3/4.
+        let on_ring = |quarter: f64| {
+            let a = quarter * std::f64::consts::FRAC_PI_2;
+            centre + dvec2(a.sin() * mid, -a.cos() * mid)
+        };
+        let hue = |_: &Cx| wheel.borrow::<crate::fab_controls::FabColorWheel>().expect("a wheel").hsv()[0];
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let send = |cx: &mut Cx, panel: &mut Tweaker, event: Event| {
+            // The panel's own order: the popover's owner, then the sidebar.
+            let actions = cx.capture_actions(|cx| {
+                panel.popover_first(cx, &event, &mut Scope::empty());
+                head.handle_event(cx, &event, &mut Scope::empty());
+            });
+            panel.handle_sidebar_actions(cx, &actions);
+        };
+        let move_to = |abs: Vec2d, time: f64| {
+            Event::MouseMove(MouseMoveEvent {
+                abs,
+                lock_delta: Vec2d::default(),
+                window_id: WINDOW,
+                modifiers: KeyModifiers::default(),
+                time,
+                handled: Cell::new(Area::Empty),
+            })
+        };
+        send(&mut cx, &mut panel, Event::MouseDown(MouseDownEvent {
+            abs: on_ring(0.0),
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 2.0,
+        }));
+        send(&mut cx, &mut panel, move_to(on_ring(1.0), 2.1));
+        assert!((hue(&cx) - 0.25).abs() < 0.01, "the ring never took the drag: hue {}", hue(&cx));
+        assert!(panel.tb_apply_due, "a drag of the colour owed the app nothing");
+
+        // The settle comes due in the middle of the drag, and its reload lands.
+        let was = panel.tb_builder.rebuilds();
+        panel.tb_settle(&mut cx, 10.0);
+        assert_eq!(panel.tb_builder.rebuilds(), was + 1, "the settle never installed the colour");
+        the_build_reload_lands(&mut cx, &mut panel, 10.0);
+        // The panel's chrome is its own palette, not the theme's, so the
+        // install does not rebuild the sidebar the popover lives in.
+        panel.ensure_sidebar(&mut cx);
+        let head_now = panel.sidebar.clone().expect("a sidebar").child(live_id!(theme_head));
+        assert_eq!(head_now.widget_uid(), head.widget_uid(), "the install rebuilt the sidebar under the drag");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.popups_start_over();
+
+        send(&mut cx, &mut panel, move_to(on_ring(2.0), 10.1));
+        assert!(
+            (hue(&cx) - 0.5).abs() < 0.01,
+            "the puck stopped where the install caught it: hue {}",
+            hue(&cx)
+        );
+        send(&mut cx, &mut panel, Event::MouseUp(MouseUpEvent {
+            abs: on_ring(2.0),
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 10.2,
+        }));
+        cx.fingers.first_mouse_button = None;
+    }
+    /// A press on the colour popover where it hangs over the app is the
+    /// popover's, and so is the rest of a drag that began there, wherever
+    /// the pointer goes before it is let go.
+    ///
+    /// Only a MOVE inside the popover's rect used to count. The press that
+    /// starts a drag on the wheel went to picking, so it selected the app
+    /// widget under the popover instead; a drag that did start (over the
+    /// panel's half) stopped dead once the pointer slipped off the popover's
+    /// edge over the app, because those moves went to the hover pick. The
+    /// hue ring comes within a dozen points of that edge.
+    #[test]
+    fn a_drag_that_starts_on_the_popover_stays_the_popovers() {
+        let rect = Rect { pos: dvec2(100.0, 80.0), size: dvec2(244.0, 420.0) };
+        let inside = dvec2(120.0, 200.0);
+        let outside = dvec2(60.0, 200.0);
+        let mut s = TweakSession::default();
+        s.popup = Some(rect);
+
+        assert!(s.popover_takes(PointerKind::Move, inside), "a hover over the popover went to the pick");
+        assert!(!s.popover_takes(PointerKind::Move, outside), "a hover off the popover was kept from the pick");
+        assert!(s.popover_takes(PointerKind::Down, inside), "a press on the popover went to the pick");
+        assert!(s.popover_takes(PointerKind::Move, outside), "the drag stopped at the popover's edge");
+        assert!(s.popover_takes(PointerKind::Up, outside), "the release of the popover's drag went to the pick");
+        // Let go, the pointer is the app's again off the popover.
+        assert!(!s.popover_takes(PointerKind::Move, outside), "the popover kept the pointer after the release");
+        // A press on the app is the app's, and so is its drag across the
+        // popover's release.
+        assert!(!s.popover_takes(PointerKind::Down, outside), "a press on the app went to the popover");
+        assert!(!s.popover_takes(PointerKind::Up, inside), "a release over the popover took a press it never had");
+        // A popover that shut while held lets the pointer go with it.
+        assert!(s.popover_takes(PointerKind::Down, inside));
+        s.popup = None;
+        assert!(!s.popover_takes(PointerKind::Move, outside), "a shut popover still holds the pointer");
+    }
+
     /// A press on the fold opens a section that really draws.
     ///
     /// The whole of this panel is fixed slots shown and hidden, and a DSL

@@ -1111,18 +1111,52 @@ pub enum WheelZone {
     None,
 }
 
+/// How far from a puck's centre a press still grabs it: the drawn puck's
+/// outer ring (6.5 points, stroked 1.4 wide in the shader) and a little more
+/// for the hand.
+pub const PUCK_GRAB: f64 = 8.0;
+
 /// Which zone a pointer at `rel` (widget-local, origin top-left) lands in,
-/// for a wheel drawn at `size` (its smaller dimension).
-pub fn wheel_zone(rel: DVec2, size: f64) -> WheelZone {
+/// for a wheel drawn at `size` (its smaller dimension) showing `hsv`.
+///
+/// A press on a puck grabs that puck, wherever the point falls. The colours
+/// people pick live on the square's edge -- every grey at saturation 0, the
+/// full colours at 1, black and the brights at the bottom and the top -- and
+/// a puck there hangs half outside the square: a press on its outer half
+/// used to fall in the gap before the ring and do nothing, or at the top
+/// right corner, where the full colours are, reach the ring and move the
+/// hue instead. Off the pucks, the gap between the square and the ring goes
+/// to whichever of the two is nearer rather than to nothing.
+pub fn wheel_zone(rel: DVec2, size: f64, hsv: [f32; 3]) -> WheelZone {
     let dx = rel.x - size * 0.5;
     let dy = rel.y - size * 0.5;
     let half = SQUARE_HALF * size;
+    let [h, s, v] = hsv.map(|c| c as f64);
+    // The pucks where the shader draws them.
+    let square_puck = dvec2(-half + s * 2.0 * half, -half + (1.0 - v) * 2.0 * half);
+    let mid = (RING_OUTER + RING_INNER) * 0.5 * size;
+    let angle = h * std::f64::consts::TAU;
+    let ring_puck = dvec2(angle.sin() * mid, -angle.cos() * mid);
+    let at = dvec2(dx, dy);
+    let to_square_puck = (at - square_puck).length();
+    let to_ring_puck = (at - ring_puck).length();
+    if to_square_puck.min(to_ring_puck) <= PUCK_GRAB {
+        return if to_square_puck <= to_ring_puck { WheelZone::Square } else { WheelZone::Ring };
+    }
     if dx.abs() <= half && dy.abs() <= half {
         return WheelZone::Square;
     }
     let r = (dx * dx + dy * dy).sqrt();
-    if r <= RING_OUTER * size + 4.0 && r >= RING_INNER * size - 4.0 {
+    let inner = RING_INNER * size - 4.0;
+    if r <= RING_OUTER * size + 4.0 && r >= inner {
         return WheelZone::Ring;
+    }
+    if r < inner {
+        // The gap: how far outside the square, against how far inside the ring.
+        let ox = (dx.abs() - half).max(0.0);
+        let oy = (dy.abs() - half).max(0.0);
+        let off_square = (ox * ox + oy * oy).sqrt();
+        return if off_square <= inner - r { WheelZone::Square } else { WheelZone::Ring };
     }
     WheelZone::None
 }
@@ -4091,7 +4125,7 @@ impl Widget for FabColorWheel {
                 cx.set_key_focus(self.draw_wheel.area());
                 let rect = self.draw_wheel.area().rect(cx);
                 let size = rect.size.x.min(rect.size.y);
-                let zone = wheel_zone(fe.abs - rect.pos, size);
+                let zone = wheel_zone(fe.abs - rect.pos, size, self.hsv());
                 if zone != WheelZone::None {
                     self.drag = Some(zone);
                     self.apply_pointer(cx, uid, fe.abs, false);
@@ -4566,6 +4600,24 @@ pub struct FabColorPick {
     /// Names of the palette entries, in strip order.
     #[rust]
     palette_names: Vec<String>,
+    /// The popover holds the sweep lock (see [`FabColorPick::lock`]).
+    #[rust]
+    locked: bool,
+    /// The area the lock was taken with: the swatch's, as it was then.
+    #[rust]
+    lock_area: Area,
+}
+
+/// A picker dropped while it is open (its page rebuilt on a theme or story
+/// switch) cannot let go of the pointer itself: a drop has no `Cx`, and a
+/// lock nobody holds turns every hit in the window away. The next event
+/// lets go of it.
+impl Drop for FabColorPick {
+    fn drop(&mut self) {
+        if self.locked {
+            crate::overlay_place::orphan_sweep_locks(&[self.lock_area, self.draw_swatch.area()]);
+        }
+    }
 }
 
 impl ScriptHook for FabColorPick {
@@ -4594,6 +4646,50 @@ impl FabColorPick {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Take the pointer for the open popover.
+    ///
+    /// The popover floats over widgets that are walked before it, the app's
+    /// buttons and the panel's rows, and with nothing to stop them they took
+    /// hovers and presses through it: a drag on the wheel that began over a
+    /// button under it pressed the button and never reached the wheel. The
+    /// lock turns away every hit test that does not name this picker, the
+    /// way a drop-down's list does; the popover's own controls are let
+    /// through while it hands them the event (see `handle_event`).
+    ///
+    /// Taken with the swatch's area, which exists from the moment the
+    /// swatch has been drawn once. The popover's own area does not exist
+    /// until the popover has drawn, and a lock on an empty area stops
+    /// nothing. A swatch that was never drawn takes it on its first draw.
+    fn lock(&mut self, cx: &mut Cx) {
+        let area = self.draw_swatch.area();
+        if self.locked || area.is_empty() {
+            return;
+        }
+        crate::overlay_place::release_orphaned_sweep_locks(cx);
+        cx.sweep_lock(area);
+        self.lock_area = area;
+        self.locked = true;
+    }
+
+    /// Let go of the pointer, and only of the lock this picker took. Both
+    /// areas: a redraw moves the lock to the swatch's newer area, and a
+    /// swatch drawn into another slot since keeps the old one in the stack.
+    fn unlock(&mut self, cx: &mut Cx) {
+        if self.locked {
+            cx.sweep_unlock(self.lock_area);
+            cx.sweep_unlock(self.draw_swatch.area());
+            self.locked = false;
+        }
+    }
+
+    /// Whether this picker's lock is the innermost one: an overlay opened
+    /// above the popover takes the pointer from it, and this one must not
+    /// take it back.
+    fn lock_on_top(&self, cx: &Cx) -> bool {
+        let top = cx.sweep_lock_area();
+        top == Some(self.lock_area) || top == Some(self.draw_swatch.area())
     }
 
     /// The popover's palette strip: named colours in display order.
@@ -4626,6 +4722,7 @@ impl FabColorPick {
             &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
             &mut Scope::empty());
         self.open = false;
+        self.unlock(cx);
         self.cancel_scope = None;
         self.draw_swatch.open = 0.0;
         cx.widget_action(uid, FabColorPickAction::Closed);
@@ -4691,6 +4788,7 @@ impl FabColorPick {
             return;
         }
         self.open = true;
+        self.lock(cx);
         self.cancel_scope = Some(self.begin_cancel_scope(cx));
         self.opened_value = self.rgba();
         self.draw_swatch.open = 1.0;
@@ -4729,6 +4827,7 @@ impl FabColorPick {
             self.publish(cx, uid, true);
         }
         self.open = false;
+        self.unlock(cx);
         self.cancel_scope = None;
         self.draw_swatch.open = 0.0;
         cx.widget_action(uid, FabColorPickAction::Closed);
@@ -4786,6 +4885,9 @@ impl Widget for FabColorPick {
         self.draw_swatch.swatch = vec4(rgba[0], rgba[1], rgba[2], rgba[3]);
         self.draw_swatch.draw_walk(cx, walk);
         if self.open {
+            // Opened before the swatch had ever drawn: no area to lock with
+            // until now.
+            self.lock(cx);
             let anchor = self.draw_swatch.area().rect(cx);
             let overlay_list = self.overlay_list.as_mut().unwrap();
             overlay_list.begin_overlay_reuse(cx);
@@ -4844,18 +4946,45 @@ impl Widget for FabColorPick {
                 self.close_popover(cx, true);
                 return;
             }
-            // A press outside the panel and the swatch commits and closes.
+            // A press outside the panel and the swatch commits and closes,
+            // and the press is the popover's: what was walked before this
+            // saw the lock and nothing else, and what is walked after would
+            // see no lock, now it is released, and take the press as its
+            // own. Only one of the two halves of the page would have heard
+            // it, depending on the order it is walked in. Read as it came in
+            // rather than through a hit test, because the lock turns this
+            // picker's own hit tests away everywhere but on the swatch.
             if let Event::MouseDown(me) = event {
                 let swatch_rect = self.draw_swatch.area().rect(cx);
                 if !self.panel_rect.contains(me.abs) && !swatch_rect.contains(me.abs) {
+                    let on_top = !self.locked || self.lock_on_top(cx);
                     self.close_popover(cx, false);
-                    // Do not return: the press still belongs to whatever is
-                    // underneath.
+                    if on_top && me.handled.get().is_empty() {
+                        me.handled.set(self.draw_swatch.area());
+                    }
+                    return;
                 }
+            }
+            // The popover's own controls hit-test with no sweep area of their
+            // own, so the lock would turn them away with everything else. It
+            // is lifted while they are handed the event and taken again after,
+            // with the swatch's area as it is now; and only when it is the
+            // innermost lock, because under an overlay opened above this one
+            // they are to be turned away.
+            let held = self.locked && self.lock_on_top(cx);
+            if held {
+                cx.sweep_unlock(self.lock_area);
+                cx.sweep_unlock(self.draw_swatch.area());
+            }
+            let popover_actions = cx.capture_actions(|cx| self.popover.handle_event(cx, event, scope));
+            if held && self.locked {
+                let area = self.draw_swatch.area();
+                cx.sweep_lock(area);
+                self.lock_area = area;
             }
             let mut changed = false;
             let mut ended = false;
-            for action in cx.capture_actions(|cx| self.popover.handle_event(cx, event, scope)) {
+            for action in popover_actions {
                 let Some(widget_action) = action.as_widget_action() else {
                     continue;
                 };
@@ -4973,7 +5102,10 @@ impl Widget for FabColorPick {
             }
         }
 
-        match event.hits(cx, self.draw_swatch.area()) {
+        // Named as the lock's own, so the swatch still hears the press that
+        // shuts its popover while the popover holds the pointer.
+        let swatch = self.draw_swatch.area();
+        match event.hits_with_sweep_area(cx, swatch, swatch) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.draw_swatch.hover = 1.0;
@@ -5121,6 +5253,61 @@ mod tests {
                 assert!((back[i] - rgb[i]).abs() < 1e-5, "{rgb:?} -> {back:?}");
             }
         }
+    }
+
+    /// Where the popover's wheel puts its square puck, widget-local.
+    fn square_puck_at(size: f64, s: f64, v: f64) -> DVec2 {
+        let half = SQUARE_HALF * size;
+        dvec2(size * 0.5 - half + s * 2.0 * half, size * 0.5 - half + (1.0 - v) * 2.0 * half)
+    }
+
+    /// A press anywhere on a puck's ink grabs that puck.
+    ///
+    /// The square's zone ended exactly at its edge, and the colours people
+    /// pick live on that edge: every grey at saturation 0, every full colour
+    /// at 1, black and the brights at the bottom and top. A puck there is
+    /// half outside the square, and a press on its outer half landed in the
+    /// gap before the ring and did nothing, or, at the top-right corner where
+    /// the full colours are, on the ring, and changed the hue instead.
+    #[test]
+    fn a_press_on_a_puck_grabs_it_where_it_hangs_off_its_zone() {
+        let size = 228.0;
+        let zone = |at: DVec2, hsv: [f32; 3]| wheel_zone(at, size, hsv);
+        let edges = [
+            (1.0, 0.5, dvec2(5.0, 0.0)),
+            (0.0, 0.5, dvec2(-5.0, 0.0)),
+            (0.5, 1.0, dvec2(0.0, -5.0)),
+            (0.5, 0.0, dvec2(0.0, 5.0)),
+            (1.0, 1.0, dvec2(4.0, -4.0)),
+            (1.0, 0.0, dvec2(4.0, 4.0)),
+            (0.0, 1.0, dvec2(-4.0, -4.0)),
+            (0.0, 0.0, dvec2(-4.0, 4.0)),
+        ];
+        for (s, v, out) in edges {
+            let at = square_puck_at(size, s, v) + out;
+            assert_eq!(
+                zone(at, [0.3, s as f32, v as f32]),
+                WheelZone::Square,
+                "a press on the outer half of the puck at s {s} v {v} missed it"
+            );
+        }
+        // The ring puck lies well inside the ring's own zone, but it is
+        // held to the same rule.
+        let mid = (RING_OUTER + RING_INNER) * 0.5 * size;
+        for out in [-7.0, 7.0] {
+            let at = dvec2(size * 0.5, size * 0.5 - mid - out);
+            assert_eq!(zone(at, [0.0, 0.5, 0.5]), WheelZone::Ring, "a press {out} off the ring puck missed it");
+        }
+        // Off the pucks, the gap between the square and the ring goes to
+        // whichever is nearer, instead of to nothing.
+        let c = size * 0.5;
+        let half = SQUARE_HALF * size;
+        let hsv = [0.3, 0.5, 0.5];
+        assert_eq!(zone(dvec2(c + half + 8.0, c), hsv), WheelZone::Square, "the gap beside the square went to nothing");
+        assert_eq!(zone(dvec2(c + RING_INNER * size - 6.0, c), hsv), WheelZone::Ring, "the gap inside the ring went to nothing");
+        // Outside the ring is outside the wheel.
+        assert_eq!(zone(dvec2(c + RING_OUTER * size + 8.0, c), hsv), WheelZone::None);
+        assert_eq!(zone(dvec2(1.0, 1.0), hsv), WheelZone::None);
     }
 
     #[test]
@@ -7660,5 +7847,311 @@ mod fab_diagonal_label_draw {
         assert!((asked - drawn).abs() < 1e-6, "asked {asked}, drew {drawn}");
         // A longer name than any theme carries wants a taller row.
         assert!(measure(&mut cx, &first, "Windows 2000 dark") > asked);
+    }
+}
+
+#[cfg(test)]
+mod fab_color_pick_shield {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    /// A window's pass with an overlay in it, which is what the popover
+    /// draws into.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        })
+    }
+
+    fn release(abs: Vec2d) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+        })
+    }
+
+    fn moved(abs: Vec2d) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.2,
+        })
+    }
+
+    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+        cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
+    }
+
+    /// Who claimed a pointer event on its way through the page.
+    fn claimed(event: &Event) -> Area {
+        match event {
+            Event::MouseDown(e) => e.handled.get(),
+            Event::MouseMove(e) => e.handled.get(),
+            _ => Area::Empty,
+        }
+    }
+
+    /// A press and its release, and the actions of both. With no event loop
+    /// here to end a capture on release, the area the press captured is let
+    /// go by hand afterwards, or it would take every later press.
+    fn click(cx: &mut Cx, root: &WidgetRef, at: Vec2d) -> (ActionsBuf, Area) {
+        let down = press(at);
+        let mut actions = send(cx, root, &down);
+        let taken = claimed(&down);
+        actions.extend(send(cx, root, &release(at)));
+        down.unhandle(cx, &taken);
+        (actions, taken)
+    }
+
+    fn pressed(actions: &ActionsBuf, button: &WidgetRef) -> bool {
+        actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+            .any(|action| {
+                action.widget_uid == button.widget_uid()
+                    && matches!(action.cast::<ButtonAction>(), ButtonAction::Pressed(_))
+            })
+    }
+
+    fn middle(cx: &Cx, area: Area) -> Vec2d {
+        let rect = area.rect(cx);
+        assert!(rect.size.x > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    /// Default event order, the last child first: the button under the
+    /// popover is walked BEFORE the picker whose popover lies over it, which
+    /// is the order a page is in beside the panel walked after it.
+    fn start(cx: &mut Cx) -> (WidgetRef, Target) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pick := FabColorPick{width: 300. height: 20.}
+                    under := Button{width: 300. height: 200. text: "under"}
+                    beside := Button{width: 100. height: 40. margin: Inset{left: 500.} text: "beside"}
+                    other := FabColorPick{width: 60. height: 20. margin: Inset{left: 600.}}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        (root, target)
+    }
+
+    fn is_open(pick: &WidgetRef) -> bool {
+        pick.borrow::<FabColorPick>().expect("a colour picker").is_open()
+    }
+
+    /// Open by a press on the swatch, and drawn, as a person opens it.
+    fn open_by_hand(cx: &mut Cx, root: &WidgetRef, target: &mut Target, pick: &WidgetRef) {
+        let at = middle(cx, pick.area());
+        click(cx, root, at);
+        assert!(is_open(pick), "a press on the swatch did not open the popover");
+        target.draw(cx, root);
+    }
+
+    /// Nothing under the open popover hears the pointer, and the popover
+    /// does.
+    ///
+    /// The popover is drawn over the page but it is not in the page's way:
+    /// a widget walked before the picker saw a press or a hover through the
+    /// popover as its own, took it, and marked it handled, so the wheel that
+    /// was drawn on top of it never heard of it. That was the operator's
+    /// finding: a button under the picker still took hover and clicks, and
+    /// a drag on the wheel that happened to start over one never moved the
+    /// puck.
+    #[test]
+    fn a_pointer_on_the_popover_reaches_nothing_under_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        let under = root.widget(&cx, ids!(under));
+        open_by_hand(&mut cx, &root, &mut target, &pick);
+        let at = middle(&cx, under.area());
+        let panel = pick.borrow::<FabColorPick>().unwrap().popover_rect();
+        assert!(panel.contains(at), "the button is not under the popover, so this tests nothing");
+
+        let hover = moved(at);
+        send(&mut cx, &root, &hover);
+        assert_ne!(claimed(&hover), under.area(), "the button under the popover took the hover");
+
+        let (actions, taken) = click(&mut cx, &root, at);
+        assert!(!pressed(&actions, &under), "the button under the popover heard the press");
+        assert_ne!(taken, under.area(), "the button under the popover took the press");
+        assert!(
+            pick.as_fab_color_pick().changed(&actions).is_some(),
+            "the wheel under the pointer never heard the press"
+        );
+        assert!(is_open(&pick), "a press on the popover shut it");
+    }
+
+    /// A press outside the popover shuts it and goes no further, and the
+    /// pointer is the page's again afterwards.
+    ///
+    /// What was walked before the picker saw the lock and nothing else; what
+    /// is walked after would find the lock released by then, and take the
+    /// press that shut the popover as its own, as a drop-down's list does
+    /// not let it.
+    #[test]
+    fn a_press_outside_shuts_the_popover_and_gives_the_pointer_back() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        let beside = root.widget(&cx, ids!(beside));
+        open_by_hand(&mut cx, &root, &mut target, &pick);
+        assert!(cx.sweep_lock_area().is_some(), "the open popover never took the pointer");
+
+        let at = middle(&cx, beside.area());
+        let (actions, _) = click(&mut cx, &root, at);
+        assert!(!is_open(&pick), "a press outside did not shut the popover");
+        assert!(!pressed(&actions, &beside), "the press that shut the popover pressed a button too");
+        assert_eq!(cx.sweep_lock_area(), None, "the shut popover still holds the pointer");
+        target.draw(&mut cx, &root);
+        let (actions, _) = click(&mut cx, &root, at);
+        assert!(pressed(&actions, &beside), "with the popover shut the button hears its press");
+    }
+
+    /// Every way the popover shuts lets go of the pointer.
+    #[test]
+    fn every_way_the_popover_shuts_lets_go_of_the_pointer() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        let open = |cx: &mut Cx, target: &mut Target| {
+            pick.borrow_mut::<FabColorPick>().unwrap().open_popover(cx);
+            target.draw(cx, &root);
+            assert!(cx.sweep_lock_area().is_some(), "the open popover never took the pointer");
+        };
+        let shut = |cx: &Cx, how: &str| {
+            assert!(!is_open(&pick), "{how} did not shut the popover");
+            assert_eq!(cx.sweep_lock_area(), None, "{how} left the pointer locked");
+        };
+
+        // Escape and Back shut it reverting, once the event loop has handed
+        // the press to its cancel scope, which a bare `Cx` never does; the
+        // revert is the call they make.
+        open(&mut cx, &mut target);
+        pick.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, true);
+        shut(&cx, "Escape or Back");
+
+        open(&mut cx, &mut target);
+        send(&mut cx, &root, &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]));
+        shut(&cx, "a modal's dismissal");
+
+        open(&mut cx, &mut target);
+        pick.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+        shut(&cx, "the host");
+
+        open(&mut cx, &mut target);
+        let eyedropper = pick.borrow::<FabColorPick>().unwrap().popover.child(live_id!(hex_row)).child(live_id!(pick)).area();
+        let at = middle(&cx, eyedropper);
+        let (actions, _) = click(&mut cx, &root, at);
+        assert!(
+            actions
+                .iter()
+                .filter_map(|a| a.as_widget_action())
+                .any(|a| a.widget_uid == pick.widget_uid()
+                    && matches!(a.cast::<FabColorPickAction>(), FabColorPickAction::Eyedropper)),
+            "the pick button never armed the eyedropper"
+        );
+        shut(&cx, "the eyedropper");
+
+        pick.borrow_mut::<FabColorPick>()
+            .unwrap()
+            .set_palette(&mut cx, vec![("accent".to_string(), [0.9, 0.2, 0.1, 1.0])]);
+        open(&mut cx, &mut target);
+        let cell = {
+            let inner = pick.borrow::<FabColorPick>().unwrap();
+            let strip = inner.popover.child(live_id!(palette));
+            let strip = strip.borrow::<FabPaletteStrip>().unwrap();
+            let rect = strip.area.rect(&cx);
+            assert!(rect.size.x > 0.0, "the palette strip never drew");
+            rect.pos + dvec2(strip.cell_size * 0.5, strip.cell_size * 0.5)
+        };
+        let (actions, _) = click(&mut cx, &root, cell);
+        assert!(
+            actions
+                .iter()
+                .filter_map(|a| a.as_widget_action())
+                .any(|a| a.widget_uid == pick.widget_uid()
+                    && matches!(a.cast::<FabColorPickAction>(), FabColorPickAction::PalettePick(_))),
+            "the palette cell was never picked"
+        );
+        shut(&cx, "a pick from the palette strip");
+    }
+
+    /// Two pickers on one page never both hold the pointer: a press on the
+    /// second one's swatch while the first is up shuts the first and opens
+    /// nothing, and the second, opened by the next press, holds it alone.
+    #[test]
+    fn two_pickers_never_both_hold_the_pointer() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        let other = root.widget(&cx, ids!(other));
+        open_by_hand(&mut cx, &root, &mut target, &pick);
+        let at = middle(&cx, other.area());
+        click(&mut cx, &root, at);
+        assert!(!is_open(&pick), "a press on the other swatch left the first popover up");
+        assert!(!is_open(&other), "the press that shut one popover opened another");
+        assert_eq!(cx.sweep_lock_area(), None);
+        target.draw(&mut cx, &root);
+
+        open_by_hand(&mut cx, &root, &mut target, &other);
+        assert!(cx.sweep_lock_area().is_some(), "the second popover never took the pointer");
+        other.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+        assert_eq!(cx.sweep_lock_area(), None, "the first popover's lock outlived it");
     }
 }
