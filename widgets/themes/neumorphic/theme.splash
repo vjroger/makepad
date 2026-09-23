@@ -1,0 +1,66 @@
+mod.theme = mod.themes.light
+
+// Neumorphism has one ground colour and no borders: every edge you can see is
+// light falling on a shoulder, not ink. So the face, the inset and the page
+// are all the same near-white lilac, and the contrast that usually comes from
+// a border comes from the material instead.
+mod.theme.color_bg_app = #eef0f6
+mod.theme.color_fg_app = #eef0f6
+mod.theme.color_bg_container = #eef0f6
+mod.theme.color_outset = #eef0f6
+mod.theme.color_outset_1 = #eef0f6
+mod.theme.color_outset_2 = #eef0f6
+mod.theme.color_inset = #eef0f6
+mod.theme.color_inset_1 = #eef0f6
+mod.theme.color_inset_2 = #eef0f6
+
+// The bevel colours are the old fake-depth stroke. Matched to the ground so
+// they disappear; the relief replaces them.
+mod.theme.color_bevel = #eef0f6
+mod.theme.color_bevel_inset_1 = #eef0f6
+mod.theme.color_bevel_inset_2 = #eef0f6
+mod.theme.color_bevel_outset_1 = #eef0f6
+mod.theme.color_bevel_outset_2 = #eef0f6
+mod.theme.beveling = 0.0
+
+mod.theme.color_text = #3a4052
+mod.theme.color_label = #3a4052
+mod.theme.color_label_inner = #3a4052
+mod.theme.color_label_outer = #3a4052
+mod.theme.color_icon = #3a4052
+mod.theme.color_focus = #7c4dff
+mod.theme.color_ctrl_active = #7c4dff
+mod.theme.color_val = #7c4dff
+
+// Shadows need somewhere to fall. A neumorphic control sits in whitespace,
+// and the relief is drawn INSIDE the control's own rect, so the spacing
+// carries the look as much as the shader does.
+mod.theme.space_factor = 9.0
+mod.theme.space_1 = 4.5
+mod.theme.space_2 = 9.0
+mod.theme.space_3 = 13.5
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.5 right: 4.5 bottom: 4.5 left: 4.5}
+mod.theme.corner_radius = 8.0
+mod.theme.container_corner_radius = 16.0
+
+// THE MATERIAL
+// Tier 1: relief, no gloss and no rim sweep. A pillowed shoulder (curve near
+// zero) is what separates neumorphism from moulded plastic.
+mod.theme.material_level = 1.0
+mod.theme.material_bevel_width = 6.0
+mod.theme.material_bevel_curve = 0.15
+mod.theme.material_ao = 0.5
+mod.theme.material_rim = 0.4
+mod.theme.material_specular = 0.06
+mod.theme.material_roughness = 0.85
+mod.theme.material_raise = 4.0
+mod.theme.material_sink = 4.0
+// Past -material_raise, so a press crosses zero and INVERTS: the lit and
+// shaded shoulders swap and the control reads as pushed into the page.
+mod.theme.material_press_depth = -9.0
+// Not black. A neumorphic shadow is a cool grey-lilac, which is what keeps
+// the page reading as one soft material rather than as dirt on white.
+mod.theme.color_material_light = #ffffff
+mod.theme.color_material_shadow = #a7aec4
+mod.theme.color_material_glow = #7c4dff
+true

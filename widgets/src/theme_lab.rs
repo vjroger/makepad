@@ -977,7 +977,12 @@ mod theme_lab_tests {
     fn bench() -> BlendCache {
         let mut cache = BlendCache::new();
         for (step, theme) in BlendTheme::all().into_iter().enumerate() {
-            let shade = (step as u32) * 0x10;
+            // 0x08, not 0x10: the light arm subtracts shade from 0xF0F0F0FF on
+            // every one of three channels, so the old step underflowed once the
+            // library shipped a sixteenth theme. Halving it keeps every theme's
+            // made-up value distinct, which is all this helper is for, with
+            // headroom for the next few.
+            let shade = (step as u32) * 0x08;
             let (bg, ink) = match theme.appearance() {
                 Appearance::Dark => (0x101010FF + (shade << 24) + (shade << 16) + (shade << 8), 0xEEEEEEFF),
                 Appearance::Light => (0xF0F0F0FF - (shade << 24) - (shade << 16) - (shade << 8), 0x101010FF),
