@@ -19533,20 +19533,32 @@ impl Tweaker {
     }
 
     /// A row's settings onto the builder, and the strip owed a regrowth
-    /// where the row carried the theme into the other appearance.
+    /// where the row moved the COLOUR the strip is grown from.
     ///
-    /// Only the lightness can, and only by crossing its middle; every other
-    /// row, and the lightness inside its own half, leaves the offers exactly
-    /// as they are -- a chip does not depend on the background rows, so a
-    /// strip grown again on every move would be the same strip, reshuffled
-    /// under nobody's hand for nothing. Across the middle the offers are the
-    /// other appearance's, and `tb_suggest_again` carries the chosen palette
-    /// over to its equivalent there, which is what the dark and light
-    /// buttons used to ask for.
+    /// A chip is the palette and nothing else: it does not depend on the
+    /// background rows, and since the surface square became the palette's own
+    /// colour it does not depend on the appearance either. So the lightness
+    /// crossing its middle no longer asks for anything -- the offers over
+    /// there are the offers over here, and a row grown again would be the
+    /// same row reshuffled under nobody's hand -- and the chip in force keeps
+    /// its outline straight through a drag.
+    ///
+    /// What is still worth a regrowth is the seed moving. The house palette
+    /// is the one case a background row can do that in: with nothing picked
+    /// the four squares are the theme files' own roles, which are not the
+    /// same colours in the two appearances, so a lightness that crosses the
+    /// middle hands the strip a different colour to grow from. That is the
+    /// seed changing and not the appearance changing, and asking the question
+    /// that way is what tells the two apart.
     fn tb_row_set(&mut self, params: BuilderParams) {
-        let was_dark = self.tb_builder.params().dark();
+        let seed_of = |panel: &Self| {
+            let params = panel.tb_builder.params();
+            panel.tb_row_seed().map(|slot| slot.seed_of(&params))
+        };
+        let was = seed_of(self);
         self.tb_builder.set(params);
-        if self.tb_builder.params().dark() != was_dark && self.tb_row_seed().is_some() {
+        let now = seed_of(self);
+        if now.is_some() && now != was {
             self.tb_suggest_due = true;
         }
     }
@@ -25742,7 +25754,7 @@ line two");
         let params = panel.tb_builder.params();
         assert_eq!(
             panel.tb_suggestions,
-            all_suggestions_from(SeedSlot::Tertiary, params.palette()[2], params.dark(), &panel.tb_own_schemes, Schemes::RoundThePick)
+            all_suggestions_from(SeedSlot::Tertiary, params.palette()[2], &panel.tb_own_schemes, Schemes::RoundThePick)
         );
     }
 
@@ -26702,24 +26714,22 @@ line two");
         );
     }
 
-    /// Growing the theme for the other page keeps the chip and the theme
-    /// saying the same thing.
+    /// The lightness slider does not touch the row of chips, wherever it is
+    /// carried and however it is carried there.
     ///
-    /// The lightness carried across its middle leaves the palette's named
-    /// companions standing -- the app goes on wearing that palette -- but the
-    /// strip is grown again for the other appearance, whose chips are not
-    /// the same colours, so the offer that was chosen is no longer in the
-    /// list. What the
-    /// section keeps is the equivalent one: the same harmony and mood for a
-    /// palette the rule grew, the same name for one out of the book or off a
-    /// person's own list. It goes on the controls as well as under the
-    /// outline, so that the marked chip and the worn theme are one palette
-    /// and not two.
+    /// A chip is the palette's own four colours now -- the surface square
+    /// included -- so the offers on the other side of the middle are the
+    /// offers on this side, byte for byte, and the palette in force keeps its
+    /// outline all the way across. Nothing is regrown, nothing is reshuffled,
+    /// and the chip that is marked and the theme that is worn go on saying
+    /// the same thing.
     ///
-    /// Without that, the outline came off a palette that was still in force,
-    /// and the row said no palette was when one plainly was.
+    /// Seen failing on the build before it, where the strip was grown again
+    /// for the other appearance and the chip that had been chosen was no
+    /// longer in the list: the row had to hunt for an equivalent, and the
+    /// outline jumped from one chip to another under the hand.
     #[test]
-    fn the_other_page_marks_the_palette_that_is_still_in_force() {
+    fn the_lightness_leaves_the_row_of_chips_alone() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
@@ -26739,14 +26749,15 @@ line two");
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let was = panel.tb_chosen.clone().expect("a palette was chosen");
         assert!(was.harmony.is_some() && was.mood.is_some(), "the chip pressed was not one the rule grew");
+        let row_was = panel.tb_suggestions.clone();
 
         across_the_middle(&mut panel);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert!(!panel.tb_suggestions.contains(&was), "the other page grew the same palette, so nothing was tested");
+        assert_eq!(panel.tb_suggestions, row_was, "the other page grew a different row of chips");
         let at = panel.tb_chosen_index().expect("the other page left no chip marked at all");
         let now = panel.tb_suggestions[at].clone();
-        assert_eq!((now.harmony, now.mood), (was.harmony, was.mood), "some other palette took the outline");
+        assert_eq!(now, was, "some other palette took the outline");
         assert_eq!(
             panel.tb_builder.params().seeds,
             Some(now.seeds),
@@ -26782,30 +26793,37 @@ line two");
         assert_eq!(panel.tb_builder.params().seeds, Some(now.seeds));
         assert_eq!(carousel_chosen(&head), Some(at), "the combination in force is not the chip outlined");
 
-        // And a drag that crosses, rather than a release: the strip is owed
-        // its regrowth from the first move over the middle, and gets it on
-        // the settle.
+        // And a drag that crosses, rather than a release: nothing is owed,
+        // because there is nothing over there that is not over here.
         let dark = panel.tb_builder.params().dark();
+        let row_was = panel.tb_suggestions.clone();
         panel.tb_row_moved(BuildRow::Lightness, BuilderParams::house(!dark).lightness * 100.0);
-        assert!(panel.tb_suggest_due, "the lightness crossed its middle and the strip was not told");
+        assert!(!panel.tb_suggest_due, "the lightness crossing its middle asked for the strip again");
         the_palette_lands(&mut cx, &mut panel, 5.0);
+        assert_eq!(panel.tb_suggestions, row_was, "the drag across grew a different row of chips");
         let at = panel.tb_chosen_index().expect("the drag across left the combination unmarked");
         assert_eq!(panel.tb_suggestions[at].label, named);
-        // Inside one half nothing is regrown: a chip does not depend on the
-        // background rows.
+        // And inside one half, as it always did.
         panel.tb_row_moved(BuildRow::Lightness, BuilderParams::house(dark).lightness * 100.0 + if dark { -5.0 } else { 5.0 });
         assert_eq!(panel.tb_builder.params().dark(), dark);
         panel.tb_suggest_due = false;
         panel.tb_row_moved(BuildRow::Saturation, 10.0);
         panel.tb_row_moved(BuildRow::Lightness, BuilderParams::house(dark).lightness * 100.0);
         assert!(!panel.tb_suggest_due, "a background row inside one half asked for the strip again");
+        assert_eq!(panel.tb_suggestions, row_was, "a background row grew a different row of chips");
     }
 
-    /// A palette the other page has no equivalent for is let go outright:
+    /// A palette the regrown row has no equivalent for is let go outright:
     /// the outline comes off AND the named companions go with it, so the
     /// chip and the theme cannot be left disagreeing the other way round.
+    ///
+    /// The switch is what regrows the row here. The lightness crossing its
+    /// middle used to, and does not any more -- a chip is the palette, and
+    /// the palettes are the same on both sides of the middle -- but the
+    /// "Adjust" switch remakes every chip that came off a list, so a palette
+    /// chosen before the flip can genuinely be one the row no longer holds.
     #[test]
-    fn a_palette_the_other_page_does_not_offer_is_let_go_whole() {
+    fn a_palette_the_row_no_longer_offers_is_let_go_whole() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
@@ -26824,8 +26842,8 @@ line two");
         orphan.mood = None;
         panel.tb_chosen = Some(orphan);
 
-        across_the_middle(&mut panel);
-        the_palette_lands(&mut cx, &mut panel, 1.0);
+        let flip = !panel.tb_adjust;
+        panel.tb_adjust_chosen(flip);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert!(
             panel.tb_chosen.as_ref().is_none_or(|chosen| chosen.label != "Nowhere, nohow"),
@@ -26967,10 +26985,10 @@ line two");
     }
 
     /// The chip in force is brought into the carousel's window when it is
-    /// changed from outside -- here the lightness carried over its middle,
-    /// which grows the row again for the other page and marks the same
-    /// palette in it -- because the outline is the only thing that says
-    /// which palette is in force, and an outline nobody can see says nothing.
+    /// changed from outside -- here the "Adjust" switch, which remakes every
+    /// chip that came off a list and marks the same combination in its new
+    /// form -- because the outline is the only thing that says which palette
+    /// is in force, and an outline nobody can see says nothing.
     #[test]
     fn the_chip_in_force_is_brought_into_view_when_it_changes_from_outside() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -26988,22 +27006,15 @@ line two");
         panel.tb_color_ended(0, 0x20_60_E0_FF);
         the_palette_lands(&mut cx, &mut panel, 0.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        // One the rule grew, far enough along that it is off the screen at
-        // the start of the row, and one the other page really does change.
-        let here = panel.tb_builder.params();
-        let there = BuilderParams::house(!here.dark()).lightness;
+        // One off the book, the last of them, far enough along that it is off
+        // the screen at the start of the row -- and one the switch really
+        // does remake.
         let far = panel
             .tb_suggestions
             .iter()
-            .rposition(|offer| {
-                if offer.harmony.is_none() || offer.mood.is_none() {
-                    return false;
-                }
-                let worn = offer.params(here);
-                crate::theme_builder::build(&worn).script
-                    != crate::theme_builder::build(&BuilderParams { lightness: there, ..worn }).script
-            })
-            .expect("the rule grew no palette in a mood that the other page changes");
+            .rposition(|offer| offer.label.starts_with(COMBINATION_LABEL))
+            .expect("the colour found no combination at all");
+        let was = panel.tb_suggestions[far].clone();
         a_press_on_chip(&mut cx, &mut panel, &head, far);
         the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
@@ -27018,10 +27029,11 @@ line two");
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(carousel_scroll(&head), 0.0, "a redraw brought the chip in force back into view");
 
-        across_the_middle(&mut panel);
-        the_palette_lands(&mut cx, &mut panel, 2.0);
+        let flip = !panel.tb_adjust;
+        panel.tb_adjust_chosen(flip);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        let at = panel.tb_chosen_index().expect("the other page left no chip marked");
+        let at = panel.tb_chosen_index().expect("the switch left no chip marked");
+        assert_ne!(panel.tb_suggestions[at].colors, was.colors, "the switch remade nothing, so nothing is tested");
         assert_eq!(carousel_chosen(&head), Some(at), "the carousel outlines some other chip than the one in force");
         assert!(
             a_chip_shown_whole(&mut cx, &head, at),
@@ -27284,7 +27296,7 @@ line two");
             lit[which] = true;
             assert_eq!(header_inks(&cx, &head), lit, "{slot:?}: the headers do not say which square the chips follow");
             let seed = slot.seed_of(&panel.tb_builder.params());
-            let want = all_suggestions_from(slot, seed, before.dark(), &panel.tb_own_schemes, Schemes::RoundThePick);
+            let want = all_suggestions_from(slot, seed, &panel.tb_own_schemes, Schemes::RoundThePick);
             assert_eq!(panel.tb_suggestions, want, "{slot:?}: the carousel is not the row grown from that slot");
             let shown = carousel_chips(&head);
             assert_eq!(shown.len(), want.len(), "{slot:?}: the carousel shows another row");
@@ -27372,22 +27384,73 @@ line two");
             );
         }
 
-        // The lightness: inside its half nothing, across the middle a row
-        // for the other page, grown from wherever the seed now stands.
+        // The lightness asks for nothing, on either side of its middle: the
+        // seed is a colour somebody named and the chips grown from it do not
+        // depend on the appearance.
         let slot = panel.tb_seed_slot;
         let dark = panel.tb_builder.params().dark();
         let (inside, across) = if dark { (20.0, 80.0) } else { (80.0, 20.0) };
+        let row_was = panel.tb_suggestions.clone();
         panel.tb_suggest_due = false;
         panel.tb_gesture_ended(BuildRow::Lightness, inside);
         assert!(!panel.tb_suggest_due, "the lightness inside its half grew the row");
         lands(&mut cx, &mut panel);
         panel.tb_gesture_ended(BuildRow::Lightness, across);
-        assert!(panel.tb_suggest_due, "the lightness across its middle did not grow the row");
+        assert!(!panel.tb_suggest_due, "the lightness across its middle grew the row");
         lands(&mut cx, &mut panel);
         let params = panel.tb_builder.params();
+        assert_eq!(panel.tb_suggestions, row_was, "the row moved under a lightness drag");
         assert_eq!(
             panel.tb_suggestions,
-            all_suggestions_from(slot, slot.seed_of(&params), params.dark(), &panel.tb_own_schemes, Schemes::RoundThePick)
+            all_suggestions_from(slot, slot.seed_of(&params), &panel.tb_own_schemes, Schemes::RoundThePick)
+        );
+    }
+
+    /// THE DICE MUST NOT CHOOSE A TEXT COLOUR. Every dropdown drawn from one
+    /// template shares ONE popup menu instance, and that menu holds the rows
+    /// of whichever dropdown last drew it. The panel has two such dropdowns
+    /// -- the theme picker at the top and the text colour picker in the rows
+    /// -- and the theme picker's menu drops down OVER the row the die stands
+    /// in.
+    ///
+    /// So a text colour picker that read whatever was in the shared menu
+    /// would take a press on the die as a press on one of the theme picker's
+    /// rows, and send a `Select` carrying that row's number under its own
+    /// uid: a text colour nobody chose, arriving on a roll. The picker may
+    /// only read the menu once IT has drawn it.
+    #[test]
+    fn the_text_colour_picker_does_not_read_the_menu_the_theme_picker_drew() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let theme = head.child(live_id!(theme_pick_row)).child(live_id!(theme_pick));
+        let text = the_text_picker(&head);
+        assert_ne!(theme.widget_uid(), text.widget_uid(), "the two pickers are one widget");
+
+        // The theme picker opened and drawn: the menu on the screen is its
+        // rows, at its place.
+        theme.as_drop_down().borrow_mut().expect("a DropDown").set_active(&mut cx);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(
+            theme.as_drop_down().borrow().expect("a DropDown").owns_the_menu(&mut cx),
+            "the picker that drew the menu does not own it"
+        );
+
+        // And now the text colour picker pressed, before a draw of its own:
+        // the menu standing on the screen is still the theme picker's, and
+        // this picker must not read a press out of it.
+        text.as_drop_down().borrow_mut().expect("a DropDown").set_active(&mut cx);
+        assert!(
+            !text.as_drop_down().borrow().expect("a DropDown").owns_the_menu(&mut cx),
+            "the text colour picker reads the rows the theme picker drew"
+        );
+        // Drawn, it owns the menu again and answers as it always did.
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(
+            text.as_drop_down().borrow().expect("a DropDown").owns_the_menu(&mut cx),
+            "a picker that has drawn its own menu still cannot read it"
         );
     }
 
@@ -27761,7 +27824,7 @@ line two");
         assert_eq!(header_inks(&cx, &head), [true, false, false, false]);
         let params = panel.tb_builder.params();
         let palette = params.palette();
-        assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Primary, palette[0], params.dark(), &panel.tb_own_schemes, Schemes::RoundThePick));
+        assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Primary, palette[0], &panel.tb_own_schemes, Schemes::RoundThePick));
         assert!(carousel_chips(&head).iter().all(|chip| chip[0] == band(palette[0])), "a chip does not hold the rolled primary");
     }
 

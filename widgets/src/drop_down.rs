@@ -742,6 +742,18 @@ impl DropDown {
         }
     }
 
+    /// Whether the shared menu on screen is THIS dropdown's: whether this is
+    /// the dropdown that last drew it. Every dropdown on one template shares
+    /// one menu instance, so the items in it belong to one of them at a time
+    /// and the rest must not read them. See `handle_event`.
+    pub fn owns_the_menu(&self, cx: &mut Cx) -> bool {
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let Ok(map) = global.map.try_borrow() else {
+            return false;
+        };
+        map.get(&self.popup_menu_key()).is_some_and(|menu| menu.tree_parent == self.widget_uid())
+    }
+
     pub fn selected_item_index(&self) -> usize {
         self.selected_item
     }
@@ -961,7 +973,23 @@ impl Widget for DropDown {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
 
-        if self.is_active && !self.popup_menu.is_nil() {
+        // ONE menu instance serves every dropdown on the same template, and
+        // it holds the items of whichever dropdown last DREW it
+        // (`tree_parent`, claimed in `draw_walk`). Between this dropdown
+        // being pressed and its own first draw, the items standing in that
+        // menu are somebody else's: they are somewhere else on the screen,
+        // they say something else, and they answer to another list. Reading
+        // them here turns a press anywhere over that other menu's rows into a
+        // choice made HERE -- a `Select` carrying the other list's row
+        // number, sent under this dropdown's uid, which is a value nobody
+        // chose arriving at a control nobody touched.
+        //
+        // So the menu is this dropdown's to read only once it has drawn it.
+        // Until then there is nothing of ours on the screen to be pressed,
+        // and the press belongs to whoever drew last. Closing still works by
+        // the plain routes -- key focus lost, and the dropdown's own hits --
+        // and the next draw makes the menu ours again.
+        if self.is_active && !self.popup_menu.is_nil() && self.owns_the_menu(cx) {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             let menu = map.get_mut(&self.popup_menu_key()).unwrap();

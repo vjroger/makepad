@@ -18,27 +18,24 @@
 //! the companions are the colours the chip showed. NOTHING moves them. Where
 //! a colour cannot be told from the page, what moves is the page, which is
 //! derived from the palette in the first place: it is carried along its own
-//! lightness axis to the NEAREST lightness the chosen accents stand `LEGIBLE`
-//! off, and no further, and every ink and ground stepped off the page
-//! re-settles as it already does.
+//! lightness axis to the NEAREST lightness the chosen accents stand
+//! [`TOLD_APART`] off, and no further, and every ink and ground stepped off
+//! the page re-settles as it already does.
 //!
-//! That axis is the WHOLE of it, both appearances' runs and not just the one
-//! the lightness slider is sitting in. A page can always be made light enough
-//! for a dark colour or dark enough for a light one, so a near-black pick
-//! sends the page into the light run and a near-white pick sends it into the
-//! dark one; and since the page's lightness is the only thing that decides
+//! That bar is not the text bar. An accent is a fill and the words on it
+//! answer to their own bars already; what an accent owes the page is only
+//! that the two can be told apart at all.
+//!
+//! The axis the page may be moved along is the WHOLE of it, both appearances'
+//! runs -- but the half the LIGHTNESS SLIDER is sitting in is asked first and
+//! kept whenever the seed can be told from any page in it, which for every
+//! ordinary colour it can. Only a near-black pick, which no dark page stands
+//! off, and a near-white one, which no light page does, send the page across
+//! the middle; and since the page's lightness is the only thing that decides
 //! whether a theme is dark or light, the base theme the build derives from
 //! follows the page where it lands ([`BuilderParams::built_dark`]). A colour
-//! on its own is therefore never hopeless.
-//!
-//! The same arithmetic says which appearances a colour leaves open at all. A
-//! page stands `LEGIBLE` off a colour of relative luminance `y` only where
-//! `y` is under about 0.28 for the lightest page there is and over about 0.13
-//! for the darkest, so a bright colour can only ever have a dark page, a deep
-//! one can only ever have a light page, and only the colours between the two
-//! can have either. A palette can take the appearance out of the lightness
-//! slider's hands that way, and it should: the slider is asking for a page,
-//! and a page the chosen colours cannot be seen on is not one to give.
+//! on its own is therefore never hopeless, and the slider still says which
+//! appearance an ordinary one gets.
 //!
 //! A SET of colours can be: one near-black and one near-white want opposite
 //! ends of the axis and no page is clear of both. The page clears the SEED --
@@ -261,6 +258,29 @@ const LIGHT_LIGHTEST: f64 = 98.0;
 /// nothing to do; and a favourite that is already a highlighter pen does not
 /// make its page one.
 const RULE_GROUND_COLOUR: (f64, f64) = (0.45, 0.85);
+
+/// What an ACCENT owes the page it is laid on: not that anything can be read
+/// off it, only that it can be TOLD APART from the page.
+///
+/// An accent is a FILL. It is the ground of a button, the body of a value
+/// bar, the disc of a mark -- and whatever words land on top of it answer to
+/// their own bars, `LEGIBLE` and `READABLE`, which the WRITTEN table holds
+/// them to ground by ground. Nothing is read off the accent itself. So the
+/// one thing that would go wrong if the page came too near is that the shape
+/// would disappear into it, and the bar for that is the bar for two colours
+/// being two colours: about a half again in luminance, which is what the eye
+/// needs to call an edge an edge. Under about 1.2 a fill on a page is the
+/// page; 1.5 is clear of that with room to spare, and well under `LEGIBLE`.
+///
+/// Holding an accent to `LEGIBLE` instead is what made a BRIGHT pick
+/// impossible to have a light theme with. The house colour sits at relative
+/// luminance 0.292, and the lightest page there is only stands 3:1 off a
+/// colour under about 0.28, so every page in the light run was refused and
+/// the palette flipped to dark whatever the lightness slider said -- a
+/// slider overruled for the sake of a bar that was never this one's to
+/// answer. At 1.5 the same colour clears every light page from about `L*`
+/// 74 up, and the slider decides again.
+const TOLD_APART: f64 = 1.5;
 
 /// The font styles `font_policy::install_theme_fonts` derives into each base
 /// theme. A theme built again from source is a new object that the installer
@@ -657,7 +677,7 @@ impl BuilderParams {
             let roles = roles_for(self.scheme());
             return [roles.primary.base, roles.secondary.base, roles.tertiary.base, house_page(self.scheme())];
         }
-        grown(self.favourite, self.dark(), self.harmony, None).colors
+        grown(self.favourite, self.harmony, None).colors
     }
 
     /// These settings with all four colours named outright, as a person
@@ -897,8 +917,9 @@ fn grounds_and_crowding(params: &BuilderParams) -> ((u32, u32), Scheme, Option<S
 /// It also gives way to the ACCENTS, and that is the whole of what happens
 /// when somebody picks a colour their page cannot be told from. The colour
 /// is theirs and does not move; the page is derived, so the page moves --
-/// along this same axis, over the WHOLE of it, to the nearest lightness the
-/// chosen accents stand `LEGIBLE` off and no further. Everything the page is
+/// along this same axis, inside the half the slider asked for where that can
+/// be done at all, to the nearest lightness the chosen accents stand
+/// [`TOLD_APART`] off and no further. Everything the page is
 /// the ground of re-derives from where it lands, so the theme goes on
 /// reading. See [`clear_of`], and [`page_scheme_and_crowding`] for the appearance
 /// that follows the page and for the one case that is still hopeless.
@@ -909,18 +930,21 @@ fn page_of(params: &BuilderParams) -> u32 {
 /// The page these settings make, the appearance it lands in, and the accent
 /// it could not be moved clear of, if any.
 ///
-/// The page walks the whole lightness axis and not the half the slider is in,
-/// which is the difference between a rule that works and one that does not. A
-/// half is a finite run: no dark page can be made darker than a near-black
-/// colour, so under the old rule a near-black pick on a dark page had nowhere
-/// to go and the theme could only apologise. Over the whole axis there is
-/// always somewhere, because at `LEGIBLE` a colour clears the lightest page
-/// the light run offers whenever its luminance is under about 0.28 and the
-/// darkest page the dark run offers whenever its luminance is over about
-/// 0.13, and those two reaches overlap: every colour there is clears one end
-/// or the other. So the page crosses the middle when it has to, and the
-/// appearance crosses with it, because the page's lightness is the only thing
-/// that ever decided the appearance.
+/// The page may walk the whole lightness axis and not only the half the
+/// slider is in, which is the difference between a rule that works and one
+/// that does not: a half is a finite run, and no dark page can be made darker
+/// than a near-black colour, so a near-black pick on a dark page would have
+/// nowhere to go and the theme could only apologise. Over the whole axis
+/// there is always somewhere, because at [`TOLD_APART`] a colour clears the
+/// lightest page the light run offers unless it is nearly white and the
+/// darkest page the dark run offers unless it is nearly black.
+///
+/// It walks out of its half only when it must. The slider is asking for an
+/// appearance, and the answer to "can this accent be told from this page" is
+/// yes for every ordinary colour somewhere inside the asked half, so that is
+/// where the page lands and the slider gets what it asked for. The two ends
+/// of the colour space are the exception, and they are the reason the whole
+/// axis is open at all.
 ///
 /// A SET of accents can still be impossible -- a near-black one and a
 /// near-white one want opposite ends -- and that is the only case left. The
@@ -1001,19 +1025,31 @@ fn page_accents(params: &BuilderParams) -> Vec<(SeedSlot, u32)> {
 /// works -- no further, so a person who moved the lightness slider still gets
 /// as near to where they put it as reading allows.
 ///
-/// The axis is both runs, [`lightness_runs`], so the search crosses the
-/// middle where that is the nearest answer and the theme changes appearance
-/// with it. One colour always has a place; only a set of them can want two
-/// places at once, and then the order is fixed: the SEED's slot has to be
-/// cleared, and among the places that clear it the one that clears the most
-/// of the others wins, nearest to `asked` breaking the tie. The seed is the
-/// colour the person has in hand, so it is the last one a rule may give up
-/// on.
+/// The axis is both runs, [`lightness_runs`], but the half the slider is
+/// sitting in is asked first and only given up where it holds no answer at
+/// all. The slider is asking for an appearance; a near-black pick has no
+/// dark page it can be told from and a near-white one no light page, and
+/// those two are the whole of what sends a theme across the middle. Every
+/// other pick, the bright ones included, keeps the appearance that was asked
+/// for and moves only within it.
+///
+/// One colour always has a place; only a set of them can want two places at
+/// once, and then the order is fixed: the SEED's slot has to be cleared, the
+/// asked half is kept if it can be, and among the places left the one that
+/// clears the most of the others wins, nearest to `asked` breaking the tie.
+/// The seed is the colour the person has in hand, so it is the last one a
+/// rule may give up on.
+///
+/// The bar here is [`TOLD_APART`] and not `LEGIBLE`: an accent is a fill, and
+/// what it owes the page is only that the two are two colours. See the
+/// constant for why holding it to the text bar took the lightness slider's
+/// job away from it.
 ///
 /// Where a page may not stand is solved and not searched for. A contrast
 /// ratio is made of luminance and nothing else, so an accent of luminance
-/// `y` forbids the page every luminance between `(y + 0.05) / LEGIBLE - 0.05`
-/// and `LEGIBLE * (y + 0.05) - 0.05`: the bar read backwards. Those bounds,
+/// `y` forbids the page every luminance between
+/// `(y + 0.05) / TOLD_APART - 0.05` and
+/// `TOLD_APART * (y + 0.05) - 0.05`: the bar read backwards. Those bounds,
 /// on the lightness scale, are the only places worth trying, along with the
 /// four ends of the two runs; each is then nudged outward until the page
 /// really clears, because a page is eight bits a channel and a bound is not.
@@ -1042,7 +1078,7 @@ fn clear_of(
         let (mut count, mut nearest, mut seed_close) = (0usize, None, false);
         for (slot, accent) in accents {
             let ratio = contrast(page, *accent);
-            if ratio >= LEGIBLE {
+            if ratio >= TOLD_APART {
                 continue;
             }
             count += 1;
@@ -1062,7 +1098,7 @@ fn clear_of(
     // dark run, and every place in it would have to be tried and thrown away.
     let shut = must.map(|(_, accent)| {
         let y = luminance(accent | 0xFF);
-        (((y + 0.05) / LEGIBLE - 0.05).max(0.0), (LEGIBLE * (y + 0.05) - 0.05).min(1.0))
+        (((y + 0.05) / TOLD_APART - 0.05).max(0.0), (TOLD_APART * (y + 0.05) - 0.05).min(1.0))
     });
     let mut tries: Vec<f64> = Vec::with_capacity(4 + accents.len() * 2);
     for (low, high) in lightness_runs() {
@@ -1071,12 +1107,21 @@ fn clear_of(
     }
     for (_, accent) in accents {
         let y = luminance(*accent | 0xFF);
-        tries.push(lstar_of(((y + 0.05) / LEGIBLE - 0.05).max(0.0)));
-        tries.push(lstar_of((LEGIBLE * (y + 0.05) - 0.05).min(1.0)));
+        tries.push(lstar_of(((y + 0.05) / TOLD_APART - 0.05).max(0.0)));
+        tries.push(lstar_of((TOLD_APART * (y + 0.05) - 0.05).min(1.0)));
     }
-    // What a place is worth: whether it clears the seed first, then how many
-    // of the others it clears, then how near it is to where the slider asked.
-    let mut best: Option<(bool, usize, f64, f64)> = None;
+    // What a place is worth: whether it clears the seed first, then whether
+    // it is in the half the slider is sitting in, then how many of the others
+    // it clears, then how near it is to where the slider asked.
+    //
+    // The half comes second because the slider is asking for an appearance
+    // and it is entitled to one whenever the seed can be told from any page
+    // in it. Only a colour no page of the asked half can be told from -- a
+    // near-black asked for on a dark page, a near-white on a light one --
+    // sends the theme across the middle, and that is the case the whole-axis
+    // search was put in for.
+    let asked_half = scheme_at_lightness(asked);
+    let mut best: Option<(bool, bool, usize, f64, f64)> = None;
     for (low, high) in lightness_runs() {
         if let Some((from, to)) = shut {
             if luminance_at(low) > from && luminance_at(high) < to {
@@ -1109,9 +1154,10 @@ fn clear_of(
                 let (close, _, seed_close) = crowded(lstar);
                 let cleared = accents.len() - close;
                 let held = !seed_close;
+                let own_half = scheme_at_lightness(lstar) == asked_half;
                 let near = -(lstar - asked).abs();
-                let worth = (held, cleared, near, lstar);
-                if best.is_none_or(|kept| (worth.0, worth.1, worth.2) > (kept.0, kept.1, kept.2)) {
+                let worth = (held, own_half, cleared, near, lstar);
+                if best.is_none_or(|kept| (worth.0, worth.1, worth.2, worth.3) > (kept.0, kept.1, kept.2, kept.3)) {
                     best = Some(worth);
                 }
                 if held {
@@ -1121,7 +1167,7 @@ fn clear_of(
         }
     }
     let landed = match best {
-        Some((_, _, _, lstar)) => lstar,
+        Some((_, _, _, _, lstar)) => lstar,
         None => asked,
     };
     (landed, crowded(landed).1)
@@ -3784,10 +3830,11 @@ pub enum Schemes {
 /// every mood in the first three places of the run, so a strip showing eight
 /// shows eight different ideas rather than one idea in three moods.
 ///
-/// It is the same list every time for the same colour and appearance, and it
-/// does not depend on the background sliders at all.
-pub fn suggestions(favourite: u32, dark: bool) -> Vec<Suggestion> {
-    suggestions_from(SeedSlot::Primary, favourite, dark)
+/// It is the same list every time for the same colour, and it does not
+/// depend on the appearance or on the background sliders at all: a chip is
+/// the palette, and the palette is four colours somebody could write down.
+pub fn suggestions(favourite: u32) -> Vec<Suggestion> {
+    suggestions_from(SeedSlot::Primary, favourite)
 }
 
 /// [`suggestions`] grown from the colour in any one of the four slots: the
@@ -3796,15 +3843,15 @@ pub fn suggestions(favourite: u32, dark: bool) -> Vec<Suggestion> {
 /// other three what the harmony and the mood make of it. What each slot's
 /// seed does is [`grown_at`]. The primary's row is [`suggestions`], byte for
 /// byte, because it is the same code.
-pub fn suggestions_from(slot: SeedSlot, seed: u32, dark: bool) -> Vec<Suggestion> {
+pub fn suggestions_from(slot: SeedSlot, seed: u32) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = Vec::with_capacity(Harmony::ALL.len() * (Mood::ALL.len() + 1));
     for harmony in Harmony::ALL {
-        offer(&mut out, Some(grown_at(slot, seed, dark, harmony, None)));
+        offer(&mut out, Some(grown_at(slot, seed, harmony, None)));
     }
     for round in 0..Mood::ALL.len() {
         for (step, harmony) in Harmony::ALL.into_iter().enumerate() {
             let mood = Mood::ALL[(round + step) % Mood::ALL.len()];
-            offer(&mut out, Some(grown_at(slot, seed, dark, harmony, Some(mood))));
+            offer(&mut out, Some(grown_at(slot, seed, harmony, Some(mood))));
         }
     }
     out
@@ -3834,8 +3881,8 @@ pub fn suggestions_from(slot: SeedSlot, seed: u32, dark: bool) -> Vec<Suggestion
 ///
 /// The library ships no personal list. `own` is read from wherever the caller
 /// keeps one; `theme_store::read_palettes` is where a person's own file is.
-pub fn all_suggestions(favourite: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Suggestion> {
-    all_suggestions_from(SeedSlot::Primary, favourite, dark, own, Schemes::RoundThePick)
+pub fn all_suggestions(favourite: u32, own: &[Vec<u32>]) -> Vec<Suggestion> {
+    all_suggestions_from(SeedSlot::Primary, favourite, own, Schemes::RoundThePick)
 }
 
 /// [`all_suggestions`] grown from the colour in any one of the four slots.
@@ -3847,16 +3894,16 @@ pub fn all_suggestions(favourite: u32, dark: bool, own: &[Vec<u32>]) -> Vec<Sugg
 /// the role rule with that slot already taken.
 /// `schemes` is the panel's "Adjust" switch and reaches only those two lists:
 /// off, each one is dressed as it was written instead ([`Schemes`]).
-pub fn all_suggestions_from(slot: SeedSlot, seed: u32, dark: bool, own: &[Vec<u32>], schemes: Schemes) -> Vec<Suggestion> {
+pub fn all_suggestions_from(slot: SeedSlot, seed: u32, own: &[Vec<u32>], schemes: Schemes) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = Vec::new();
     for scheme in matching_schemes(seed, own, OWN_TOLERANCE) {
-        offer(&mut out, list_chip(4, slot, seed, dark, &scheme, OWN_LABEL.to_string(), schemes));
+        offer(&mut out, list_chip(slot, seed, &scheme, OWN_LABEL.to_string(), schemes));
     }
     let built_in = matched(seed, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
     for (at, scheme) in built_in.into_iter().take(MOST_COMBINATIONS) {
-        offer(&mut out, list_chip(4, slot, seed, dark, &scheme, combination_label(at), schemes));
+        offer(&mut out, list_chip(slot, seed, &scheme, combination_label(at), schemes));
     }
-    for grown in suggestions_from(slot, seed, dark) {
+    for grown in suggestions_from(slot, seed) {
         offer(&mut out, Some(grown));
     }
     out
@@ -3874,15 +3921,27 @@ pub fn all_suggestions_from(slot: SeedSlot, seed: u32, dark: bool, own: &[Vec<u3
 /// The front colour is the one that stood nearest the pick -- that is how the
 /// scheme was found -- so a chip shown as written leads with the colour that
 /// drew it into the row, in the value the list holds for it.
-fn list_chip(count: usize, slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: String, schemes: Schemes) -> Option<Suggestion> {
-    let (slot, seed) = match schemes {
+fn list_chip(slot: SeedSlot, seed: u32, scheme: &[u32], label: String, schemes: Schemes) -> Option<Suggestion> {
+    let (slot, seed) = laid_round(slot, seed, scheme, schemes);
+    scheme_at(slot, seed, scheme, label)
+}
+
+/// [`list_chip`] for a palette of fewer than four colours, where the roles
+/// are dealt short and the slots the count leaves out are derived: see
+/// [`scheme_for`]. The appearance reaches the DERIVED slots and nothing a
+/// chip draws.
+fn list_chip_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: String, schemes: Schemes) -> Option<Suggestion> {
+    let (slot, seed) = laid_round(slot, seed, scheme, schemes);
+    scheme_for(count, slot, seed, dark, scheme, label)
+}
+
+/// Which slot a chip off a list holds and which colour it holds there: the
+/// seed in its own slot with the switch on, and the scheme's own front
+/// colour in the primary with it off.
+fn laid_round(slot: SeedSlot, seed: u32, scheme: &[u32], schemes: Schemes) -> (SeedSlot, u32) {
+    match schemes {
         Schemes::RoundThePick => (slot, seed | 0xFF),
         Schemes::AsWritten => (SeedSlot::Primary, scheme.first().copied().unwrap_or(seed) | 0xFF),
-    };
-    if count >= 4 {
-        scheme_at(slot, seed, dark, scheme, label)
-    } else {
-        scheme_for(count, slot, seed, dark, scheme, label)
     }
 }
 
@@ -3931,7 +3990,7 @@ pub fn suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool) -> V
     let count = count.clamp(1, 4);
     let slot = if slot.chosen_at(count) { slot } else { SeedSlot::Primary };
     if count == 4 {
-        return suggestions_from(slot, seed, dark);
+        return suggestions_from(slot, seed);
     }
     let mut out = Vec::new();
     if count == 1 {
@@ -3941,7 +4000,7 @@ pub fn suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool) -> V
         }
         return out;
     }
-    for grown in suggestions_from(slot, seed, dark) {
+    for grown in suggestions_from(slot, seed) {
         let [primary, secondary, tertiary, background] = grown.colors;
         let secondary = match slot {
             SeedSlot::Secondary => secondary,
@@ -3974,11 +4033,11 @@ pub fn all_suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, 
     let count = count.clamp(1, 4);
     let slot = if slot.chosen_at(count) { slot } else { SeedSlot::Primary };
     if count == 4 {
-        return all_suggestions_from(slot, seed, dark, own, schemes);
+        return all_suggestions_from(slot, seed, own, schemes);
     }
     let mut out: Vec<Suggestion> = Vec::new();
     for scheme in matching_schemes(seed, own, OWN_TOLERANCE) {
-        offer(&mut out, list_chip(count, slot, seed, dark, &scheme, OWN_LABEL.to_string(), schemes));
+        offer(&mut out, list_chip_for(count, slot, seed, dark, &scheme, OWN_LABEL.to_string(), schemes));
     }
     if count == 1 {
         let mut colors = book_colors();
@@ -4004,7 +4063,7 @@ pub fn all_suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, 
                 .collect()
         };
         for (label, scheme) in book.into_iter().take(MOST_COMBINATIONS) {
-            offer(&mut out, list_chip(count, slot, seed, dark, &scheme, label, schemes));
+            offer(&mut out, list_chip_for(count, slot, seed, dark, &scheme, label, schemes));
         }
     }
     for grown in suggestions_for(count, slot, seed, dark) {
@@ -4088,11 +4147,14 @@ fn scheme_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32
     }
     let seed = seed | 0xFF;
     let mut rest: Vec<u32> = adjusted[1..].to_vec();
-    let step_of = |primary: u32| derived_palette([primary; 4], 2, dark)[1];
+    // What a scheme too short to fill a slot borrows: the plain house
+    // harmony's colour for it, which is the palette's own and the same in
+    // either appearance, as every other square of a chip now is.
+    let step_of = |primary: u32| grown(primary, Harmony::House, None).colors[1];
     let chosen = match slot {
         SeedSlot::Surface => {
             let primary = if rest.is_empty() {
-                surface_anchor(Harmony::House, seed, dark)
+                surface_anchor(Harmony::House, seed)
             } else {
                 let mut at = 0;
                 for next in 1..rest.len() {
@@ -4113,10 +4175,10 @@ fn scheme_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32
             // An accent is wanted beside the seed at three and not at two,
             // so the page is only taken where that leaves one.
             let spare = if count >= 3 { rest.len() >= 2 } else { !rest.is_empty() };
-            let ground = spare.then(|| rest.remove(page_end(&rest, dark)));
+            let ground = spare.then(|| rest.remove(page_end(&rest)));
             let (primary, secondary) = match slot {
                 SeedSlot::Secondary if !rest.is_empty() => (rest.remove(partner_of(slot, seed, &rest)), seed),
-                SeedSlot::Secondary => (grown(seed, dark, Harmony::House, None).colors[1], seed),
+                SeedSlot::Secondary => (grown(seed, Harmony::House, None).colors[1], seed),
                 _ => {
                     let anchor = adjusted[0];
                     rest.sort_by(|a, b| {
@@ -4126,8 +4188,8 @@ fn scheme_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32
                 }
             };
             let background = match ground {
-                Some(ground) => ground_swatch(ground, dark),
-                None => rule_background(Harmony::House, primary, None, [primary, secondary, step_of(primary)], dark),
+                Some(ground) => ground,
+                None => rule_background(Harmony::House, primary, None, [primary, secondary, step_of(primary)]),
             };
             [primary, secondary, primary, background]
         }
@@ -4162,11 +4224,26 @@ fn offer(out: &mut Vec<Suggestion>, made: Option<Suggestion>) {
 /// The hue is taken the short way round the circle. A scheme holding a red at
 /// 355 degrees is a scheme holding a red at 5 degrees, and a measure that
 /// called those 350 apart would never find it.
+///
+/// And the hue counts only so far as the two colours HAVE one. A white, a
+/// black or a grey is nowhere on the hue circle: the number `rgb_to_hsl`
+/// hands back for it is whatever fell out of the arithmetic, and holding a
+/// pick to it threw nearly every scheme out -- somebody picking white was
+/// shown an empty row where a coloured pick fills one. So the hue term is
+/// weighted by how much colour the PAIR has, the lesser of the two
+/// saturations, ramped from nothing at a flat grey to its full weight at
+/// [`HAS_HUE`], which is the bar the rest of this file already uses to decide
+/// whether a colour has a hue at all. A ramp and not a switch, so that
+/// nothing jumps as a colour crosses the bar; and full weight from the bar up,
+/// so that two colours which both have a hue are measured exactly as they
+/// always were. The saturation and the lightness go on counting in full for
+/// everybody: they are what a grey has to be matched by.
 pub fn color_distance(a: u32, b: u32) -> f64 {
     let (a_hue, a_colour, a_light) = rgb_to_hsl(a | 0xFF);
     let (b_hue, b_colour, b_light) = rgb_to_hsl(b | 0xFF);
     let turn = (a_hue - b_hue).rem_euclid(360.0);
-    turn.min(360.0 - turn) + (a_colour - b_colour).abs() * 100.0 + (a_light - b_light).abs() * 100.0
+    let has_hue = (a_colour.min(b_colour) / HAS_HUE).min(1.0);
+    turn.min(360.0 - turn) * has_hue + (a_colour - b_colour).abs() * 100.0 + (a_light - b_light).abs() * 100.0
 }
 
 /// Every scheme in `schemes` that holds a colour within `tolerance` of the
@@ -4231,19 +4308,18 @@ fn matched<'a>(
 ///
 /// What the colours themselves say decides it instead:
 ///
-/// * The background is the dark END of the palette in a dark theme and the
-///   light end in a light one: of the colours that are not the anchor, the
-///   one with the least luminance on a dark page and the most on a light one.
-///   A page is what a palette is laid on, and a palette laid on its own
-///   darkest colour in the dark -- its lightest in the light -- is the one a
-///   designer would have drawn. Least saturated, which is what this used to
+/// * The background is the palette's own END ([`page_end`]): of the colours
+///   that are not the anchor, the one standing furthest from the middle of
+///   the lightness axis. A page is what a palette is laid on, and the colour
+///   a palette would be laid on is the one least usable as an accent, which
+///   is the one nearest an end. Least saturated, which is what this used to
 ///   say, picked a grey for nineteen of the book's hundred and eight
 ///   four-colour rows, and a page that could never carry any colour. Ties go
 ///   to the less saturated, and then to written order. Only where there is
 ///   one to spare: three colours are the three accent families exactly, and
 ///   taking one of them for the page would leave the theme a family short.
-///   So the order depends on the appearance, and a panel that flips it grows
-///   the list again.
+///   The appearance does not come into it: a scheme is a scheme, and the row
+///   of chips has to stand still while the lightness slider moves.
 /// * Of the two accents left, the one NEARER the anchor round the circle is
 ///   the secondary and the farther one the tertiary -- the quiet accent beside
 ///   the favourite, the contrast accent across from it. That is what every
@@ -4257,13 +4333,13 @@ fn matched<'a>(
 /// ANCHOR is the grey there is nothing at all to be near or far from, and then
 /// written order decides, as it does for every other tie. Anything past the
 /// fourth colour is left where it fell; nothing reads it.
-fn in_role_order(scheme: &[u32], dark: bool) -> Vec<u32> {
+fn in_role_order(scheme: &[u32]) -> Vec<u32> {
     if scheme.len() < 3 {
         return scheme.to_vec();
     }
     let anchor = scheme[0];
     let mut rest: Vec<u32> = scheme[1..].to_vec();
-    let ground = (rest.len() >= 3).then(|| rest.remove(page_end(&rest, dark)));
+    let ground = (rest.len() >= 3).then(|| rest.remove(page_end(&rest)));
     // A stable sort, so colours standing equally far round the circle keep the
     // order they were written in.
     rest.sort_by(|a, b| {
@@ -4278,13 +4354,30 @@ fn in_role_order(scheme: &[u32], dark: bool) -> Vec<u32> {
     out
 }
 
-/// Which of these colours is the palette's end on this side: the darkest for
-/// a dark theme, the lightest for a light one, by luminance. The less
-/// saturated of two that are equally dark, and then the first written.
-fn page_end(colors: &[u32], dark: bool) -> usize {
+/// Which of these colours is the palette's END: the one standing FURTHEST
+/// from the middle of the lightness axis, either way. The less saturated of
+/// two that stand equally far, and then the first written.
+///
+/// Furthest from the middle and not "the darkest" or "the lightest", because
+/// a chip is the palette and not the page in force: asking which end by the
+/// appearance made the same scheme hand its page role to one colour in the
+/// dark and to another in the light, and the row of chips shuffled itself
+/// under the hand every time the lightness slider crossed over. The question
+/// the roles actually turn on is which colour is LEAST usable as an accent,
+/// and that is the one nearest an end of the axis, whichever end it is.
+///
+/// The middle is the one [`scheme_at_lightness`] divides the two runs at, so
+/// this and the appearance a colour's own lightness names never disagree.
+/// How far from it is measured in `L*` and not in luminance, because
+/// luminance is nearly all the light end -- a mid orange sits further from
+/// the middle in luminance than a near-black green does, and a rule read off
+/// that number would call the orange the page. `L*` is the axis the rest of
+/// this file works in and the one the eye reads lightness on.
+fn page_end(colors: &[u32]) -> usize {
+    let middle = (dark_lightest() + LIGHT_DARKEST) / 2.0;
     let key = |packed: u32| {
-        let y = luminance(packed | 0xFF);
-        (if dark { y } else { -y }, rgb_to_hsl(packed | 0xFF).1)
+        let at = lstar_of(luminance(packed | 0xFF));
+        (-(at - middle).abs(), rgb_to_hsl(packed | 0xFF).1)
     };
     let mut best = 0;
     for at in 1..colors.len() {
@@ -4419,7 +4512,7 @@ pub fn adjust_scheme(favourite: u32, scheme: &[u32]) -> Vec<u32> {
 /// tertiary steps a fifth along the lightness axis toward the middle, or the
 /// three would be one colour three times. The background is
 /// [`rule_background`].
-fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Suggestion {
+fn grown(favourite: u32, harmony: Harmony, mood: Option<Mood>) -> Suggestion {
     let primary = in_mood(favourite, mood);
     let (hue, sat, light) = rgb_to_hsl(primary);
     let (second, third) = harmony.offsets();
@@ -4433,7 +4526,7 @@ fn grown(favourite: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Su
     let secondary = companion(second, SECONDARY_SHARE, 0.0);
     let toward_middle = if light < 0.5 { 0.2 } else { -0.2 };
     let tertiary = companion(third, TERTIARY_SHARE, if harmony == Harmony::Single { toward_middle } else { 0.0 });
-    let background = rule_background(harmony, favourite, mood, [primary, secondary, tertiary], dark);
+    let background = rule_background(harmony, favourite, mood, [primary, secondary, tertiary]);
     let seeds = SuggestionSeeds { primary, secondary, tertiary, background };
     Suggestion {
         label: match mood {
@@ -4488,11 +4581,11 @@ const HUE_TIE: f64 = 1.0;
 /// at one colour, where the primary is the only colour chosen and everything
 /// else is derived from it -- the chip is not offered twice: `offer` drops
 /// it and the row is shorter by one.
-fn grown_at(slot: SeedSlot, seed: u32, dark: bool, harmony: Harmony, mood: Option<Mood>) -> Suggestion {
+fn grown_at(slot: SeedSlot, seed: u32, harmony: Harmony, mood: Option<Mood>) -> Suggestion {
     let laid = match slot {
-        SeedSlot::Primary => return with_primary(grown(seed, dark, harmony, mood), seed | 0xFF),
-        SeedSlot::Surface => grown(surface_anchor(harmony, seed, dark), dark, harmony, mood),
-        _ => grown(seed, dark, harmony, mood),
+        SeedSlot::Primary => return with_primary(grown(seed, harmony, mood), seed | 0xFF),
+        SeedSlot::Surface => grown(surface_anchor(harmony, seed), harmony, mood),
+        _ => grown(seed, harmony, mood),
     };
     let seed = seed | 0xFF;
     let [first, second, third, background] = laid.colors;
@@ -4561,15 +4654,22 @@ fn partner_of(slot: SeedSlot, seed: u32, candidates: &[u32]) -> usize {
 /// is; which one the rule itself would name turns only on where the hues
 /// happen to fall round nought.
 ///
-/// The seed's saturation and lightness say nothing about an accent -- how
-/// light the page is belongs to the lightness slider -- so the primary takes
-/// the appearance's house primary's saturation, and its luminance too, which
-/// holds the contrast the house primary stands off the house page at: every
-/// hue then reads on the page as the house colour does. A seed with no hue
-/// has no hue to lay a harmony from, and the accents are laid from the house
+/// The seed's saturation says nothing about an accent, so the primary takes
+/// a house primary's saturation, and its luminance too, which holds the
+/// contrast that house primary stands off its own house page at: every hue
+/// then reads on the page as the house colour does. A seed with no hue has
+/// no hue to lay a harmony from, and the accents are laid from the house
 /// primary's instead.
-fn surface_anchor(harmony: Harmony, surface: u32, dark: bool) -> u32 {
-    let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+///
+/// WHICH house primary is decided by the seed and not by the appearance in
+/// force. The seed IS this palette's page, so the appearance to ask is the
+/// one that page would be: a dark seed borrows the dark theme's primary, a
+/// light seed the light theme's. That keeps a chip the palette's own four
+/// colours -- the same in the dark and in the light, and the same wherever
+/// the lightness slider is standing -- and it is the better question anyway,
+/// since the accents here have to sit on THIS page and not on the house one.
+fn surface_anchor(harmony: Harmony, surface: u32) -> u32 {
+    let scheme = scheme_at_lightness(lstar_of(luminance(surface | 0xFF)));
     let house = roles_for(scheme).primary.base | 0xFF;
     let (house_hue, house_sat, _) = rgb_to_hsl(house);
     let y = luminance(house);
@@ -4577,7 +4677,7 @@ fn surface_anchor(harmony: Harmony, surface: u32, dark: bool) -> u32 {
     if sat < HAS_HUE {
         return at_luminance(house_hue, house_sat, y);
     }
-    let probe = grown(at_luminance(0.0, house_sat, y), dark, harmony, None);
+    let probe = grown(at_luminance(0.0, house_sat, y), harmony, None);
     let probe_hue = rgb_to_hsl(probe.colors[0]).0;
     let offset = ground_hue(harmony, probe_hue, &probe.colors[..3]) - probe_hue;
     at_luminance(hue - offset, house_sat, y)
@@ -4586,7 +4686,19 @@ fn surface_anchor(harmony: Harmony, surface: u32, dark: bool) -> u32 {
 /// The background colour the rule gives a palette that did not come with
 /// one: a hue a designer would put behind those three accents, properly
 /// saturated so that the top of the saturation slider is unmistakably a
-/// colour, and shown at the appearance's house page lightness.
+/// colour, AT ITS OWN NATURAL LIGHTNESS.
+///
+/// Its own natural lightness is one half, the middle of the HSL axis, where
+/// a hue is as much of itself as it can be and neither appearance has a
+/// claim on it. It is the rule's own choice and it is the same in the dark
+/// and in the light, which is the whole point of it: this colour is the
+/// PALETTE's fourth, and a chip showing it is showing what the palette is.
+/// What the built theme does with it is a separate matter and a later one --
+/// the page takes its hue, the saturation slider says how much of its colour
+/// the grounds carry, the lightness slider says how light the page is, and
+/// the page then moves out of the accents' way. So the chip shows the
+/// palette and the theme shows the setting, and dragging a slider no longer
+/// makes the row of chips restless under the hand.
 ///
 /// The hue, harmony by harmony:
 ///
@@ -4606,12 +4718,12 @@ fn surface_anchor(harmony: Harmony, surface: u32, dark: bool) -> u32 {
 /// The saturation is the favourite's, kept between the two bounds of
 /// [`RULE_GROUND_COLOUR`], in the mood. A favourite that is a grey has no
 /// colour for a page to take, and its background is a grey.
-fn rule_background(harmony: Harmony, favourite: u32, mood: Option<Mood>, accents: [u32; 3], dark: bool) -> u32 {
+fn rule_background(harmony: Harmony, favourite: u32, mood: Option<Mood>, accents: [u32; 3]) -> u32 {
     let (hue, own, _) = rgb_to_hsl(favourite | 0xFF);
     let ground_hue = ground_hue(harmony, hue, &accents);
     let share = mood.map_or(1.0, |mood| mood.rule().colour);
     let sat = if own < HAS_HUE { 0.0 } else { own.clamp(RULE_GROUND_COLOUR.0, RULE_GROUND_COLOUR.1) * share };
-    ground_swatch(hsl_to_rgb(ground_hue, sat, 0.5), dark)
+    hsl_to_rgb(ground_hue, sat, 0.5)
 }
 
 /// The hue [`rule_background`] gives the page, for a primary at `hue` and
@@ -4667,17 +4779,17 @@ fn widest_gap(colors: &[u32]) -> Option<f64> {
 /// beige tops out at that beige. A scheme of three colours or two has none,
 /// and gets one by [`rule_background`]; a scheme of two borrows its tertiary
 /// from the plain house harmony first.
-fn from_scheme(favourite: u32, dark: bool, scheme: &[u32], label: String) -> Option<Suggestion> {
-    let adjusted = in_role_order(&adjust_scheme(favourite, scheme), dark);
+fn from_scheme(favourite: u32, scheme: &[u32], label: String) -> Option<Suggestion> {
+    let adjusted = in_role_order(&adjust_scheme(favourite, scheme));
     if adjusted.len() < 2 {
         return None;
     }
     let primary = adjusted[0] | 0xFF;
     let secondary = adjusted[1] | 0xFF;
-    let tertiary = adjusted.get(2).map_or_else(|| grown(favourite, dark, Harmony::House, None).seeds.tertiary, |c| c | 0xFF);
+    let tertiary = adjusted.get(2).map_or_else(|| grown(favourite, Harmony::House, None).seeds.tertiary, |c| c | 0xFF);
     let background = match adjusted.get(3) {
-        Some(ground) => ground_swatch(*ground, dark),
-        None => rule_background(Harmony::House, favourite, None, [primary, secondary, tertiary], dark),
+        Some(ground) => *ground | 0xFF,
+        None => rule_background(Harmony::House, favourite, None, [primary, secondary, tertiary]),
     };
     let seeds = SuggestionSeeds { primary, secondary, tertiary, background };
     Some(Suggestion {
@@ -4710,9 +4822,9 @@ fn from_scheme(favourite: u32, dark: bool, scheme: &[u32], label: String) -> Opt
 ///   other two follow it in [`in_role_order`]'s way, the nearer round the
 ///   circle the secondary. What a short scheme lacks it borrows from the
 ///   plain house harmony round that primary.
-fn scheme_at(slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: String) -> Option<Suggestion> {
+fn scheme_at(slot: SeedSlot, seed: u32, scheme: &[u32], label: String) -> Option<Suggestion> {
     if slot == SeedSlot::Primary {
-        return from_scheme(seed, dark, scheme, label);
+        return from_scheme(seed, scheme, label);
     }
     let adjusted = adjust_scheme(seed, scheme);
     if adjusted.len() < 2 {
@@ -4733,20 +4845,20 @@ fn scheme_at(slot: SeedSlot, seed: u32, dark: bool, scheme: &[u32], label: Strin
             rest.sort_by(|a, b| {
                 hue_gap(primary, *a).partial_cmp(&hue_gap(primary, *b)).unwrap_or(std::cmp::Ordering::Equal)
             });
-            let plain = grown(primary, dark, Harmony::House, None).colors;
+            let plain = grown(primary, Harmony::House, None).colors;
             [primary, rest.first().copied().unwrap_or(plain[1]), rest.get(1).copied().unwrap_or(plain[2]), seed]
         }
         _ => {
-            let ground = (rest.len() >= 3).then(|| rest.remove(page_end(&rest, dark)));
+            let ground = (rest.len() >= 3).then(|| rest.remove(page_end(&rest)));
             let primary = rest.remove(partner_of(slot, seed, &rest));
-            let plain = grown(primary, dark, Harmony::House, None).colors;
+            let plain = grown(primary, Harmony::House, None).colors;
             let (secondary, tertiary) = match slot {
                 SeedSlot::Secondary => (seed, rest.first().copied().unwrap_or(plain[2])),
                 _ => (rest.first().copied().unwrap_or(plain[1]), seed),
             };
             let background = match ground {
-                Some(ground) => ground_swatch(ground, dark),
-                None => rule_background(Harmony::House, seed, None, [primary, secondary, tertiary], dark),
+                Some(ground) => ground,
+                None => rule_background(Harmony::House, seed, None, [primary, secondary, tertiary]),
             };
             [primary, secondary, tertiary, background]
         }
@@ -5342,7 +5454,7 @@ mod theme_builder_tests {
                 }
             }
             for dark in [true, false] {
-                let chip = suggestions(BLUE, dark)[8].params(BuilderParams::house(dark));
+                let chip = suggestions(BLUE)[8].params(BuilderParams::house(dark));
                 check(vm, BuilderParams { saturation: 0.5, ..chip });
                 let (least, most) = chip.text_contrast_range();
                 check(vm, BuilderParams { text_contrast: least, ..chip });
@@ -5498,13 +5610,11 @@ mod theme_builder_tests {
     /// the base theme's own value, so this test fails on the theme the
     /// builder made before the mapping and cannot pass by accident.
     ///
-    /// One orange per appearance, and they are two different oranges because
-    /// they have to be. A page stands `LEGIBLE` off a bright orange only
-    /// while it is dark and off a deep one only while it is light, and the
-    /// page goes where the colour leaves it room, so asking a light theme for
-    /// the bright orange asks for a dark theme instead. Both oranges are the
-    /// defect's own colour a shade apart, and the mapping is what is being
-    /// measured either way.
+    /// One orange per appearance, and they are two different oranges so that
+    /// each is a colour at home on its own page: a bright one on a dark page
+    /// and a deep one on a light page, which is where a person would put
+    /// them. Both are the defect's own colour a shade apart, and the mapping
+    /// is what is being measured either way.
     #[test]
     fn an_orange_theme_does_not_leave_the_controls_grey_and_the_focus_blue() {
         for dark in [true, false] {
@@ -5985,7 +6095,7 @@ mod theme_builder_tests {
     #[test]
     fn saturation_moves_the_backgrounds_chroma_and_nothing_else() {
         for dark in [true, false] {
-            let chip = suggestions(BLUE, dark)[0].params(BuilderParams::house(dark));
+            let chip = suggestions(BLUE)[0].params(BuilderParams::house(dark));
             let [_, _, _, fourth] = chip.palette();
             let (fourth_hue, fourth_sat, _) = rgb_to_hsl(fourth);
             assert!(fourth_sat > 0.3, "the rule's background is not a colour: {fourth:08X}");
@@ -6073,7 +6183,7 @@ mod theme_builder_tests {
         }
         // And a real palette all the way along: every theme reads, and the
         // base theme it derives from is the one the page landed in.
-        let chip = suggestions(0xE8730CFF, true)[5].params(BuilderParams::house(true));
+        let chip = suggestions(0xE8730CFF)[5].params(BuilderParams::house(true));
         for saturation in [0.0, 1.0] {
             for step in 0..=100 {
                 let lightness = step as f64 / 100.0;
@@ -6130,7 +6240,7 @@ mod theme_builder_tests {
     #[test]
     fn text_contrast_moves_the_text_inks_and_nothing_else() {
         for dark in [true, false] {
-            let chip = suggestions(BLUE, dark)[3].params(BuilderParams::house(dark));
+            let chip = suggestions(BLUE)[3].params(BuilderParams::house(dark));
             for (saturation, lightness) in slider_ends(dark) {
                 let at = BuilderParams { saturation, lightness, ..chip };
                 let (least, most) = at.text_contrast_range();
@@ -6226,7 +6336,7 @@ mod theme_builder_tests {
     #[test]
     fn no_text_colour_is_the_theme_there_was_before() {
         for dark in [true, false] {
-            let chip = suggestions(BLUE, dark)[3].params(BuilderParams::house(dark));
+            let chip = suggestions(BLUE)[3].params(BuilderParams::house(dark));
             for base in [BuilderParams::house(dark), chip] {
                 let plain = build(&base);
                 for same in [
@@ -6424,7 +6534,7 @@ mod theme_builder_tests {
             "color_label_inner_active",
         ];
         for dark in [true, false] {
-            for suggestion in suggestions(0xE8730CFF, dark).iter().take(6) {
+            for suggestion in suggestions(0xE8730CFF).iter().take(6) {
                 let chip = suggestion.params(BuilderParams::house(dark));
                 let (grey, full) = (build(&BuilderParams { saturation: 0.0, ..chip }), build(&chip));
                 let fourth = rgb_to_hsl(chip.palette()[3]).0;
@@ -6472,7 +6582,7 @@ mod theme_builder_tests {
         let mut pages = 0;
         for dark in [true, false] {
             for favourite in [0xE8730CFFu32, BLUE, 0x20A040FF] {
-                for suggestion in suggestions(favourite, dark).iter().step_by(2) {
+                for suggestion in suggestions(favourite).iter().step_by(2) {
                     let chip = BuilderParams { text_contrast: READABLE, ..suggestion.params(BuilderParams::house(dark)) };
                     let places = slider_ends(dark);
                     let built: Vec<BuiltTheme> = places
@@ -7094,9 +7204,9 @@ mod theme_builder_tests {
     #[test]
     fn a_favourite_offers_the_six_harmonies_first_and_then_their_moods() {
         for dark in [true, false] {
-            let made = suggestions(BLUE, dark);
+            let made = suggestions(BLUE);
             assert_eq!(made.len(), Harmony::ALL.len() * (Mood::ALL.len() + 1), "{dark}");
-            assert_eq!(made, suggestions(BLUE, dark), "the same colour asked twice");
+            assert_eq!(made, suggestions(BLUE), "the same colour asked twice");
             let labels: Vec<&str> = made[..6].iter().map(|s| s.label.as_str()).collect();
             assert_eq!(labels, ["Default", "Single hue", "Analogous", "Complementary", "Split", "Triadic"]);
             for (at, harmony) in Harmony::ALL.into_iter().enumerate() {
@@ -7130,9 +7240,9 @@ mod theme_builder_tests {
     /// called, and a palette they wrote down is theirs.
     #[test]
     fn a_look_alike_the_rule_grew_gives_way_to_a_chosen_one() {
-        let triadic = suggestions(BLUE, true)[5].clone();
+        let triadic = suggestions(BLUE)[5].clone();
         let copy = vec![triadic.colors[0], triadic.colors[1], triadic.colors[2]];
-        let all = all_suggestions(BLUE, true, &[copy]);
+        let all = all_suggestions(BLUE, &[copy]);
         assert_eq!(theirs(&all), 1, "the person's copy was the one dropped");
         assert_eq!(all[0].label, OWN_LABEL);
         assert_eq!(all[0].colors, triadic.colors, "it is the same palette either way");
@@ -7152,7 +7262,7 @@ mod theme_builder_tests {
     #[test]
     fn a_grey_favourite_collapses_to_a_handful() {
         for dark in [true, false] {
-            let grey = suggestions(0x808080FF, dark);
+            let grey = suggestions(0x808080FF);
             let labels: Vec<String> = grey.iter().map(|s| s.label.clone()).collect();
             // The single-hue palette keeps its tertiary a step along the
             // lightness axis, grey or not, so it is the one plain palette
@@ -7165,7 +7275,7 @@ mod theme_builder_tests {
                 assert_eq!(rgb_to_hsl(suggestion.seeds.background).1, 0.0, "a grey coloured the page");
             }
             // And a colour still gets the whole row.
-            assert_eq!(suggestions(BLUE, dark).len(), 24);
+            assert_eq!(suggestions(BLUE).len(), 24);
         }
     }
 
@@ -7218,7 +7328,7 @@ mod theme_builder_tests {
         let own = vec![vec![favourite, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![favourite, 0x40D0D0FF]];
         for dark in [true, false] {
             let base = BuilderParams { spacing: 9.0, font_size: 11.5, ..BuilderParams::house(dark) };
-            let offered = all_suggestions(favourite, dark, &own);
+            let offered = all_suggestions(favourite, &own);
             assert!(!book(&offered).is_empty() && theirs(&offered) > 0, "nothing but the rule's was offered");
             for suggestion in &offered {
                 let [_, _, _, fourth] = suggestion.colors;
@@ -7235,16 +7345,26 @@ mod theme_builder_tests {
                 assert_eq!(params.palette(), suggestion.colors);
                 let top = build(&params);
                 let page = top.color("color_bg_app").unwrap();
-                if sat >= 0.08 {
+                // How much colour a square actually holds, in the eight bits
+                // it is written in. An HSL saturation says a pale grey off the
+                // book is a sixth of the way to a colour when its channels are
+                // two steps apart, and a hue read off two steps is noise -- so
+                // the question is asked only where the background is really a
+                // colour AND the page has room left to be one. A page carried
+                // to the far end of the axis to clear an accent has a handful
+                // of steps of chroma and no hue worth arguing about; what the
+                // saturation test below still holds it to is that none of the
+                // colour comes back with the slider at nought.
+                let steps = |packed: u32, shift: u32| ((packed >> shift) & 0xFF) as i64;
+                let spread = |packed: u32| {
+                    steps(packed, 24).max(steps(packed, 16)).max(steps(packed, 8))
+                        - steps(packed, 24).min(steps(packed, 16)).min(steps(packed, 8))
+                };
+                if sat >= 0.08 && spread(fourth) >= 8 && spread(page) >= 6 {
                     let at = rgb_to_hsl(page).0;
-                    // A page carried to the far end of the lightness axis to
-                    // get clear of a colour has only a handful of steps of
-                    // chroma left in eight bits, and a hue named in six of
-                    // 255 is named coarsely. What it still is not is another
-                    // colour's hue.
-                    let band = |shift: u32| ((page >> shift) & 0xFF) as i64;
-                    let chroma = band(24).max(band(16)).max(band(8)) - band(24).min(band(16)).min(band(8));
-                    let slack = if chroma >= 16 { 4.0 } else { 12.0 };
+                    // A hue named in a dozen of 255 is named coarsely. What
+                    // it still is not is another colour's hue.
+                    let slack = if spread(page) >= 16 { 4.0 } else { 12.0 };
                     assert!(apart(at, hue) < slack, "{}: {page:08X} is not {fourth:08X}'s hue", suggestion.label);
                 }
                 let none = build(&BuilderParams { saturation: 0.0, ..params });
@@ -7252,7 +7372,7 @@ mod theme_builder_tests {
             }
         }
         // A grey favourite's background is a grey.
-        for suggestion in suggestions(0x777777FF, true) {
+        for suggestion in suggestions(0x777777FF) {
             assert_eq!(rgb_to_hsl(suggestion.colors[3]).1, 0.0);
         }
     }
@@ -7275,7 +7395,7 @@ mod theme_builder_tests {
         let favourite = 0xE8730CFF;
         for dark in [true, false] {
             let house = BuilderParams { favourite, ..BuilderParams::house(dark) };
-            let offered = suggestions(favourite, dark);
+            let offered = suggestions(favourite);
             let muted = offered.iter().find(|s| s.mood == Some(Mood::Muted)).unwrap();
             assert_eq!(muted.colors[0], favourite, "the mood chip moved the pick");
             // The rest of the palette is calmer, the background colour too.
@@ -7310,7 +7430,7 @@ mod theme_builder_tests {
     /// Seen failing twice. First on the build before this one, where the
     /// favourite was read for its hue and the rule put its own saturation and
     /// lightness on it; then on the build after that, which held the colour
-    /// only while it stood `LEGIBLE` off the page and walked it away when it
+    /// only while it stood clear of the page and walked it away when it
     /// did not -- so a colour picked near the page came back changed, which
     /// is the one thing a person who picked a colour did not ask for.
     #[test]
@@ -7333,7 +7453,7 @@ mod theme_builder_tests {
             for step in 0..36 {
                 for light in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] {
                     let favourite = hsl_to_rgb(step as f64 * 10.0, 0.6, light);
-                    if contrast_of(favourite, page) >= LEGIBLE {
+                    if contrast_of(favourite, page) >= TOLD_APART {
                         continue;
                     }
                     let built = build(&BuilderParams { favourite, ..BuilderParams::house(dark) });
@@ -7344,19 +7464,22 @@ mod theme_builder_tests {
         }
     }
 
-    /// The colour stands still and the PAGE gets out of its way -- along the
-    /// WHOLE lightness axis, not the half the slider is in. A colour picked
-    /// within `LEGIBLE` of the house page of its appearance builds a theme
-    /// whose page is NOT the house page any more, whose primary is the pick
-    /// exactly, and on whose page that primary stands off at `LEGIBLE`: moved
-    /// no further than it had to be, and across the middle into the other
-    /// appearance where that is where the room is.
+    /// The colour stands still and the PAGE gets out of its way. A colour
+    /// picked within [`TOLD_APART`] of the house page of its appearance
+    /// builds a theme whose page is NOT the house page any more, whose
+    /// primary is the pick exactly, and on whose page that primary stands off
+    /// at [`TOLD_APART`]: moved no further than it had to be -- and STAYING
+    /// in the half the lightness slider was left in, because at this bar
+    /// there is somewhere in that half for every one of these picks to be
+    /// seen against.
     ///
-    /// Seen failing twice. On the build before it, which held the page still
-    /// and walked the colour instead; and on the build after that, which let
-    /// the page move only inside its own half, so that a near-black pick on a
-    /// dark page had nowhere to go and 283 of these 325 picks came back with
-    /// the page where it started and an apology under the controls.
+    /// Seen failing three times. On the build that held the page still and
+    /// walked the colour instead; on the one after it, which let the page
+    /// move only inside its own half at the TEXT bar, so that a near-black
+    /// pick on a dark page had nowhere to go and 283 of these picks came back
+    /// with the page where it started and an apology under the controls; and
+    /// on the one after THAT, which opened the whole axis at the text bar and
+    /// took the appearance out of the slider's hands altogether.
     #[test]
     fn a_colour_the_page_hides_moves_the_page_and_not_the_colour() {
         let mut moved = 0;
@@ -7368,7 +7491,7 @@ mod theme_builder_tests {
             for step in 0..36 {
                 for light in [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85] {
                     let favourite = hsl_to_rgb(step as f64 * 10.0, 0.55, light);
-                    if contrast_of(favourite, page) >= LEGIBLE {
+                    if contrast_of(favourite, page) >= TOLD_APART {
                         continue;
                     }
                     // One chosen colour, so the page has only the pick to get
@@ -7380,12 +7503,19 @@ mod theme_builder_tests {
                     assert_eq!(built.crowding, None, "{what}: nothing should be hopeless on its own");
                     let built_page = built.color("color_bg_app").unwrap();
                     assert_ne!(built_page, page, "{what}: the page did not move");
-                    assert!(contrast_of(favourite, built_page) >= LEGIBLE, "{what}: still hidden");
+                    assert!(contrast_of(favourite, built_page) >= TOLD_APART, "{what}: still hidden");
                     // The appearance is the one the page landed in, and
-                    // nothing else.
+                    // nothing else -- and it is the one the slider asked for,
+                    // because a single accent of this strength always has
+                    // room in its own half.
                     let at = lstar_of(luminance(built_page));
                     assert_eq!(built.scheme, scheme_at_lightness(at), "{what}: the base theme left the page");
-                    if built.scheme != scheme {
+                    // The half the slider is in is kept unless that half has
+                    // nowhere at all, which is checked here by walking it.
+                    if a_page_of_this_half_clears(favourite, dark) {
+                        assert_eq!(built.scheme, scheme, "{what}: the slider asked for the other appearance");
+                    } else {
+                        assert_ne!(built.scheme, scheme, "{what}: the half had nowhere and it stayed anyway");
                         crossed += 1;
                     }
                     // No further than it had to: a step back toward where the
@@ -7400,7 +7530,7 @@ mod theme_builder_tests {
                             let (hue, sat, _) = rgb_to_hsl(built_page);
                             let nearer = at_luminance(hue, sat, luminance_at(back));
                             assert!(
-                                contrast_of(favourite, nearer) < LEGIBLE,
+                                contrast_of(favourite, nearer) < TOLD_APART,
                                 "{what}: the page went further than it had to"
                             );
                         }
@@ -7411,12 +7541,14 @@ mod theme_builder_tests {
                 }
             }
         }
-        // Every one of them moved, and a good many of them had to cross the
-        // middle to do it: that is the whole difference the roaming page
-        // makes, and the count is here so that a rule quietly narrowed again
-        // fails this test rather than passing it quietly.
-        assert!(moved > 300, "only {moved} pages moved: the case is not being reached");
-        assert!(crossed > 60, "only {crossed} pages crossed into the other appearance");
+        // Every one of them moved, and hardly any of them had to leave the
+        // half the slider was in: the softer bar gives an ordinary colour
+        // somewhere to be seen in either appearance, and only the narrow band
+        // of lightness the dark run cannot hold at all crosses over. The
+        // counts are here so that a rule that quietly stops reaching either
+        // case fails this test rather than passing it quietly.
+        assert!(moved > 60, "only {moved} pages moved: the case is not being reached");
+        assert!(crossed * 4 < moved, "{crossed} of {moved} pages left the half the slider asked for");
         // The two outcomes are both common, and which one a pick lands in is
         // arithmetic and not taste: a page can be made darker than a mid
         // colour, and no page in the dark half can be made darker than a
@@ -7429,7 +7561,7 @@ mod theme_builder_tests {
             for step in 0..36 {
                 for light in [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85] {
                     let favourite = hsl_to_rgb(step as f64 * 10.0, 0.55, light);
-                    if contrast_of(favourite, page) >= LEGIBLE {
+                    if contrast_of(favourite, page) >= TOLD_APART {
                         continue;
                     }
                     let params = BuilderParams { favourite, ..BuilderParams::house(dark) };
@@ -7439,10 +7571,19 @@ mod theme_builder_tests {
                     let built_page = built.color("color_bg_app").unwrap();
                     // The seed is the primary here, and the seed is never the
                     // one given up on.
-                    assert!(contrast_of(favourite, built_page) >= LEGIBLE, "{what}: the seed was given up on");
+                    assert!(contrast_of(favourite, built_page) >= TOLD_APART, "{what}: the seed was given up on");
                     if let Some(slot) = built.crowding {
                         assert!(slot != SeedSlot::Surface, "{what}: {slot:?}");
-                        assert!(!a_page_clears_them_all(&params), "{what}: reported {slot:?} with room to spare");
+                        // Where the seed has room in the half the slider
+                        // asked for, the page stays in that half, so the room
+                        // that matters is that half's. Only where the seed
+                        // has none there does the whole axis come into it.
+                        let asked = [lightness_runs()[usize::from(!dark)]];
+                        if a_page_of_this_half_clears(favourite, dark) {
+                            assert!(!clears_them_all_in(&params, &asked), "{what}: reported {slot:?} with room in its own half");
+                        } else {
+                            assert!(!a_page_clears_them_all(&params), "{what}: reported {slot:?} with room to spare");
+                        }
                         crowded += 1;
                     }
                 }
@@ -7453,19 +7594,40 @@ mod theme_builder_tests {
         assert!(crowded > 0, "no set pulled the page two ways: the case is not being reached");
     }
 
-    /// Whether any page on the whole lightness axis stands `LEGIBLE` off
+    /// Whether any grey page in ONE half of the lightness axis stands
+    /// [`TOLD_APART`] off this colour: the brute-force answer to "did the
+    /// slider's half have anywhere to put the page".
+    fn a_page_of_this_half_clears(favourite: u32, dark: bool) -> bool {
+        let (low, high) = lightness_runs()[usize::from(!dark)];
+        let mut lstar = low;
+        while lstar <= high {
+            if contrast_of(favourite, at_luminance(0.0, 0.0, luminance_at(lstar))) >= TOLD_APART {
+                return true;
+            }
+            lstar += 0.1;
+        }
+        false
+    }
+
+    /// Whether any page on the whole lightness axis stands [`TOLD_APART`] off
     /// every chosen accent of a palette: the brute-force answer the rule's
     /// solved one is checked against.
     fn a_page_clears_them_all(params: &BuilderParams) -> bool {
+        clears_them_all_in(params, &lightness_runs())
+    }
+
+    /// [`a_page_clears_them_all`] over only the runs named, so that one half
+    /// of the axis can be asked about on its own.
+    fn clears_them_all_in(params: &BuilderParams, runs: &[(f64, f64)]) -> bool {
         let [_, _, _, background] = params.palette();
         let (hue, own, _) = rgb_to_hsl(background | 0xFF);
         let sat = if own < 0.01 { 0.0 } else { own * params.saturation.clamp(0.0, 1.0) };
         let accents = page_accents(params);
-        for (low, high) in lightness_runs() {
+        for (low, high) in runs.iter().copied() {
             let mut lstar = low;
             while lstar <= high {
                 let page = at_luminance(hue, sat, luminance_at(lstar));
-                if accents.iter().all(|(_, accent)| contrast_of(page, *accent) >= LEGIBLE) {
+                if accents.iter().all(|(_, accent)| contrast_of(page, *accent) >= TOLD_APART) {
                     return true;
                 }
                 lstar += 0.1;
@@ -7474,30 +7636,88 @@ mod theme_builder_tests {
         false
     }
 
-    /// A near-black pick builds a LIGHT theme and a near-white one builds a
-    /// DARK theme, wherever the lightness slider was left: the page goes to
-    /// the nearest lightness it can be told from the colour at, and the
-    /// page's lightness is the only thing that says which appearance a theme
-    /// is.
+    /// THE LIGHTNESS SLIDER SAYS WHICH APPEARANCE. A bright pick, a deep one,
+    /// a near-black one and a near-white one all build a LIGHT theme with the
+    /// slider in the light half and a DARK one with it in the dark half: the
+    /// page moves inside the half it was asked for, because at [`TOLD_APART`]
+    /// there is somewhere in either half that any of these can be seen
+    /// against.
     ///
-    /// Seen failing on the build before it, which let the page move only
-    /// inside the half the slider was in: a near-black pick on a dark page
-    /// came back with the house page and "stands too close to the page"
-    /// under the controls.
+    /// The house colour is here by name. It sits at relative luminance 0.292,
+    /// and the lightest page there is stands only 2.9:1 off it -- so the
+    /// build that held an accent to the text bar could not give it a light
+    /// theme at all, whatever the slider said, and the operator who moved the
+    /// slider watched it flip straight back. That is the failure this test
+    /// was written off.
     #[test]
-    fn a_pick_at_either_end_sends_the_page_to_the_other() {
-        for (favourite, wanted) in [(0x10_10_14_FF, Scheme::Light), (0xF4_F4_F0_FF, Scheme::Dark)] {
-            for lightness in [0.0, 0.25, 0.5, 0.75, 1.0] {
-                let params =
-                    BuilderParams { favourite, lightness, color_count: 1, ..BuilderParams::house(lightness <= 0.5) };
+    fn the_lightness_slider_says_which_appearance() {
+        let picks = [
+            0xFF_5C_39_FF, // the house colour, bright
+            0xF0_C0_20_FF, // a bright yellow
+            0x30_D0_A0_FF, // a bright green
+            0x20_30_A0_FF, // a deep blue
+            0x10_10_14_FF, // near black
+            0xF4_F4_F0_FF, // near white
+        ];
+        for favourite in picks {
+            for (lightness, wanted) in
+                [(0.0, Scheme::Dark), (0.25, Scheme::Dark), (0.75, Scheme::Light), (1.0, Scheme::Light)]
+            {
+                // Named outright, so that the house colour is a PICK here and
+                // not the house palette left alone: with nothing chosen the
+                // page never has to move and the case is not reached at all.
+                let dark = lightness <= 0.5;
+                let params = BuilderParams {
+                    lightness,
+                    color_count: 1,
+                    ..BuilderParams::house(dark).with_palette([favourite; 4])
+                };
                 let built = build(&params);
                 let what = format!("{favourite:08X} at {lightness}");
-                assert_eq!(built.scheme, wanted, "{what}: the theme went the wrong way");
+                assert_eq!(built.scheme, wanted, "{what}: the slider was overruled");
                 assert_eq!(built.params.built_scheme(), wanted, "{what}");
                 assert_eq!(built.color("color_primary").unwrap(), favourite, "{what}: the pick moved");
                 let page = built.color("color_bg_app").unwrap();
-                assert!(contrast_of(favourite, page) >= LEGIBLE, "{what}: still hidden");
+                assert!(contrast_of(favourite, page) >= TOLD_APART, "{what}: still hidden");
                 assert_eq!(built.crowding, None, "{what}: one colour is never hopeless");
+            }
+        }
+    }
+
+    /// And the one case that still crosses, which is why the whole axis is
+    /// open at all: a colour no dark page can be told from ANYWHERE.
+    ///
+    /// The dark run spans about 2.1:1 from its darkest page to its lightest,
+    /// so a colour landing in the middle of that span -- around relative
+    /// luminance 0.035, which is a very dark grey -- clears neither end of
+    /// it. Asked for on a dark page, such a pick sends the page into the
+    /// light run and the appearance follows it. The light run is wider than
+    /// any one colour's forbidden band, so nothing ever crosses the other
+    /// way.
+    #[test]
+    fn a_colour_no_dark_page_can_be_told_from_crosses_to_the_light() {
+        let stuck = 0x35_35_35_FF;
+        assert!((luminance(stuck) - 0.035).abs() < 0.01, "{}", luminance(stuck));
+        for lightness in [0.0, 0.25, 0.5] {
+            let params =
+                BuilderParams { lightness, color_count: 1, ..BuilderParams::house(true).with_palette([stuck; 4]) };
+            let built = build(&params);
+            assert_eq!(built.scheme, Scheme::Light, "at {lightness}: the dark run had nowhere for it");
+            assert_eq!(built.color("color_primary").unwrap(), stuck, "at {lightness}: the pick moved");
+            assert!(contrast_of(stuck, built.color("color_bg_app").unwrap()) >= TOLD_APART, "at {lightness}");
+            assert_eq!(built.crowding, None, "at {lightness}: one colour is never hopeless");
+        }
+        // Nothing crosses the other way: a light page can be found for
+        // anything, so the light half is never given up.
+        for step in 0..24 {
+            for light in [0.1, 0.3, 0.5, 0.7, 0.9] {
+                let favourite = hsl_to_rgb(step as f64 * 15.0, 0.6, light);
+                let params = BuilderParams {
+                    lightness: 0.9,
+                    color_count: 1,
+                    ..BuilderParams::house(false).with_palette([favourite; 4])
+                };
+                assert_eq!(build(&params).scheme, Scheme::Light, "{favourite:08X} left the light half");
             }
         }
     }
@@ -7511,7 +7731,7 @@ mod theme_builder_tests {
             for lightness in [0.05, 0.2, 0.4, 0.5, 0.6, 0.8, 0.95] {
                 let asked = at_luminance(0.0, 0.0, luminance_at(lightness_lstar(lightness)));
                 for favourite in [0x20_40_C0_FF, 0xE8_C0_20_FF, 0x18_A0_60_FF] {
-                    if contrast_of(favourite, asked) < LEGIBLE {
+                    if contrast_of(favourite, asked) < TOLD_APART {
                         continue;
                     }
                     let params = BuilderParams {
@@ -7530,31 +7750,41 @@ mod theme_builder_tests {
         }
     }
 
-    /// Where a palette pulls the page both ways -- one colour near black, one
-    /// near white -- the SEED wins. The page clears the slot the person last
-    /// touched, the other one is still used exactly, and the theme names it
-    /// so the panel can say which one stands too close.
+    /// Where a palette pulls the page more ways than it can go, the SEED
+    /// wins. The page clears the slot the person last touched, the others are
+    /// still used exactly, and the theme names the one that stands too close
+    /// so the panel can say so.
+    ///
+    /// Three colours are needed to be genuinely stuck now, and it is worth
+    /// saying why: at [`TOLD_APART`] one accent's forbidden band is 2.25:1
+    /// wide and the light run is 2.33:1 wide, so no single colour can shut
+    /// the light run, and a pair of colours can always be laid on some page
+    /// somewhere. The palette here shuts the dark run with a very dark grey
+    /// and the light run with two pale ones between them.
     #[test]
-    fn the_seed_wins_where_a_palette_pulls_both_ways() {
-        let (black, white) = (0x10_10_14_FF, 0xF4_F4_F0_FF);
-        for (seed_slot, seed, other, other_slot) in [
-            (SeedSlot::Primary, black, white, SeedSlot::Secondary),
-            (SeedSlot::Secondary, white, black, SeedSlot::Primary),
-        ] {
-            // The same four colours both times, the black in the primary and
-            // the white in the secondary: only which one is in hand changes.
-            let palette = [black, white, 0x80_80_80_FF, 0x40_40_40_FF];
+    fn the_seed_wins_where_a_palette_pulls_more_ways_than_it_can_go() {
+        // Relative luminance about 0.035, 0.55 and 0.80: the first shuts the
+        // whole dark run, the other two share out the light one.
+        let (deep, pale, paler) = (0x35_35_35_FF, 0xC4_C4_C4_FF, 0xE7_E7_E7_FF);
+        for seed_slot in [SeedSlot::Primary, SeedSlot::Secondary, SeedSlot::Tertiary] {
+            // The same four colours every time: only which one is in hand
+            // changes.
+            let palette = [deep, pale, paler, 0x40_40_40_FF];
+            let seed = palette[seed_slot.index()];
             let params = BuilderParams { seed_slot, ..BuilderParams::house(true).with_palette(palette) };
             let built = build(&params);
             let page = built.color("color_bg_app").unwrap();
             let what = format!("{seed_slot:?}");
-            assert!(contrast_of(seed, page) >= LEGIBLE, "{what}: the seed was given up on");
-            assert_eq!(built.crowding, Some(other_slot), "{what}: the wrong slot was named");
-            // Both colours are still exactly what was named, whatever the
-            // page did about them.
-            assert_eq!(built.params.palette()[0], black, "{what}");
-            assert_eq!(built.params.palette()[1], white, "{what}");
-            assert!(contrast_of(other, page) < LEGIBLE, "{what}: nothing was crowded after all");
+            assert!(contrast_of(seed, page) >= TOLD_APART, "{what}: the seed was given up on");
+            let named = built.crowding.expect("nothing was crowded after all");
+            assert_ne!(named, seed_slot, "{what}: the seed was the one named");
+            assert!(
+                contrast_of(palette[named.index()], page) < TOLD_APART,
+                "{what}: {named:?} was named and stands clear"
+            );
+            // Every colour is still exactly what was named, whatever the page
+            // did about them.
+            assert_eq!(&built.params.palette()[..3], &palette[..3], "{what}");
         }
     }
 
@@ -7565,7 +7795,7 @@ mod theme_builder_tests {
     fn four_colours_named_by_hand_round_trip() {
         for dark in [true, false] {
             let house = BuilderParams::house(dark);
-            for suggestion in all_suggestions(BLUE, dark, &[]).iter().step_by(3) {
+            for suggestion in all_suggestions(BLUE, &[]).iter().step_by(3) {
                 let chip = suggestion.params(house);
                 assert_eq!(chip.palette(), suggestion.colors);
                 let by_hand = house.with_palette(suggestion.colors);
@@ -7620,7 +7850,7 @@ mod theme_builder_tests {
         for dark in [true, false] {
             for step in 0..36 {
                 let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
-                for suggestion in suggestions(favourite, dark) {
+                for suggestion in suggestions(favourite) {
                     for (saturation, lightness) in slider_ends(dark) {
                         let base = BuilderParams { saturation, lightness, ..BuilderParams::house(dark) };
                         let built = build(&suggestion.params(base));
@@ -7640,7 +7870,7 @@ mod theme_builder_tests {
         assert_eq!(checked, 2 * 36 * 24 * 6);
         for favourite in [0x000000FFu32, 0x808080FF, 0xFFFFFFFF] {
             for dark in [true, false] {
-                for suggestion in suggestions(favourite, dark) {
+                for suggestion in suggestions(favourite) {
                     for (saturation, lightness) in slider_ends(dark) {
                         let base = BuilderParams { saturation, lightness, ..BuilderParams::house(dark) };
                         let built = build(&suggestion.params(base));
@@ -7800,8 +8030,8 @@ mod theme_builder_tests {
     fn a_persons_own_palettes_come_before_the_rules() {
         let favourite = 0x2E8BF0FF;
         let own = vec![vec![0xFFA500FF, 0x1E90FFFF, 0x2F4F4FFF], vec![0x8B0000FF, 0xFFD700FF]];
-        let grown = suggestions(favourite, true);
-        let all = all_suggestions(favourite, true, &own);
+        let grown = suggestions(favourite);
+        let all = all_suggestions(favourite, &own);
         assert_eq!(theirs(&all), 1, "only the scheme holding the colour is offered");
         let mine = all.first().unwrap();
         assert_eq!(mine.label, OWN_LABEL);
@@ -7815,7 +8045,7 @@ mod theme_builder_tests {
         assert!(rules.iter().zip(grown.iter()).all(|(a, b)| a.label == b.label), "the rule's own order moved");
 
         // Two colours is a scheme; the other two places are filled for it.
-        let short = all_suggestions(favourite, false, &[vec![0x1E90FFFF, 0x20C020FF]]);
+        let short = all_suggestions(favourite, &[vec![0x1E90FFFF, 0x20C020FF]]);
         let filled = short.first().unwrap();
         assert_eq!(filled.label, OWN_LABEL);
         assert!(filled.colors.iter().all(|c| c & 0xFF == 0xFF), "{:08X?}", filled.colors);
@@ -7829,14 +8059,14 @@ mod theme_builder_tests {
         // And a palette that says what the rule would have said is not said
         // twice. It is theirs that stands, now that theirs goes in first: the
         // copy the rule grew is the one dropped.
-        let doubled = all_suggestions(favourite, true, &[vec![favourite, grown[0].colors[1], grown[0].colors[2]]]);
+        let doubled = all_suggestions(favourite, &[vec![favourite, grown[0].colors[1], grown[0].colors[2]]]);
         assert_eq!(theirs(&doubled), 1, "a person's palette was dropped for the rule's copy of it");
         assert_eq!(
             doubled.iter().filter(|offer| offer.colors == doubled[0].colors).count(),
             1,
             "the same palette was offered twice"
         );
-        assert_eq!(theirs(&all_suggestions(favourite, true, &[])), 0);
+        assert_eq!(theirs(&all_suggestions(favourite, &[])), 0);
     }
 
     /// How many of these palettes came off the person's own file.
@@ -7863,7 +8093,7 @@ mod theme_builder_tests {
             let at = number - FIRST_COMBINATION;
             let favourite = COMBINATIONS[at][0];
             for dark in [true, false] {
-                let offered = all_suggestions(favourite, dark, &[]);
+                let offered = all_suggestions(favourite, &[]);
                 let found = book(&offered);
                 assert!(!found.is_empty(), "{number} did not find itself on dark={dark}");
                 assert_eq!(found[0].label, combination_label(at), "on dark={dark}");
@@ -7928,7 +8158,7 @@ mod theme_builder_tests {
         for step in 0..36 {
             for light in [0.35, 0.5, 0.65] {
                 let favourite = hsl_to_rgb(step as f64 * 10.0, 0.45, light);
-                let found = book(&all_suggestions(favourite, true, &[])).len();
+                let found = book(&all_suggestions(favourite, &[])).len();
                 assert!(found <= MOST_COMBINATIONS, "{favourite:08X}: {found} kept");
                 most = most.max(found);
             }
@@ -7957,7 +8187,7 @@ mod theme_builder_tests {
                 // moved to the front of the row, so a hue now offers up to
                 // four dozen; the stride keeps the sweep the length it was
                 // while it still runs from the nearest match to the furthest.
-                for suggestion in book(&all_suggestions(favourite, dark, &[])).into_iter().step_by(2) {
+                for suggestion in book(&all_suggestions(favourite, &[])).into_iter().step_by(2) {
                     for (saturation, lightness) in slider_ends(dark) {
                         let base = BuilderParams { saturation, lightness, ..BuilderParams::house(dark) };
                         let built = build(&suggestion.params(base));
@@ -7989,15 +8219,18 @@ mod theme_builder_tests {
 
     /// A list has no roles in it, only an order somebody happened to type, so
     /// the same four colours written six ways must come out as one palette:
-    /// the dark end is the background in a dark theme and the light end in a
-    /// light one, and of the two left the one nearer the favourite round the
-    /// circle is the secondary and the farther the tertiary.
+    /// the palette's own end is the background, and of the two left the one
+    /// nearer the favourite round the circle is the secondary and the farther
+    /// the tertiary.
     #[test]
     fn a_scheme_takes_its_roles_from_the_colours_and_not_the_written_order() {
         let favourite = hsl_to_rgb(210.0, 0.7, 0.5);
         let near = hsl_to_rgb(250.0, 0.7, 0.5);
         let far = hsl_to_rgb(40.0, 0.75, 0.5);
-        for (dark, ground) in [(true, hsl_to_rgb(100.0, 0.5, 0.12)), (false, hsl_to_rgb(100.0, 0.5, 0.93))] {
+        // Either end of the lightness axis: the rule takes the palette's own
+        // end whichever end it is, and says the same thing in both
+        // appearances.
+        for ground in [hsl_to_rgb(100.0, 0.5, 0.12), hsl_to_rgb(100.0, 0.5, 0.93)] {
             let rest = [near, far, ground];
             for way in WRITTEN_WAYS {
                 let written: Vec<u32> = std::iter::once(favourite).chain(way.map(|at| rest[at])).collect();
@@ -8007,13 +8240,13 @@ mod theme_builder_tests {
                 for turn in 0..written.len() {
                     let mut scheme = written.clone();
                     scheme.rotate_left(turn);
-                    let offered = all_suggestions(favourite, dark, &[scheme.clone()]);
+                    let offered = all_suggestions(favourite, &[scheme.clone()]);
                     let mine = off_the_list(&offered, OWN_LABEL);
                     let hue = |packed: u32| rgb_to_hsl(packed).0;
                     assert!(apart(hue(mine.seeds.secondary), 250.0) < 1.0, "{scheme:08X?} took {:08X} as the secondary", mine.seeds.secondary);
                     assert!(apart(hue(mine.seeds.tertiary), 40.0) < 1.0, "{scheme:08X?} took {:08X} as the tertiary", mine.seeds.tertiary);
                     let background = mine.seeds.background;
-                    assert!(apart(hue(background), 100.0) < 2.0, "{scheme:08X?} on dark={dark} took {background:08X}");
+                    assert!(apart(hue(background), 100.0) < 2.0, "{scheme:08X?} took {background:08X}");
                 }
             }
         }
@@ -8022,38 +8255,43 @@ mod theme_builder_tests {
     /// Which of a four-colour scheme's colours becomes the background, over
     /// the whole book, measured the way the operator measured it: least
     /// saturated picked a grey for nineteen of the hundred and eight
-    /// four-colour rows. The dark end in a dark theme and the light end in a
-    /// light one lands in at least five of the six sextants of the hue
-    /// circle, and on fewer than fifteen greys, in each appearance.
+    /// four-colour rows. The palette's own END -- the colour standing
+    /// furthest from the middle of the lightness axis -- lands in at least
+    /// five of the six sextants of the hue circle and on fewer than fifteen
+    /// greys.
     ///
-    /// Seen failing with least-saturated put back in place of the dark and
-    /// light ends.
+    /// Once, and not once per appearance, because the answer no longer
+    /// depends on one: a chip is the palette, and a row of them that dealt
+    /// its roles out differently on the two sides of the lightness slider's
+    /// middle shuffled itself under the hand for nothing.
+    ///
+    /// Seen failing with least-saturated put back in place of the end.
     #[test]
-    fn the_background_of_a_scheme_is_its_dark_end_or_its_light_end() {
+    fn the_background_of_a_scheme_is_the_palettes_own_end() {
         let fours: Vec<&[u32]> = COMBINATIONS.iter().copied().filter(|row| row.len() == 4).collect();
         assert_eq!(fours.len(), 108);
-        for dark in [true, false] {
-            let mut sextants = [0usize; 6];
-            let mut greys = 0;
-            for row in &fours {
-                let ordered = in_role_order(row, dark);
-                let (hue, sat, _) = rgb_to_hsl(ordered[3] | 0xFF);
-                if sat < HAS_HUE {
-                    greys += 1;
-                } else {
-                    sextants[(hue.rem_euclid(360.0) / 60.0) as usize % 6] += 1;
-                }
-                // The background is the end of the palette on this side.
-                let y = luminance(ordered[3] | 0xFF);
-                for other in &ordered[1..3] {
-                    let theirs = luminance(*other | 0xFF);
-                    assert!(if dark { y <= theirs } else { y >= theirs }, "{row:08X?} on dark={dark}");
-                }
+        let middle = (dark_lightest() + LIGHT_DARKEST) / 2.0;
+        let mut sextants = [0usize; 6];
+        let mut greys = 0;
+        for row in &fours {
+            let ordered = in_role_order(row);
+            let (hue, sat, _) = rgb_to_hsl(ordered[3] | 0xFF);
+            if sat < HAS_HUE {
+                greys += 1;
+            } else {
+                sextants[(hue.rem_euclid(360.0) / 60.0) as usize % 6] += 1;
             }
-            let covered = sextants.iter().filter(|n| **n > 0).count();
-            assert!(covered >= 5, "the backgrounds land in {covered} sextants on dark={dark}: {sextants:?}");
-            assert!(greys < 15, "{greys} greys on dark={dark}");
+            // The background stands further from the middle than either
+            // accent does.
+            let far = (lstar_of(luminance(ordered[3] | 0xFF)) - middle).abs();
+            for other in &ordered[1..3] {
+                let theirs = (lstar_of(luminance(*other | 0xFF)) - middle).abs();
+                assert!(far >= theirs - 1e-12, "{row:08X?}");
+            }
         }
+        let covered = sextants.iter().filter(|n| **n > 0).count();
+        assert!(covered >= 5, "the backgrounds land in {covered} sextants: {sextants:?}");
+        assert!(greys < 15, "{greys} greys");
     }
 
     /// Three colours are the three accent families exactly, so none of them
@@ -8070,7 +8308,7 @@ mod theme_builder_tests {
         for way in [[0, 1], [1, 0]] {
             let rest = [near, far];
             let scheme: Vec<u32> = std::iter::once(favourite).chain(way.map(|at| rest[at])).collect();
-            let offered = all_suggestions(favourite, true, &[scheme.clone()]);
+            let offered = all_suggestions(favourite, &[scheme.clone()]);
             let mine = off_the_list(&offered, OWN_LABEL);
             assert!(apart(rgb_to_hsl(mine.seeds.secondary).0, 250.0) < 1.0, "{scheme:08X?}");
             assert!(apart(rgb_to_hsl(mine.seeds.tertiary).0, 40.0) < 1.0, "{scheme:08X?}");
@@ -8082,7 +8320,7 @@ mod theme_builder_tests {
         // side of the circle does, whichever way round the two are written.
         let grey = 0x808080FF;
         for scheme in [vec![favourite, grey, near], vec![favourite, near, grey]] {
-            let offered = all_suggestions(favourite, true, &[scheme.clone()]);
+            let offered = all_suggestions(favourite, &[scheme.clone()]);
             let mine = off_the_list(&offered, OWN_LABEL);
             assert!(apart(rgb_to_hsl(mine.seeds.secondary).0, 250.0) < 1.0, "{scheme:08X?} made the grey the secondary");
             assert_eq!(rgb_to_hsl(mine.seeds.tertiary).1, 0.0, "{scheme:08X?} did not put the grey across the circle");
@@ -8128,7 +8366,7 @@ mod theme_builder_tests {
         for dark in [true, false] {
             for step in 0..36 {
                 let favourite = hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5);
-                for suggestion in suggestions(favourite, dark) {
+                for suggestion in suggestions(favourite) {
                     at(&suggestion.label, favourite, dark, &suggestion);
                 }
                 let middling = hsl_to_rgb(step as f64 * 10.0, 0.55, 0.5);
@@ -8136,12 +8374,12 @@ mod theme_builder_tests {
                 // `every_combination_theme_reads` gives: the row shows twice
                 // as many of the book as it used to, and the stride keeps
                 // these sweeps the length they were over the same spread.
-                for suggestion in book(&all_suggestions(middling, dark, &[])).into_iter().step_by(2) {
+                for suggestion in book(&all_suggestions(middling, &[])).into_iter().step_by(2) {
                     at(&suggestion.label, middling, dark, suggestion);
                 }
             }
             for favourite in [0x000000FFu32, 0x808080FF, 0xFFFFFFFF] {
-                for suggestion in suggestions(favourite, dark) {
+                for suggestion in suggestions(favourite) {
                     at(&suggestion.label, favourite, dark, &suggestion);
                 }
             }
@@ -8346,9 +8584,10 @@ mod theme_builder_tests {
 
     /// Everything the rows grown from the primary offer, folded into one
     /// number: labels, harmonies, moods, colours and seeds, for a spread of
-    /// favourites on both pages and a person's own list. The number was
-    /// taken off the rows as they stood before a row could be grown from any
-    /// other slot, and checked against that code chip for chip.
+    /// favourites and a person's own list. The number was taken off the rows
+    /// as they stood before a row could be grown from any other slot, and
+    /// checked against that code chip for chip. One number and not one per
+    /// appearance, because a row no longer has one.
     pub(super) fn prim_digest() -> u64 {
         let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF], vec![0xCC3344FF, 0x223344FF, 0xEEDDCCFF]];
         let mut favourites: Vec<u32> = (0..36).map(|step| hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5)).collect();
@@ -8362,14 +8601,12 @@ mod theme_builder_tests {
             }
         };
         for favourite in favourites {
-            for dark in [true, false] {
-                for offer in all_suggestions(favourite, dark, &own) {
-                    eat(offer.label.as_bytes());
-                    eat(format!("{:?}{:?}", offer.harmony, offer.mood).as_bytes());
-                    let seeds = offer.seeds;
-                    for colour in offer.colors.into_iter().chain([seeds.primary, seeds.secondary, seeds.tertiary, seeds.background]) {
-                        eat(&colour.to_le_bytes());
-                    }
+            for offer in all_suggestions(favourite, &own) {
+                eat(offer.label.as_bytes());
+                eat(format!("{:?}{:?}", offer.harmony, offer.mood).as_bytes());
+                let seeds = offer.seeds;
+                for colour in offer.colors.into_iter().chain([seeds.primary, seeds.secondary, seeds.tertiary, seeds.background]) {
+                    eat(&colour.to_le_bytes());
                 }
             }
         }
@@ -8381,23 +8618,231 @@ mod theme_builder_tests {
     /// names.
     ///
     /// The number was taken off the row as it stood before a row could be
-    /// grown from any slot but the first, and it has moved twice since, both
-    /// times on purpose. Once when the seed became literal in every chip -- a
-    /// mood no longer shifts the pick, and a scheme off the book is
-    /// re-anchored on it rather than rescaled with it -- and once when the
-    /// curated palettes moved to the front of the row and the measure that
-    /// finds them was loosened, which changes both the order of the row and
-    /// how much of the book reaches it.
+    /// grown from any slot but the first, and it has moved three times since,
+    /// every one of them on purpose. Once when the seed became literal in
+    /// every chip -- a mood no longer shifts the pick, and a scheme off the
+    /// book is re-anchored on it rather than rescaled with it -- once when
+    /// the curated palettes moved to the front of the row and the measure
+    /// that finds them was loosened, which changes both the order of the row
+    /// and how much of the book reaches it, and once when the surface square
+    /// became the palette's own colour instead of that colour re-lit for the
+    /// appearance in force.
     #[test]
     fn a_row_grown_from_the_primary_is_the_row_it_always_was() {
         assert_eq!(prim_digest(), PRIM_DIGEST, "the primary's row moved: a chip's colours are not the ones the builder grew");
-        for dark in [true, false] {
-            assert_eq!(suggestions_from(SeedSlot::Primary, BLUE, dark), suggestions(BLUE, dark));
-            assert!(suggestions(BLUE, dark).iter().all(|offer| offer.grown_from == SeedSlot::Primary));
+        assert_eq!(suggestions_from(SeedSlot::Primary, BLUE), suggestions(BLUE));
+        assert!(suggestions(BLUE).iter().all(|offer| offer.grown_from == SeedSlot::Primary));
+    }
+
+    const PRIM_DIGEST: u64 = 0x3A81441ABEB005AC;
+
+    /// A CHIP IS THE PALETTE. Every square a chip draws -- the accents AND
+    /// the surface -- is one of the palette's own four colours as the palette
+    /// gives it, hue, saturation and lightness together. Neither background
+    /// slider reaches a chip, and neither does the appearance in force: the
+    /// same seed offers the same row at nought saturation and at full, at
+    /// both ends of the lightness, in the dark and in the light.
+    ///
+    /// Seen failing on the build before it, where the surface square was the
+    /// palette's background colour RE-LIT to the house page lightness of
+    /// whichever appearance the lightness slider was sitting in. Dragging the
+    /// slider over the middle changed the fourth square of every chip in the
+    /// row, and the row went restless under the hand for a reason that had
+    /// nothing to do with the palettes it was offering.
+    #[test]
+    fn a_chip_draws_the_palettes_own_colours_whatever_the_sliders_say() {
+        let own = vec![
+            vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF],
+            vec![0x3366CCFF, 0x40D0D0FF],
+            vec![0xCC3344FF, 0x223344FF, 0xEEDDCCFF],
+        ];
+        let seeds = [BLUE, 0xFF5C39FF, 0x3366CCFF, 0x808080FF, 0x101014FF, 0xF4F4F0FF];
+        // Both ends of each half of the lightness slider, with none and all
+        // of the saturation, so the appearance moves and the page moves a
+        // long way inside each appearance too.
+        let places =
+            [(0.0, 0.0), (0.0, 0.48), (1.0, 0.0), (1.0, 0.48), (0.0, 0.52), (0.0, 1.0), (1.0, 0.52), (1.0, 1.0)];
+        for count in 1..=4 {
+            for slot in SeedSlot::ALL {
+                for seed in seeds {
+                    for schemes in [Schemes::RoundThePick, Schemes::AsWritten] {
+                        let mut first: Option<Vec<Vec<u32>>> = None;
+                        for (saturation, lightness) in places {
+                            // Built the way the panel builds it, off the
+                            // settings in force, so that a slider reaching the
+                            // row by any road at all shows up here.
+                            let params = BuilderParams {
+                                saturation,
+                                lightness,
+                                color_count: count,
+                                seed_slot: slot,
+                                ..BuilderParams::house(lightness <= 0.5).with_palette([seed; 4])
+                            };
+                            let row: Vec<Vec<u32>> =
+                                all_suggestions_for(count, slot, seed, params.dark(), &own, schemes)
+                                    .iter()
+                                    .map(|offer| offer.shown())
+                                    .collect();
+                            let what = format!(
+                                "{count} colours from {slot:?}, {seed:08X}, {schemes:?} at {saturation}/{lightness}"
+                            );
+                            match &first {
+                                None => first = Some(row),
+                                Some(was) => assert_eq!(&row, was, "{what}: the row is not the row"),
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    const PRIM_DIGEST: u64 = 0x1917597B78284EF7;
+    /// A chip off the book shows the combination's OWN colours: the four the
+    /// book wrote down with the switch off, and the four they become when
+    /// they are laid round the pick with it on. Never a re-lit fourth.
+    #[test]
+    fn a_book_chip_shows_the_combination_and_not_a_re_lit_one() {
+        let fours: Vec<(usize, &[u32])> =
+            COMBINATIONS.iter().copied().enumerate().filter(|(_, row)| row.len() == 4).take(24).collect();
+        let mut seen = 0;
+        for (at, row) in fours {
+            let label = combination_label(at);
+            let mut written: Vec<u32> = row.iter().map(|c| c | 0xFF).collect();
+            written.sort_unstable();
+            // As written: the chip's four squares are the book's four
+            // colours, dealt into roles and otherwise untouched.
+            for pick in [row[0] | 0xFF, 0x3366CCFF] {
+                let offered = all_suggestions_for(4, SeedSlot::Primary, pick, true, &[], Schemes::AsWritten);
+                let Some(chip) = offered.iter().find(|offer| offer.label == label) else {
+                    continue;
+                };
+                let mut shown = chip.colors.to_vec();
+                shown.sort_unstable();
+                assert_eq!(shown, written, "{label} as written is not the book's four colours");
+                seen += 1;
+            }
+            // Round the pick: every square is one of the re-anchored colours,
+            // the surface included.
+            let pick = 0x3366CCFF;
+            let offered = all_suggestions_for(4, SeedSlot::Primary, pick, true, &[], Schemes::RoundThePick);
+            let Some(chip) = offered.iter().find(|offer| offer.label == label) else {
+                continue;
+            };
+            // The colour nearest the pick goes to the front before the
+            // scheme is re-anchored: that is how the scheme was found.
+            let front = row
+                .iter()
+                .enumerate()
+                .min_by(|a, b| color_distance(pick, *a.1 | 0xFF).partial_cmp(&color_distance(pick, *b.1 | 0xFF)).unwrap())
+                .map(|(which, _)| which)
+                .unwrap();
+            let mut ordered: Vec<u32> = row.iter().map(|c| c | 0xFF).collect();
+            let head = ordered.remove(front);
+            ordered.insert(0, head);
+            let mut laid: Vec<u32> = adjust_scheme(pick, &ordered).into_iter().map(|c| c | 0xFF).collect();
+            laid.sort_unstable();
+            let mut shown = chip.colors.to_vec();
+            shown.sort_unstable();
+            assert_eq!(shown, laid, "{label} round the pick is not the re-anchored combination");
+            seen += 1;
+        }
+        assert!(seen > 8, "only {seen} of the book's chips were reached");
+    }
+
+    /// A white, a black or a grey pick finds as much of the book as a
+    /// coloured one does, and it finds a spread of it rather than one hue
+    /// over and over.
+    ///
+    /// Seen failing before the hue term was weighted by how much colour the
+    /// two compared actually have: a colour with no hue was measured against
+    /// whatever number the arithmetic happened to leave in its hue, so nearly
+    /// every scheme was thrown out and the row came back all but empty while
+    /// a coloured pick's filled.
+    #[test]
+    fn a_pick_with_no_hue_still_finds_the_book() {
+        let own: Vec<Vec<u32>> = vec![
+            vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF],
+            vec![0xCC3344FF, 0x223344FF, 0xEEDDCCFF],
+            vec![0x20C080FF, 0x104030FF],
+            vec![0xF0F0F0FF, 0x303030FF, 0x808080FF],
+            vec![0xE8E8E8FF, 0x101010FF],
+            vec![0x505050FF, 0xB0B0B0FF, 0x202020FF],
+        ];
+        for pick in [WHITE, BLACK, 0x808080FF, 0xC0C0C0FF, 0x404040FF] {
+            let found = matched(pick, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
+            assert!(found.len() >= 20, "{pick:08X} found only {} of the book's combinations", found.len());
+            // And of more than one hue family: the front colour of each match
+            // is the one that drew it in, and they are not all the same sort
+            // of colour.
+            let mut sextants = [0usize; 6];
+            for (_, scheme) in &found {
+                let (hue, sat, _) = rgb_to_hsl(scheme[0] | 0xFF);
+                if sat >= HAS_HUE {
+                    sextants[(hue.rem_euclid(360.0) / 60.0) as usize % 6] += 1;
+                }
+            }
+            let covered = sextants.iter().filter(|n| **n > 0).count();
+            assert!(covered >= 3, "{pick:08X} found {covered} sextants' worth: {sextants:?}");
+            // A person's own list answers too. Fewer, because a list of six
+            // is a list of six -- what matters is that a pick with no hue is
+            // not shut out of it.
+            assert!(
+                !matching_schemes(pick, &own, OWN_TOLERANCE).is_empty(),
+                "{pick:08X} found nothing on a person's own list"
+            );
+        }
+    }
+
+    /// And a pick with plenty of colour is measured exactly as it always was:
+    /// the weighting is for the colours that have no hue, and above the
+    /// [`HAS_HUE`] bar it is one, so nothing else moves.
+    #[test]
+    fn a_pick_with_plenty_of_colour_is_measured_as_it_always_was() {
+        // The measure as it stood before the hue was weighted.
+        let unweighted = |a: u32, b: u32| {
+            let (a_hue, a_colour, a_light) = rgb_to_hsl(a | 0xFF);
+            let (b_hue, b_colour, b_light) = rgb_to_hsl(b | 0xFF);
+            let turn = (a_hue - b_hue).rem_euclid(360.0);
+            turn.min(360.0 - turn) + (a_colour - b_colour).abs() * 100.0 + (a_light - b_light).abs() * 100.0
+        };
+        let coloured: Vec<u32> =
+            COMBINATIONS.iter().flat_map(|row| row.iter()).map(|c| *c | 0xFF).filter(|c| rgb_to_hsl(*c).1 >= HAS_HUE).collect();
+        assert!(coloured.len() > 200, "the book has only {} colours with a hue", coloured.len());
+        for step in 0..24 {
+            for light in [0.3, 0.5, 0.7] {
+                let pick = hsl_to_rgb(step as f64 * 15.0, 0.8, light);
+                for colour in &coloured {
+                    let (mine, theirs) = (color_distance(pick, *colour), unweighted(pick, *colour));
+                    assert!((mine - theirs).abs() < 1e-9, "{pick:08X} against {colour:08X}: {mine} not {theirs}");
+                }
+            }
+        }
+        // And the row a saturated pick is offered is the row it was offered:
+        // the same schemes, nearest first, in the same order.
+        for step in 0..12 {
+            let pick = hsl_to_rgb(step as f64 * 30.0, 0.75, 0.5);
+            let mine = matched(pick, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
+            let mut theirs: Vec<(f64, usize, Vec<u32>)> = Vec::new();
+            for (at, row) in COMBINATIONS.iter().enumerate() {
+                let near = row
+                    .iter()
+                    .enumerate()
+                    .map(|(which, colour)| (which, unweighted(pick, *colour | 0xFF)))
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                    .unwrap();
+                if near.1 <= OWN_TOLERANCE {
+                    let mut laid: Vec<u32> = row.iter().map(|c| c | 0xFF).collect();
+                    let front = laid.remove(near.0);
+                    laid.insert(0, front);
+                    theirs.push((near.1, at, laid));
+                }
+            }
+            theirs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+            let wanted: Vec<usize> = theirs.iter().map(|(_, at, _)| *at).collect();
+            let got: Vec<usize> = mine.iter().map(|(at, _)| *at).collect();
+            assert_eq!(got, wanted, "{pick:08X}: the row a saturated pick is offered moved");
+        }
+    }
 
     /// Grown from the secondary, the tertiary or the surface, every chip in
     /// the row -- the rule's, the book's and a person's own -- holds the seed
@@ -8413,7 +8858,7 @@ mod theme_builder_tests {
         for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
             for dark in [true, false] {
                 for seed in seed_colours().into_iter().chain([0x3366CCFF]) {
-                    let offered = all_suggestions_from(slot, seed, dark, &own, Schemes::RoundThePick);
+                    let offered = all_suggestions_from(slot, seed, &own, Schemes::RoundThePick);
                     let what = format!("{slot:?} {seed:08X} dark={dark}");
                     for offer in &offered {
                         assert_eq!(offer.colors[slot.index()], seed | 0xFF, "{what}: {} moved the seed", offer.label);
@@ -8447,7 +8892,7 @@ mod theme_builder_tests {
         // And the book and a person's own list are searched for the seed.
         let seed = COMBINATIONS.iter().find(|row| row.len() == 4).unwrap()[2] | 0xFF;
         for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
-            let offered = all_suggestions_from(slot, seed, true, &[vec![0x10A0F0FF, seed, 0xF0E040FF, 0x202020FF]], Schemes::RoundThePick);
+            let offered = all_suggestions_from(slot, seed, &[vec![0x10A0F0FF, seed, 0xF0E040FF, 0x202020FF]], Schemes::RoundThePick);
             assert!(!book(&offered).is_empty(), "{slot:?}: the book was not searched for the seed");
             assert_eq!(theirs(&offered), 1, "{slot:?}: their own scheme holding the seed was not offered");
         }
@@ -8515,41 +8960,47 @@ mod theme_builder_tests {
     fn an_accent_seed_takes_its_slot_and_the_primary_stands_where_the_role_says() {
         let seed = hsl_to_rgb(200.0, 0.8, 0.5);
         let hue = |c: u32| rgb_to_hsl(c).0;
-        for dark in [true, false] {
-            let sec = suggestions_from(SeedSlot::Secondary, seed, dark);
-            let plain = sec.iter().find(|s| s.harmony == Some(Harmony::Complementary) && s.mood.is_none()).unwrap();
-            assert!(apart(hue(plain.colors[0]), 200.0) < 3.0, "the secondary's primary is not beside it: {:08X}", plain.colors[0]);
-            assert!(apart(hue(plain.colors[2]), 20.0) < 3.0, "the secondary's tertiary is not across: {:08X}", plain.colors[2]);
-            let tert = suggestions_from(SeedSlot::Tertiary, seed, dark);
-            let plain = tert.iter().find(|s| s.harmony == Some(Harmony::Complementary) && s.mood.is_none()).unwrap();
-            assert!(apart(hue(plain.colors[0]), 20.0) < 3.0, "the tertiary's primary is not across from it: {:08X}", plain.colors[0]);
-            assert!(apart(hue(plain.colors[1]), 200.0) < 3.0, "the tertiary's secondary: {:08X}", plain.colors[1]);
-            // Triadic is a tie either way, and keeps the harmony's order.
-            let triad = sec.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood.is_none()).unwrap();
-            assert!(apart(hue(triad.colors[0]), 320.0) < 3.0, "{:08X}", triad.colors[0]);
-            assert!(apart(hue(triad.colors[2]), 80.0) < 3.0, "{:08X}", triad.colors[2]);
-            // A mood moves the other three and never the seed.
-            let muted = sec.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood == Some(Mood::Muted)).unwrap();
-            assert_eq!(muted.colors[1], seed);
-            assert!(rgb_to_hsl(muted.colors[0]).1 < rgb_to_hsl(triad.colors[0]).1 - 0.2, "the mood left the primary as it was");
-        }
+        let sec = suggestions_from(SeedSlot::Secondary, seed);
+        let plain = sec.iter().find(|s| s.harmony == Some(Harmony::Complementary) && s.mood.is_none()).unwrap();
+        assert!(apart(hue(plain.colors[0]), 200.0) < 3.0, "the secondary's primary is not beside it: {:08X}", plain.colors[0]);
+        assert!(apart(hue(plain.colors[2]), 20.0) < 3.0, "the secondary's tertiary is not across: {:08X}", plain.colors[2]);
+        let tert = suggestions_from(SeedSlot::Tertiary, seed);
+        let plain = tert.iter().find(|s| s.harmony == Some(Harmony::Complementary) && s.mood.is_none()).unwrap();
+        assert!(apart(hue(plain.colors[0]), 20.0) < 3.0, "the tertiary's primary is not across from it: {:08X}", plain.colors[0]);
+        assert!(apart(hue(plain.colors[1]), 200.0) < 3.0, "the tertiary's secondary: {:08X}", plain.colors[1]);
+        // Triadic is a tie either way, and keeps the harmony's order.
+        let triad = sec.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood.is_none()).unwrap();
+        assert!(apart(hue(triad.colors[0]), 320.0) < 3.0, "{:08X}", triad.colors[0]);
+        assert!(apart(hue(triad.colors[2]), 80.0) < 3.0, "{:08X}", triad.colors[2]);
+        // A mood moves the other three and never the seed.
+        let muted = sec.iter().find(|s| s.harmony == Some(Harmony::Triadic) && s.mood == Some(Mood::Muted)).unwrap();
+        assert_eq!(muted.colors[1], seed);
+        assert!(rgb_to_hsl(muted.colors[0]).1 < rgb_to_hsl(triad.colors[0]).1 - 0.2, "the mood left the primary as it was");
     }
 
     /// A surface seed is the page, and the accents are laid where the
     /// background rule, run forwards from them, would have put that page:
     /// every plain harmony's own rule gives the seed's hue back. They stand
-    /// off the house page at the house primary's luminance, so they read on
-    /// it as the house colour does, and a grey surface is dressed in the
-    /// house colour's harmonies.
+    /// at the house primary's luminance, so they read on the page as the
+    /// house colour does, and a grey surface is dressed in the house colour's
+    /// harmonies.
+    ///
+    /// WHICH house primary is the seed's own business and not the lightness
+    /// slider's: a dark page borrows the dark theme's, a light page the light
+    /// theme's. Seen failing the other way round, where a row grown from the
+    /// same dark page was two different rows on the two sides of the slider's
+    /// middle.
     #[test]
     fn a_surface_seed_is_the_page_the_accents_were_laid_for() {
         let hue = |c: u32| rgb_to_hsl(c).0;
-        for dark in [true, false] {
-            let scheme = if dark { Scheme::Dark } else { Scheme::Light };
-            let house = roles_for(scheme).primary.base;
+        let house_for = |page: u32| roles_for(scheme_at_lightness(lstar_of(luminance(page | 0xFF)))).primary.base;
+        // Pages at both ends of the axis, so both house primaries are asked
+        // for.
+        for light in [0.2, 0.9] {
             for step in 0..12 {
-                let surface = hsl_to_rgb(step as f64 * 30.0 + 7.0, 0.5, 0.2);
-                let offered = suggestions_from(SeedSlot::Surface, surface, dark);
+                let surface = hsl_to_rgb(step as f64 * 30.0 + 7.0, 0.5, light);
+                let house = house_for(surface);
+                let offered = suggestions_from(SeedSlot::Surface, surface);
                 for harmony in Harmony::ALL {
                     let plain = offered.iter().find(|s| s.harmony == Some(harmony) && s.mood.is_none()).unwrap();
                     let [primary, secondary, tertiary, page] = plain.colors;
@@ -8585,7 +9036,12 @@ mod theme_builder_tests {
                     assert!((luminance(primary) - luminance(house)).abs() < 0.01, "{harmony:?}: {primary:08X} is not as light as the house primary");
                 }
             }
-            let grey = suggestions_from(SeedSlot::Surface, house_page(scheme), dark);
+        }
+        // A grey page has no hue to lay a harmony from, so it wears the house
+        // colour's -- its OWN appearance's house colour.
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            let house = roles_for(scheme).primary.base;
+            let grey = suggestions_from(SeedSlot::Surface, house_page(scheme));
             let first = grey[0].colors[0];
             assert!(apart(hue(first), hue(house)) < 3.0 && rgb_to_hsl(first).1 > 0.3, "a grey surface lost the house colour: {first:08X}");
         }
@@ -8599,7 +9055,7 @@ mod theme_builder_tests {
         let base = BuilderParams { favourite: BLUE, ..BuilderParams::house(true) };
         let green = hsl_to_rgb(120.0, 0.7, 0.5);
         for slot in [SeedSlot::Secondary, SeedSlot::Tertiary, SeedSlot::Surface] {
-            let chip = &suggestions_from(slot, green, true)[3];
+            let chip = &suggestions_from(slot, green)[3];
             let on = chip.params(base);
             assert_eq!(on.favourite, chip.colors[0], "{slot:?}");
             assert_eq!(on.palette(), chip.colors, "{slot:?}");
@@ -8608,7 +9064,7 @@ mod theme_builder_tests {
         // A chip of the primary's OWN row hands over its primary too, and
         // that is the colour picked: no chip moves the seed any more, so the
         // two are the same colour and the favourite does not budge.
-        for chip in suggestions(BLUE, true).iter() {
+        for chip in suggestions(BLUE).iter() {
             assert_eq!(chip.colors[0], BLUE, "{}", chip.label);
             assert_eq!(chip.params(base).favourite, BLUE, "{}: a chip of the primary's row moved the colour picked", chip.label);
         }
@@ -8641,7 +9097,7 @@ mod theme_builder_tests {
             for dark in [true, false] {
                 let ends: Vec<(f64, f64)> = slider_ends(dark).into_iter().filter(|(s, _)| *s != 0.5).collect();
                 for seed in seeds {
-                    let offered = all_suggestions_from(slot, seed, dark, &own, Schemes::RoundThePick);
+                    let offered = all_suggestions_from(slot, seed, &own, Schemes::RoundThePick);
                     let rule = offered.iter().filter(|s| s.harmony.is_some()).step_by(2);
                     let lists = offered.iter().filter(|s| s.harmony.is_none()).take(4);
                     for suggestion in rule.chain(lists) {
@@ -8685,7 +9141,7 @@ mod theme_builder_tests {
             assert_eq!(BuilderParams::house(dark).color_count, 4);
             for slot in SeedSlot::ALL {
                 for seed in [BLUE, 0x808080FF, COMBINATIONS[130][1] | 0xFF] {
-                    assert_eq!(all_suggestions_for(4, slot, seed, dark, &own, Schemes::RoundThePick), all_suggestions_from(slot, seed, dark, &own, Schemes::RoundThePick), "{slot:?} {seed:08X}");
+                    assert_eq!(all_suggestions_for(4, slot, seed, dark, &own, Schemes::RoundThePick), all_suggestions_from(slot, seed, &own, Schemes::RoundThePick), "{slot:?} {seed:08X}");
                 }
             }
             let params = counted(4, dark);
@@ -8916,11 +9372,12 @@ mod theme_builder_tests {
                 pairs_seen += found.len();
                 // The pair of the seed's own colour is on the strip, or a
                 // chip the same colours is, which is the one a strip keeps:
-                // the accent, and the pair's other colour as the page at the
-                // page's lightness.
+                // the accent, and the pair's other colour as the page --
+                // exactly as the book wrote it, at its own lightness and not
+                // re-lit for whichever appearance happens to be in force.
                 let own = scheme_for(2, SeedSlot::Primary, seed, dark, PAIRS[at], pair_label(at)).unwrap();
                 assert_eq!(own.colors[0], seed);
-                assert_eq!(own.colors[3], ground_swatch(PAIRS[at][1], dark));
+                assert_eq!(own.colors[3], PAIRS[at][1] | 0xFF);
                 assert!(two.iter().any(|s| the_same_palette(s, &own)), "pair {} is not offered for its own colour: {found:?}", at + 1);
             }
             let seed = COMBINATIONS[3][0] | 0xFF;
