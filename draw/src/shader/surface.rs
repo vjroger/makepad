@@ -84,17 +84,23 @@ script_mod! {
         // raised face, negative a sunken one, and that sign alone swaps which
         // edge is lit — the whole of the raised/sunken and pressed/unpressed
         // trick lives here.
-        fn normal_of(d: float, width: float, curve: float, elev: float) -> vec3 {
-            let g = grad_of(d);
+        fn normal_of(g: vec2, d: float, width: float, curve: float, elev: float) -> vec3 {
             let s = slope_of(d, width, curve) * elev;
             return normalize(vec3(g.x * s, g.y * s, 1.0));
+        }
+
+        // A wrapped Lambert. The terminator on a steep shoulder is a soft
+        // roll-off, not a hard line at n.l = 0; `flat_of` goes through the
+        // same curve so a flat face still reads as exactly flat.
+        fn lam_of(ndl: float) -> float {
+            return smoothstep(-0.35, 1.0, ndl);
         }
 
         // Lambert in .x, Blinn-Phong in .y. The view direction is straight out
         // of the screen, so the half vector is against vec3(0, 0, 1).
         fn lit_of(n: vec3, light: vec4, spec: vec2) -> vec2 {
             let l = normalize(light.xyz);
-            let diffuse = max(dot(n, l), 0.0) * light.w;
+            let diffuse = lam_of(dot(n, l)) * light.w;
             let h = normalize(l + vec3(0.0, 0.0, 1.0));
             let s = pow(max(dot(n, h), 0.0), max(spec.y, 1.0)) * spec.x;
             return vec2(diffuse, s);
@@ -104,7 +110,7 @@ script_mod! {
         // keeps the middle of a control its own colour and confines the
         // lighting to the shoulders, instead of tinting the whole face.
         fn flat_of(light: vec4) -> float {
-            return max(normalize(light.xyz).z, 0.0) * light.w;
+            return lam_of(normalize(light.xyz).z) * light.w;
         }
 
         // The direction a shadow falls: away from the light, flattened into
@@ -159,7 +165,7 @@ script_mod! {
         }
 
         normal: fn(d: float, width: float, curve: float, elev: float) -> vec3 {
-            return normal_of(d, width, curve, elev);
+            return normal_of(grad_of(d), d, width, curve, elev);
         }
 
         lit: fn(n: vec3, light: vec4, spec: vec2) -> vec2 {
@@ -292,13 +298,22 @@ script_mod! {
             let outside = smoothstep(-3.0 * max(px, 0.001), 0.0, d);
             let rel = clamp(depth / max(raise, 0.001), 0.0, 1.0);
             let g = grad_of(d);
-            let off = shadow_dir_of(light) * depth * 1.5;
+            // The shadow is thrown by a HEIGHT under a LIGHT: off = H / tan(el).
+            // A low light throws it far; a high one keeps it under the object.
+            let sdir = shadow_dir_of(light);
+            let tanel = max(light.z, 0.05) / max(length(light.xy), 0.05);
+            let off = sdir * (depth / tanel);
             let blur = max(shadow.y, 0.001);
+            // The lip is the ground curving up into a LIT shoulder, so it exists
+            // only where the outward normal faces the light. Painted all round,
+            // it landed on the shadow side too and pushed the shadow off the
+            // edge, which is what made a raised control look as if it floated.
+            let facing = smoothstep(0.0, 0.7, clamp(-dot(g, sdir), 0.0, 1.0));
 
             // shift_of(d, off) and shift_of(d, -off), with the one gradient
             // shared rather than taken twice.
             let dark = exp(-max(d - dot(g, off), 0.0) / blur) * rel;
-            let lite = exp(-max(d + dot(g, off), 0.0) / blur) * rel;
+            let lite = exp(-max(d + dot(g, off), 0.0) / blur) * rel * facing;
             // Contact darkening is much tighter than the cast shadow: it is
             // what grounds a raised cap, and it is the right answer for a
             // raised face where self-occlusion is not.
@@ -357,15 +372,20 @@ script_mod! {
             let depth = form.x;
             let sink = max(deep.z, 0.001);
             let g = grad_of(d);
-            let n = normal_of(d, relief.x, relief.y, convex);
+            let n = normal_of(g, d, relief.x, relief.y, convex);
             let spec = vec2(relief.w, mix(64.0, 4.0, clamp(finish.w, 0.0, 1.0)));
             let lt = lit_of(n, light, spec);
 
             // Signed deviation from a flat face: positive where the shoulder
             // turns into the light, negative where it turns away.
+            // TWO RAMPS THAT MEET FLAT. clamp() gave each side a straight ramp
+            // from zero, and the shadow ink sits about four times further from
+            // the base than white does, so the slopes differed and every dome
+            // carried a V-shaped crease where they met. smoothstep starts with
+            // zero slope on both sides.
             let key = (lt.x - flat_of(light)) * 1.5;
-            let lift = clamp(key, 0.0, 1.0) * light_ink.a;
-            let drop = clamp(-key, 0.0, 1.0) * shadow_ink.a;
+            let lift = smoothstep(0.0, 1.0, key) * light_ink.a;
+            let drop = smoothstep(0.0, 1.0, -key) * shadow_ink.a;
             var out = mix(rgb, light_ink.rgb, lift);
             out = mix(out, shadow_ink.rgb, drop);
 
@@ -379,10 +399,13 @@ script_mod! {
             // `color` -> `color_2` fills, so this is joining up machinery that
             // exists rather than inventing more.
             if form.y > 0.001 {
+                // Toward the light -- `axis` points AT the light, so the lit
+                // side is where dot is positive. One smooth target with a C1
+                // weight: two clamped ramps met at zero in a visible fold.
                 let axis = normalize(light.xy + vec2(0.000001));
-                let t = dot(uv - vec2(0.5), -axis) * 2.0 * sign(convex);
-                out = mix(out, light_ink.rgb, clamp(t, 0.0, 1.0) * form.y * 0.5 * light_ink.a);
-                out = mix(out, shadow_ink.rgb, clamp(-t, 0.0, 1.0) * form.y * 0.5 * shadow_ink.a);
+                let t = dot(uv - vec2(0.5), axis) * 2.0 * sign(convex);
+                let gink = mix(shadow_ink.rgb, light_ink.rgb, vec3(smoothstep(-1.0, 1.0, t)));
+                out = mix(out, gink, vec3(form.y * 0.5 * smoothstep(0.0, 1.0, abs(t))));
             }
 
             // OCCLUSION IS CONCAVITY. This used to darken the rim of every

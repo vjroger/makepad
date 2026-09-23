@@ -437,15 +437,24 @@ script_mod! {
                     self.rect_size.x - (self.border_inset.z + self.border_size)
                     self.rect_size.y - (self.border_inset.w + self.border_size)
                 )
-                let mat_inner = Material.inner_cov(
-                    mat_lower
-                    mat_upper
-                    self.pos * self.rect_size
-                    max(1.0 self.border_radius)
-                    self.material_deep.y
-                    max(-self.material_form.x 0.0)
-                    self.material_light
-                )
+                // Only a SUNKEN face has an inner shadow, and only a material
+                // one at all -- so this is computed behind both, on uniforms.
+                // Unconditional, it was ~300 ALU per pixel on every RoundedView
+                // in every stock theme, multiplied by zero downstream: `shade`'s
+                // level check is a runtime branch, so the compiler cannot drop
+                // an argument it was handed.
+                let mut mat_inner = 0.0
+                if self.material > 0.5 && self.material_form.x < 0.0 {
+                    mat_inner = Material.inner_cov(
+                        mat_lower
+                        mat_upper
+                        self.pos * self.rect_size
+                        max(1.0 self.border_radius)
+                        self.material_deep.y
+                        -self.material_form.x
+                        self.material_light
+                    )
+                }
                 // The material rides between the fill colour and the fill.
                 // At material 0 `shade` hands back rgb untouched, so a theme
                 // that leaves it off draws exactly what it always did.
@@ -522,15 +531,18 @@ script_mod! {
                     self.material_form.z
                     self.material_form.w
                 )
-                let mat_inner = Material.inner_cov(
-                    vec2(0.0, 0.0)
-                    self.rect_size
-                    p
-                    self.border_radius
-                    self.material_deep.y
-                    max(-elev 0.0)
-                    self.material_light
-                )
+                let mut mat_inner = 0.0
+                if self.material > 0.5 && elev < 0.0 {
+                    mat_inner = Material.inner_cov(
+                        vec2(0.0, 0.0)
+                        self.rect_size
+                        p
+                        self.border_radius
+                        self.material_deep.y
+                        -elev
+                        self.material_light
+                    )
+                }
                 if self.material > 0.5 {
                     sdf.clear(Material.cast(
                         sdf.shape
