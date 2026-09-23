@@ -27272,6 +27272,84 @@ line two");
         vec4(rgba[0], rgba[1], rgba[2], rgba[3])
     }
 
+    /// The colour a square is DRAWN in, off the quad the last draw wrote and
+    /// not off the settings that ought to have written it.
+    fn a_square_drawn(head: &WidgetRef, which: usize) -> Vec4f {
+        let column = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(TB_COLOR_IDS[which]);
+        let control = column.child(live_id!(tb_color));
+        let drawn = control.borrow::<FabColorPick>().expect("a colour square").drawn_swatch();
+        drawn
+    }
+
+    /// A drawn quad's colour as the eight-bit channels it stands for, which
+    /// is what "byte for byte" means once a colour has been through a float:
+    /// a square and a chip band written from the same packed colour can sit
+    /// one ulp apart and still be the same colour on the screen.
+    fn drawn_bytes(color: Vec4f) -> [u8; 4] {
+        [color.x, color.y, color.z, color.w].map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+    }
+
+    /// A chip's seed square is the square above it, on a builder JUST
+    /// ENTERED with nothing touched -- the state the section opens in, at
+    /// every colour count.
+    ///
+    /// Seen failing on the house settings: the Prim square drew the role
+    /// base the rule had built for the theme files, a dusty pink, while
+    /// every chip in the row drew the house favourite, because the row is
+    /// grown from the favourite and the squares were drawn from the built
+    /// roles. Two answers to "what colour is the primary", a hand's width
+    /// apart, before anybody had touched anything.
+    ///
+    /// Both halves are asked of a real draw: the squares off the quads the
+    /// draw wrote, the chips off the carousel control rather than off the
+    /// list that filled it.
+    #[test]
+    fn the_squares_show_the_colours_the_chips_are_grown_from() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        for (at, count) in COLOR_COUNTS.into_iter().enumerate() {
+            panel.tb_count_chosen(count);
+            // The install the count asks for, taken the whole way, so the
+            // draw below is not the one that reads a clock nothing started.
+            // A count that installs nothing -- four, which is where the
+            // section opened -- asks for no reload and needs none driven.
+            panel.tb_settle(&mut cx, at as f64);
+            if cx.pending_style_reload {
+                the_build_reload_lands(&mut cx, &mut panel, at as f64);
+            }
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+            let params = panel.tb_builder.params();
+            let palette = params.palette();
+            let what = format!("count={count}");
+            // Every square draws the palette's own colour for its slot.
+            for slot in SeedSlot::chosen(count) {
+                assert_eq!(
+                    drawn_bytes(a_square_drawn(&head, slot.index())),
+                    palette[slot.index()].to_be_bytes(),
+                    "{what}: the {slot:?} square draws something the palette does not hold"
+                );
+            }
+            // And the row is grown from the square it says it is grown from.
+            let Some(slot) = panel.tb_row_seed() else {
+                assert_eq!(count, 1, "{what}: no carousel");
+                continue;
+            };
+            let seed = slot.seed_of(&params);
+            assert_eq!(palette[slot.index()], seed, "{what}: the row is grown from a colour no square holds");
+            let chips = carousel_chips(&head);
+            assert!(!chips.is_empty(), "{what}: the carousel drew nothing");
+            for (at, chip) in chips.iter().enumerate() {
+                assert_eq!(
+                    drawn_bytes(chip[slot.index()]),
+                    drawn_bytes(a_square_drawn(&head, slot.index())),
+                    "{what}: chip {at}'s seed square is not the square above it"
+                );
+            }
+        }
+    }
+
     /// Touching a square grows the carousel from the colour in it, and every
     /// chip on it holds that colour in that slot. Touching one moves nothing
     /// in force and installs nothing: it says which of the four the person is
@@ -27920,9 +27998,11 @@ line two");
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let store = a_store_of_its_own(&mut panel);
-        // One scheme built round the house favourite so that it is found,
-        // one round a colour nowhere near it so that it is not, and a note
-        // and a bad line so that neither stops the file being read.
+        // One scheme built round the house favourite so that it is found
+        // first, one round a colour nowhere near it -- which the reach
+        // offers behind it, a file of two being shorter than the floor it
+        // fills -- and a note and a bad line so that neither stops the file
+        // being read.
         let favourite = BuilderParams::house(true).favourite;
         std::fs::write(
             store.dir.join(crate::theme_store::PALETTES_FILE),
@@ -27942,8 +28022,13 @@ line two");
             .filter(|(_, offer)| offer.label == OWN_LABEL)
             .map(|(index, _)| index)
             .collect();
-        assert_eq!(own.len(), 1, "the scheme built round the favourite was not offered, or the far one was");
+        assert_eq!(own.len(), 2, "the file of two was not offered whole");
         let first_own = own[0];
+        assert_eq!(
+            panel.tb_suggestions[first_own].colors[1] | 0xFF,
+            0xE08A2AFF,
+            "the scheme built round the favourite does not lead their own"
+        );
         assert!(
             panel.tb_suggestions[..first_own]
                 .iter()

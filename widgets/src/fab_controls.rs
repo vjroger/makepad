@@ -5463,6 +5463,15 @@ impl ScriptHook for FabColorPick {
 }
 
 impl FabColorPick {
+    /// The colour the square is DRAWN in: the quad's own instance, which is
+    /// what a test asking what is on the screen has to read. It is written
+    /// by [`FabColorPick::set_rgba`] and by the popover, so a control the
+    /// host forgot to write answers with what it last drew and not with what
+    /// the host meant.
+    pub fn drawn_swatch(&self) -> Vec4f {
+        self.draw_swatch.swatch
+    }
+
     pub fn rgba(&self) -> [f32; 4] {
         let [h, s, v] = self.hsv;
         let [r, g, b] = hsv_to_rgb(h, s, v);

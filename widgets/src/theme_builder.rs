@@ -650,11 +650,17 @@ impl BuilderParams {
     /// three to within what reading forced, and its page wears the fourth's
     /// hue.
     ///
-    /// The house theme is the one exception, and by construction: with the
-    /// palette untouched nothing is installed at all, so the roles the rule
-    /// grew for the theme files stand, and those are what this hands back,
-    /// with the house page -- a grey -- as the fourth. The moment the palette
-    /// moves, the primary IS the colour picked.
+    /// The untouched house settings are no exception. They are the house SEED
+    /// -- the favourite `color_makepad`, the companions the house harmony
+    /// turns out of it, and the house page as the fourth, because the house
+    /// seed names no neutral and a seed with no neutral leaves the page the
+    /// theme file's own grey. It used to hand back the ROLE BASES the theme
+    /// files carry instead, and those are a different set of colours: the
+    /// primary square drew the base the rule built while every chip in the
+    /// row beside it drew the favourite, which is the one thing a palette
+    /// square must never do. What the built theme wears is
+    /// [`BuiltTheme::color`] on the theme this builds, and that is still the
+    /// roles: untouched, nothing at all is installed and the files stand.
     ///
     /// Under four colours ([`BuilderParams::color_count`]) the ones not
     /// chosen are the ones [`derived_palette`] makes of the primary, and
@@ -669,15 +675,23 @@ impl BuilderParams {
     /// derives still hold what the person had in them. A panel edits and
     /// reorders these, so a colour hidden by a lower count is never
     /// overwritten by what was derived over it.
+    ///
+    /// With nothing named it is the harmony laid round the favourite, the
+    /// untouched house settings included: they are a favourite and a harmony
+    /// like any other, and the colour in the primary square is the colour the
+    /// row of chips is grown from because they are the one colour. The house
+    /// keeps only its page -- the house seed names no neutral, so the fourth
+    /// square is the file's own grey rather than the page the rule would have
+    /// invented, and an untouched builder still tints nothing.
     pub fn chosen_palette(&self) -> [u32; 4] {
         if let Some(seeds) = self.seeds {
             return [seeds.primary, seeds.secondary, seeds.tertiary, seeds.background];
         }
+        let [primary, secondary, tertiary, background] = grown(self.favourite, self.harmony, None).colors;
         if !colors_named(self) {
-            let roles = roles_for(self.scheme());
-            return [roles.primary.base, roles.secondary.base, roles.tertiary.base, house_page(self.scheme())];
+            return [primary, secondary, tertiary, house_page(self.scheme())];
         }
-        grown(self.favourite, self.harmony, None).colors
+        [primary, secondary, tertiary, background]
     }
 
     /// These settings with all four colours named outright, as a person
@@ -3561,9 +3575,11 @@ pub const COMBINATION_LABEL: &str = "Combination";
 /// The number the first row of the built-in table carries.
 pub const FIRST_COMBINATION: usize = 121;
 
-/// How many of the built-in combinations a colour is offered at most. The
-/// strip holds eight to a page, so this is six pages' worth, the nearest
-/// first, and the rest dropped.
+/// How many schemes off ONE list a colour is offered at most -- the cap of
+/// the reach, and what a list that answers a pick in its hundreds is cut back
+/// to. The strip holds eight to a page, so this is six pages' worth, the
+/// nearest first and the rest dropped; a cap that did not land on a page's
+/// edge would leave a last page with two chips on it.
 ///
 /// It was three pages, and the reason given was that nobody turns nine pages
 /// to see what a colour can do. That reason was about a strip whose first
@@ -3572,7 +3588,18 @@ pub const FIRST_COMBINATION: usize = 121;
 /// pages a person turns are the curated ones and the cut is what decides how
 /// many of those there are -- and three pages of them was throwing away
 /// matches worth showing.
-pub const MOST_COMBINATIONS: usize = 48;
+pub const MOST_MATCHES: usize = 48;
+
+/// How many schemes off one list a colour is offered at least -- the floor of
+/// the reach, and what a list that answers a pick with two or three is made
+/// up to by taking the nearest of the rest.
+///
+/// Ten because a row a person can choose from is a row with a choice in it,
+/// and two chips are not a choice. It is a page and a bit of the strip, which
+/// is on purpose: a pick the list hardly answers should still show that there
+/// is more of the list past the first page, and it should not pretend to six
+/// pages of matches it has not got.
+pub const FEWEST_MATCHES: usize = 10;
 
 /// What the row at `at` in the built-in table is called.
 pub fn combination_label(at: usize) -> String {
@@ -3585,6 +3612,13 @@ pub fn combination_label(at: usize) -> String {
 /// and lightness in percent, which is near enough that the scheme is
 /// recognisably about that colour and loose enough that a colour picked by
 /// eye off a screen finds it.
+///
+/// It is the PREFERRED cut and not a gate: see [`offer_reach`], where a pick
+/// the list hardly answers reaches past it to fill [`FEWEST_MATCHES`] and a
+/// pick it answers in its hundreds is cut back to [`MOST_MATCHES`], which is
+/// a tighter tolerance by another name. What this number sets is where the
+/// reach would stand if the list answered the pick about as often as a list
+/// usually does.
 ///
 /// It was thirty, and thirty is tight: a scheme built round a red and a pick
 /// a shade off that red missed each other, and the row fell back to what the
@@ -3876,8 +3910,12 @@ pub fn suggestions_from(slot: SeedSlot, seed: u32) -> Vec<Suggestion> {
 /// curated ones going in first, it is the rule's chip that gives way where
 /// two of them are the same palette.
 ///
-/// At most [`MOST_COMBINATIONS`] of the built-in matches are kept, nearest
-/// first: the strip is a choice and not a catalogue.
+/// How many of each list is offered is the pick's own business: see
+/// [`offer_reach`]. Everything inside [`OWN_TOLERANCE`], but never fewer than
+/// [`FEWEST_MATCHES`] and never more than [`MOST_MATCHES`] of one list, so a
+/// colour the book hardly answers still gets a row worth turning and one it
+/// answers three hundred times gets the nearest six pages of them. The strip
+/// is a choice and not a catalogue, and a choice is not two chips either.
 ///
 /// The library ships no personal list. `own` is read from wherever the caller
 /// keeps one; `theme_store::read_palettes` is where a person's own file is.
@@ -3896,17 +3934,24 @@ pub fn all_suggestions(favourite: u32, own: &[Vec<u32>]) -> Vec<Suggestion> {
 /// off, each one is dressed as it was written instead ([`Schemes`]).
 pub fn all_suggestions_from(slot: SeedSlot, seed: u32, own: &[Vec<u32>], schemes: Schemes) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = Vec::new();
-    for scheme in matching_schemes(seed, own, OWN_TOLERANCE) {
-        offer(&mut out, list_chip(slot, seed, &scheme, OWN_LABEL.to_string(), schemes));
-    }
-    let built_in = matched(seed, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
-    for (at, scheme) in built_in.into_iter().take(MOST_COMBINATIONS) {
-        offer(&mut out, list_chip(slot, seed, &scheme, combination_label(at), schemes));
-    }
+    let mine = matched(seed, own.iter().map(|scheme| scheme.as_slice()));
+    offer_reach(&mut out, ranked_schemes(mine), OWN_TOLERANCE, |(_, scheme)| {
+        list_chip(slot, seed, &scheme, OWN_LABEL.to_string(), schemes)
+    });
+    let book = matched(seed, COMBINATIONS.iter().copied());
+    offer_reach(&mut out, ranked_schemes(book), OWN_TOLERANCE, |(at, scheme)| {
+        list_chip(slot, seed, &scheme, combination_label(at), schemes)
+    });
     for grown in suggestions_from(slot, seed) {
         offer(&mut out, Some(grown));
     }
     out
+}
+
+/// A [`matched`] ranking in the shape [`offer_reach`] walks: the distance
+/// first and the scheme with its place beside it.
+fn ranked_schemes(found: Vec<(f64, usize, Vec<u32>)>) -> impl Iterator<Item = (f64, (usize, Vec<u32>))> {
+    found.into_iter().map(|(distance, place, scheme)| (distance, (place, scheme)))
 }
 
 /// One scheme off a list, dressed as a chip for a palette of `count`
@@ -4036,35 +4081,35 @@ pub fn all_suggestions_for(count: usize, slot: SeedSlot, seed: u32, dark: bool, 
         return all_suggestions_from(slot, seed, own, schemes);
     }
     let mut out: Vec<Suggestion> = Vec::new();
-    for scheme in matching_schemes(seed, own, OWN_TOLERANCE) {
-        offer(&mut out, list_chip_for(count, slot, seed, dark, &scheme, OWN_LABEL.to_string(), schemes));
-    }
+    let mine = matched(seed, own.iter().map(|scheme| scheme.as_slice()));
+    offer_reach(&mut out, ranked_schemes(mine), OWN_TOLERANCE, |(_, scheme)| {
+        list_chip_for(count, slot, seed, dark, &scheme, OWN_LABEL.to_string(), schemes)
+    });
     if count == 1 {
-        let mut colors = book_colors();
+        let mut colors: Vec<(f64, u32)> =
+            book_colors().into_iter().map(|color| (color_distance(seed, color), color)).collect();
         // A stable sort, so two colours equally near stay in the book's order.
-        colors.sort_by(|a, b| {
-            color_distance(seed, *a).partial_cmp(&color_distance(seed, *b)).unwrap_or(std::cmp::Ordering::Equal)
+        colors.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        offer_reach(&mut out, colors, OWN_TOLERANCE, |color| {
+            Some(single(color, book_color_label(color), None, None, dark))
         });
-        for color in colors.into_iter().take(MOST_COMBINATIONS) {
-            offer(&mut out, Some(single(color, book_color_label(color), None, None, dark)));
-        }
     } else {
-        let book: Vec<(String, Vec<u32>)> = if count == 3 {
+        let book: Vec<(f64, (String, Vec<u32>))> = if count == 3 {
             // The threes are the table's first rows, so a place among them
             // is a place in the table.
-            matched(seed, COMBINATIONS.iter().copied().take_while(|row| row.len() == 3), OWN_TOLERANCE)
+            matched(seed, COMBINATIONS.iter().copied().take_while(|row| row.len() == 3))
                 .into_iter()
-                .map(|(at, scheme)| (combination_label(at), scheme))
+                .map(|(distance, at, scheme)| (distance, (combination_label(at), scheme)))
                 .collect()
         } else {
-            matched(seed, PAIRS.iter().copied(), OWN_TOLERANCE)
+            matched(seed, PAIRS.iter().copied())
                 .into_iter()
-                .map(|(at, scheme)| (pair_label(at), scheme))
+                .map(|(distance, at, scheme)| (distance, (pair_label(at), scheme)))
                 .collect()
         };
-        for (label, scheme) in book.into_iter().take(MOST_COMBINATIONS) {
-            offer(&mut out, list_chip_for(count, slot, seed, dark, &scheme, label, schemes));
-        }
+        offer_reach(&mut out, book, OWN_TOLERANCE, |(label, scheme)| {
+            list_chip_for(count, slot, seed, dark, &scheme, label, schemes)
+        });
     }
     for grown in suggestions_for(count, slot, seed, dark) {
         offer(&mut out, Some(grown));
@@ -4257,23 +4302,27 @@ pub fn color_distance(a: u32, b: u32) -> f64 {
 /// Any list: the library ships none, a scheme may hold two colours or four,
 /// and nothing here knows where the list came from.
 pub fn matching_schemes(favourite: u32, schemes: &[Vec<u32>], tolerance: f64) -> Vec<Vec<u32>> {
-    matched(favourite, schemes.iter().map(|scheme| scheme.as_slice()), tolerance)
+    matched(favourite, schemes.iter().map(|scheme| scheme.as_slice()))
         .into_iter()
-        .map(|(_, scheme)| scheme)
+        .take_while(|(distance, _, _)| *distance <= tolerance)
+        .map(|(_, _, scheme)| scheme)
         .collect()
 }
 
-/// [`matching_schemes`], and where in the list each match came from -- which
-/// is how a built-in combination learns the number it is called by.
+/// The WHOLE of a list ranked against the favourite: every scheme, how far it
+/// stands, and where in the list it came from -- which is how a built-in
+/// combination learns the number it is called by -- nearest first.
+///
+/// No tolerance here on purpose. A gate at this depth can only answer "in or
+/// out", and what the row wants is an ORDER it can take as much or as little
+/// of as the pick deserves: [`offer_reach`] does the taking, and
+/// [`matching_schemes`] is the plain gate for anyone who only wants the
+/// matches. Ranking the whole list costs one distance a scheme either way.
 ///
 /// Over an iterator rather than a slice because the two lists are not the same
 /// shape: a person's own is a `Vec` of `Vec`s read off a file, and the
 /// built-in table is rows of a `const`.
-fn matched<'a>(
-    favourite: u32,
-    schemes: impl Iterator<Item = &'a [u32]>,
-    tolerance: f64,
-) -> Vec<(usize, Vec<u32>)> {
+fn matched<'a>(favourite: u32, schemes: impl Iterator<Item = &'a [u32]>) -> Vec<(f64, usize, Vec<u32>)> {
     let mut found: Vec<(f64, usize, Vec<u32>)> = Vec::new();
     for (place, scheme) in schemes.enumerate() {
         let nearest = scheme
@@ -4284,9 +4333,6 @@ fn matched<'a>(
         let Some((at, distance)) = nearest else {
             continue;
         };
-        if distance > tolerance {
-            continue;
-        }
         let mut ordered = Vec::with_capacity(scheme.len());
         ordered.push(scheme[at]);
         ordered.extend(scheme.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, c)| *c));
@@ -4295,7 +4341,47 @@ fn matched<'a>(
     // A stable sort, so two schemes that stand equally near the favourite
     // stay in the order the person wrote them in.
     found.sort_by(|(a, _, _), (b, _, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    found.into_iter().map(|(_, place, scheme)| (place, scheme)).collect()
+    found
+}
+
+/// Take from one ranked list what this pick reaches, and offer each of them.
+///
+/// Everything inside `tolerance` is offered; then, if that came to fewer
+/// than [`FEWEST_MATCHES`], the nearest of the rest are offered on until the
+/// floor is met; and never more than [`MOST_MATCHES`] of one list, however
+/// many it held inside the tolerance. So the tolerance is a preference and not a
+/// gate: a colour the list hardly answers reaches past it rather than showing
+/// two chips and a shrug, and a colour it answers three hundred times is cut
+/// back to the nearest six pages, which is what a tighter tolerance would
+/// have done for that colour and only for that colour. The effective reach
+/// varies with the pick, which is the point.
+///
+/// Per list, each on its own: a person's own file and the book are two
+/// different promises and neither should be able to starve the other of its
+/// floor or spend the other's cap.
+///
+/// Counted in chips that SURVIVE: a scheme that came out as a palette already
+/// offered is dropped by [`offer`] and is not one of the ten. A floor counted
+/// before the dropping would leave a list that holds the same palette six
+/// times showing four chips and calling it ten.
+///
+/// A list shorter than the floor is offered whole, which needs no saying: it
+/// simply runs out.
+fn offer_reach<T>(
+    out: &mut Vec<Suggestion>,
+    ranked: impl IntoIterator<Item = (f64, T)>,
+    tolerance: f64,
+    mut chip: impl FnMut(T) -> Option<Suggestion>,
+) {
+    let mut taken = 0usize;
+    for (distance, item) in ranked {
+        if taken >= MOST_MATCHES || (distance > tolerance && taken >= FEWEST_MATCHES) {
+            break;
+        }
+        let before = out.len();
+        offer(out, chip(item));
+        taken += out.len() - before;
+    }
 }
 
 /// A scheme's colours in the order the theme wants them: the anchor first,
@@ -7822,11 +7908,18 @@ mod theme_builder_tests {
             let named_over = set.with_palette(named);
             assert_eq!((named_over.saturation, named_over.lightness), (0.3, house.lightness));
         }
-        // The house palette is the house roles, and the house page.
-        let house = BuilderParams::house(true);
-        let roles = roles_for(Scheme::Dark);
-        let want = [roles.primary.base, roles.secondary.base, roles.tertiary.base, house_page(Scheme::Dark)];
-        assert_eq!(house.palette(), want);
+        // The house palette is the house SEED laid out by the house harmony,
+        // and the house page: the favourite in the primary square, not the
+        // role base the theme files carry for it. See
+        // `the_squares_show_the_colours_the_chips_are_grown_from` for what
+        // went wrong while it was the bases.
+        for dark in [true, false] {
+            let house = BuilderParams::house(dark);
+            let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+            let [primary, secondary, tertiary, _] = grown(house.favourite, Harmony::House, None).colors;
+            assert_eq!(house.palette(), [primary, secondary, tertiary, house_page(scheme)]);
+            assert_eq!(house.palette()[0], SeedColors::HOUSE.primary);
+        }
     }
 
     /// Both ends of an appearance's half of the lightness slider, crossed
@@ -8026,13 +8119,17 @@ mod theme_builder_tests {
     /// picked, and filled out to four places however short the line they
     /// wrote was -- and they go through the same bar and the same dropping
     /// as the rest.
+    ///
+    /// A file of two is offered whole: a list shorter than
+    /// [`FEWEST_MATCHES`] has nothing to cut, and the one holding the colour
+    /// leads because the row is ordered by how near each stands.
     #[test]
     fn a_persons_own_palettes_come_before_the_rules() {
         let favourite = 0x2E8BF0FF;
         let own = vec![vec![0xFFA500FF, 0x1E90FFFF, 0x2F4F4FFF], vec![0x8B0000FF, 0xFFD700FF]];
         let grown = suggestions(favourite);
         let all = all_suggestions(favourite, &own);
-        assert_eq!(theirs(&all), 1, "only the scheme holding the colour is offered");
+        assert_eq!(theirs(&all), 2, "a file shorter than the floor is not offered whole");
         let mine = all.first().unwrap();
         assert_eq!(mine.label, OWN_LABEL);
         assert_eq!((mine.harmony, mine.mood), (None, None));
@@ -8099,7 +8196,7 @@ mod theme_builder_tests {
                 assert_eq!(found[0].label, combination_label(at), "on dark={dark}");
                 assert_eq!(found[0].colors[0], favourite | 0xFF);
                 assert_eq!((found[0].harmony, found[0].mood), (None, None));
-                assert!(found.len() <= MOST_COMBINATIONS, "{} kept", found.len());
+                assert!(found.len() <= MOST_MATCHES, "{} kept", found.len());
             }
         }
     }
@@ -8150,7 +8247,7 @@ mod theme_builder_tests {
     }
 
     /// The wider tolerance reaches more of the book, and the row can show up
-    /// to [`MOST_COMBINATIONS`] of them: a pick that finds many finds more
+    /// to [`MOST_MATCHES`] of them: a pick that finds many finds more
     /// than the two dozen the cut used to allow, and never more than the cut.
     #[test]
     fn a_pick_with_many_matches_shows_up_to_the_cut() {
@@ -8159,11 +8256,150 @@ mod theme_builder_tests {
             for light in [0.35, 0.5, 0.65] {
                 let favourite = hsl_to_rgb(step as f64 * 10.0, 0.45, light);
                 let found = book(&all_suggestions(favourite, &[])).len();
-                assert!(found <= MOST_COMBINATIONS, "{favourite:08X}: {found} kept");
+                assert!(found <= MOST_MATCHES, "{favourite:08X}: {found} kept");
                 most = most.max(found);
             }
         }
         assert!(most > 24, "only {most} of the book's schemes reached the row at most");
+    }
+
+    /// How far the book's row behind this chip stands from the pick, read
+    /// back off the number the chip is called by. The chip itself has been
+    /// re-anchored on the pick, so its own colours no longer say.
+    fn book_distance(pick: u32, offer: &Suggestion) -> f64 {
+        let at = offer.label.rsplit(' ').next().and_then(|n| n.parse::<usize>().ok()).expect("a numbered chip");
+        COMBINATIONS[at - FIRST_COMBINATION]
+            .iter()
+            .map(|colour| color_distance(pick, *colour))
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Where in the book's ranking each offered chip came from, in the order
+    /// the row shows them.
+    fn book_places(pick: u32, offered: &[&Suggestion]) -> Vec<usize> {
+        let ranked = matched(pick, COMBINATIONS.iter().copied());
+        offered
+            .iter()
+            .map(|offer| {
+                let want = offer.label.rsplit(' ').next().and_then(|n| n.parse::<usize>().ok()).expect("a numbered chip")
+                    - FIRST_COMBINATION;
+                ranked.iter().position(|(_, at, _)| *at == want).expect("the chip is somewhere in the ranking")
+            })
+            .collect()
+    }
+
+    /// A pick the book hardly answers reaches PAST the tolerance to fill the
+    /// floor, and what it reaches for is the nearest of the rest, in order.
+    ///
+    /// This is the half of the variable reach that the fixed gate could not
+    /// do: a colour the book holds two schemes near was shown two chips and
+    /// the rule's own arithmetic, and two is not a choice. Seen failing on
+    /// the build before it, where the count stopped at whatever the tolerance
+    /// let through.
+    #[test]
+    fn a_pick_the_book_hardly_answers_still_reaches_the_floor() {
+        let mut seen = 0;
+        for step in 0..72 {
+            for light in [0.04, 0.5, 0.96] {
+                let pick = hsl_to_rgb(step as f64 * 5.0, 1.0, light);
+                let ranked = matched(pick, COMBINATIONS.iter().copied());
+                let inside = ranked.iter().take_while(|(distance, _, _)| *distance <= OWN_TOLERANCE).count();
+                if inside >= FEWEST_MATCHES {
+                    continue;
+                }
+                seen += 1;
+                let all = all_suggestions(pick, &[]);
+                let offered = book(&all);
+                assert!(
+                    offered.len() >= FEWEST_MATCHES,
+                    "{pick:08X}: {inside} inside the tolerance and only {} offered",
+                    offered.len()
+                );
+                // Nearest first, and the ones past the tolerance are the
+                // nearest of what was left rather than any old scheme: each
+                // chip comes from further down the one ranking than the last.
+                let places = book_places(pick, &offered);
+                assert!(
+                    places.windows(2).all(|two| two[0] < two[1]),
+                    "{pick:08X}: the reach did not take them in order: {places:?}"
+                );
+                let mut far = offered.iter().map(|offer| book_distance(pick, offer));
+                let mut last = 0.0;
+                assert!(far.all(|distance| {
+                    let ordered = distance >= last - 1e-9;
+                    last = distance;
+                    ordered
+                }), "{pick:08X}: the row is not nearest first");
+            }
+        }
+        assert!(seen > 0, "no pick the book hardly answers, so the floor was never asked for");
+    }
+
+    /// And a pick the book answers in its hundreds is cut back to the cap --
+    /// the same thing a tighter tolerance would have done, for that pick and
+    /// no other -- and what it keeps is the nearest of them.
+    ///
+    /// The cut is counted in chips that survive the dropping, so a pick that
+    /// reaches the cap shows exactly the cap and not the cap less however
+    /// many the book says twice.
+    #[test]
+    fn a_pick_the_book_answers_often_is_cut_back_to_the_cap() {
+        let mut seen = 0;
+        for step in 0..36 {
+            for light in [0.4, 0.5, 0.6] {
+                let pick = hsl_to_rgb(step as f64 * 10.0, 0.4, light);
+                let ranked = matched(pick, COMBINATIONS.iter().copied());
+                let inside = ranked.iter().take_while(|(distance, _, _)| *distance <= OWN_TOLERANCE).count();
+                if inside <= MOST_MATCHES {
+                    continue;
+                }
+                seen += 1;
+                let all = all_suggestions(pick, &[]);
+                let offered = book(&all);
+                assert_eq!(offered.len(), MOST_MATCHES, "{pick:08X}: {inside} inside the tolerance");
+                // The chip at the cut and the one after it: nothing past the
+                // cut stands nearer than the last one taken, and none of it
+                // reached the row.
+                let places = book_places(pick, &offered);
+                let cut = *places.last().expect("a chip at the cut");
+                assert!(cut + 1 < ranked.len(), "{pick:08X}: the book ran out before the cap");
+                assert!(
+                    ranked[cut + 1].0 >= ranked[cut].0 - 1e-9,
+                    "{pick:08X}: the one past the cut stands nearer than the one at it"
+                );
+                assert!(!places.contains(&(cut + 1)), "{pick:08X}: the one past the cut reached the row");
+            }
+        }
+        assert!(seen > 0, "no pick the book answers past the cap, so the cap was never asked for");
+    }
+
+    /// A white, a black and a mid-grey each reach the floor too. They could
+    /// not before the hue term was weighted by how much colour the pair has
+    /// -- see [`a_pick_with_no_hue_still_finds_the_book`] -- and the floor is
+    /// what now says so outright, whatever the measure does next.
+    #[test]
+    fn a_pick_with_no_hue_reaches_the_floor() {
+        for pick in [WHITE, BLACK, 0x808080FF, 0x404040FF, 0xC0C0C0FF] {
+            let all = all_suggestions(pick, &[]);
+            let offered = book(&all);
+            assert!(offered.len() >= FEWEST_MATCHES, "{pick:08X}: only {} of the book reached the row", offered.len());
+        }
+    }
+
+    /// A list shorter than the floor is offered whole, and the two lists are
+    /// reached into separately: a person's own file of three is three chips,
+    /// and the book behind it still fills its own floor.
+    #[test]
+    fn a_list_shorter_than_the_floor_is_offered_whole() {
+        let pick = 0x2E8BF0FF;
+        let own = vec![
+            vec![0xFFA500FF, 0x1E90FFFF, 0x2F4F4FFF],
+            vec![0x8B0000FF, 0xFFD700FF],
+            vec![0x104030FF, 0x20C080FF, 0xEEDDCCFF],
+        ];
+        let offered = all_suggestions(pick, &own);
+        assert_eq!(theirs(&offered), own.len(), "a file of three was not offered whole");
+        assert!(book(&offered).len() >= FEWEST_MATCHES, "the short file spent the book's reach");
     }
 
     /// The sweep the rule's own palettes go through, over the built-in
@@ -8624,9 +8860,12 @@ mod theme_builder_tests {
     /// book is re-anchored on it rather than rescaled with it -- once when
     /// the curated palettes moved to the front of the row and the measure
     /// that finds them was loosened, which changes both the order of the row
-    /// and how much of the book reaches it, and once when the surface square
+    /// and how much of the book reaches it, once when the surface square
     /// became the palette's own colour instead of that colour re-lit for the
-    /// appearance in force.
+    /// appearance in force, and once when the tolerance stopped being a gate:
+    /// the reach ([`offer_reach`]) fills a floor and holds a cap per list, so
+    /// a pick the book hardly answers now carries chips it did not and a pick
+    /// it answers past the cap carries the same ones it did.
     #[test]
     fn a_row_grown_from_the_primary_is_the_row_it_always_was() {
         assert_eq!(prim_digest(), PRIM_DIGEST, "the primary's row moved: a chip's colours are not the ones the builder grew");
@@ -8634,7 +8873,7 @@ mod theme_builder_tests {
         assert!(suggestions(BLUE).iter().all(|offer| offer.grown_from == SeedSlot::Primary));
     }
 
-    const PRIM_DIGEST: u64 = 0x3A81441ABEB005AC;
+    const PRIM_DIGEST: u64 = 0x10C40F819116E209;
 
     /// A CHIP IS THE PALETTE. Every square a chip draws -- the accents AND
     /// the surface -- is one of the palette's own four colours as the palette
@@ -8769,7 +9008,11 @@ mod theme_builder_tests {
             vec![0x505050FF, 0xB0B0B0FF, 0x202020FF],
         ];
         for pick in [WHITE, BLACK, 0x808080FF, 0xC0C0C0FF, 0x404040FF] {
-            let found = matched(pick, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
+            let found: Vec<(usize, Vec<u32>)> = matched(pick, COMBINATIONS.iter().copied())
+                .into_iter()
+                .take_while(|(distance, _, _)| *distance <= OWN_TOLERANCE)
+                .map(|(_, at, scheme)| (at, scheme))
+                .collect();
             assert!(found.len() >= 20, "{pick:08X} found only {} of the book's combinations", found.len());
             // And of more than one hue family: the front colour of each match
             // is the one that drew it in, and they are not all the same sort
@@ -8821,7 +9064,11 @@ mod theme_builder_tests {
         // the same schemes, nearest first, in the same order.
         for step in 0..12 {
             let pick = hsl_to_rgb(step as f64 * 30.0, 0.75, 0.5);
-            let mine = matched(pick, COMBINATIONS.iter().copied(), OWN_TOLERANCE);
+            let mine: Vec<(usize, Vec<u32>)> = matched(pick, COMBINATIONS.iter().copied())
+                .into_iter()
+                .take_while(|(distance, _, _)| *distance <= OWN_TOLERANCE)
+                .map(|(_, at, scheme)| (at, scheme))
+                .collect();
             let mut theirs: Vec<(f64, usize, Vec<u32>)> = Vec::new();
             for (at, row) in COMBINATIONS.iter().enumerate() {
                 let near = row
@@ -8867,10 +9114,16 @@ mod theme_builder_tests {
                         assert_eq!(offer.colors, [seeds.primary, seeds.secondary, seeds.tertiary, seeds.background], "{what}");
                     }
                     // The rule's own chips stand at the back of the row,
-                    // behind the curated ones, and in their own order.
+                    // behind the curated ones, and in their own order -- less
+                    // any whose palette a curated chip already offered, which
+                    // is the rule's chip giving way to the one somebody chose.
                     let rule: Vec<&Suggestion> = offered.iter().filter(|offer| kind_of(offer) == 2).collect();
-                    let labels: Vec<&str> = rule[..2].iter().map(|s| s.label.as_str()).collect();
-                    assert_eq!(labels, ["Default", "Single hue"], "{what}");
+                    let mut order = suggestions_from(slot, seed).into_iter().map(|offer| offer.label);
+                    assert!(
+                        rule.iter().all(|offer| order.any(|label| label == offer.label)),
+                        "{what}: the rule's own order moved: {:?}",
+                        rule.iter().map(|s| s.label.as_str()).collect::<Vec<&str>>()
+                    );
                     let has_hue = rgb_to_hsl(seed).1 >= HAS_HUE;
                     if has_hue || slot == SeedSlot::Surface {
                         let firsts: Vec<(Option<Harmony>, Option<Mood>)> = rule[..6].iter().map(|s| (s.harmony, s.mood)).collect();
