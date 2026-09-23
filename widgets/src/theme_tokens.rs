@@ -3456,7 +3456,7 @@ mod sheet_contrast_tests {
         colors: Vec<(&'static str, Option<u32>)>,
     }
 
-    /// One walk of every base theme and every sheet. The two contrast tests
+    /// One walk of every base theme and every sheet. The three contrast tests
     /// read the same reloads; building the library twelve times per test was
     /// the whole cost (about 0.25 s each).
     fn snaps() -> &'static [ThemeSnap] {
@@ -3464,7 +3464,7 @@ mod sheet_contrast_tests {
         static SNAPS: OnceLock<Vec<ThemeSnap>> = OnceLock::new();
         SNAPS.get_or_init(|| {
             let mut keys = Vec::new();
-            for pairs in [MEANING, SURFACES, VARIANTS] {
+            for pairs in [MEANING, SURFACES, VARIANTS, INVERSE] {
                 for (ground, ink) in pairs {
                     if !keys.contains(ground) {
                         keys.push(*ground);
@@ -3583,8 +3583,7 @@ mod sheet_contrast_tests {
     /// still stand apart.
     #[test]
     fn the_inverse_page_carries_its_own_ink_under_every_sheet() {
-        let mut bad: Vec<String> = Vec::new();
-        walk(&mut |vm, label| bad.extend(failures(vm, label, INVERSE, READABLE)));
+        let bad = snap_failures(INVERSE, READABLE);
         assert!(bad.is_empty(), "ink that does not hold on the inverse page:
 {}", bad.join("
 "));
@@ -4053,7 +4052,8 @@ mod equalizer_tests {
             vm.with_reload(crate::script_mod);
             Scheme::ALL.iter().map(|s| resolve_theme(vm, BlendTheme::Base(*s))).collect()
         }
-        let mut cx = Cx::new(Box::new(|_, _| {}));
+        // Its own context, not the pooled one: it reloads the library.
+        let mut cx = crate::makepad_platform::Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let under_light = resolve_all(vm, crate::BaseTheme::Light);

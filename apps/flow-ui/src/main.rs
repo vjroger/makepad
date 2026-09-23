@@ -1637,8 +1637,28 @@ impl App {
                     return;
                 }
             },
-            CanvasEdit::Disconnect { to_node, to_port } => {
+            CanvasEdit::Disconnect { to_node, to_port, .. } => {
                 graph_edit::disconnect(&graph, &to_node, &to_port)
+            }
+            // One wire picked up and dropped on another input: one revision,
+            // the old input cleared and the new one connected.
+            CanvasEdit::Reconnect {
+                from_node,
+                from_port,
+                old_to_node,
+                old_to_port,
+                to_node,
+                to_port,
+                ..
+            } => {
+                let cleared = graph_edit::disconnect(&graph, &old_to_node, &old_to_port);
+                match graph_edit::connect(&cleared, &from_node, &from_port, &to_node, &to_port) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        self.set_error(cx, &error);
+                        return;
+                    }
+                }
             }
             CanvasEdit::Delete { node } => graph_edit::delete_node(&graph, &node),
             CanvasEdit::AddType { type_name, at } => {
@@ -2390,6 +2410,7 @@ impl App {
                     from_port,
                     to_node,
                     to_port,
+                    ..
                 }) => inspector.show_edge(
                     cx,
                     graph.as_ref(),
@@ -3800,7 +3821,7 @@ impl App {
                     Some(Selection::Node(node)) => Some(CanvasEdit::Delete { node }),
                     Some(Selection::Edge {
                         to_node, to_port, ..
-                    }) => Some(CanvasEdit::Disconnect { to_node, to_port }),
+                    }) => Some(CanvasEdit::Disconnect { to_node, to_port, key: None }),
                     None => None,
                 };
                 if let Some(edit) = edit {
@@ -4133,7 +4154,7 @@ impl MatchEvent for App {
             .collect();
         for action in canvas_actions {
             match action {
-                FlowCanvasAction::None => {}
+                FlowCanvasAction::None | FlowCanvasAction::Open { .. } => {}
                 FlowCanvasAction::Select(selection) => {
                     self.selected_node = selection
                         .as_ref()
@@ -5819,6 +5840,7 @@ mod layout_tests {
                 rect: Rect::default(),
                 is_over: true,
                 is_sweep: false,
+                cancelled: false,
             })),
             widget_uid: asset_item.widget_uid(),
             group: Some(WidgetActionGroup {
