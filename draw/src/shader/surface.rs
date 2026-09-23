@@ -144,10 +144,17 @@ script_mod! {
             return (1.0 - smoothstep(0.0, max(width, 0.001), -d)) * pow(facing, 0.8) * step(d, 0.0);
         }
 
-        // The sweep across the top of a glossy cap. `uv` is the rect-local
-        // 0..1 position, so this is in the face's own space, not the screen's.
-        fn gloss_of(uv: vec2, top: float, power: float) -> float {
-            return pow(clamp(1.0 - uv.y / max(top, 0.001), 0.0, 1.0), max(power, 0.001));
+        // The sheen on a glossy cap is a REFLECTION, so it is read off the
+        // normal, not off position: a soft light box above and in front, with
+        // the flat face's share subtracted so a flat top keeps its own colour
+        // and only surfaces that tilt toward the sky pick it up -- domes and
+        // rims. A ramp over uv.y did the same on a round cap and painted the
+        // whole arm of a pointer knob white, because the arm was the top of
+        // the bounding box.
+        fn gloss_of(n: vec3) -> float {
+            let sky = normalize(vec3(0.0, -0.6, 0.8));
+            let s = max(dot(n, sky), 0.0);
+            return clamp((s * s - 0.64) * 2.8, 0.0, 1.0);
         }
 
         // ---- the exported surface ----
@@ -239,8 +246,8 @@ script_mod! {
             return rim_of(d, n, light, width);
         }
 
-        gloss: fn(uv: vec2, top: float, power: float) -> float {
-            return gloss_of(uv, top, power);
+        gloss: fn(n: vec3) -> float {
+            return gloss_of(n);
         }
 
         // An emissive halo OUTSIDE the shape. The caller has to have left room
@@ -460,7 +467,7 @@ script_mod! {
             let r = rim_of(d, n, light, max(relief.x * 0.5, 0.5)) * finish.y * light_ink.a;
             out = mix(out, light_ink.rgb, clamp(r, 0.0, 1.0));
             out = out + vec3(lt.y);
-            let gl = gloss_of(uv, 0.55, 2.0) * finish.z * step(d, 0.0) * light_ink.a;
+            let gl = gloss_of(n) * finish.z * step(d, 0.0) * light_ink.a;
             out = mix(out, light_ink.rgb, clamp(gl, 0.0, 1.0));
             return out;
         }
