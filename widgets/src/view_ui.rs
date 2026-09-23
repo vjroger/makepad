@@ -433,6 +433,8 @@ script_mod! {
             bevel_light: uniform(#ffffff)
             bevel_dark: uniform(#808080)
             bevel_shadow: uniform(#000000)
+            /** how far a sunken panel drops below its ground, in points 0..24 step 0.5 */
+            material_sink: uniform(theme.material_sink)
             pixel: fn() {
                 let p = self.pos * self.rect_size
                 if self.bevel > 0.5 {
@@ -446,7 +448,29 @@ script_mod! {
                 }
                 let sdf = Sdf2d.viewport(p)
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
-                sdf.fill(self.color)
+                // `sunken` flips the sign of the relief, and that is the
+                // whole difference between a panel standing off its ground
+                // and a well cut into it: the same material, lit from the
+                // other side, so the lit and shaded shoulders swap. The
+                // inherited relief carries the raised depth in .z.
+                let elev = mix(self.material_relief.z, -self.material_sink, self.sunken)
+                let relief = vec4(
+                    self.material_relief.x
+                    self.material_relief.y
+                    elev
+                    self.material_relief.w
+                )
+                sdf.fill(vec4(Material.shade(
+                    self.color.rgb
+                    sdf.shape
+                    self.pos
+                    self.material
+                    self.material_light
+                    relief
+                    self.material_finish
+                    self.material_light_ink
+                    self.material_shadow_ink
+                ), self.color.a))
                 return sdf.result
             }
         }
