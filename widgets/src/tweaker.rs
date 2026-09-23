@@ -1497,6 +1497,17 @@ fn private_kb() -> u64 {
     0
 }
 
+/// The panel's width once the splitter has been dragged to `pointer_x`, or
+/// `None` when the drag does not change it.
+///
+/// Dragging past either clamp moves nothing, and a whole-app relayout for a
+/// width that did not change is the most expensive way of doing nothing there
+/// is.
+pub(crate) fn dragged_sidebar_width(current: f64, window_right: f64, pointer_x: f64) -> Option<f64> {
+    let width = (window_right - pointer_x).clamp(180.0, 560.0);
+    ((current - width).abs() >= 0.01).then_some(width)
+}
+
 fn sidebar_width() -> f64 {
     let width = session().lock().unwrap().sidebar_width;
     if width <= 0.0 {
@@ -6280,7 +6291,10 @@ fn chunk_callsite_line(code: &str) -> u32 {
 /// The bare eval-apply: evaluate a splash chunk with the widget's own
 /// `__script_source__` scope and apply it through the ordinary machinery.
 /// No diff, no log — [`apply_splash_chunk`] wraps this for user-visible
-/// edits; the tweaker's own scaffolding (body compression) uses it raw.
+/// edits; the tweaker's own scaffolding uses it raw. Never for the room the
+/// panel takes from the app: that is kept back by the window as it lays the
+/// body out (`View::set_child_reserve`), because an apply to the body is a
+/// rebuild of it and a reload takes whatever it wrote away again.
 fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String> {
     require_tweak_target(widget)?;
     let chunk = chunk.trim();
@@ -8781,17 +8795,35 @@ const EQ_SETTLE: f64 = 0.15;
 /// during a drag rather than waiting for the end of it.
 const TB_QUIET: f64 = 0.06;
 
-/// The panel lies over the app rather than pushing it inward. Compressing
-/// the body cost a jump the width of the panel on every module rebuild --
-/// the rebuild forgot the compression and the next draw put it back -- and
-/// a mix or a theme edit rebuilds on every settle. Kept as a switch, not
-/// deleted: the compression code is still the right shape if the panel
-/// ever moves to its own window and stops needing either.
+/// Whether the panel lies over the app instead of standing beside it.
+///
+/// False: the panel is docked, and the app is laid out in what is left of
+/// the window. The window keeps the band back from its body's walk on every
+/// draw (see [`docked_band_width`]), so nothing is written into the app and a
+/// rebuild of it -- a mix or a theme edit rebuilds on every settle -- has no
+/// compression to forget. That forgetting was the jump the width of the
+/// panel the app used to make on every settle, when the band was a margin
+/// run into the body as script.
+///
+/// Kept as a switch for a panel that floats over the app: the window then
+/// keeps nothing back and the app keeps its whole width underneath.
 const PANEL_FLOATS: bool = false;
 
-/// How far the app body is pushed in while the panel is up.
-fn desired_body_margin(on: bool) -> f64 {
-    if on && !PANEL_FLOATS { sidebar_width() } else { 0.0 }
+/// How much of the window's width the docked panel takes from the app, in
+/// layout points: the whole band, splitter included, while the panel is up
+/// and docked, and nothing otherwise.
+///
+/// Read by the window as it lays its body out, which is BEFORE the panel has
+/// drawn this frame, so it comes off the session rather than off the band the
+/// panel caches as it draws: that one is still last frame's while the body is
+/// being laid out, and a splitter drag would leave the app a frame behind it.
+pub(crate) fn docked_band_width() -> f64 {
+    band_reserve(tweak_is_on(), sidebar_width())
+}
+
+/// [`docked_band_width`] with the session's two answers passed in.
+pub(crate) fn band_reserve(on: bool, sidebar_width: f64) -> f64 {
+    if on && !PANEL_FLOATS { sidebar_width } else { 0.0 }
 }
 
 /// The seed the next surprise mix is drawn from.
@@ -9444,11 +9476,11 @@ pub struct Tweaker {
     /// install per [`EQ_SETTLE`].
     #[rust]
     tb_apply_due: bool,
-    /// What [`body_applies`] and the builder's rebuild count stood at when
-    /// the colour drag now in flight began, so its cost can be said at the
-    /// release. `None` between drags.
+    /// What the builder's rebuild count stood at when the colour or slider
+    /// drag now in flight began, so its cost can be said at the release.
+    /// `None` between drags.
     #[rust]
-    tb_drag_from: Option<(u32, u32)>,
+    tb_drag_from: Option<u32>,
     /// The built theme goes in on the next draw whatever the settle says.
     /// Set by everything that is a press rather than a drag.
     #[rust]
@@ -9805,17 +9837,6 @@ pub struct Tweaker {
     /// This widget's window, learned at draw time.
     #[rust]
     my_window: Option<usize>,
-    /// The margin-right currently applied to the window body.
-    #[rust]
-    applied_margin: f64,
-    /// The body's own margin.right before the panel compressed it.
-    #[rust]
-    saved_body_right: Option<f64>,
-    /// Set when the body has been applied from its own DSL again, which
-    /// throws the panel's runtime margin away. See
-    /// [`body_margin_needs_apply`].
-    #[rust]
-    margin_stale: bool,
     /// The palette the sidebar was built from. See [`fab_palette_stamp`].
     #[rust]
     sidebar_palette: u64,
@@ -9866,44 +9887,6 @@ fn fab_palette_stamp(cx: &mut Cx) -> u64 {
     })
 }
 
-/// Is the body's right margin due to be applied again?
-///
-/// `desired` alone is not enough to answer this. The margin is a RUNTIME
-/// override on a widget the APP declares in its own splash, so any script
-/// re-apply puts the body back to what its own DSL says and the override is
-/// gone -- while `applied_margin` here still says it is on. A theme switch
-/// is exactly that: it goes through `request_style_reload`, `script_mod`
-/// runs again and every widget is re-applied. The app then draws at full
-/// width UNDER the panel, which is the right-hand side of the app
-/// "disappearing"; toggling the panel off and on was the only way back,
-/// because that drives `desired` to 0 and back and so defeats the guard.
-///
-/// The guard itself has to stay: without it this runs an eval against the
-/// body on every frame the panel draws.
-///
-/// The apply generation the palette follows (`palette_gen`) is deliberately
-/// NOT what this hangs off: that moves on every property apply, so scrubbing
-/// a single value would re-evaluate the body's margin on every frame of the
-/// drag. `stale` is set by [`Tweaker::on_after_reload`] instead, which fires
-/// on precisely the applies that wipe the override -- the body is re-applied
-/// by the same pass that re-applies this widget, so the flag and the wipe
-/// cannot come apart.
-fn body_margin_needs_apply(applied: f64, desired: f64, stale: bool) -> bool {
-    stale || (applied - desired).abs() >= 0.5
-}
-
-/// How many times the app's body has been re-evaluated to carry the panel's
-/// margin. Each one is a script parse and a re-apply of the whole body — the
-/// most expensive thing on the panel's frame — so the number is the measure
-/// of whether a gesture is leaking into the app's layout. A colour drag must
-/// leave it exactly where it found it.
-static BODY_APPLIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// See [`BODY_APPLIES`].
-pub fn body_applies() -> u32 {
-    BODY_APPLIES.load(Ordering::Relaxed)
-}
-
 /// Whether something other than this panel's chrome owns the pointer.
 ///
 /// The house rule is that a press on a control locks the mouse to it until
@@ -9919,37 +9902,10 @@ fn pointer_is_elsewhere(cx: &Cx) -> bool {
     cx.sweep_lock_area().is_some() || cx.fingers.is_mouse_held_outside(&[])
 }
 
-/// The body's OWN right margin, as read back off the widget -- or `None`
-/// when what came back is the panel's own compression still standing on it,
-/// in which case the body's own is whatever was remembered before.
-///
-/// Releasing the panel gives the body back this value, so filing the panel's
-/// own width as "what the body had before" would indent the app by a sidebar
-/// for the rest of the session. A re-apply can run either side of the wipe
-/// -- after it, the body is back to its DSL and what is read back really is
-/// its own; before it (a splitter drag, a release), what is read back is
-/// what this panel wrote -- so the two cases are told apart by value rather
-/// than assumed.
-fn body_own_right(read_back: f64, applied: f64) -> Option<f64> {
-    if applied > 0.5 && (read_back - applied).abs() < 0.5 {
-        None
-    } else {
-        Some(read_back)
-    }
-}
-
 impl ScriptHook for Tweaker {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.overlay_list = Some(DrawList2d::script_new(vm));
         self.sidebar_list = Some(DrawList2d::script_new(vm));
-    }
-    /// A reload -- a live edit, a `request_script_reapply`, or the style
-    /// reload a theme switch asks for -- has just re-applied this widget
-    /// from its DSL. The same pass re-applied the window body, so the
-    /// runtime margin the panel had put on it is gone and has to be put back
-    /// even though nothing about the panel's own geometry changed.
-    fn on_after_reload(&mut self, _vm: &mut ScriptVm) {
-        self.margin_stale = true;
     }
 }
 
@@ -9974,73 +9930,6 @@ impl Tweaker {
             None
         } else {
             Some(found)
-        }
-    }
-
-    /// Compress (or release) the app's UI: the body gets a right margin the
-    /// size of the sidebar band, through the ordinary apply machinery so the
-    /// relayout is the real one. Not a user edit — never enters the diff.
-    fn ensure_body_margin(&mut self, cx: &mut Cx, desired: f64) {
-        // A floating panel never touches the body. Not merely "asks for a
-        // margin of zero": the ask itself is a script chunk applied to the
-        // app's own body, and applying one is a rebuild of what it lands on.
-        // Every reload marked the margin stale and re-applied a zero, and
-        // each of those rebuilt the body once more while the panel was up.
-        if PANEL_FLOATS {
-            self.margin_stale = false;
-            return;
-        }
-        if !body_margin_needs_apply(self.applied_margin, desired, self.margin_stale) {
-            return;
-        }
-        let Some(body) = self.find_body(cx) else {
-            return;
-        };
-        // A dotted `margin.right:` apply fails when the body's margin is a
-        // scalar (an f64 has no .right). Read the current legs (scalar
-        // margins fan out to all four) and apply one full Inset; remember
-        // the body's own right so release restores it, not zero.
-        let before = reflect_flat(cx, &body);
-        let leg = |name: &str| {
-            before
-                .iter()
-                .find(|(n, _, _)| n == name)
-                .and_then(|(_, v, _)| v.parse::<f64>().ok())
-        };
-        let scalar = leg("margin");
-        let left = leg("margin.left").or(scalar).unwrap_or(0.0);
-        let top = leg("margin.top").or(scalar).unwrap_or(0.0);
-        let bottom = leg("margin.bottom").or(scalar).unwrap_or(0.0);
-        // What the body itself carries -- unless the panel's own
-        // compression is still standing on it, which is not the body's own
-        // and must never replace what was remembered.
-        if let Some(own) = body_own_right(
-            leg("margin.right").or(scalar).unwrap_or(0.0),
-            self.applied_margin,
-        ) {
-            self.saved_body_right = Some(own);
-        }
-        let right = if desired > 0.5 {
-            desired
-        } else {
-            self.saved_body_right.take().unwrap_or(0.0)
-        };
-        let chunk = format!(
-            "margin: Inset{{left: {left} top: {top} right: {right:.0} bottom: {bottom}}}"
-        );
-        BODY_APPLIES.fetch_add(1, Ordering::Relaxed);
-        match eval_chunk(cx, &body, &chunk) {
-            Ok(()) => {
-                self.applied_margin = desired;
-                self.margin_stale = false;
-                cx.redraw_all();
-            }
-            Err(error) => {
-                log!("TWEAK body compress failed: {error}");
-                // Don't retry every frame.
-                self.applied_margin = desired;
-                self.margin_stale = false;
-            }
         }
     }
 
@@ -17394,24 +17283,22 @@ impl Tweaker {
                 match widget_action.cast::<FabColorPickAction>() {
                     FabColorPickAction::Changed(v) => {
                         if self.tb_drag_from.is_none() {
-                            self.tb_drag_from =
-                                Some((body_applies(), self.tb_builder.rebuilds()));
+                            self.tb_drag_from = Some(self.tb_builder.rebuilds());
                         }
                         self.tb_color_moving(which, packed_of([v.x, v.y, v.z, v.w]));
                         self.redraw_panel(cx);
                     }
                     FabColorPickAction::Ended(v) => {
                         // What the gesture cost, said once where it can be
-                        // read off a log rather than guessed at: the body
-                        // re-evaluations it caused (zero is the only right
-                        // answer — the app's layout has nothing to do with
-                        // a colour) and the module rebuilds the settle
-                        // spent, which are the drag's seconds over the
-                        // settle interval and no more.
-                        if let Some((applies, rebuilds)) = self.tb_drag_from.take() {
+                        // read off a log rather than guessed at: the module
+                        // rebuilds the settle spent, which are the drag's
+                        // seconds over the settle interval and no more. The
+                        // app's own layout costs a colour nothing to follow:
+                        // the panel's room is kept back by the window as it
+                        // lays the body out, not applied to the body.
+                        if let Some(rebuilds) = self.tb_drag_from.take() {
                             log!(
-                                "TWEAK colour drag cost: body_applies={} module_rebuilds={}",
-                                body_applies() - applies,
+                                "TWEAK colour drag cost: module_rebuilds={}",
                                 self.tb_builder.rebuilds() - rebuilds
                             );
                         }
@@ -17529,8 +17416,7 @@ impl Tweaker {
                         // `tb_row_moved`, and `eq_weight_moved` for why.
                         FabSliderAction::Changed(shown) => {
                             if self.tb_drag_from.is_none() {
-                                self.tb_drag_from =
-                                    Some((body_applies(), self.tb_builder.rebuilds()));
+                                self.tb_drag_from = Some(self.tb_builder.rebuilds());
                             }
                             self.tb_row_moved(which, shown);
                             self.redraw_panel(cx);
@@ -17541,11 +17427,10 @@ impl Tweaker {
                             // What the gesture cost, on the same terms a
                             // colour drag says it in: see the release of a
                             // square's popover below. A slider pays the same
-                            // two things and used to pay more of the second.
-                            if let Some((applies, rebuilds)) = self.tb_drag_from.take() {
+                            // rebuilds and used to pay more of them.
+                            if let Some(rebuilds) = self.tb_drag_from.take() {
                                 log!(
-                                    "TWEAK slider drag cost: body_applies={} module_rebuilds={}",
-                                    body_applies() - applies,
+                                    "TWEAK slider drag cost: module_rebuilds={}",
                                     self.tb_builder.rebuilds() - rebuilds
                                 );
                             }
@@ -21504,13 +21389,6 @@ impl Widget for Tweaker {
             // one place: every reload the panel asks for lands here, and so
             // does a live edit arriving from the file watcher.
             self.tb_module_rebuilt();
-            // The body's compression does not survive the rebuild. Put it
-            // back here, before the first draw, or that draw lays the app
-            // out at full width and the one after takes it back -- a jump
-            // the size of the panel on every settle.
-            if tweak_is_on() {
-                self.ensure_body_margin(cx, desired_body_margin(true));
-            }
         }
         // The guard must drop before undo/redo take the session lock again
         // (an `if let` scrutinee's temporary lives for the whole body).
@@ -21692,14 +21570,15 @@ impl Widget for Tweaker {
             }
             Hit::FingerMove(fe) if self.splitter_drag => {
                 let window_right = self.band.pos.x + self.band.size.x;
-                let width = (window_right - fe.abs.x).clamp(180.0, 560.0);
                 let mut session = session().lock().unwrap();
-                // Dragging past either clamp moves nothing, and a whole-app
-                // relayout for a width that did not change is the most
-                // expensive way of doing nothing there is.
-                if (session.sidebar_width - width).abs() >= 0.01 {
+                if let Some(width) =
+                    dragged_sidebar_width(session.sidebar_width, window_right, fe.abs.x)
+                {
                     session.sidebar_width = width;
                     drop(session);
+                    // A relayout and nothing more: the window reads the new
+                    // width as it lays its body out on the frame this asks
+                    // for. Nothing is applied to the app.
                     cx.redraw_all();
                 }
                 cx.set_cursor(MouseCursor::EwResize);
@@ -22272,11 +22151,6 @@ impl Widget for Tweaker {
         }
         let window_id = cx.get_current_window_id().map(|id| id.id());
         self.my_window = window_id;
-        // Compress the app's UI while the sidebar is up; release it when the
-        // mode goes off (this draw still runs once after the toggle because
-        // set_tweak_on redraws everything).
-        let desired = desired_body_margin(on);
-        self.ensure_body_margin(cx, desired);
         self.edit_settle(cx);
         if !on {
             // Tear the surface down for real: both overlay lists are
@@ -23584,54 +23458,33 @@ mod tests {
         }
     }
 
-    /// A theme switch asks for a style reload, `script_mod` runs again and
-    /// the window body is applied from ITS OWN splash -- which throws away
-    /// the runtime margin the panel had put on it, while the panel still
-    /// believes it is applied. With the guard reading `desired` alone, that
-    /// same `desired` early-returns, the margin is never put back and the
-    /// app draws full width under the panel: the right-hand side of the app
-    /// "disappears". Pressing the panel off and on was the only way back,
-    /// because that drives `desired` to 0 and back.
+    /// The room the window keeps back for the panel is the panel's whole
+    /// band while it is up and docked, and nothing at all otherwise: an app
+    /// whose panel is hidden, or floats over it, is laid out at its full
+    /// width exactly as an app without a panel is.
     #[test]
-    fn a_style_reload_makes_the_body_margin_due_again() {
-        let band = 300.0;
-        // Settled: applied and wanted agree, so nothing runs -- the guard is
-        // there so this does not evaluate a chunk on every frame.
-        assert!(!body_margin_needs_apply(band, band, false));
-        // The reload has wiped the override. The SAME `desired` must run.
-        assert!(body_margin_needs_apply(band, band, true));
-        // ...and once it has run, it settles again.
-        assert!(!body_margin_needs_apply(band, band, false));
-        // The old escape hatch still works, and still costs two applies.
-        assert!(body_margin_needs_apply(band, 0.0, false));
-        assert!(body_margin_needs_apply(0.0, band, false));
-        // A splitter drag under half a pixel is not worth an eval; over it is.
-        assert!(!body_margin_needs_apply(band, band + 0.4, false));
-        assert!(body_margin_needs_apply(band, band + 0.6, false));
-        // A reload while the panel is OFF is answered by re-applying zero,
-        // not by leaving the app compressed.
-        assert!(body_margin_needs_apply(0.0, 0.0, true));
+    fn the_band_is_kept_back_only_while_the_panel_is_up_and_docked() {
+        assert_eq!(band_reserve(false, 280.0), 0.0, "a hidden panel keeps nothing back");
+        assert_eq!(band_reserve(false, 560.0), 0.0);
+        if PANEL_FLOATS {
+            assert_eq!(band_reserve(true, 280.0), 0.0, "a floating panel keeps nothing back");
+        } else {
+            assert_eq!(band_reserve(true, 280.0), 280.0);
+            assert_eq!(band_reserve(true, 412.5), 412.5, "the splitter's width, to the fraction");
+        }
     }
 
-    /// Releasing the panel hands the body back its OWN right margin, so what
-    /// is read off the body must never be the panel's own compression
-    /// misfiled as the body's. A re-apply can run either side of the wipe,
-    /// and getting this wrong leaves the app indented by a sidebar for the
-    /// rest of the session -- with the panel closed.
+    /// The splitter follows the pointer inside its clamps, and a move that
+    /// does not change the width asks for nothing -- not even the relayout.
     #[test]
-    fn the_bodys_own_margin_is_never_the_panels_own_compression() {
-        // Nothing applied yet, so whatever the body carries is its own.
-        assert_eq!(body_own_right(0.0, 0.0), Some(0.0));
-        assert_eq!(body_own_right(12.0, 0.0), Some(12.0));
-        // The override is still standing on the body: NOT the body's own,
-        // so the remembered value has to survive this read.
-        assert_eq!(body_own_right(300.0, 300.0), None);
-        assert_eq!(body_own_right(300.4, 300.0), None);
-        // A reload has put the body back to its own splash, so this is its
-        // own again -- and re-reading it here is how a body whose DSL margin
-        // changed across the reload is picked up.
-        assert_eq!(body_own_right(0.0, 300.0), Some(0.0));
-        assert_eq!(body_own_right(12.0, 300.0), Some(12.0));
+    fn a_splitter_move_changes_the_width_only_when_it_moves_it() {
+        // The band's right edge is the window's; the width is what lies
+        // between it and the pointer.
+        assert_eq!(dragged_sidebar_width(280.0, 1400.0, 1000.0), Some(400.0));
+        assert_eq!(dragged_sidebar_width(400.0, 1400.0, 1000.0), None, "the same width again");
+        assert_eq!(dragged_sidebar_width(280.0, 1400.0, 1300.0), Some(180.0), "the narrow clamp");
+        assert_eq!(dragged_sidebar_width(180.0, 1400.0, 1390.0), None, "past the clamp moves nothing");
+        assert_eq!(dragged_sidebar_width(280.0, 1400.0, 100.0), Some(560.0), "the wide clamp");
     }
 
     /// Deleting a saved theme takes two presses, the same way saving over

@@ -900,6 +900,127 @@ mod tests {
         assert_eq!(shown(&cx, &app), expected(0), "the faces did not all come back");
     }
 
+    /// The row inside a stand-in for the window's view, laid out beside the
+    /// design panel's band: the caption, the app's body with the row in it,
+    /// the panel. What it was built from comes back too, so it can be
+    /// applied again the way a reload applies it.
+    fn docked_fixture() -> (Cx, App, DrawPass, DrawList2d, ScriptValue) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let (ui, value) = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    caption := View{width: Fill height: 30}
+                    body := View{
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 0.
+                        margin: 0.
+                        toolbar := mod.storybook.CatalogueToolbar{}
+                    }
+                    tweaker := View{width: 0 height: 0}
+                }
+            });
+            assert!(vm.take_errors().is_empty());
+            (WidgetRef::script_from_value(vm, value), value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let list = DrawList2d::new(&mut cx);
+        (cx, App { ui, current: None }, pass, list, value)
+    }
+
+    /// Keep `band` back from the body, the way the window does before every
+    /// draw, or a margin that wide written into the body the way the panel
+    /// used to.
+    fn keep_back(app: &App, band: f64) {
+        let mut root = app.ui.borrow_mut::<View>().expect("the root is a View");
+        root.set_child_reserve(live_id!(body), (band > 0.0).then(|| Inset { right: band, ..Default::default() }));
+    }
+
+    fn write_margin(cx: &Cx, app: &App, band: f64) {
+        let body = app.ui.widget(cx, ids!(body));
+        body.borrow_mut::<View>().expect("the body is a View").walk.margin.right = band;
+    }
+
+    fn body_width(cx: &Cx, app: &App) -> f64 {
+        app.ui.widget(cx, ids!(body)).area().rect(cx).size.x
+    }
+
+    fn reapply(cx: &mut Cx, app: &App, value: ScriptValue, apply: &Apply) {
+        let mut ui = app.ui.clone();
+        cx.with_vm(|vm| {
+            ui.script_apply(vm, apply, &mut Scope::empty(), value);
+            assert!(vm.take_errors().is_empty(), "the reload did not apply cleanly");
+        });
+    }
+
+    /// The jitter the operator saw, pinned on the row he saw it on. The
+    /// equalizer installs a theme several times a second while a slider
+    /// moves, and each install re-applies the app from its markup. With the
+    /// panel's width written into the app's body as a margin, the reload
+    /// took it away, the next draw laid the row out at the whole window's
+    /// width and gave its title back, and the draw after that took it away
+    /// again. With the width kept back by the window, the draw after a
+    /// reload is the draw before it.
+    #[test]
+    fn a_reload_under_the_docked_panel_leaves_the_top_bar_as_it_was() {
+        // A window this wide gives the row fewer rungs than the room beside
+        // the panel does, so a frame at the wrong one of the two widths shows.
+        const WINDOW: f64 = 1000.0;
+        const BAND: f64 = 280.0;
+        let whole_width = {
+            let (mut cx, mut app, pass, mut list, _) = docked_fixture();
+            settle(&mut cx, &mut app, &pass, &mut list, WINDOW);
+            assert_eq!(body_width(&cx, &app), WINDOW);
+            rung(&cx, &app)
+        };
+        for apply in [Apply::ScriptReapply, Apply::Reload, Apply::Rebake] {
+            // Then: the band written into the body. The first draw after the
+            // reload is at the whole width and the row has given something
+            // back -- the frame that flickered.
+            let (mut cx, mut app, pass, mut list, value) = docked_fixture();
+            write_margin(&cx, &app, BAND);
+            settle(&mut cx, &mut app, &pass, &mut list, WINDOW);
+            assert_eq!(body_width(&cx, &app), WINDOW - BAND);
+            let settled = shown(&cx, &app);
+            assert!(
+                rung(&cx, &app) > whole_width,
+                "the band has to cost the row a rung, or nothing here is proved"
+            );
+            reapply(&mut cx, &app, value, &apply);
+            draw(&mut cx, &app, &pass, &mut list, WINDOW);
+            assert_eq!(body_width(&cx, &app), WINDOW, "{apply:?}: the written margin survived the reload");
+            assert_ne!(shown(&cx, &app), settled, "{apply:?}: the full-width frame showed nothing different");
+
+            // Now: the band kept back by the window, set before every draw
+            // as the window sets it. The reload changes nothing on screen.
+            let (mut cx, mut app, pass, mut list, value) = docked_fixture();
+            keep_back(&app, BAND);
+            settle(&mut cx, &mut app, &pass, &mut list, WINDOW);
+            assert_eq!(body_width(&cx, &app), WINDOW - BAND);
+            let settled = shown(&cx, &app);
+            assert_eq!(settled, expected(rung(&cx, &app)));
+            reapply(&mut cx, &app, value, &apply);
+            keep_back(&app, BAND);
+            draw(&mut cx, &app, &pass, &mut list, WINDOW);
+            assert_eq!(body_width(&cx, &app), WINDOW - BAND, "{apply:?}: the reload frame was at full width");
+            assert_eq!(shown(&cx, &app), settled, "{apply:?}: the top bar moved on the reload frame");
+            // And stays put on the draws after it.
+            for _ in 0..3 {
+                keep_back(&app, BAND);
+                draw(&mut cx, &app, &pass, &mut list, WINDOW);
+                assert_eq!(shown(&cx, &app), settled, "{apply:?}: the top bar moved after the reload");
+            }
+        }
+    }
+
     /// The reset is one command with two faces, and a press on either is
     /// the same press. Catches the mark being left out of what the app
     /// listens to, which is a button that looks live and does nothing.

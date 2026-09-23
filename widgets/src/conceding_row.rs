@@ -48,7 +48,7 @@ struct Rung {
     wear: Vec<(LiveId, ScriptObjectRef, WidthOverride)>,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct ConcedingRow {
     #[deref]
     view: View,
@@ -74,6 +74,29 @@ pub struct ConcedingRow {
     /// depends on the face the child is wearing at the time.
     #[rust]
     base_over: Vec<(LiveId, WidthOverride)>,
+    /// The children were applied again from their markup, so the faces
+    /// they wear may no longer be the ones the level calls for. See the
+    /// `ScriptHook` impl.
+    #[rust]
+    rewear: bool,
+}
+
+impl ScriptHook for ConcedingRow {
+    /// A reload re-applies every child from its markup, and a live edit's
+    /// `Reload` puts a child's authored text back while leaving a
+    /// visibility its markup does not state where a rung put it -- so after
+    /// one the row can stand in a mix of faces that belongs to no level. The
+    /// level itself has not moved, so nothing would put the faces right
+    /// again: the next draw wears the level once more whatever it is.
+    ///
+    /// It used to be put right by accident: the app was laid out at full
+    /// width on the frame after every reload, which moved the level and so
+    /// re-wore it. That frame was the flicker, and it is gone.
+    fn on_after_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_reload() {
+            self.rewear = true;
+        }
+    }
 }
 
 impl ConcedingRow {
@@ -291,7 +314,8 @@ impl Widget for ConcedingRow {
             self.collect(cx.cx);
         }
         let level = self.fit(cx, walk);
-        if level != self.applied {
+        let rewear = std::mem::take(&mut self.rewear);
+        if rewear || level != self.applied {
             self.wear(cx.cx, level);
             self.applied = level;
         }
