@@ -283,7 +283,13 @@ script_mod! {
             if depth <= 0.0 {
                 return vec4(0.0);
             }
-            let outside = step(0.0, d);
+            // A soft gate, not `step(0.0, d)`. The caller composites its fill
+            // over this with an antialiased edge about a pixel wide, so the
+            // shadow must reach that far inside the shape too; a hard gate
+            // leaves bare ground under the edge pixels, and the fill blends
+            // with it into a one-pixel light line around every shadowed edge.
+            let px = length(vec2(dFdx(d), dFdy(d)));
+            let outside = smoothstep(-3.0 * max(px, 0.001), 0.0, d);
             let rel = clamp(depth / max(raise, 0.001), 0.0, 1.0);
             let g = grad_of(d);
             let off = shadow_dir_of(light) * depth * 1.5;
