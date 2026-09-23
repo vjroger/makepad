@@ -79,6 +79,20 @@ pub struct ConcedingRow {
     /// `ScriptHook` impl.
     #[rust]
     rewear: bool,
+    /// Every width asked of a child since the row was made, `None` answers
+    /// included. A running count rather than a per-frame one, so that
+    /// keeping it is one add and a caller reads a frame's cost as the
+    /// difference across that frame.
+    #[rust]
+    measures: u64,
+    /// The children that could not say how wide they are when the row last
+    /// priced itself, and never give way.
+    #[rust]
+    unpriced: Vec<LiveId>,
+    /// What each of those drew at, margin included, read right after the row
+    /// drew and not before. See [`ConcedingRow::span`].
+    #[rust]
+    drawn: Vec<(LiveId, f64)>,
 }
 
 impl ScriptHook for ConcedingRow {
@@ -100,6 +114,17 @@ impl ScriptHook for ConcedingRow {
 }
 
 impl ConcedingRow {
+    /// How many rungs are in force: the level the row last drew at.
+    pub fn level(&self) -> usize {
+        self.applied
+    }
+
+    /// How many widths the row has asked of its children, in all. What a
+    /// draw costs is the difference across it.
+    pub fn measures(&self) -> u64 {
+        self.measures
+    }
+
     /// Read the ladder off the children: who gives way, in what order, and what
     /// they wear when they do.
     ///
@@ -189,6 +214,14 @@ impl ConcedingRow {
     /// gets its rungs priced exactly. Before the first draw that width is zero,
     /// so a cold row reads narrower than it is and settles on the draw after --
     /// once, not per rung.
+    ///
+    /// That width is the one kept in `drawn`, read after the row drew. It
+    /// cannot be read off the child's area here: pricing happens part way
+    /// into a redraw, after the list the child draws into has been begun
+    /// again, and every area in that list is a frame stale until it is drawn
+    /// again -- a stale area answers a zero rect. Read here, the storybook's
+    /// theme picker was worth nothing on every frame, and the row gave its
+    /// title back into an overflow of the picker's whole width.
     fn span(&mut self, cx: &mut Cx2d, level: usize) -> Option<f64> {
         let mut total = 0.0;
         let mut shown = 0usize;
@@ -213,10 +246,16 @@ impl ConcedingRow {
                 continue;
             }
             let ranked = over.is_some();
+            self.measures += 1;
             let w = match child.measure_width(cx, over.as_ref()) {
                 Some(w) => w,
                 None if ranked => return None,
-                None => child.area().rect(cx.cx).size.x,
+                None => {
+                    if !self.unpriced.contains(&id) {
+                        self.unpriced.push(id);
+                    }
+                    self.drawn.iter().find(|(d, _)| *d == id).map_or(0.0, |(_, w)| *w)
+                }
             };
             if w > 0.0 {
                 shown += 1;
@@ -244,6 +283,7 @@ impl ConcedingRow {
             return self.ladder.level();
         }
 
+        self.unpriced.clear();
         let mut spans: Vec<f64> = Vec::with_capacity(self.rungs.len() + 1);
         for level in 0..=self.rungs.len() {
             let Some(s) = self.span(cx, level) else { break };
@@ -268,6 +308,33 @@ impl ConcedingRow {
         let at = self.ladder.level().min(spans.len() - 1);
         self.ladder.measured(room - spans[at]);
         self.ladder.level()
+    }
+
+    /// Keep what each child that cannot price itself has just drawn at, for
+    /// the next pricing to count it at.
+    ///
+    /// Read now because now is the one moment its area is current: the row
+    /// has just drawn it. Only those children, and only a rect each, so an
+    /// ordinary frame asks no child for anything more than it did. A child
+    /// that drew nothing -- a draw that stopped part way -- keeps the width
+    /// it had rather than being counted as taking no room.
+    fn keep_drawn_widths(&mut self, cx: &mut Cx) {
+        for i in 0..self.unpriced.len() {
+            let id = self.unpriced[i];
+            let Some((_, child)) = self.view.children.iter().find(|(c, _)| *c == id) else {
+                continue;
+            };
+            let child = child.clone();
+            let width = child.area().rect(cx).size.x;
+            if !(width > 0.0) {
+                continue;
+            }
+            let outer = width + child.walk(cx).margin.width();
+            match self.drawn.iter_mut().find(|(d, _)| *d == id) {
+                Some((_, w)) => *w = outer,
+                None => self.drawn.push((id, outer)),
+            }
+        }
     }
 
     /// Put every child in the face its level calls for.
@@ -321,10 +388,245 @@ impl Widget for ConcedingRow {
         }
         // One draw, at the level already settled. The deciding happened before
         // the drawing, so there is nothing here to ask for a redraw about.
-        self.view.draw_walk(cx, scope, walk)
+        let step = self.view.draw_walk(cx, scope, walk);
+        self.keep_drawn_widths(cx.cx);
+        step
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A row on its own, drawn the way a window draws it but with no platform
+    //! window under it: a test that makes its own graphics device takes the
+    //! rest of the suite down with it.
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    struct Rig {
+        cx: Cx,
+        root: WidgetRef,
+        pass: DrawPass,
+        list: DrawList2d,
+        /// What the row is built from, so that a rebuild builds it again.
+        source: fn(&mut ScriptVm) -> ScriptValue,
+    }
+
+    fn rig(source: fn(&mut ScriptVm) -> ScriptValue) -> Rig {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+        let root = cx.with_vm(|vm| {
+            let value = source(vm);
+            assert!(vm.take_errors().is_empty(), "the row did not build");
+            WidgetRef::script_from_value(vm, value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let list = DrawList2d::new(&mut cx);
+        Rig { cx, root, pass, list, source }
+    }
+
+    /// A title that goes first, a count its app leaves empty, and words that
+    /// stay whatever happens.
+    fn with_an_empty_count(vm: &mut ScriptVm) -> ScriptValue {
+        crate::script_eval!(vm, {
+            use mod.prelude.widgets.*
+            use mod.widgets.*
+            View{
+                width: Fill
+                height: Fit
+                flow: Down
+                row := ConcedingRow{
+                    spacing: 8.
+                    title := Label{
+                        text: "A title that can go"
+                        width: 150.
+                        give_up := 1
+                        tight: { visible: false }
+                    }
+                    count := Label{ text: "" }
+                    words := Label{ text: "Words that stay where they are" }
+                }
+            }
+        })
+    }
+
+    /// The same title, beside a child that cannot say how wide it is -- a Fit
+    /// view, whose width is its children's business -- and a stated end
+    /// marker, whose drawn rect says where the row really ends.
+    fn with_a_box(vm: &mut ScriptVm) -> ScriptValue {
+        crate::script_eval!(vm, {
+            use mod.prelude.widgets.*
+            use mod.widgets.*
+            View{
+                width: Fill
+                height: Fit
+                flow: Down
+                row := ConcedingRow{
+                    spacing: 8.
+                    title := Label{
+                        text: "A title that can go"
+                        width: 150.
+                        give_up := 1
+                        tight: { visible: false }
+                    }
+                    boxed := View{
+                        width: Fit
+                        height: Fit
+                        inner := View{ width: 60. height: 10. }
+                    }
+                    end := View{ width: 20. height: 10. }
+                }
+            }
+        })
+    }
+
+    /// One frame at `width`, as a window draws one: the whole list again.
+    fn frame(rig: &mut Rig, width: f64) {
+        let size = dvec2(width, 100.0);
+        let cx = &mut rig.cx;
+        rig.pass.set_size(cx, size);
+        cx.redraw_all();
+        let event = std::mem::take(&mut cx.new_draw_event);
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&rig.pass, Some(1.0));
+        rig.list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(size, Layout::flow_down());
+        rig.root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        rig.list.end(&mut cx2d);
+        cx2d.end_pass(&rig.pass);
+    }
+
+    fn row(rig: &Rig) -> WidgetRef {
+        rig.root.widget(&rig.cx, ids!(row))
+    }
+
+    fn level(rig: &Rig) -> usize {
+        row(rig).borrow::<ConcedingRow>().expect("the row is a ConcedingRow").level()
+    }
+
+    fn measures(rig: &Rig) -> u64 {
+        row(rig).borrow::<ConcedingRow>().expect("the row is a ConcedingRow").measures()
+    }
+
+    /// Draw a few frames at `width` and answer the level the row ends on.
+    /// A cold row may take two: a child that cannot price itself has no
+    /// drawn width until it has drawn once.
+    fn settle(rig: &mut Rig, width: f64) -> usize {
+        for _ in 0..3 {
+            frame(rig, width);
+        }
+        level(rig)
+    }
+
+    /// A width at which the row has only just given its title up: a point
+    /// narrower than the narrowest width at which it has the title back. A
+    /// row this close to the edge gives the title back for any child that
+    /// prices itself a point or two narrower than it draws.
+    fn edge(rig: &mut Rig) -> f64 {
+        let mut width = 300.0;
+        while settle(rig, width) > 0 {
+            width += 1.0;
+            assert!(width < 1200.0, "the row never had its title back");
+        }
+        let edge = width - 1.0;
+        assert_eq!(settle(rig, edge), 1, "a point narrower did not take the title again");
+        edge
+    }
+
+    /// Build the row again from its template in a module run, and apply it
+    /// the way a style reload does -- the landing of every theme install.
+    fn rebuild(rig: &mut Rig) {
+        let source = rig.source;
+        let mut root = rig.root.clone();
+        rig.cx.with_vm(|vm| {
+            let value = vm.with_reload(|vm| {
+                crate::script_mod(vm);
+                source(vm)
+            });
+            root.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), value);
+            assert!(vm.take_errors().is_empty(), "the rebuild did not apply cleanly");
+        });
+        let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+    }
+
+    /// A row that had settled draws that same level on its first draw after
+    /// its children are rebuilt from their template, and on every draw after.
+    ///
+    /// The rebuild on its own never moved it. What moved it is what an app
+    /// does on the event that follows every rebuild: it writes its own state
+    /// back into the rebuilt children, and the storybook writes an empty
+    /// count back into a label that had drawn itself a space. An empty label
+    /// priced at its padding alone is a label the row believes is a space
+    /// narrower than it draws, so for one frame a row on its edge found room
+    /// for its title -- the flash on every theme install.
+    #[test]
+    fn a_rebuilt_row_draws_the_level_it_had_settled_on() {
+        let mut rig = rig(with_an_empty_count);
+        let at = edge(&mut rig);
+        for write_back in [false, true] {
+            rebuild(&mut rig);
+            if write_back {
+                let count = rig.root.widget(&rig.cx, ids!(count));
+                count.set_text(&mut rig.cx, "");
+            }
+            frame(&mut rig, at);
+            assert_eq!(level(&rig), 1, "the first draw after the rebuild (write back {write_back}) moved the row");
+            assert!(
+                !rig.root.widget(&rig.cx, ids!(title)).visible(),
+                "the first draw after the rebuild (write back {write_back}) had the title"
+            );
+            for _ in 0..3 {
+                frame(&mut rig, at);
+                assert_eq!(level(&rig), 1, "the row moved after the rebuild (write back {write_back})");
+            }
+        }
+    }
+
+    /// A child that cannot price itself is counted at the width it drew at.
+    ///
+    /// It was read off its area while the row priced, which is part way into
+    /// a redraw: the list has been begun again, every area in it is a frame
+    /// stale, and a stale area answers nothing. The child took no room as far
+    /// as the row could tell, so the row gave its title back into an overflow
+    /// of that child's whole width. Caught off the stated end marker, whose
+    /// drawn rect is where the row really ends.
+    #[test]
+    fn a_child_that_cannot_price_itself_is_counted_at_the_width_it_drew() {
+        let mut rig = rig(with_a_box);
+        let mut width = 250.0;
+        while width < 700.0 {
+            if settle(&mut rig, width) == 0 {
+                let row = row(&rig).area().rect(&rig.cx);
+                let end = rig.root.widget(&rig.cx, ids!(end)).area().rect(&rig.cx);
+                assert!(
+                    end.pos.x + end.size.x <= row.pos.x + row.size.x + 0.5,
+                    "at {width} the row kept its title and ran {} past its own end",
+                    end.pos.x + end.size.x - (row.pos.x + row.size.x)
+                );
+            }
+            width += 2.0;
+        }
+    }
+
+    /// What an ordinary frame costs the row: one width asked of each child
+    /// at each level, less the children a level hides -- here three at level
+    /// nought and two at level one, the title being gone. Pinned, so that
+    /// remembering what a child drew at stays a read of its rect and never
+    /// becomes another round of asking.
+    #[test]
+    fn an_ordinary_frame_asks_each_child_once_per_level() {
+        let mut rig = rig(with_a_box);
+        for width in [900.0, 260.0] {
+            settle(&mut rig, width);
+            let before = measures(&rig);
+            frame(&mut rig, width);
+            assert_eq!(measures(&rig) - before, 5, "a frame at {width} asked more than it did");
+        }
     }
 }
