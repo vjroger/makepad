@@ -11,7 +11,9 @@
 //! * `mod.widgets.FabValueInput` — the drag-numeric field. Press arms, 3 px
 //!   engages a drag (one step per pixel, Shift fine, Ctrl snaps, clamping
 //!   shifts the anchor), a plain click opens text entry, the end zones step.
-//!   `enabled: false` dims it and makes it inert.
+//!   `enabled: false` dims it and makes it inert. `track: true` turns the
+//!   row into a slider instead: the press lands the value under the pointer
+//!   and the drag keeps it there, the name resets, the number types.
 //! * `mod.widgets.FabSlider` — a horizontal track with the name on its
 //!   left and the number on its right. The press lands the thumb where the
 //!   pointer is and the drag keeps it there; a click on the name takes the
@@ -29,7 +31,8 @@
 //! * `mod.widgets.FabColorWheel` — hue ring around a saturation/value
 //!   square, pointer-captured drags, arrow-key nudges.
 //! * `mod.widgets.FabColorPick` — a swatch that opens a self-managed
-//!   popover (wheel + RGB rows + hex entry) anchored at the swatch;
+//!   popover (wheel + R G B A and H S V track rows + hex entry) anchored at
+//!   the swatch; one colour seen four ways, each following the others;
 //!   outside-click commits, Escape reverts. Publishes `Changed` live and
 //!   `Ended` on commit, plus `Opened`/`Closed` for hosts that need to know.
 //! * `mod.widgets.FabPaletteCarousel` — every palette on offer in one row
@@ -202,6 +205,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
             disabled: 0.0
             fill: -1.0
             flat: 0.0
+            stepper: 1.0
+            fill_pad_l: 0.0
+            fill_pad_r: 0.0
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -219,13 +225,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 border = vec4(border.xyz, border.w * reveal * dim)
                 sdf.stroke(border, 1.0)
                 if self.fill >= 0.0 {
-                    sdf.box(1.0, 1.0, max(2.0, (w - 2.0) * self.fill), h - 2.0, fab.radius)
+                    let x0 = 1.0 + self.fill_pad_l
+                    let x1 = max(x0 + 2.0, w - 1.0 - self.fill_pad_r)
+                    sdf.box(x0, 1.0, max(2.0, (x1 - x0) * self.fill), h - 2.0, fab.radius)
                     sdf.fill(vec4(fab.color_num_fill.xyz, 0.85))
                 }
                 // Hover arrows in the end zones; they retire while the field
-                // is a text editor (focus carries the editing state) and
-                // while it is off.
-                if self.hover * (1.0 - self.disabled) > 0.01 {
+                // is a text editor (focus carries the editing state), while
+                // it is off, and on a row that is a track — there the ends
+                // are the ends of the track, not two little buttons.
+                if self.hover * (1.0 - self.disabled) * self.stepper > 0.01 {
                     if self.focus < 0.5 {
                         let cy = h * 0.5
                         let a = vec4(fab.color_num_arrow.xyz, self.hover)
@@ -266,6 +275,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             wrap: false
             show_fill: false
             quantize: false
+            track: false
 
             draw_text +: {
                 ink_centered: true
@@ -993,10 +1003,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     width: 228
                     height: 228
                 }
-                num_r := mod.widgets.FabValueInput{ label: "R" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true }
-                num_g := mod.widgets.FabValueInput{ label: "G" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true }
-                num_b := mod.widgets.FabValueInput{ label: "B" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true }
-                num_a := mod.widgets.FabValueInput{ label: "A" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true }
+                // Seven tracks, not seven scrubs: a filled row reads as a
+                // slider and is one — press it where the value should be.
+                num_r := mod.widgets.FabValueInput{ label: "R" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                num_g := mod.widgets.FabValueInput{ label: "G" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                num_b := mod.widgets.FabValueInput{ label: "B" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                num_a := mod.widgets.FabValueInput{ label: "A" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                // The same colour said the other way. Hue is a clamped
+                // 0..360 here and not a cyclic one: a track carries a fill,
+                // a fill has two ends, and a row that jumped from 360 back
+                // to 0 under the hand would fight what the eye is reading.
+                // The ring above is where hue comes round.
+                num_h := mod.widgets.FabValueInput{ label: "H" min: 0.0 max: 360.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                num_s := mod.widgets.FabValueInput{ label: "S" min: 0.0 max: 100.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                num_v := mod.widgets.FabValueInput{ label: "V" min: 0.0 max: 100.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
                 hex_row := View{
                     width: Fill
                     height: fab.row_height
@@ -1241,6 +1261,19 @@ pub struct DrawDragNum {
     /// Hide the idle chip; hover/down/focus still reveal the editor surface.
     #[live]
     flat: f32,
+    /// Draw the ‹ › stepper chevrons on hover. Off on a row that is a
+    /// track: their end zones are the track's ends there.
+    #[live(1.0)]
+    stepper: f32,
+    /// How far the fill is held off each end of the row, in points. Nothing
+    /// by default; a track row holds it clear of the name and the number, so
+    /// that the two ends of the fill are the two ends of the range and a
+    /// press on either lands there. In points rather than a fraction because
+    /// the columns are measured before the row knows how wide it is.
+    #[live]
+    fill_pad_l: f32,
+    #[live]
+    fill_pad_r: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1408,6 +1441,20 @@ pub fn reanchor(current_value: f64, x: f64) -> DragAnchor {
     }
 }
 
+/// The value a press at `x` (from the row's left edge) names on a row that
+/// is a TRACK, whose fill runs from `lo` to `hi` in the same frame.
+///
+/// The arithmetic is the fill's, read backwards, and that is the whole point
+/// of it: the two ends of the fill are the two ends of the range, so a hand
+/// reaching for a zero or a maximum gets one by pressing where it can see the
+/// fill ends. A mapping over the row's whole width would put both of those a
+/// name's width and a number's width out of reach.
+pub fn track_value_at(p: &DragParams, x: f64, lo: f64, hi: f64) -> f64 {
+    let span = (hi - lo).max(1.0);
+    let t = ((x - lo) / span).clamp(0.0, 1.0);
+    p.min + t * p.range()
+}
+
 /// The three zones of the row: the stepping arrows at the ends and the
 /// drag/edit surface between them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1498,6 +1545,24 @@ pub struct FabValueInput {
     show_fill: bool,
     #[live]
     quantize: bool,
+    /// The row is a TRACK, not a scrub.
+    ///
+    /// A filled field reads as a slider, and a hand treats it as one: it
+    /// presses where it wants the value and expects the value to be there.
+    /// The scrub cannot answer that — it arms on the press, waits three
+    /// pixels, then moves the number by a fraction of the range per pixel
+    /// with the pointer pinned out of sight, so a press changes nothing and
+    /// a short pull inside a 228-point popover moves a 0..255 channel by
+    /// five. Switched on, the press lands the value under the pointer at
+    /// once and the drag keeps it there, the way the panel's own sliders
+    /// behave; the name still resets, the number still types, and the wheel
+    /// and the arrows still step.
+    ///
+    /// Off by default: the fields the property panel scrubs are unbounded
+    /// or nearly so, and a press that jumped them to wherever the pointer
+    /// happened to be would be a disaster there.
+    #[live]
+    track: bool,
     /// Off: the value shows dimmed and nothing answers — no press, scrub,
     /// wheel step or click into text entry. A host switches a field off
     /// when what it drives is not there to be driven.
@@ -1506,6 +1571,21 @@ pub struct FabValueInput {
 
     #[rust]
     drag: Option<DragState>,
+    /// A track row's press is live: the value follows the pointer until the
+    /// release. Kept apart from `drag` so the scrub's own state machine —
+    /// its threshold, its anchor, its pinned pointer — stays exactly as it
+    /// is for the fields that still scrub.
+    #[rust]
+    tracking: bool,
+    /// What a track row held when the press landed, for a cancel to put back.
+    #[rust]
+    track_press_value: f64,
+    /// A track row's outer two columns, in points, as the row last drew
+    /// them: the name on the left, the number on the right. Measured at
+    /// draw time so the zones a press is read against are the columns the
+    /// eye is looking at.
+    #[rust]
+    track_columns: (f64, f64),
     /// Pointer over the field: the ‹ › stepper chevrons reveal.
     #[rust]
     hovered: bool,
@@ -1562,6 +1642,29 @@ impl FabValueInput {
         }
     }
 
+    /// How many characters the widest number this row can print takes.
+    ///
+    /// The readout's column is measured from this and not from the number
+    /// standing there now: a boundary that moved as "9" became "255" would
+    /// put the end of the track somewhere different on every frame, and a
+    /// press aimed at the maximum would sometimes open the editor instead.
+    fn widest_number(&self) -> usize {
+        let width_of = |v: f64| -> usize {
+            let mut s = match self.precision {
+                0 => format!("{v:.0}"),
+                1 => format!("{v:.1}"),
+                2 => format!("{v:.2}"),
+                3 => format!("{v:.3}"),
+                _ => format!("{v}"),
+            };
+            s.push_str(&self.suffix);
+            s.chars().count()
+        };
+        width_of(self.min)
+            .max(width_of(self.max))
+            .max(self.format().chars().count())
+    }
+
     /// The string offered for editing: full precision, trailing zeros
     /// trimmed, so opening and committing an edit can never silently round
     /// the stored value.
@@ -1605,8 +1708,51 @@ impl FabValueInput {
         self.text_input.set_text(cx, &t);
     }
 
+    /// What the pointer says it can do here. A scrub's middle is a
+    /// sideways pull; a track's is a place to put the value, and the two
+    /// columns beside it are a word and a number to click.
+    fn cursor_at(&self, abs_x: f64, face: Rect) -> MouseCursor {
+        if self.track {
+            let (label_px, readout_px) = self.track_columns;
+            match slider_zone(abs_x - face.pos.x, face.size.x, label_px, readout_px) {
+                SliderZone::Track => MouseCursor::Hand,
+                _ => MouseCursor::Default,
+            }
+        } else {
+            match field_zone(abs_x - face.pos.x, face.size.x, face.size.y) {
+                FieldZone::Middle => MouseCursor::EwResize,
+                _ => MouseCursor::Default,
+            }
+        }
+    }
+
+    /// Which of a track row's three columns a press at `abs_x` landed in.
+    fn track_zone(&self, cx: &Cx, abs_x: f64) -> SliderZone {
+        let face = self.draw_bg.area().rect(cx);
+        let (label_px, readout_px) = self.track_columns;
+        slider_zone(abs_x - face.pos.x, face.size.x, label_px, readout_px)
+    }
+
+    /// Where a track row's fill begins and ends, in the face's own frame.
+    fn track_span(&self, width: f64) -> (f64, f64) {
+        let (name, number) = self.track_columns;
+        (1.0 + name, (width - number - 1.0).max(2.0 + name))
+    }
+
+    /// The value a track row's pointer is naming right now.
+    fn track_value(&self, cx: &Cx, abs_x: f64) -> f64 {
+        let face = self.draw_bg.area().rect(cx);
+        let (lo, hi) = self.track_span(face.size.x);
+        self.normalize(track_value_at(
+            &self.params(),
+            abs_x - face.pos.x,
+            lo,
+            hi,
+        ))
+    }
+
     pub fn set_value(&mut self, cx: &mut Cx, v: f64) {
-        if self.editing || self.drag.is_some() {
+        if self.editing || self.drag.is_some() || self.tracking {
             return;
         }
         let v = self.normalize(v);
@@ -1740,6 +1886,14 @@ impl FabValueInput {
 
     fn cancel_drag(&mut self, cx: &mut Cx, uid: WidgetUid) {
         self.cancel_scope = None;
+        if self.tracking {
+            // The track holds no pointer of its own — the press is where it
+            // always was — so putting the value back is the whole of it.
+            self.tracking = false;
+            let back = self.track_press_value;
+            self.publish(cx, uid, back, false);
+            self.animator_play(cx, ids!(hover.off));
+        }
         if let Some(drag) = self.drag.take() {
             if drag.engaged {
                 // Early cancel (Escape / right-click): the button is still
@@ -1775,6 +1929,30 @@ impl Widget for FabValueInput {
             -1.0
         };
         self.draw_bg.disabled = if self.enabled { 0.0 } else { 1.0 };
+        self.draw_bg.stepper = if self.track { 0.0 } else { 1.0 };
+        if self.track {
+            // The two outer columns, measured with the metrics the draw
+            // below uses, so the zones a press is read against are the
+            // columns the eye sees. A row with no name has no name column,
+            // and the track begins at the row's own edge. Measured BEFORE
+            // the quad is begun, because that is when its instance is
+            // written — and it needs no width, which is the other reason
+            // the fill's inset is carried in points.
+            let fs = self.draw_text.text_style.font_size as f64;
+            let name = if self.label.is_empty() {
+                0.0
+            } else {
+                self.layout.padding.left + self.label.chars().count() as f64 * fs * 0.62 + 2.0
+            };
+            let number =
+                self.layout.padding.right + (self.widest_number() as f64 + 0.5) * fs * 0.72 + 6.0;
+            self.track_columns = (name, number);
+            self.draw_bg.fill_pad_l = name as f32;
+            self.draw_bg.fill_pad_r = number as f32;
+        } else {
+            self.draw_bg.fill_pad_l = 0.0;
+            self.draw_bg.fill_pad_r = 0.0;
+        }
         self.draw_bg.begin(cx, walk, self.layout);
         if !self.label.is_empty() {
             // The label spans exactly the space the value does not need:
@@ -1810,7 +1988,7 @@ impl Widget for FabValueInput {
         // The 3D-suite convention: stepper chevrons reveal on hover at the
         // field's edges — their zones (field_zone) exist regardless; the
         // glyphs only while the pointer is here and nothing is in flight.
-        if self.enabled && self.hovered && !self.editing && self.drag.is_none() {
+        if self.enabled && self.hovered && !self.editing && self.drag.is_none() && !self.track {
             let rect = cx.turtle().rect();
             let fs = self.draw_text.text_style.font_size as f64;
             let y = rect.pos.y + (rect.size.y - fs * 1.5).max(0.0) * 0.5;
@@ -1837,7 +2015,7 @@ impl Widget for FabValueInput {
         if !self.enabled {
             return;
         }
-        if (self.editing || self.drag.is_some())
+        if (self.editing || self.drag.is_some() || self.tracking)
             && crate::modal::ModalAction::is_dismissal(event)
         {
             self.cancel_drag(cx, uid);
@@ -1853,7 +2031,12 @@ impl Widget for FabValueInput {
         // hits, so hit-testing can't see it). Coexistence: a single click
         // still opens the editor instantly (snappy); the second click
         // within the window converts that into end-edit + reset.
-        if let Event::MouseDown(me) = event {
+        //
+        // A track row has none of this: its reset is a tap on the name, the
+        // way the panel's sliders read it, and a double press on the track
+        // is two presses that each landed a value — the second must not undo
+        // the first.
+        if let (Event::MouseDown(me), false) = (event, self.track) {
             // ...but only in the MIDDLE. The stepper arrows exist to be
             // clicked repeatedly, and two of those inside the double-click
             // window were being read as the reset gesture — nudge a value up
@@ -1884,9 +2067,11 @@ impl Widget for FabValueInput {
         }
 
         // Ctrl+Wheel nudges by one step; a plain wheel keeps scrolling the
-        // panel underneath.
+        // panel underneath. A track row takes the plain wheel too: it lives
+        // in a popover with nothing behind it to scroll, and the wheel over
+        // a row is how a hand asks for one unit.
         if let Event::Scroll(e) = event {
-            if e.modifiers.control || e.modifiers.logo {
+            if e.modifiers.control || e.modifiers.logo || self.track {
                 if !e.handled_y.get()
                     && e.scroll.y.abs() > f64::EPSILON
                     && self.draw_bg.area().rect(cx).contains(e.abs)
@@ -1910,7 +2095,7 @@ impl Widget for FabValueInput {
 
         // Escape, Back or a right-button press cancels an in-flight drag and
         // restores the pressed value.
-        if self.drag.is_some() {
+        if self.drag.is_some() || self.tracking {
             match event {
                 Event::KeyDown(ke)
                     if ke.key_code == KeyCode::Escape
@@ -1984,23 +2169,15 @@ impl Widget for FabValueInput {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(fe) => {
                 let rect = self.draw_bg.area().rect(cx);
-                let zone = field_zone(fe.abs.x - rect.pos.x, rect.size.x, rect.size.y);
-                cx.set_cursor(match zone {
-                    FieldZone::Middle => MouseCursor::EwResize,
-                    _ => MouseCursor::Default,
-                });
+                cx.set_cursor(self.cursor_at(fe.abs.x, rect));
                 self.hovered = true;
                 self.draw_bg.redraw(cx);
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOver(fe) => {
-                if self.drag.is_none() && !self.editing {
+                if self.drag.is_none() && !self.tracking && !self.editing {
                     let rect = self.draw_bg.area().rect(cx);
-                    let zone = field_zone(fe.abs.x - rect.pos.x, rect.size.x, rect.size.y);
-                    cx.set_cursor(match zone {
-                        FieldZone::Middle => MouseCursor::EwResize,
-                        _ => MouseCursor::Default,
-                    });
+                    cx.set_cursor(self.cursor_at(fe.abs.x, rect));
                 }
             }
             Hit::FingerHoverOut(_) => {
@@ -2008,6 +2185,62 @@ impl Widget for FabValueInput {
                 self.draw_bg.redraw(cx);
                 self.animator_play(cx, ids!(hover.off));
             }
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() && !self.editing && self.track => {
+                // The track's press is the whole gesture's beginning AND its
+                // first move: the value is where the pointer is, at once.
+                // The two outer columns are not track — the name is the
+                // reset and the number is the way in to typing — and a press
+                // on either changes nothing until the release says what it
+                // was.
+                self.track_press_value = self.value;
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
+                cx.set_key_focus(self.draw_bg.area());
+                self.animator_play(cx, ids!(hover.down));
+                if self.track_zone(cx, fe.abs.x) == SliderZone::Track {
+                    self.tracking = true;
+                    let v = self.track_value(cx, fe.abs.x);
+                    self.publish(cx, uid, v, false);
+                }
+            }
+            Hit::FingerMove(fe) if self.tracking => {
+                let v = self.track_value(cx, fe.abs.x);
+                self.publish(cx, uid, v, false);
+            }
+            Hit::FingerUp(fe) if self.track => {
+                self.cancel_scope = None;
+                if self.tracking {
+                    self.tracking = false;
+                    cx.widget_action(uid, FabValueInputAction::Ended(self.value));
+                } else {
+                    // Nothing moved, so the column the release is over says
+                    // what the press meant.
+                    match self.track_zone(cx, fe.abs.x) {
+                        SliderZone::Label => {
+                            cx.widget_action(uid, FabValueInputAction::Reset);
+                        }
+                        SliderZone::Readout => self.begin_edit(cx),
+                        SliderZone::Track => {}
+                    }
+                }
+                if fe.is_over && fe.device.has_hovers() {
+                    self.animator_play(cx, ids!(hover.on));
+                } else {
+                    self.animator_play(cx, ids!(hover.off));
+                }
+            }
+            // The keyboard, once a press has left the focus here: one step
+            // an arrow, a tenth of one with Shift, and Return opens the
+            // editor without reaching for the number with the pointer.
+            Hit::KeyDown(ke) if self.track && !self.editing => match ke.key_code {
+                KeyCode::ArrowLeft | KeyCode::ArrowDown => {
+                    self.step_once(cx, uid, -1.0, ke.modifiers.shift)
+                }
+                KeyCode::ArrowRight | KeyCode::ArrowUp => {
+                    self.step_once(cx, uid, 1.0, ke.modifiers.shift)
+                }
+                KeyCode::ReturnKey => self.begin_edit(cx),
+                _ => {}
+            },
             Hit::FingerDown(fe) if fe.device.is_primary_hit() && !self.editing => {
                 let rect = self.draw_bg.area().rect(cx);
                 // Press changes nothing: it only arms.
@@ -5393,9 +5626,13 @@ pub struct FabColorPick {
     hsv: [f32; 3],
     #[rust(1.0)]
     alpha: f32,
-    /// The colour when the popover opened — restored by Escape.
+    /// The colour when the popover opened — restored by Escape. Held twice:
+    /// as the RGBA that went out, and as the HSV that was behind it, because
+    /// the hue of a grey is not in the RGBA.
     #[rust]
     opened_value: [f32; 4],
+    #[rust]
+    opened_hsv: [f32; 3],
     #[rust]
     panel_rect: Rect,
     #[rust]
@@ -5488,8 +5725,28 @@ impl FabColorPick {
         [r, g, b, self.alpha]
     }
 
+    /// Take a colour that arrived as RGB, KEEPING the hue and saturation the
+    /// person set where the new colour has none of its own.
+    ///
+    /// HSV plus alpha is the one thing the picker holds; the wheel, the seven
+    /// rows and the hex field are all views of it. That is deliberate: a
+    /// round trip through RGB throws away the hue of every grey and the hue
+    /// and saturation of every black, because `rgb_to_hsv` has nowhere to put
+    /// them and answers 0. Pulled S down to nothing and back up, a colour
+    /// that came back through RGB would come back red; pulled V down to
+    /// black and back up, the same. So the undefined channels are not read
+    /// out of the new colour, they are left where the hand had them.
+    fn adopt_rgb(&mut self, rgb: [f32; 3]) {
+        let [h, s, v] = rgb_to_hsv(rgb[0], rgb[1], rgb[2]);
+        self.hsv = [
+            if s <= 0.0 || v <= 0.0 { self.hsv[0] } else { h },
+            if v <= 0.0 { self.hsv[1] } else { s },
+            v,
+        ];
+    }
+
     pub fn set_rgba(&mut self, cx: &mut Cx, rgba: [f32; 4]) {
-        self.hsv = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+        self.adopt_rgb([rgba[0], rgba[1], rgba[2]]);
         self.alpha = rgba[3];
         self.draw_swatch.swatch = vec4(rgba[0], rgba[1], rgba[2], rgba[3]);
         self.draw_swatch.redraw(cx);
@@ -5686,15 +5943,22 @@ impl FabColorPick {
         {
             wheel.set_hsv(cx, h, s, v);
         }
+        // Every row from the one truth, never from another row: the four
+        // bytes are derived, the three HSV numbers are the truth in the
+        // units the rows print it in. A row that is being dragged or typed
+        // into refuses the write itself, so nothing stamps on the hand.
         let nums = [
-            (live_id!(num_r), rgba[0]),
-            (live_id!(num_g), rgba[1]),
-            (live_id!(num_b), rgba[2]),
-            (live_id!(num_a), rgba[3]),
+            (live_id!(num_r), (rgba[0] * 255.0) as f64),
+            (live_id!(num_g), (rgba[1] * 255.0) as f64),
+            (live_id!(num_b), (rgba[2] * 255.0) as f64),
+            (live_id!(num_a), (rgba[3] * 255.0) as f64),
+            (live_id!(num_h), (h * 360.0) as f64),
+            (live_id!(num_s), (s * 100.0) as f64),
+            (live_id!(num_v), (v * 100.0) as f64),
         ];
         for (id, channel) in nums {
             if let Some(mut num) = self.popover.child(id).borrow_mut::<FabValueInput>() {
-                num.set_value(cx, (channel * 255.0).round() as f64);
+                num.set_value(cx, channel);
             }
         }
         let hex = self.popover.child(live_id!(hex_row)).child(live_id!(hex));
@@ -5725,6 +5989,7 @@ impl FabColorPick {
         self.lock(cx);
         self.cancel_scope = Some(self.begin_cancel_scope(cx));
         self.opened_value = self.rgba();
+        self.opened_hsv = self.hsv;
         self.draw_swatch.open = 1.0;
         self.sync_pending = true;
         let uid = self.widget_uid();
@@ -5753,9 +6018,10 @@ impl FabColorPick {
             &mut Scope::empty());
         let uid = self.widget_uid();
         if revert {
-            let original = self.opened_value;
-            self.hsv = rgb_to_hsv(original[0], original[1], original[2]);
-            self.alpha = original[3];
+            // Put back the colour AS IT WAS HELD, hue and all: a revert
+            // through RGB would hand a grey back with its hue lost.
+            self.hsv = self.opened_hsv;
+            self.alpha = self.opened_value[3];
             self.publish(cx, uid, true);
         } else {
             self.publish(cx, uid, true);
@@ -5835,7 +6101,12 @@ impl Widget for FabColorPick {
                 .child(live_id!(palette))
                 .borrow::<FabPaletteStrip>()
                 .map_or(0.0, |s| s.height_for(width - 16.0));
-            let est_height = 360.0_f64 + if strip_height > 0.0 { strip_height + 26.0 } else { 0.0 };
+            // Tall enough to decide which side of the swatch to hang from,
+            // counted rather than guessed: 8 of padding at each end, the
+            // wheel, then eight rows of `row_height` — the seven channels
+            // and the hex line — with 6 of spacing between every child.
+            let est_height =
+                16.0 + 228.0 + 8.0 * 24.0 + 8.0 * 6.0 + if strip_height > 0.0 { strip_height + 26.0 } else { 0.0 };
             let mut pos = dvec2(anchor.pos.x + anchor.size.x - width, anchor.pos.y + anchor.size.y + 2.0);
             if pos.y + est_height > pass_size.y {
                 pos.y = (anchor.pos.y - est_height - 2.0).max(0.0);
@@ -5954,6 +6225,9 @@ impl Widget for FabColorPick {
                 let g_uid = self.popover.child(live_id!(num_g)).widget_uid();
                 let b_uid = self.popover.child(live_id!(num_b)).widget_uid();
                 let a_uid = self.popover.child(live_id!(num_a)).widget_uid();
+                let h_uid = self.popover.child(live_id!(num_h)).widget_uid();
+                let s_uid = self.popover.child(live_id!(num_s)).widget_uid();
+                let v_uid = self.popover.child(live_id!(num_v)).widget_uid();
                 let hex_uid = self
                     .popover
                     .child(live_id!(hex_row))
@@ -5988,7 +6262,7 @@ impl Widget for FabColorPick {
                                     .borrow::<FabPaletteStrip>()
                                     .and_then(|s| s.colors.get(i).copied());
                                 if let Some(c) = color {
-                                    self.hsv = rgb_to_hsv(c[0], c[1], c[2]);
+                                    self.adopt_rgb([c[0], c[1], c[2]]);
                                     self.alpha = c[3];
                                     self.draw_swatch.swatch = vec4(c[0], c[1], c[2], c[3]);
                                 }
@@ -6026,18 +6300,47 @@ impl Widget for FabColorPick {
                     };
                     if let Some(v) = value {
                         let channel = (v / 255.0).clamp(0.0, 1.0) as f32;
-                        let mut rgba = self.rgba();
-                        if widget_action.widget_uid == r_uid {
-                            rgba[0] = channel;
-                        } else if widget_action.widget_uid == g_uid {
-                            rgba[1] = channel;
-                        } else if widget_action.widget_uid == b_uid {
-                            rgba[2] = channel;
+                        if widget_action.widget_uid == a_uid {
+                            self.alpha = channel;
                         } else {
-                            rgba[3] = channel;
+                            // One byte moved; the other two come out of the
+                            // colour the picker holds, and the whole goes
+                            // back in through `adopt_rgb` so a grey keeps
+                            // the hue the hand gave it.
+                            let rgba = self.rgba();
+                            let mut rgb = [rgba[0], rgba[1], rgba[2]];
+                            if widget_action.widget_uid == r_uid {
+                                rgb[0] = channel;
+                            } else if widget_action.widget_uid == g_uid {
+                                rgb[1] = channel;
+                            } else {
+                                rgb[2] = channel;
+                            }
+                            self.adopt_rgb(rgb);
                         }
-                        self.hsv = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
-                        self.alpha = rgba[3];
+                        changed = true;
+                        ended |= is_ended;
+                    }
+                } else if widget_action.widget_uid == h_uid
+                    || widget_action.widget_uid == s_uid
+                    || widget_action.widget_uid == v_uid
+                {
+                    // Straight into the truth, with no colour space crossed
+                    // on the way: this is why S and V may be taken to zero
+                    // and brought back without the hue moving.
+                    let (value, is_ended) = match widget_action.cast::<FabValueInputAction>() {
+                        FabValueInputAction::Changed(v) => (Some(v), false),
+                        FabValueInputAction::Ended(v) => (Some(v), true),
+                        _ => (None, false),
+                    };
+                    if let Some(v) = value {
+                        if widget_action.widget_uid == h_uid {
+                            self.hsv[0] = (v / 360.0).clamp(0.0, 1.0) as f32;
+                        } else if widget_action.widget_uid == s_uid {
+                            self.hsv[1] = (v / 100.0).clamp(0.0, 1.0) as f32;
+                        } else {
+                            self.hsv[2] = (v / 100.0).clamp(0.0, 1.0) as f32;
+                        }
                         changed = true;
                         ended |= is_ended;
                     }
@@ -6046,7 +6349,7 @@ impl Widget for FabColorPick {
                         widget_action.cast::<TextInputAction>()
                     {
                         if let Some((rgba, had_alpha)) = parse_hex(&text) {
-                            self.hsv = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+                            self.adopt_rgb([rgba[0], rgba[1], rgba[2]]);
                             if had_alpha {
                                 self.alpha = rgba[3];
                             }
@@ -9098,6 +9401,316 @@ mod fab_diagonal_label_draw {
     }
 }
 
+/// A row that LOOKS like a slider, made to behave like one.
+///
+/// The filled rows in the colour popover were scrubs wearing a fill: the
+/// press only armed, three pixels of travel engaged a relative drag at a
+/// quarter of the range per row-width, and the pointer was pinned out of
+/// sight while it ran. Pressing the fill at three quarters and pulling left
+/// therefore did nothing visible at all, which is what "I cannot move the
+/// sliders" meant. These say what a track row does instead, and the first of
+/// them fails on the scrub.
+#[cfg(test)]
+mod fab_value_input_track {
+    use super::fab_slider_gestures::{moved, press, release, send, Target};
+    use super::*;
+    use crate::event::{ScrollEvent, ScrollPhase};
+    use std::cell::Cell;
+
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    band := FabValueInput{
+                        width: 228.
+                        label: "R"
+                        min: 0.0
+                        max: 255.0
+                        step: 1.0
+                        precision: 0
+                        show_fill: true
+                        quantize: true
+                        track: true
+                    }
+                    scrub := FabValueInput{
+                        width: 228.
+                        label: "R"
+                        min: 0.0
+                        max: 255.0
+                        step: 1.0
+                        precision: 0
+                        show_fill: true
+                        quantize: true
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let band = root.widget(cx, ids!(band));
+        let scrub = root.widget(cx, ids!(scrub));
+        assert!(!band.is_empty() && !scrub.is_empty(), "the scene has both rows");
+        (root, band, scrub)
+    }
+
+    fn face(cx: &Cx, row: &WidgetRef) -> Rect {
+        let rect = row.borrow::<FabValueInput>().unwrap().draw_bg.area().rect(cx);
+        assert!(rect.size.x > 0.0, "the row was drawn");
+        rect
+    }
+
+    /// A window point `t` (0..1) along the row's fill — the span the row
+    /// itself paints the fill across and reads a press against.
+    fn along(cx: &Cx, row: &WidgetRef, t: f64) -> Vec2d {
+        let f = face(cx, row);
+        let (lo, hi) = row.borrow::<FabValueInput>().unwrap().track_span(f.size.x);
+        assert!(hi > lo + 10.0, "the track has no room left between its columns");
+        dvec2(f.pos.x + lo + t * (hi - lo), f.pos.y + f.size.y * 0.5)
+    }
+
+    /// A window point inside one of the two outer columns.
+    fn on_the_name(cx: &Cx, row: &WidgetRef) -> Vec2d {
+        let f = face(cx, row);
+        let (name, _) = row.borrow::<FabValueInput>().unwrap().track_columns;
+        assert!(name > 2.0, "the name column was never measured");
+        dvec2(f.pos.x + name * 0.5, f.pos.y + f.size.y * 0.5)
+    }
+
+    fn on_the_number(cx: &Cx, row: &WidgetRef) -> Vec2d {
+        let f = face(cx, row);
+        let (_, number) = row.borrow::<FabValueInput>().unwrap().track_columns;
+        assert!(number > 2.0, "the number column was never measured");
+        dvec2(
+            f.pos.x + f.size.x - number * 0.5,
+            f.pos.y + f.size.y * 0.5,
+        )
+    }
+
+    fn value(row: &WidgetRef) -> f64 {
+        row.borrow::<FabValueInput>().unwrap().value()
+    }
+
+    /// Who claimed a press on its way through the page. With no event loop
+    /// here to end a capture on the release, the area a press captured is
+    /// let go by hand afterwards, or it would take every later press.
+    fn claimed(event: &Event) -> Area {
+        match event {
+            Event::MouseDown(e) => e.handled.get(),
+            Event::MouseMove(e) => e.handled.get(),
+            _ => Area::Empty,
+        }
+    }
+
+    fn said(actions: &ActionsBuf, row: &WidgetRef) -> Vec<FabValueInputAction> {
+        actions
+            .filter_widget_actions_cast::<FabValueInputAction>(row.widget_uid())
+            .collect()
+    }
+
+    fn changed(actions: &ActionsBuf, row: &WidgetRef) -> Option<f64> {
+        said(actions, row).into_iter().find_map(|a| match a {
+            FabValueInputAction::Changed(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    fn ended(actions: &ActionsBuf, row: &WidgetRef) -> Option<f64> {
+        said(actions, row).into_iter().find_map(|a| match a {
+            FabValueInputAction::Ended(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    fn wheel(abs: Vec2d, notches: f64) -> Event {
+        Event::Scroll(ScrollEvent {
+            window_id: WINDOW,
+            scroll: dvec2(0.0, -120.0 * notches),
+            abs,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: true,
+            time: 0.0,
+            phase: ScrollPhase::Changed,
+        })
+    }
+
+    fn key(key_code: KeyCode) -> Event {
+        Event::KeyDown(KeyEvent {
+            key_code,
+            is_repeat: false,
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    /// The mapping, with no window anywhere near it: a point along the fill
+    /// names the value that point of the fill stands for.
+    #[test]
+    fn a_point_on_the_track_names_the_value_that_point_means() {
+        let p = DragParams {
+            min: 0.0,
+            max: 255.0,
+            step: 1.0,
+            wrap: false,
+            bounded: true,
+            snap_override: 0.0,
+        };
+        // A fill running from 16 to 192: its two ends are the two ends of
+        // the range, and its middle is the middle.
+        assert_eq!(track_value_at(&p, 16.0, 16.0, 192.0), 0.0);
+        assert_eq!(track_value_at(&p, 192.0, 16.0, 192.0), 255.0);
+        assert!((track_value_at(&p, 104.0, 16.0, 192.0) - 127.5).abs() < 1e-9);
+        // Off either end is the end, not a number past it.
+        assert_eq!(track_value_at(&p, -40.0, 16.0, 192.0), 0.0);
+        assert_eq!(track_value_at(&p, 900.0, 16.0, 192.0), 255.0);
+    }
+
+    /// The press lands the value under the pointer at once, and the drag
+    /// keeps it there. This is the one the scrub fails.
+    #[test]
+    fn a_press_on_the_track_lands_the_value_and_the_drag_keeps_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, band, _scrub) = start(&mut cx);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = along(&cx, &band, 0.5);
+        let down = press(at, 0.0);
+        let actions = send(&mut cx, &root, &down);
+        assert_eq!(
+            changed(&actions, &band),
+            Some(128.0),
+            "the press did not land the value it was pointing at"
+        );
+        let to = along(&cx, &band, 0.75);
+        let actions = send(&mut cx, &root, &moved(to, 0.1));
+        assert_eq!(
+            changed(&actions, &band),
+            Some(191.0),
+            "the drag did not follow the pointer"
+        );
+        let actions = send(&mut cx, &root, &release(to, 0.2));
+        assert_eq!(ended(&actions, &band), Some(191.0), "the release did not commit");
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// And the field that did NOT ask for a track still scrubs: it arms on
+    /// the press and changes nothing until the travel threshold is past.
+    #[test]
+    fn a_field_that_did_not_ask_for_a_track_still_scrubs() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _band, scrub) = start(&mut cx);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = along(&cx, &scrub, 0.5);
+        let down = press(at, 0.0);
+        let actions = send(&mut cx, &root, &down);
+        assert_eq!(changed(&actions, &scrub), None, "the press moved a scrub field");
+        assert_eq!(value(&scrub), 0.0);
+        send(&mut cx, &root, &release(at, 0.1));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The number is still the way in to typing, and Return still commits.
+    #[test]
+    fn a_click_on_the_number_still_opens_typing_and_return_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, band, _scrub) = start(&mut cx);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = on_the_number(&cx, &band);
+        let down = press(at, 0.0);
+        let actions = send(&mut cx, &root, &down);
+        assert_eq!(
+            changed(&actions, &band),
+            None,
+            "the press on the number moved the value"
+        );
+        send(&mut cx, &root, &release(at, 0.1));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert!(
+            band.borrow::<FabValueInput>().unwrap().editing,
+            "a click on the number did not open the editor"
+        );
+        // What Return does with the typed text, taken at the seam the
+        // editor's own action arrives at.
+        let uid = band.widget_uid();
+        let actions = cx.capture_actions(|cx| {
+            band.borrow_mut::<FabValueInput>()
+                .unwrap()
+                .commit_edit_text(cx, uid, "200");
+        });
+        assert_eq!(ended(&actions, &band), Some(200.0), "the typed value never committed");
+        assert_eq!(value(&band), 200.0);
+        assert!(!band.borrow::<FabValueInput>().unwrap().editing);
+    }
+
+    /// The name is the reset, the way the panel's sliders read it.
+    #[test]
+    fn a_tap_on_the_name_asks_for_a_reset_and_moves_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, band, _scrub) = start(&mut cx);
+        band.borrow_mut::<FabValueInput>().unwrap().set_value(&mut cx, 100.0);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = on_the_name(&cx, &band);
+        let down = press(at, 0.0);
+        let mut actions = send(&mut cx, &root, &down);
+        assert_eq!(changed(&actions, &band), None, "the press on the name moved the value");
+        actions.extend(send(&mut cx, &root, &release(at, 0.1)));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert!(
+            said(&actions, &band)
+                .iter()
+                .any(|a| matches!(a, FabValueInputAction::Reset)),
+            "the tap on the name did not read as a reset"
+        );
+        assert_eq!(value(&band), 100.0, "the reset moved the row itself");
+    }
+
+    /// The wheel over the row steps it, and the arrows step it once a press
+    /// has left the keyboard here.
+    #[test]
+    fn the_wheel_and_the_arrows_still_step_the_row() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, band, _scrub) = start(&mut cx);
+        let over = along(&cx, &band, 0.5);
+        let actions = send(&mut cx, &root, &wheel(over, 1.0));
+        assert_eq!(changed(&actions, &band), Some(1.0), "the wheel did not step the row");
+        let actions = send(&mut cx, &root, &wheel(over, -1.0));
+        assert_eq!(changed(&actions, &band), Some(0.0), "and back again");
+
+        // The keyboard the only way a hand gets it: a press and a release,
+        // dispatched, because `set_key_focus` only records the request.
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = along(&cx, &band, 0.5);
+        let down = press(at, 0.0);
+        root.handle_event(&mut cx, &down, &mut Scope::empty());
+        cx.handle_actions();
+        root.handle_event(&mut cx, &release(at, 0.1), &mut Scope::empty());
+        cx.handle_actions();
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        let area = band.borrow::<FabValueInput>().unwrap().draw_bg.area();
+        assert!(cx.has_key_focus(area), "the press left the keyboard elsewhere");
+        let stood = value(&band);
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight));
+        assert_eq!(changed(&actions, &band), Some(stood + 1.0), "the arrow did not step");
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowLeft));
+        assert_eq!(changed(&actions, &band), Some(stood), "and back again");
+    }
+}
+
 #[cfg(test)]
 mod fab_color_pick_shield {
     use super::*;
@@ -9403,6 +10016,226 @@ mod fab_color_pick_shield {
         assert_eq!(cx.sweep_lock_area(), None, "the first popover's lock outlived it");
     }
 
+    // ---- one colour, four views of it ----
+
+    fn row(pick: &WidgetRef, id: LiveId) -> WidgetRef {
+        pick.borrow::<FabColorPick>().unwrap().popover.child(id)
+    }
+
+    fn row_value(pick: &WidgetRef, id: LiveId) -> f64 {
+        row(pick, id)
+            .borrow::<FabValueInput>()
+            .expect("the popover has that row")
+            .value()
+    }
+
+    /// A window point `t` (0..1) along a row's fill — the span the row
+    /// itself paints the fill across and reads a press against.
+    fn along(cx: &Cx, pick: &WidgetRef, id: LiveId, t: f64) -> Vec2d {
+        let r = row(pick, id);
+        let inner = r.borrow::<FabValueInput>().expect("the popover has that row");
+        let f = inner.draw_bg.area().rect(cx);
+        assert!(f.size.x > 0.0, "the row was drawn");
+        let (lo, hi) = inner.track_span(f.size.x);
+        dvec2(f.pos.x + lo + t * (hi - lo), f.pos.y + f.size.y * 0.5)
+    }
+
+    fn wheel_hsv(pick: &WidgetRef) -> [f32; 3] {
+        row(pick, live_id!(wheel))
+            .borrow::<FabColorWheel>()
+            .expect("the popover has a wheel")
+            .hsv()
+    }
+
+    fn hex_text(pick: &WidgetRef) -> String {
+        pick.borrow::<FabColorPick>()
+            .unwrap()
+            .popover
+            .child(live_id!(hex_row))
+            .child(live_id!(hex))
+            .text()
+    }
+
+    /// One press on a row, and its release, with the capture let go by hand.
+    fn drag_row(cx: &mut Cx, root: &WidgetRef, pick: &WidgetRef, id: LiveId, t: f64) -> ActionsBuf {
+        let at = along(cx, pick, id, t);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let mut actions = send(cx, root, &down);
+        actions.extend(send(cx, root, &release(at)));
+        down.unhandle(cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        actions
+    }
+
+    fn opened_on(cx: &mut Cx, root: &WidgetRef, target: &mut Target, pick: &WidgetRef, rgba: [f32; 4]) {
+        pick.borrow_mut::<FabColorPick>().unwrap().set_rgba(cx, rgba);
+        open_by_hand(cx, root, target, pick);
+    }
+
+    /// A move on the H row reaches the bytes, the hex and the wheel, and
+    /// does it on the same frame.
+    #[test]
+    fn moving_the_hue_row_carries_the_bytes_the_hex_and_the_wheel_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        opened_on(&mut cx, &root, &mut target, &pick, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 0.0);
+        // A third of the way along 0..360 is green.
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 1.0 / 3.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 120.0);
+        assert_eq!(row_value(&pick, live_id!(num_r)), 0.0, "R never heard the hue move");
+        assert_eq!(row_value(&pick, live_id!(num_g)), 255.0);
+        assert_eq!(row_value(&pick, live_id!(num_b)), 0.0);
+        assert_eq!(hex_text(&pick), "#00ff00ff", "the hex field never heard it");
+        assert!((wheel_hsv(&pick)[0] - 1.0 / 3.0).abs() < 1e-4, "the wheel never heard it");
+    }
+
+    /// And the other way: a byte reaches H S V, the hex and the wheel.
+    #[test]
+    fn moving_a_byte_row_carries_the_hsv_rows_the_hex_and_the_wheel_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        opened_on(&mut cx, &root, &mut target, &pick, [1.0, 0.0, 0.0, 1.0]);
+        // Half way along G: 128 of 255, which is orange at 30 degrees.
+        drag_row(&mut cx, &root, &pick, live_id!(num_g), 0.5);
+        assert_eq!(row_value(&pick, live_id!(num_g)), 128.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 30.0, "H never heard the byte move");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 100.0);
+        assert_eq!(hex_text(&pick), "#ff8000ff", "the hex field never heard it");
+        let hue = wheel_hsv(&pick)[0];
+        assert!((hue - 30.0 / 360.0).abs() < 1e-3, "the wheel never heard it: {hue}");
+    }
+
+    /// Saturation down to nothing and back up again keeps the hue.
+    ///
+    /// The picker holds HSV and derives the rest; a grey has no hue to read
+    /// back out of RGB, so a state kept as bytes would answer 0 — red — the
+    /// moment S touched the floor, and the colour would come back red.
+    #[test]
+    fn saturation_to_zero_and_back_keeps_the_hue() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        opened_on(&mut cx, &root, &mut target, &pick, [1.0, 0.0, 0.0, 1.0]);
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 200.0 / 360.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0);
+        drag_row(&mut cx, &root, &pick, live_id!(num_s), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_s)), 0.0);
+        assert_eq!(
+            row_value(&pick, live_id!(num_h)),
+            200.0,
+            "the hue jumped when the colour went grey"
+        );
+        drag_row(&mut cx, &root, &pick, live_id!(num_s), 1.0);
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "the hue did not come back");
+    }
+
+    /// And value down to black and back up again keeps both.
+    #[test]
+    fn value_to_zero_and_back_keeps_the_hue_and_the_saturation() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        opened_on(&mut cx, &root, &mut target, &pick, [1.0, 0.0, 0.0, 1.0]);
+        drag_row(&mut cx, &root, &pick, live_id!(num_h), 200.0 / 360.0);
+        drag_row(&mut cx, &root, &pick, live_id!(num_v), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 0.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "black lost the hue");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0, "black lost the saturation");
+        drag_row(&mut cx, &root, &pick, live_id!(num_v), 1.0);
+        assert_eq!(row_value(&pick, live_id!(num_v)), 100.0);
+        assert_eq!(row_value(&pick, live_id!(num_h)), 200.0, "the hue did not come back");
+        assert_eq!(row_value(&pick, live_id!(num_s)), 100.0, "the saturation did not come back");
+    }
+
+    /// A colour that went in as a hex comes back out of the hex field
+    /// unchanged, however far round the HSV state it travelled.
+    #[test]
+    fn a_hex_comes_back_out_of_the_field_unchanged() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        open_by_hand(&mut cx, &root, &mut target, &pick);
+        for text in [
+            "#3a7bd5ff",
+            "#ff8000ff",
+            "#808080ff",
+            "#000000ff",
+            "#ffffffff",
+            "#01020380",
+        ] {
+            let (rgba, _) = parse_hex(text).expect("a hex this test wrote");
+            pick.borrow_mut::<FabColorPick>().unwrap().set_rgba(&mut cx, rgba);
+            assert_eq!(hex_text(&pick), text, "the colour did not survive the round trip");
+        }
+    }
+
+    /// One move, one change: the popover says its colour once however many
+    /// views of it followed along.
+    #[test]
+    fn the_popover_says_its_colour_once_per_move() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        opened_on(&mut cx, &root, &mut target, &pick, [1.0, 0.0, 0.0, 1.0]);
+        let at = along(&cx, &pick, live_id!(num_h), 0.25);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        let actions = send(&mut cx, &root, &down);
+        let count = |actions: &ActionsBuf| {
+            actions
+                .filter_widget_actions_cast::<FabColorPickAction>(pick.widget_uid())
+                .filter(|a| matches!(a, FabColorPickAction::Changed(_)))
+                .count()
+        };
+        assert_eq!(count(&actions), 1, "the press said its colour more than once");
+        let to = along(&cx, &pick, live_id!(num_h), 0.5);
+        let actions = send(&mut cx, &root, &moved(to));
+        assert_eq!(count(&actions), 1, "the move said its colour more than once");
+        send(&mut cx, &root, &release(to));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Every row in the popover is a track, and the popover still fits: the
+    /// seven channels, the hex line and the strip inside one panel that is
+    /// on screen.
+    #[test]
+    fn the_seven_rows_are_all_tracks_and_the_popover_still_fits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        open_by_hand(&mut cx, &root, &mut target, &pick);
+        for id in [
+            live_id!(num_r),
+            live_id!(num_g),
+            live_id!(num_b),
+            live_id!(num_a),
+            live_id!(num_h),
+            live_id!(num_s),
+            live_id!(num_v),
+        ] {
+            let r = row(&pick, id);
+            let inner = r.borrow::<FabValueInput>().expect("the popover has that row");
+            assert!(inner.track, "a row of the popover is not a track");
+            assert!(inner.show_fill, "a row of the popover shows no fill");
+        }
+        let panel = pick.borrow::<FabColorPick>().unwrap().popover_rect();
+        assert!(panel.size.x > 0.0 && panel.size.y > 0.0, "the popover never drew");
+        assert!(panel.pos.y >= 0.0, "the popover hangs off the top of the window");
+        assert!(
+            panel.pos.y + panel.size.y <= SIZE.y,
+            "the popover is {} tall and runs off the bottom of a {} window",
+            panel.size.y,
+            SIZE.y
+        );
+    }
+
     // ---- carrying a colour off a draggable swatch ----
 
     fn carrier(cx: &mut Cx) -> (WidgetRef, Target) {
@@ -9577,6 +10410,7 @@ mod fab_carousel_motion {
     //! glide is what the panel does with it.
     use super::fab_slider_gestures::{moved, press, release, send, Target};
     use super::*;
+    use crate::event::{ScrollEvent, ScrollPhase};
     use std::cell::Cell;
 
     const WINDOW: WindowId = WindowId(1, 1);
