@@ -479,7 +479,16 @@ script_mod! {
         material_glow: 0.
         material_ink_glow: 0.
         material_ink_lift: 1.6
+        material_face_gradient: 0.
+        material_hairline: 0.
+        material_ao_reach: 1.
+        material_inner_shadow: 0.
         material_inner_radius: 6.
+        material_shadow: 0.
+        material_shadow_blur: 8.
+        material_contact_ao: 0.
+        material_ground_lip: 0.
+        material_press_invert: 0.
         material_raise: 3.
         material_sink: 3.
         material_press_depth: -6.

@@ -107,6 +107,17 @@ script_mod! {
             return max(normalize(light.xyz).z, 0.0) * light.w;
         }
 
+        // The direction a shadow falls: away from the light, flattened into
+        // the plane. Degenerate when the light is straight on, so it falls
+        // back to down-screen, which is what a UI convention expects anyway.
+        fn shadow_dir_of(light: vec4) -> vec2 {
+            let len = length(light.xy);
+            if len > 0.0001 {
+                return -light.xy / len;
+            }
+            return vec2(0.0, 1.0);
+        }
+
         // The field as it would read `offset` points away, to first order.
         // Two multiply-adds instead of re-evaluating the shape, which is what
         // makes an offset inner shadow cheap enough to always have on.
@@ -161,9 +172,57 @@ script_mod! {
 
         // A directional inner shadow: 1 along the edge the light does not
         // reach, falling to 0 `radius` points inside.
+        //
+        // # Do not use this on a rectangle
+        //
+        // It is a falloff over the DISTANCE FIELD, and the interior field of a
+        // rounded rectangle has a ridge along its corner diagonals — its
+        // medial axis, where the nearest edge switches from one side to the
+        // other. Anything shaped as `smoothstep(distance)` creases along that
+        // ridge, and the wider the radius the further inward the crease runs,
+        // which shows as hard bright spikes reaching in from the corners. The
+        // ridge is a true property of the field, so no better rounded-box
+        // formula removes it: the shape of the falloff is what is wrong.
+        //
+        // A convolution has no such feature, because it integrates over the
+        // shape instead of reading one nearest point — so a box passes
+        // `inner_cov` below to `shade` instead. This form stays correct for a
+        // CIRCLE, whose medial axis is a single point at its centre, and for
+        // the cast shadow, which only ever reads the field outside the shape
+        // where a convex shape has no medial axis at all.
         inner: fn(d: float, offset: vec2, radius: float) -> float {
             let s = shift_of(d, offset);
             return (1.0 - smoothstep(0.0, max(radius, 0.001), -s)) * step(d, 0.0);
+        }
+
+        // The inner shadow of a BOX, as a real blurred coverage.
+        //
+        // The lit part of a dropped face is its own outline shifted DOWN-LIGHT
+        // — light passing over the rim lands offset — so the shadow is
+        // everything that shifted outline does not cover. `GaussShadow`
+        // already integrates exactly that, which is why the fix is to reuse it
+        // rather than to sharpen the falloff above.
+        //
+        //   lower/upper  the face's own rect, in the same space as `point`
+        //   depth        how far it sits BELOW its surround, positive
+        inner_cov: fn(
+            lower: vec2,
+            upper: vec2,
+            point: vec2,
+            corner: float,
+            radius: float,
+            depth: float,
+            light: vec4
+        ) -> float {
+            let off = shadow_dir_of(light) * depth * 1.6;
+            let cov = GaussShadow.rounded_box_shadow(
+                lower + off,
+                upper + off,
+                point,
+                max(radius * 0.5, 0.35),
+                corner
+            );
+            return 1.0 - cov;
         }
 
         ao: fn(d: float, radius: float) -> float {
@@ -185,13 +244,89 @@ script_mod! {
             return exp(-max(d, 0.0) / max(radius, 0.001));
         }
 
+        // Everything a raised face throws OUTSIDE itself, premultiplied and
+        // ready for `sdf.clear` before the shape is filled — the same place
+        // and the same idiom as `GaussShadow.rounded_box_shadow` in
+        // `RoundedShadowView`.
+        //
+        // `shade` colours the inside of a face and nothing else, so on its own
+        // a raised control cast nothing onto its ground and read flat however
+        // well its shoulders were lit. Outside the face there is no fill to
+        // shade, so the shadow is a second read of the SAME field: the
+        // distance to the shape translated away from the light is exactly the
+        // distance to where its shadow falls. That is `shift_of` — two
+        // multiply-adds, no second evaluation of the shape.
+        //
+        //   depth    how far the face stands off its surround, in points
+        //   raise    the theme's reference elevation, which `depth` is read against
+        //   shadow   cast strength, cast blur, contact occlusion, ground lip
+        //
+        // GROUND LIP is the light-side counterpart, and it is deliberately its
+        // own control rather than welded to the cast shadow. It only means
+        // anything where the control is EXTRUDED FROM the page — one
+        // continuous surface, so the lit side is the ground bending up into
+        // it. A control resting ON a panel is a separate object and casts a
+        // dark shadow only; a lip there reads as a button emitting light for
+        // no reason. Light that genuinely leaves a control is `glow`.
+        cast: fn(
+            d: float,
+            depth: float,
+            raise: float,
+            light: vec4,
+            shadow: vec4,
+            shadow_ink: vec4,
+            light_ink: vec4
+        ) -> vec4 {
+            // Only a face standing proud of its surround casts anything, and
+            // only outside itself. A pressed or sunken face returns nothing
+            // here and earns its inner shadow in `shade` instead.
+            if depth <= 0.0 {
+                return vec4(0.0);
+            }
+            let outside = step(0.0, d);
+            let rel = clamp(depth / max(raise, 0.001), 0.0, 1.0);
+            let g = grad_of(d);
+            let off = shadow_dir_of(light) * depth * 1.5;
+            let blur = max(shadow.y, 0.001);
+
+            // shift_of(d, off) and shift_of(d, -off), with the one gradient
+            // shared rather than taken twice.
+            let dark = exp(-max(d - dot(g, off), 0.0) / blur) * rel;
+            let lite = exp(-max(d + dot(g, off), 0.0) / blur) * rel;
+            // Contact darkening is much tighter than the cast shadow: it is
+            // what grounds a raised cap, and it is the right answer for a
+            // raised face where self-occlusion is not.
+            let contact = exp(-max(d, 0.0) / (blur * 0.3));
+
+            let a_dark = clamp(dark * shadow.x + contact * shadow.z, 0.0, 1.0) * shadow_ink.a * outside;
+            let a_lite = clamp(lite * shadow.w, 0.0, 1.0) * light_ink.a * outside * (1.0 - a_dark);
+            let rgb = shadow_ink.rgb * a_dark + light_ink.rgb * a_lite;
+            return vec4(rgb, a_dark + a_lite);
+        }
+
         // The one call a retrofitted widget makes, between its fill colour and
         // `fill_keep`.
         //
         //   level    0 off (returns rgb untouched), 1 relief, 2 full
         //   light    xyz direction in UI space (x right, y down, z out), w intensity
-        //   relief   bevel width, profile curve, SIGNED elevation, specular strength
+        //   relief   bevel width, profile curve, SIGNED CONVEXITY, specular strength
         //   finish   ao, rim, gloss, roughness
+        //   form       SIGNED DEPTH, face gradient, hairline, occlusion reach
+        //   deep       inner shadow, inner radius, sink reference, raise reference
+        //   inner_cov  the inner shadow's coverage, from `inner_cov` or `inner`
+        //
+        // # Depth and convexity are two different numbers
+        //
+        // They used to be one, and that is why a press had to flip its sign —
+        // which turns a cap into a bowl. DEPTH is how far a face sits from its
+        // surround, and it drives the cast shadow outside and the inner shadow
+        // inside. CONVEXITY is whether the face itself bulges out or dishes
+        // in, and it drives the normal, the gradient, the hairline and the
+        // self-occlusion. A pressed cap is still a cap: it has descended, so
+        // its own shadow is gone and its surround throws one across it, but
+        // its face never dishes. Full inversion is the neumorphic illustration
+        // convention and is something the caller opts into by passing a
+        // negative convexity, not something the material does on its own.
         //
         // `level` is read from a uniform by every caller, so the two early
         // returns cost one scalar compare per draw call and nothing per pixel.
@@ -203,13 +338,20 @@ script_mod! {
             light: vec4,
             relief: vec4,
             finish: vec4,
+            form: vec4,
+            deep: vec4,
+            inner_cov: float,
             light_ink: vec4,
             shadow_ink: vec4
         ) -> vec3 {
             if level < 0.5 {
                 return rgb;
             }
-            let n = normal_of(d, relief.x, relief.y, relief.z);
+            let convex = relief.z;
+            let depth = form.x;
+            let sink = max(deep.z, 0.001);
+            let g = grad_of(d);
+            let n = normal_of(d, relief.x, relief.y, convex);
             let spec = vec2(relief.w, mix(64.0, 4.0, clamp(finish.w, 0.0, 1.0)));
             let lt = lit_of(n, light, spec);
 
@@ -221,10 +363,66 @@ script_mod! {
             var out = mix(rgb, light_ink.rgb, lift);
             out = mix(out, shadow_ink.rgb, drop);
 
-            // Contact occlusion over twice the bevel, so it reaches past the
-            // shoulder and reads as the surface meeting its ground.
-            let occ = ao_of(d, relief.x * 2.0) * finish.x * shadow_ink.a;
+            // THE FACE GRADIENT. The bevel normal is flat everywhere but
+            // within `relief.x` of the edge, so without this the middle of
+            // every face is exactly its own fill colour — which is why
+            // shoulders alone never looked like moulded plastic however they
+            // were tuned. A real face is curved across its whole span, and
+            // every reference kit carries this broad gradient through it.
+            // Makepad already does the same thing by hand through
+            // `color` -> `color_2` fills, so this is joining up machinery that
+            // exists rather than inventing more.
+            if form.y > 0.001 {
+                let axis = normalize(light.xy + vec2(0.000001));
+                let t = dot(uv - vec2(0.5), -axis) * 2.0 * sign(convex);
+                out = mix(out, light_ink.rgb, clamp(t, 0.0, 1.0) * form.y * 0.5 * light_ink.a);
+                out = mix(out, shadow_ink.rgb, clamp(-t, 0.0, 1.0) * form.y * 0.5 * shadow_ink.a);
+            }
+
+            // OCCLUSION IS CONCAVITY. This used to darken the rim of every
+            // face over twice the bevel, and the rim of a RAISED face is the
+            // most exposed point on it — the top of the hill, with nothing
+            // above it to block anything — so it fought the very shoulder the
+            // bevel had just lit, on the same band of pixels. Only a face that
+            // curves away from the viewer occludes itself at its rim. What
+            // grounds a raised face is the contact shadow on the ground around
+            // its base, which `cast` draws outside and is the right place for
+            // it. The reach is in units of the shoulder now, not a hardcoded
+            // double, so it cannot spill onto face the relief says is flat.
+            let concave = clamp(-convex / sink, 0.0, 1.0);
+            let occ = ao_of(d, max(relief.x, 0.001) * form.w) * finish.x * shadow_ink.a * concave;
             out = mix(out, shadow_ink.rgb, occ);
+
+            // THE HAIRLINE. A hard thin line right on the boundary, lit on the
+            // side facing the light and dark opposite — distinct from the soft
+            // shoulder, and what gives the reference kits their crispness.
+            // The stroke half of the same pair as the gradient above, which
+            // makepad spells `border_color` -> `border_color_2`.
+            if form.z > 0.001 {
+                let band = 1.0 - smoothstep(0.0, 1.4, abs(d));
+                let facing = dot(g, normalize(light.xy + vec2(0.000001))) * sign(convex);
+                out = mix(out, light_ink.rgb, band * clamp(facing, 0.0, 1.0) * form.z * light_ink.a);
+                out = mix(out, shadow_ink.rgb, band * clamp(-facing, 0.0, 1.0) * form.z * shadow_ink.a);
+            }
+
+            // THE INNER SHADOW, which nothing used to call at all — a sunken
+            // well got the inverted bevel and the occlusion and nothing else.
+            // Scaled by how sunken the face is, so a press earns it as it
+            // crosses over rather than switching it on.
+            //
+            // `inner_cov` is what the CALLER passes in, because the honest
+            // version of this is a blurred coverage of the face's own rect and
+            // only the caller knows that rect. A box computes it with
+            // `Material.inner_cov`; a circle may pass `Material.inner(...)`,
+            // which is cheaper and correct for a shape whose medial axis is a
+            // single point. Computing it here from the field gradient is what
+            // put bright spikes along the corner diagonals of every pressed
+            // rectangle — see the note on `inner`.
+            let sunk = clamp(-depth / sink, 0.0, 1.0);
+            if sunk > 0.001 {
+                let ins = inner_cov * step(d, 0.0);
+                out = mix(out, shadow_ink.rgb, clamp(ins * deep.x * sunk, 0.0, 1.0) * shadow_ink.a);
+            }
 
             if level < 1.5 {
                 return out;
@@ -233,8 +431,8 @@ script_mod! {
             let r = rim_of(d, n, light, max(relief.x * 0.5, 0.5)) * finish.y * light_ink.a;
             out = mix(out, light_ink.rgb, clamp(r, 0.0, 1.0));
             out = out + vec3(lt.y);
-            let g = gloss_of(uv, 0.55, 2.0) * finish.z * step(d, 0.0) * light_ink.a;
-            out = mix(out, light_ink.rgb, clamp(g, 0.0, 1.0));
+            let gl = gloss_of(uv, 0.55, 2.0) * finish.z * step(d, 0.0) * light_ink.a;
+            out = mix(out, light_ink.rgb, clamp(gl, 0.0, 1.0));
             return out;
         }
     }

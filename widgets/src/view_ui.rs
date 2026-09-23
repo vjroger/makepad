@@ -367,10 +367,16 @@ script_mod! {
             material: uniform(theme.material_level)
             /** key light: xyz direction in UI space, w intensity */
             material_light: uniform(vec4(theme.material_light_x, theme.material_light_y, theme.material_light_z, theme.material_light_intensity))
-            /** relief: bevel width, profile curve, SIGNED elevation, specular */
+            /** relief: bevel width, profile curve, SIGNED CONVEXITY, specular */
             material_relief: uniform(vec4(theme.material_bevel_width, theme.material_bevel_curve, theme.material_raise, theme.material_specular))
             /** finish: ao, rim, gloss, roughness */
             material_finish: uniform(vec4(theme.material_ao, theme.material_rim, theme.material_gloss, theme.material_roughness))
+            /** form: SIGNED DEPTH, face gradient, hairline, occlusion reach */
+            material_form: uniform(vec4(theme.material_raise, theme.material_face_gradient, theme.material_hairline, theme.material_ao_reach))
+            /** depth refs: inner shadow, inner radius, sink reference, raise reference */
+            material_deep: uniform(vec4(theme.material_inner_shadow, theme.material_inner_radius, theme.material_sink, theme.material_raise))
+            /** outside: cast strength, cast blur, contact occlusion, ground lip */
+            material_shadow: uniform(vec4(theme.material_shadow, theme.material_shadow_blur, theme.material_contact_ao, theme.material_ground_lip))
             /** the ink a lit shoulder is tinted toward */
             material_light_ink: uniform(theme.color_material_light)
             /** the ink a shaded shoulder and the occlusion are tinted toward */
@@ -400,6 +406,46 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                     max(1.0 self.border_radius)
                 )
+                // The cast shadow goes UNDER the face, so it is written before
+                // the fill, the same order and the same `sdf.clear` idiom as
+                // `RoundedShadowView`. It only has somewhere to land where the
+                // shape is inset from the quad — makepad clips by default, so
+                // a material control buys its overhang out of `border_inset`
+                // rather than by growing its geometry. With no inset there is
+                // no outside and this writes nothing.
+                if self.material > 0.5 {
+                    sdf.clear(Material.cast(
+                        sdf.shape
+                        self.material_form.x
+                        self.material_deep.w
+                        self.material_light
+                        self.material_shadow
+                        self.material_shadow_ink
+                        self.material_light_ink
+                    ))
+                }
+                // The inner shadow is a blurred coverage of THIS rect, not a
+                // falloff over the distance field -- a rounded rectangle's
+                // interior field creases along its corner diagonals, and a
+                // distance falloff creases with it. Only the caller knows the
+                // rect, so only the caller can compute this.
+                let mat_lower = vec2(
+                    self.border_inset.x + self.border_size
+                    self.border_inset.y + self.border_size
+                )
+                let mat_upper = vec2(
+                    self.rect_size.x - (self.border_inset.z + self.border_size)
+                    self.rect_size.y - (self.border_inset.w + self.border_size)
+                )
+                let mat_inner = Material.inner_cov(
+                    mat_lower
+                    mat_upper
+                    self.pos * self.rect_size
+                    max(1.0 self.border_radius)
+                    self.material_deep.y
+                    max(-self.material_form.x 0.0)
+                    self.material_light
+                )
                 // The material rides between the fill colour and the fill.
                 // At material 0 `shade` hands back rgb untouched, so a theme
                 // that leaves it off draws exactly what it always did.
@@ -411,6 +457,9 @@ script_mod! {
                     self.material_light
                     self.material_relief
                     self.material_finish
+                    self.material_form
+                    self.material_deep
+                    mat_inner
                     self.material_light_ink
                     self.material_shadow_ink
                 ), fill_color.a))
@@ -451,15 +500,48 @@ script_mod! {
                 // `sunken` flips the sign of the relief, and that is the
                 // whole difference between a panel standing off its ground
                 // and a well cut into it: the same material, lit from the
-                // other side, so the lit and shaded shoulders swap. The
-                // inherited relief carries the raised depth in .z.
-                let elev = mix(self.material_relief.z, -self.material_sink, self.sunken)
+                // other side, so the lit and shaded shoulders swap. A panel
+                // genuinely is inverted rather than merely lowered, so here
+                // depth and convexity move together — unlike a pressed cap,
+                // which descends with its face still convex.
+                //
+                // A SURFACE IS SHALLOWER THAN A CONTROL: a panel is a step in
+                // the housing and a cap stands proud OF it, so the panel takes
+                // a fraction of the theme's elevation. Scaling it up instead
+                // makes a whole surface deeper than the buttons sitting on it.
+                let elev = mix(self.material_relief.z, -self.material_sink, self.sunken) * 0.55
                 let relief = vec4(
                     self.material_relief.x
                     self.material_relief.y
                     elev
                     self.material_relief.w
                 )
+                let form = vec4(
+                    elev
+                    self.material_form.y
+                    self.material_form.z
+                    self.material_form.w
+                )
+                let mat_inner = Material.inner_cov(
+                    vec2(0.0, 0.0)
+                    self.rect_size
+                    p
+                    self.border_radius
+                    self.material_deep.y
+                    max(-elev 0.0)
+                    self.material_light
+                )
+                if self.material > 0.5 {
+                    sdf.clear(Material.cast(
+                        sdf.shape
+                        elev
+                        self.material_deep.w
+                        self.material_light
+                        self.material_shadow
+                        self.material_shadow_ink
+                        self.material_light_ink
+                    ))
+                }
                 sdf.fill(vec4(Material.shade(
                     self.color.rgb
                     sdf.shape
@@ -468,6 +550,9 @@ script_mod! {
                     self.material_light
                     relief
                     self.material_finish
+                    form
+                    self.material_deep
+                    mat_inner
                     self.material_light_ink
                     self.material_shadow_ink
                 ), self.color.a))

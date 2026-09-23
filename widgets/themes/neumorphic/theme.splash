@@ -44,11 +44,13 @@ mod.theme.corner_radius = 8.0
 mod.theme.container_corner_radius = 16.0
 
 // THE MATERIAL
-// Tier 1: relief, no gloss and no rim sweep. A pillowed shoulder (curve near
-// zero) is what separates neumorphism from moulded plastic.
+// Tier 1: relief, no gloss and no rim sweep. A fully pillowed shoulder
+// (curve 0) under a dialled-down light is what separates neumorphism from
+// moulded plastic: soft material, soft light, narrow shoulder.
 mod.theme.material_level = 1.0
-mod.theme.material_bevel_width = 6.0
-mod.theme.material_bevel_curve = 0.15
+mod.theme.material_light_intensity = 0.70
+mod.theme.material_bevel_width = 4.0
+mod.theme.material_bevel_curve = 0.0
 mod.theme.material_ao = 0.5
 mod.theme.material_rim = 0.4
 mod.theme.material_specular = 0.06
@@ -58,6 +60,32 @@ mod.theme.material_sink = 4.0
 // Past -material_raise, so a press crosses zero and INVERTS: the lit and
 // shaded shoulders swap and the control reads as pushed into the page.
 mod.theme.material_press_depth = -9.0
+// The one style where a press dishes the FACE as well as lowering it. That is
+// the neumorphic illustration convention, and it only reads where the control
+// is the page rather than an object resting on it -- which is exactly the
+// condition this sheet sets up.
+mod.theme.material_press_invert = 1.0
+
+// The broad gradient across a face, and the hard line on its boundary. Both
+// stay low here: neumorphism is a soft material under a soft light, and a
+// crisp hairline is the first thing that makes it look like moulded plastic
+// instead. The occlusion reaches slightly past the shoulder.
+mod.theme.material_face_gradient = 0.3
+mod.theme.material_hairline = 0.1
+mod.theme.material_ao_reach = 1.2
+
+// OUTSIDE THE FACE. The signature pair: a dark shadow down-light and a light
+// one up-light, both wide and soft. The ground lip is on -- and this is the
+// only shipped sheet where it is -- because a neumorphic control is EXTRUDED
+// FROM the page, one continuous surface, so its light side genuinely is the
+// ground bending up into it. On a control resting on a panel the same effect
+// reads as a button glowing for no reason.
+mod.theme.material_shadow = 0.75
+mod.theme.material_shadow_blur = 14.0
+mod.theme.material_contact_ao = 0.3
+mod.theme.material_ground_lip = 0.7
+mod.theme.material_inner_shadow = 0.55
+mod.theme.material_inner_radius = 10.0
 // Not black. A neumorphic shadow is a cool grey-lilac, which is what keeps
 // the page reading as one soft material rather than as dirt on white.
 mod.theme.color_material_light = #ffffff

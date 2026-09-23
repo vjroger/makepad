@@ -262,7 +262,16 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     spec("material_glow", TokenGroup::Material, TokenKind::Opacity, "Strength of the emissive halo a lit surface throws.", 0.0, 1.0, 0.01, ALL),
     spec("material_ink_glow", TokenGroup::Material, TokenKind::Opacity, "How far a label or icon lifts toward the glow colour when lit.", 0.0, 1.0, 0.01, ALL),
     spec("material_ink_lift", TokenGroup::Material, TokenKind::Factor, "How far past full brightness lit ink is pushed before it clips.", 1.0, 4.0, 0.05, ALL),
+    spec("material_face_gradient", TokenGroup::Material, TokenKind::Opacity, "Broad light-to-dark gradient across a whole face, separate from its shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_hairline", TokenGroup::Material, TokenKind::Opacity, "Hard thin lit and shaded line right on the boundary, separate from the soft shoulder.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ao_reach", TokenGroup::Material, TokenKind::Factor, "How far the self-occlusion reaches inside, in units of the shoulder width.", 0.25, 3.0, 0.05, ALL),
+    spec("material_inner_shadow", TokenGroup::Material, TokenKind::Opacity, "Strength of the shadow a surround throws across a sunken or pressed face.", 0.0, 1.0, 0.01, ALL),
     length("material_inner_radius", TokenGroup::Material, "Blur of the inner shadow along a shaded edge, in points.", 0.0, 32.0, 0.5),
+    spec("material_shadow", TokenGroup::Material, TokenKind::Opacity, "Strength of the shadow a raised surface casts on its ground.", 0.0, 1.0, 0.01, ALL),
+    length("material_shadow_blur", TokenGroup::Material, "Softness of that cast shadow, in points.", 0.5, 40.0, 0.5),
+    spec("material_contact_ao", TokenGroup::Material, TokenKind::Opacity, "Tight darkening on the ground where a raised surface meets it.", 0.0, 1.0, 0.01, ALL),
+    spec("material_ground_lip", TokenGroup::Material, TokenKind::Opacity, "Light-side counter-shadow, for surfaces EXTRUDED FROM the page rather than resting on it.", 0.0, 1.0, 0.01, ALL),
+    spec("material_press_invert", TokenGroup::Material, TokenKind::Factor, "How far a held face dishes as well as descends: 0 stays convex, 1 fully inverts.", 0.0, 1.0, 0.01, ALL),
     length("material_raise", TokenGroup::Material, "How far a raised surface stands off its ground, in points.", 0.0, 24.0, 0.5),
     length("material_sink", TokenGroup::Material, "How far a sunken surface drops below it, in points.", 0.0, 24.0, 0.5),
     length("material_press_depth", TokenGroup::Material, "Signed change in elevation while held: past -material_raise it inverts, short of it it deepens.", -32.0, 8.0, 0.5),
@@ -3190,7 +3199,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 581, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 590, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 
