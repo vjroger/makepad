@@ -34,7 +34,10 @@
 //!   `Ended` on commit, plus `Opened`/`Closed` for hosts that need to know.
 //! * `mod.widgets.FabPaletteCarousel` — every palette on offer in one row
 //!   that scrolls sideways, a chip of four stacked colours each; drag, wheel
-//!   or arrows along it, press and let go on a chip to pick it.
+//!   or arrows along it, press and let go on a chip to pick it. It glides:
+//!   an arrow, a wheel's momentum and a flick off a drag all close the
+//!   distance over a tenth of a second or so rather than jumping it (see
+//!   [`ChipGlide`]).
 //! * `mod.widgets.FabLabel` / `FabLabelDim` / `FabLabelSmall` /
 //!   `FabHeaderLabel`, `mod.widgets.FabSearch` (input well),
 //!   `mod.widgets.FabPropRow` (label-left / value-right row),
@@ -56,6 +59,10 @@ use crate::{
     makepad_draw::*, text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
+use crate::scroll_motion::{
+    estimate_release_velocity, push_sample, FrameClock, ScrollSample,
+    FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, FLING_SAMPLE_MAX_AGE,
+};
 
 pub fn script_mod(vm: &mut ScriptVm) {
     // Phase 1: the token table and a prelude carrying the `fab` alias, so
@@ -4539,6 +4546,167 @@ pub fn carousel_wheel(scroll_x: f64, scroll_y: f64) -> f64 {
     }
 }
 
+/// The shortest and longest a glide may take, in seconds. These are the
+/// app-facing carousel's own numbers (`carousel.rs`, which shares them with
+/// the drum picker): two rows out of the same kit that settled at different
+/// speeds would read as two different pieces of machinery.
+const CHIP_GLIDE_SECS: (f64, f64) = (0.14, 0.75);
+
+/// A glide is over once the drawing is this close to the row's place, in
+/// points. An exponential approach never actually arrives, and a twentieth
+/// of a point is inside a pixel at any scale the panel is drawn at.
+const CHIP_GLIDE_DONE: f64 = 0.05;
+
+/// A turn of the wheel is worth at most one chip of momentum after it. The
+/// operating system's notches run from a few points to most of a screen, so
+/// the speed read off them is not a hand's: a row that shot half its
+/// palettes past because a notch was reported large cannot be aimed. The
+/// app-facing carousel caps what one notch MOVES its strip for that same
+/// reason; this caps what the notches throw it.
+const CHIP_WHEEL_CARRY: f64 = 1.0;
+
+/// The time constant of a glide closing `distance` points, opened at
+/// `velocity` points a second.
+///
+/// Matching the opening speed to the hand is what makes the hand-off from a
+/// drag to its flick invisible: the picture leaves the finger at the speed
+/// the finger had. A move nobody threw -- an arrow, the chip in force
+/// changing -- opens at the short end and is over in a seventh of a second.
+///
+/// Spelled again here rather than shared with the app-facing carousel,
+/// which keeps its copy private: it is three lines, and the number that
+/// matters ([`CHIP_GLIDE_SECS`]) is named in both places.
+pub fn chip_glide_secs(distance: f64, velocity: f64) -> f64 {
+    let v = velocity.abs();
+    if v <= f64::EPSILON {
+        return CHIP_GLIDE_SECS.0;
+    }
+    (distance.abs() / v).clamp(CHIP_GLIDE_SECS.0, CHIP_GLIDE_SECS.1)
+}
+
+/// How far a row let go at `velocity` points a second travels on, its speed
+/// decaying by `decay_per_ms` every millisecond: the whole remaining travel
+/// of `v(t) = v0 * decay^t`, which is `v0 / lambda` with
+/// `lambda = -ln(decay) * 1000`.
+///
+/// The library's scrollers integrate that same decay frame by frame. A row
+/// that only has to end up somewhere needs the end of it, because where it
+/// lands is what decides the whole motion.
+pub fn chip_spin_travel(velocity: f64, decay_per_ms: f64) -> f64 {
+    let lambda = -decay_per_ms.ln() * 1000.0;
+    if lambda <= 0.0 || !lambda.is_finite() {
+        0.0
+    } else {
+        velocity / lambda
+    }
+}
+
+/// What a release carries the row on by, in points: the flick.
+///
+/// `velocity` is the FINGER's, in points a second, and `travel` how far it
+/// came; the row runs the other way to the hand, so the carry is negated. A
+/// press that barely moved is a press and not a throw. A hand that rested
+/// on the row before it let go has no speed either, because the samples
+/// that old are dropped before the release is measured -- which is the rule
+/// that stops a careful drag from drifting on after the hand stops.
+pub fn carousel_flick(velocity: f64, travel: f64) -> f64 {
+    if travel.abs() <= FLING_MIN_TOTAL_DELTA {
+        return 0.0;
+    }
+    chip_spin_travel(-velocity, FLING_DECEL_RATE_PER_MS)
+}
+
+/// How far behind the row's own place its drawing still is, and how fast
+/// that is closing: the glide.
+///
+/// The row's place is settled the moment anything moves it -- an arrow, a
+/// wheel, the chip in force changing -- and it is the DRAWING that takes a
+/// tenth of a second to get there. That way round, because everything else
+/// asks the row where it stands: the arrows at its two ends, the chip under
+/// a point, a host reading the scroll back. Answered off a picture still in
+/// flight, those would answer the same question differently twice in a
+/// frame, and the panel's arrows would flicker on and off through every
+/// glide.
+///
+/// The lag closes the way the app-facing carousel's glide does, because it
+/// IS that glide written from the other end: `to + (from - to) * exp(-t/tau)`
+/// is `to - lag * exp(-t/tau)`. A strip of cards and a row of chips settle
+/// alike, off the same two numbers and the same jitter-clamped clock.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChipGlide {
+    /// The lag this decay started from, kept so that a frame is measured
+    /// from the opening of the glide rather than from the frame before it.
+    from: f64,
+    /// Points the drawing is behind the row's place; nought at rest.
+    lag: f64,
+    tau: f64,
+    /// The jitter-clamped frame clock the library's scrollers use, so a
+    /// late frame becomes a slightly uneven step and not a visible jerk.
+    clock: FrameClock,
+}
+
+impl ChipGlide {
+    /// The row's place moved on by `moved` points: the drawing stays where
+    /// it is and closes that from here, opening at `velocity` points a
+    /// second.
+    ///
+    /// Re-aimed rather than restarted -- what is still outstanding is added
+    /// to what is new -- so a second arrow press while the first is still
+    /// running carries on from where the picture is, instead of jumping it
+    /// to where the row now stands and gliding from there.
+    pub fn moved(&mut self, moved: f64, velocity: f64) {
+        let lag = self.lag + moved;
+        if lag.abs() <= CHIP_GLIDE_DONE {
+            self.land();
+            return;
+        }
+        self.from = lag;
+        self.lag = lag;
+        self.tau = chip_glide_secs(lag, velocity);
+        self.clock = FrameClock::default();
+    }
+
+    /// There is no lag: the picture and the place are one number again.
+    ///
+    /// A hand landing on the row calls this with the row's place already
+    /// taken back to where the picture had got to -- so the row stops dead
+    /// under the finger and the chip drawn there is the chip pressed. A
+    /// width that clamps the row calls it as it is, since that place was
+    /// decided by the layout rather than by a gesture.
+    pub fn land(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether the drawing is still catching up, which is whether another
+    /// frame is owed. At rest it is false and nothing asks for frames.
+    pub fn running(&self) -> bool {
+        self.lag != 0.0
+    }
+
+    /// One frame of it, at wall-clock `now`; the answer is [`ChipGlide::running`]
+    /// again, so a caller asks for the next frame only while there is one to
+    /// draw.
+    pub fn tick(&mut self, now: f64) -> bool {
+        if !self.running() {
+            return false;
+        }
+        let t = self.clock.advance(now);
+        let lag = self.from * (-t / self.tau.max(f64::EPSILON)).exp();
+        if lag.abs() <= CHIP_GLIDE_DONE {
+            self.land();
+            false
+        } else {
+            self.lag = lag;
+            true
+        }
+    }
+
+    /// Where a row whose place is `scroll` is drawn this frame.
+    pub fn at(&self, scroll: f64) -> f64 {
+        scroll - self.lag
+    }
+}
+
 /// A press held on the carousel: where it landed and where the row stood,
 /// so a drag moves the row with the hand rather than jumping it.
 #[derive(Clone, Copy, Debug)]
@@ -4546,6 +4714,10 @@ struct CarouselPress {
     abs_x: f64,
     scroll: f64,
     dragged: bool,
+    /// The press landed a glide that was still running. Landing it is what
+    /// the hand asked for, so the release that follows chooses nothing: a
+    /// hand put out to stop a moving row is not pointing at a palette.
+    caught: bool,
 }
 
 /// Every palette on offer, in one row that scrolls sideways.
@@ -4615,6 +4787,20 @@ pub struct FabPaletteCarousel {
     reveal_due: bool,
     #[rust]
     press: Option<CarouselPress>,
+    /// The drawing's lag behind `scroll`, and the frames that close it.
+    #[rust]
+    glide: ChipGlide,
+    #[rust]
+    next_frame: NextFrame,
+    /// Where the hand (or the wheel's own stream) has been lately, for the
+    /// speed a release is thrown at.
+    #[rust]
+    samples: Vec<ScrollSample>,
+    /// Where the notches of the wheel now turning have put the row, with
+    /// none of the momentum they were given: what the next notch's momentum
+    /// is measured from.
+    #[rust]
+    notched: f64,
     /// The whole row, the window the chips are seen through. Marked
     /// `#[area]` so `Widget::area()` reports it: without that the derive
     /// reports the last chip drawn, which is a different one every scroll.
@@ -4677,6 +4863,10 @@ impl FabPaletteCarousel {
     /// is looking at a different row, and the middle of it is nowhere.
     pub fn rewind(&mut self, cx: &mut Cx) {
         self.scroll = 0.0;
+        // No glide: there is nothing to follow from the old row to the new
+        // one, and a picture sliding back through palettes that are already
+        // gone would say the two rows were one.
+        self.glide.land();
         self.repaint(cx);
     }
 
@@ -4699,16 +4889,38 @@ impl FabPaletteCarousel {
         self.chips.get(index).copied()
     }
 
+    /// Where the row stands -- or where it is on its way to, while the
+    /// drawing is still catching up with it (see [`ChipGlide`]). The number
+    /// everything but the draw answers off.
     pub fn scroll(&self) -> f64 {
         self.scroll
     }
 
-    /// Scroll to `scroll`, clamped to the row's ends.
+    /// Where the row is DRAWN this frame, which lags [`FabPaletteCarousel::scroll`]
+    /// by a tenth of a second or so after every move. What a test of the
+    /// motion reads, and what the chips are painted at.
+    pub fn drawn_scroll(&self) -> f64 {
+        self.glide.at(self.scroll)
+    }
+
+    /// Whether the drawing is still closing on the row's place, which is
+    /// whether the row is asking for frames.
+    pub fn is_gliding(&self) -> bool {
+        self.glide.running()
+    }
+
+    /// Scroll to `scroll`, clamped to the row's ends, with no motion to
+    /// watch: a host putting the row somewhere is not a gesture, and a row
+    /// that glided every time its host placed it would be sliding about
+    /// while somebody was reading it. The gestures --
+    /// [`FabPaletteCarousel::scroll_page`], the wheel, a flick off a drag,
+    /// the chip in force coming into view -- are the ones that glide.
     pub fn set_scroll(&mut self, cx: &mut Cx, scroll: f64) {
         let rect = self.area.rect(cx);
         let scroll = self.track(rect.size.x).clamp(scroll);
-        if scroll != self.scroll {
+        if scroll != self.scroll || self.glide.running() {
             self.scroll = scroll;
+            self.glide.land();
             self.repaint(cx);
         }
     }
@@ -4716,14 +4928,16 @@ impl FabPaletteCarousel {
     /// The row moved on by a page, or back by one: as many whole chips as
     /// the window holds ([`ChipTrack::page`]), clamped at the ends like every
     /// other way of moving it. What a host's arrow presses.
+    ///
+    /// It glides there. A second press while the first is still running is
+    /// a page further on, measured from where the row is going rather than
+    /// from where the picture has got to: two presses are two pages,
+    /// whatever the hand's timing, and the row never doubles back.
     pub fn scroll_page(&mut self, cx: &mut Cx, forward: bool) {
         let track = self.track(self.window);
         let page = track.page();
         let scroll = track.clamp(self.scroll + if forward { page } else { -page });
-        if scroll != self.scroll {
-            self.scroll = scroll;
-            self.repaint(cx);
-        }
+        self.glide_to(cx, scroll, 0.0);
     }
 
     /// Whether the row stands at one of its ends, which is what an arrow
@@ -4734,6 +4948,10 @@ impl FabPaletteCarousel {
     /// Off the window as last drawn, so that these answer the same arithmetic
     /// [`FabPaletteCarousel::scroll_page`] obeys: an arrow that is live and a
     /// press that moves nothing cannot both be right.
+    ///
+    /// And off where the row is GOING, not off the picture mid-glide: an
+    /// arrow that answered for a moving picture would go out somewhere in
+    /// the middle of its own glide and come back on at the end of it.
     pub fn at_start(&self) -> bool {
         self.scroll <= 0.0
     }
@@ -4746,7 +4964,11 @@ impl FabPaletteCarousel {
     }
 
     /// Bring chip `index` whole into the window, moving the row as little as
-    /// that takes.
+    /// that takes -- at once, like [`FabPaletteCarousel::set_scroll`], which
+    /// is what it is: a host placing the row. The row bringing the chip in
+    /// force into view OFF ITS OWN CHANGE glides instead; that one is the
+    /// row answering something the person did, and they should see it
+    /// happen.
     pub fn show_chip(&mut self, cx: &mut Cx, index: usize) {
         let rect = self.area.rect(cx);
         let scroll = self.track(rect.size.x).reveal(self.scroll, index);
@@ -4793,6 +5015,45 @@ impl FabPaletteCarousel {
         }
     }
 
+    /// Move the row's place to `scroll` and leave the drawing to close the
+    /// distance, opening at `velocity` points a second -- nought for a move
+    /// nobody threw.
+    fn glide_to(&mut self, cx: &mut Cx, scroll: f64, velocity: f64) {
+        let moved = scroll - self.scroll;
+        if moved == 0.0 {
+            return;
+        }
+        self.scroll = scroll;
+        self.glide.moved(moved, velocity);
+        if self.glide.running() {
+            self.next_frame = cx.new_next_frame();
+        }
+        self.repaint(cx);
+    }
+
+    /// Put the row at `scroll` with the picture on it: what a hand dragging
+    /// it does, and what a wheel's own delta does, both of which are already
+    /// as continuous as the hand moving them.
+    fn place(&mut self, cx: &mut Cx, scroll: f64) {
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            self.repaint(cx);
+        }
+    }
+
+    /// One frame of a glide in flight. Another is asked for only while
+    /// there is more of it to draw, so a row at rest costs nothing: the
+    /// last frame of a glide is the last frame the row asks for at all.
+    fn tick(&mut self, cx: &mut Cx, time: f64) {
+        if !self.glide.running() {
+            return;
+        }
+        if self.glide.tick(time) {
+            self.next_frame = cx.new_next_frame();
+        }
+        self.repaint(cx);
+    }
+
     /// The row and every chip on it. The chips' own area alone is not
     /// enough: a list that has just emptied has no chip to redraw by.
     fn repaint(&mut self, cx: &mut Cx) {
@@ -4829,16 +5090,39 @@ impl Widget for FabPaletteCarousel {
         // The width is new on every draw -- the sidebar is dragged wider, a
         // list comes in shorter -- so the scroll is clamped to what it is
         // now, and a chip owed a place in the window is given it here.
-        self.scroll = track.clamp(self.scroll);
+        let clamped = track.clamp(self.scroll);
+        if clamped != self.scroll {
+            // A place the layout decided, not a gesture: the picture goes
+            // there with it rather than sliding in from where the row used
+            // to be able to stand.
+            self.scroll = clamped;
+            self.glide.land();
+        }
         if self.reveal_due {
             self.reveal_due = false;
             if let Some(index) = self.chosen {
-                self.scroll = track.reveal(self.scroll, index);
+                let to = track.reveal(self.scroll, index);
+                let moved = to - self.scroll;
+                if moved != 0.0 {
+                    self.scroll = to;
+                    // This one glides: the chip in force has changed under
+                    // somebody's hand, and a row that jumped would leave
+                    // them looking for which chip moved where.
+                    self.glide.moved(moved, 0.0);
+                }
             }
         }
+        // The frames that carry a glide are asked for here as well as from
+        // the tick, because the reveal above opens one mid-draw; and only
+        // while one is running, so a row at rest is a row that has stopped
+        // asking.
+        if self.glide.running() {
+            self.next_frame = cx.new_next_frame();
+        }
+        let at = self.glide.at(self.scroll);
         cx.push_clip_rect(rect);
         let pitch = track.pitch();
-        for index in track.in_view(self.scroll) {
+        for index in track.in_view(at) {
             let bands = self.chips[index];
             self.draw_chip.band_0 = bands[0];
             self.draw_chip.band_1 = bands[1];
@@ -4850,7 +5134,7 @@ impl Widget for FabPaletteCarousel {
             self.draw_chip.draw_abs(
                 cx,
                 Rect {
-                    pos: dvec2(rect.pos.x + index as f64 * pitch - self.scroll, rect.pos.y),
+                    pos: dvec2(rect.pos.x + index as f64 * pitch - at, rect.pos.y),
                     size: dvec2(self.chip_width, height),
                 },
             );
@@ -4873,6 +5157,9 @@ impl Widget for FabPaletteCarousel {
         if !self.visible {
             return;
         }
+        if let Some(ne) = self.next_frame.is_event(event) {
+            self.tick(cx, ne.time);
+        }
         let uid = self.widget_uid();
         let rect = self.area.rect(cx);
         let track = self.track(rect.size.x);
@@ -4889,16 +5176,30 @@ impl Widget for FabPaletteCarousel {
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus(self.area);
+                // A hand on a moving row stops it where it stands: the
+                // row's place comes back to what was drawn, so from the
+                // touch on the picture and the place are one number and the
+                // chip under the finger is the chip drawn there.
+                let caught = self.glide.running();
+                if caught {
+                    self.scroll = self.glide.at(self.scroll);
+                    self.glide.land();
+                    self.repaint(cx);
+                }
+                self.samples.clear();
+                push_sample(&mut self.samples, fe.abs.x, fe.time);
                 self.press = Some(CarouselPress {
                     abs_x: fe.abs.x,
                     scroll: self.scroll,
                     dragged: false,
+                    caught,
                 });
             }
             Hit::FingerMove(fe) => {
                 let Some(mut press) = self.press else {
                     return;
                 };
+                push_sample(&mut self.samples, fe.abs.x, fe.time);
                 let moved = fe.abs.x - press.abs_x;
                 if !press.dragged && moved.abs() > CAROUSEL_DRAG_SLOP {
                     press.dragged = true;
@@ -4906,13 +5207,10 @@ impl Widget for FabPaletteCarousel {
                     self.set_hot(cx, None);
                 }
                 if press.dragged {
-                    // The row goes with the hand: dragging right brings the
-                    // earlier chips back into the window.
-                    let scroll = track.clamp(press.scroll - moved);
-                    if scroll != self.scroll {
-                        self.scroll = scroll;
-                        self.repaint(cx);
-                    }
+                    // The row goes with the hand, one point for one:
+                    // dragging right brings the earlier chips back into the
+                    // window.
+                    self.place(cx, track.clamp(press.scroll - moved));
                 }
                 self.press = Some(press);
             }
@@ -4920,7 +5218,21 @@ impl Widget for FabPaletteCarousel {
                 let Some(press) = self.press.take() else {
                     return;
                 };
-                if press.dragged || !fe.is_over {
+                if press.dragged {
+                    // The flick: the row leaves the finger at the speed the
+                    // finger had and runs down to rest, clamped at the ends
+                    // like every other way of moving it. A hand that came to
+                    // a stop before it let go leaves no speed behind it (see
+                    // [`carousel_flick`]), so a careful drag stays put.
+                    push_sample(&mut self.samples, fe.abs.x, fe.time);
+                    let (velocity, travel) = estimate_release_velocity(&self.samples);
+                    let carry = carousel_flick(velocity, travel);
+                    if carry != 0.0 {
+                        self.glide_to(cx, track.clamp(self.scroll + carry), -velocity);
+                    }
+                    return;
+                }
+                if press.caught || !fe.is_over {
                     return;
                 }
                 if let Some(index) = track.index_at(self.scroll, fe.abs.x - rect.pos.x) {
@@ -4928,15 +5240,43 @@ impl Widget for FabPaletteCarousel {
                 }
             }
             Hit::FingerScroll(fs) => {
+                // A stream that has gone quiet is over; what comes after it
+                // is a new turn of the wheel and is measured on its own.
+                if self.samples.last().map_or(true, |last| fs.time - last.time > FLING_SAMPLE_MAX_AGE) {
+                    self.samples.clear();
+                    self.notched = self.scroll;
+                }
                 let delta = carousel_wheel(fs.scroll.x, fs.scroll.y);
-                let scroll = track.clamp(self.scroll + delta);
-                if scroll != self.scroll {
-                    self.scroll = scroll;
+                let notched = track.clamp(self.notched + delta);
+                let moved = notched - self.notched;
+                self.notched = notched;
+                if moved != 0.0 {
+                    // The delta itself lands whole: a wheel and a trackpad
+                    // are already as continuous as the hand on them, and a
+                    // row that eased into every delta would trail the pad.
+                    self.place(cx, track.clamp(self.scroll + moved));
                     // What is under the pointer moved; the tooltip and the
                     // ring follow it.
-                    let hot = track.index_at(scroll, fs.abs.x - rect.pos.x);
+                    let hot = track.index_at(self.scroll, fs.abs.x - rect.pos.x);
                     self.set_hot(cx, hot);
-                    self.repaint(cx);
+                }
+                // What the wheel is doing, taken off the row's own travel:
+                // a notch or two rolled slowly leaves nothing behind it, and
+                // a spin runs on a little and settles instead of stopping
+                // dead where the last notch left it.
+                //
+                // Measured from where the NOTCHES have put the row, so the
+                // momentum is one carry and not one per notch, and taken
+                // only while the spin is still gathering speed: a wheel
+                // slowing down must not pull the row back towards itself.
+                push_sample(&mut self.samples, self.notched, fs.time);
+                let (velocity, _) = estimate_release_velocity(&self.samples);
+                let pitch = track.pitch() * CHIP_WHEEL_CARRY;
+                let carry =
+                    chip_spin_travel(velocity, FLING_DECEL_RATE_PER_MS).clamp(-pitch, pitch);
+                let target = track.clamp(self.notched + carry);
+                if (target - self.scroll) * carry > 0.0 {
+                    self.glide_to(cx, target, velocity);
                 }
             }
             Hit::KeyDown(ke) => {
@@ -4947,11 +5287,7 @@ impl Widget for FabPaletteCarousel {
                     KeyCode::End => track.max_scroll(),
                     _ => return,
                 };
-                let scroll = track.clamp(scroll);
-                if scroll != self.scroll {
-                    self.scroll = scroll;
-                    self.repaint(cx);
-                }
+                self.glide_to(cx, track.clamp(scroll), 0.0);
             }
             _ => {}
         }
@@ -7069,6 +7405,110 @@ mod tests {
         assert_eq!(carousel_wheel(1.0, -9.0), -9.0);
     }
 
+    /// A glide closes the distance over frames rather than in the one the
+    /// press landed in, and it slows down into its target rather than
+    /// stopping dead at it.
+    #[test]
+    fn a_glide_closes_the_gap_over_frames_and_slows_into_it() {
+        let mut glide = ChipGlide::default();
+        glide.moved(250.0, 0.0);
+        assert_eq!(glide.at(250.0), 0.0, "the picture jumped to where the row now stands");
+        assert!(glide.running());
+        // The frames a display sends, and the ground each covers.
+        let mut at = 0.0;
+        let mut steps = Vec::new();
+        for frame in 1..12 {
+            glide.tick(frame as f64 / 60.0);
+            let now = glide.at(250.0);
+            steps.push(now - at);
+            at = now;
+        }
+        assert!(steps[0] > 1.0, "the first frame moved nothing: {steps:?}");
+        assert!(at < 250.0, "a tenth of a second in, the row is already there");
+        assert!(
+            steps[0] > steps[10] * 3.0,
+            "the row is not slowing into its target: {steps:?}"
+        );
+        // And it does arrive, and stops asking for frames when it does.
+        let mut frame = 12;
+        while glide.tick(frame as f64 / 60.0) {
+            frame += 1;
+            assert!(frame < 600, "the glide never came to rest");
+        }
+        assert!(!glide.running());
+        assert_eq!(glide.at(250.0), 250.0, "the row came to rest short of its place");
+        assert!(!glide.tick(20.0), "a row at rest asked for another frame");
+    }
+
+    /// A second move while the first is still running is added to what is
+    /// outstanding: the picture carries on from where it is, and the row
+    /// never doubles back.
+    #[test]
+    fn a_second_move_is_added_to_what_is_still_outstanding() {
+        let mut glide = ChipGlide::default();
+        glide.moved(250.0, 0.0);
+        for frame in 1..6 {
+            glide.tick(frame as f64 / 60.0);
+        }
+        let midway = glide.at(250.0);
+        assert!(midway > 0.0 && midway < 250.0, "{midway}");
+        glide.moved(250.0, 0.0);
+        assert!(
+            (glide.at(500.0) - midway).abs() < 1e-9,
+            "the second page jumped the picture to {}",
+            glide.at(500.0)
+        );
+        let mut at = midway;
+        let mut frame = 6;
+        while glide.tick(frame as f64 / 60.0) {
+            let now = glide.at(500.0);
+            assert!(now >= at - 1e-9, "the row went backwards: {at} then {now}");
+            at = now;
+            frame += 1;
+            assert!(frame < 600, "the glide never came to rest");
+        }
+        assert_eq!(glide.at(500.0), 500.0);
+    }
+
+    /// A move small enough to be over already is over: nothing to draw, no
+    /// frames asked for.
+    #[test]
+    fn a_move_of_nothing_is_not_a_glide() {
+        let mut glide = ChipGlide::default();
+        glide.moved(0.01, 0.0);
+        assert!(!glide.running(), "a hundredth of a point is a glide");
+        assert_eq!(glide.at(7.0), 7.0);
+    }
+
+    /// The flick: a release carries the row on by what its speed would run
+    /// out in, the other way to the hand. A press that went nowhere, and a
+    /// hand that came to a stop before it let go, both leave it standing.
+    #[test]
+    fn a_flick_carries_the_row_on_and_a_hand_that_stopped_does_not() {
+        let slow = carousel_flick(-200.0, -100.0);
+        let fast = carousel_flick(-2000.0, -100.0);
+        assert!(slow > 0.0, "a flick to the left did not carry the row on");
+        assert!(fast > slow * 9.0, "the carry is not the speed's: {slow} then {fast}");
+        assert_eq!(carousel_flick(2000.0, 100.0), -fast, "and it is signed");
+        assert_eq!(carousel_flick(-2000.0, -2.0), 0.0, "a press that wobbled threw the row");
+        assert_eq!(carousel_flick(0.0, -100.0), 0.0, "a drag that ended standing still drifted on");
+        // A decay that never decays must not carry the row an infinity.
+        assert_eq!(chip_spin_travel(500.0, 1.0), 0.0);
+    }
+
+    /// A glide opens at the speed the hand let go with, and however far or
+    /// slow the throw, it is over between a seventh of a second and
+    /// three quarters of one.
+    #[test]
+    fn a_glide_opens_at_the_speed_the_hand_left_it_with() {
+        // The opening speed of an exponential approach is distance / tau.
+        let tau = chip_glide_secs(300.0, 1200.0);
+        assert!((300.0 / tau - 1200.0).abs() < 1.0);
+        assert_eq!(chip_glide_secs(2.0, 4000.0), CHIP_GLIDE_SECS.0, "a small correction is instant");
+        assert_eq!(chip_glide_secs(900.0, 20.0), CHIP_GLIDE_SECS.1, "a slow crawl lasts all day");
+        assert_eq!(chip_glide_secs(250.0, 0.0), CHIP_GLIDE_SECS.0, "a move nobody threw takes the short glide");
+    }
+
     fn cell() -> KnobTurn {
         KnobTurn {
             min: 0.0,
@@ -9108,5 +9548,360 @@ mod fab_color_pick_shield {
         cx.fingers.first_mouse_button = None;
         assert_eq!(carry_said(&all, &plain), vec!["opened"], "a plain picker carried");
         plain.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+    }
+}
+
+#[cfg(test)]
+mod fab_carousel_motion {
+    //! The carousel's motion, driven the way the platform drives it: real
+    //! presses and real `NextFrame` events, so that what these say about the
+    //! glide is what the panel does with it.
+    use super::fab_slider_gestures::{moved, press, release, send, Target};
+    use super::*;
+    use std::cell::Cell;
+
+    const WINDOW: WindowId = WindowId(1, 1);
+    /// The window the row is seen through, and the row that is too long for
+    /// it: forty chips at a pitch of 25 is a thousand points of palettes.
+    const VIEW: f64 = 260.0;
+    const COUNT: usize = 40;
+    const PITCH: f64 = 25.0;
+    /// A display's frame, which is what the tests step by.
+    const FRAME: f64 = 1.0 / 60.0;
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    row := FabPaletteCarousel{
+                        width: 260.
+                        height: 88.
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// The scene drawn, with forty palettes in the row and nothing chosen,
+    /// so that nothing is owed a place in the window before a test starts.
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef, Target) {
+        // No `init_cx_os`: this draws into a pass of its own, the way the
+        // panel's own tests do, and a graphics device per test is both
+        // unnecessary and a lot to ask of a machine running the suite
+        // several tests at a time.
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let row = root.widget(cx, ids!(row));
+        assert!(!row.is_empty(), "the scene has a carousel in it");
+        let chips: Vec<[Vec4f; 4]> = (0..COUNT)
+            .map(|index| {
+                let shade = index as f32 / COUNT as f32;
+                [vec4(shade, 0.3, 0.6, 1.0); 4]
+            })
+            .collect();
+        row.borrow_mut::<FabPaletteCarousel>().expect("a carousel").set_chips(cx, &chips, None);
+        target.draw(cx, &root);
+        let seen = row.area().rect(cx);
+        assert!((seen.size.x - VIEW).abs() < 0.5, "the window is {} wide", seen.size.x);
+        (root, row, target)
+    }
+
+    fn scroll(row: &WidgetRef) -> f64 {
+        row.borrow::<FabPaletteCarousel>().expect("a carousel").scroll()
+    }
+
+    fn drawn(row: &WidgetRef) -> f64 {
+        row.borrow::<FabPaletteCarousel>().expect("a carousel").drawn_scroll()
+    }
+
+    fn gliding(row: &WidgetRef) -> bool {
+        row.borrow::<FabPaletteCarousel>().expect("a carousel").is_gliding()
+    }
+
+    fn far_end() -> f64 {
+        ChipTrack { count: COUNT, chip_width: 22.0, gap: 3.0, view: VIEW }.max_scroll()
+    }
+
+    /// One animation frame, as the platform sends it: the row's own
+    /// next-frame id in the set, the way the animator's own tests do it.
+    fn frame(cx: &mut Cx, root: &WidgetRef, row: &WidgetRef, at: u64, time: f64) {
+        let next = row.borrow::<FabPaletteCarousel>().expect("a carousel").next_frame;
+        let event = Event::NextFrame(NextFrameEvent {
+            frame: at,
+            time,
+            set: [next].into_iter().collect(),
+        });
+        root.handle_event(cx, &event, &mut Scope::empty());
+    }
+
+    /// Frames until the row is at rest, at sixty a second from `from`. The
+    /// positions it was drawn at on the way, so a test can say the row went
+    /// one way and stayed inside its ends.
+    fn settle(cx: &mut Cx, root: &WidgetRef, row: &WidgetRef, from: f64) -> Vec<f64> {
+        let mut seen = Vec::new();
+        let mut time = from;
+        while gliding(row) {
+            time += FRAME;
+            frame(cx, root, row, seen.len() as u64 + 1, time);
+            seen.push(drawn(row));
+            assert!(seen.len() < 600, "the row never came to rest");
+        }
+        seen
+    }
+
+    fn a_press_on_the_arrow(cx: &mut Cx, row: &WidgetRef, forward: bool) {
+        row.borrow_mut::<FabPaletteCarousel>().expect("a carousel").scroll_page(cx, forward);
+    }
+
+    /// An arrow does NOT land the row a page along in the frame it was
+    /// pressed: the row's place is a page along, and the picture takes the
+    /// frames after it to get there.
+    #[test]
+    fn an_arrow_glides_the_row_rather_than_stepping_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        assert_eq!(scroll(&row), 0.0);
+        a_press_on_the_arrow(&mut cx, &row, true);
+        let page = scroll(&row);
+        assert!(page >= 10.0 * PITCH, "a page of the window is {page}");
+        assert_eq!(drawn(&row), 0.0, "the row jumped the whole page in the frame the arrow was pressed");
+        assert!(gliding(&row), "the arrow left nothing to draw");
+        // The arrows read the row's place, not the picture: one that went
+        // out halfway through its own glide and came back on at the end of
+        // it would flicker on every press.
+        assert!(!row.borrow::<FabPaletteCarousel>().expect("a carousel").at_start());
+
+        frame(&mut cx, &root, &row, 1, FRAME);
+        let first = drawn(&row);
+        assert!(first > 0.0 && first < page, "one frame carried the row {first} of {page}");
+
+        let seen = settle(&mut cx, &root, &row, FRAME);
+        assert!(seen.len() > 6, "the row arrived in {} frames, which is a jump", seen.len());
+        assert_eq!(drawn(&row), page, "the row came to rest short of its place");
+        assert!(!gliding(&row));
+        // At rest it asks for nothing more, and a stray frame moves nothing.
+        frame(&mut cx, &root, &row, 999, 30.0);
+        assert_eq!(drawn(&row), page);
+        assert!(!gliding(&row));
+    }
+
+    /// A second press while the first is still running: the row's place is
+    /// two pages along, the picture carries on from where it had got to,
+    /// and it never goes backwards on its way there.
+    #[test]
+    fn a_second_arrow_press_retargets_without_a_jump() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        a_press_on_the_arrow(&mut cx, &row, true);
+        let page = scroll(&row);
+        for at in 1..5 {
+            frame(&mut cx, &root, &row, at, at as f64 * FRAME);
+        }
+        let midway = drawn(&row);
+        assert!(midway > 0.0 && midway < page, "{midway}");
+
+        a_press_on_the_arrow(&mut cx, &row, true);
+        assert_eq!(scroll(&row), page * 2.0, "two presses are not two pages");
+        assert_eq!(drawn(&row), midway, "the second press jumped the picture");
+
+        let mut was = midway;
+        for at in settle(&mut cx, &root, &row, 5.0 * FRAME) {
+            assert!(at >= was - 1e-9, "the row went backwards: {was} then {at}");
+            was = at;
+        }
+        assert_eq!(drawn(&row), page * 2.0);
+    }
+
+    /// The ends hold whatever is moving the row: it comes to rest exactly
+    /// on them and never passes them on the way.
+    #[test]
+    fn the_row_rests_exactly_at_both_of_its_ends() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        let end = far_end();
+        assert!(end > 0.0);
+        for _ in 0..COUNT {
+            a_press_on_the_arrow(&mut cx, &row, true);
+        }
+        assert_eq!(scroll(&row), end, "the arrows ran the row past its last chip");
+        for at in settle(&mut cx, &root, &row, 0.0) {
+            assert!(at <= end + 1e-9, "the row was drawn {at} points along, past its end at {end}");
+        }
+        assert_eq!(drawn(&row), end, "the row came to rest off its far end");
+        assert!(row.borrow::<FabPaletteCarousel>().expect("a carousel").at_end());
+
+        for _ in 0..COUNT {
+            a_press_on_the_arrow(&mut cx, &row, false);
+        }
+        assert_eq!(scroll(&row), 0.0);
+        for at in settle(&mut cx, &root, &row, 0.0) {
+            assert!(at >= -1e-9, "the row was drawn {at} points along, behind its first chip");
+        }
+        assert_eq!(drawn(&row), 0.0);
+        assert!(!gliding(&row), "a row resting on its end is still asking for frames");
+    }
+
+    /// A drag follows the hand one point for one, and the release throws
+    /// the row on: further than the hand itself came, and then to rest.
+    #[test]
+    fn a_flick_off_a_drag_carries_the_row_further_than_the_hand_did() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        let seen = row.area().rect(&cx);
+        let from = seen.pos + dvec2(200.0, 40.0);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(from, 0.0));
+        // Six frames of hand, twenty points each, leftwards: the row comes
+        // with it, point for point.
+        let mut at = from;
+        for step in 1..7 {
+            at = from - dvec2(20.0 * step as f64, 0.0);
+            send(&mut cx, &root, &moved(at, step as f64 * FRAME));
+            assert!(!gliding(&row), "the row glided under the hand holding it");
+        }
+        let dragged = scroll(&row);
+        assert!((dragged - 120.0).abs() < 0.5, "the drag moved the row {dragged}, not with the hand");
+        // Let go while it is still moving.
+        send(&mut cx, &root, &release(at, 7.0 * FRAME));
+        cx.fingers.first_mouse_button = None;
+        let thrown = scroll(&row);
+        assert!(thrown > dragged + 10.0, "the flick carried the row {thrown}, barely past the drag's {dragged}");
+        assert!(gliding(&row), "the row stopped dead where the hand let go");
+        assert_eq!(drawn(&row), dragged, "the flick jumped the picture on");
+
+        let end = far_end();
+        for was in settle(&mut cx, &root, &row, 7.0 * FRAME) {
+            assert!(was <= end + 1e-9 && was >= -1e-9, "the flick carried the row out of its ends: {was}");
+        }
+        assert_eq!(drawn(&row), thrown, "the flick did not come to rest where it was going");
+        assert!(!gliding(&row));
+    }
+
+    /// A drag that comes to a stop before the hand lets go leaves the row
+    /// where the hand left it. Without that, every careful drag ends with
+    /// the palettes sliding out from under the pointer.
+    #[test]
+    fn a_drag_that_ends_standing_still_does_not_drift() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        let seen = row.area().rect(&cx);
+        let from = seen.pos + dvec2(200.0, 40.0);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(from, 0.0));
+        let mut at = from;
+        for step in 1..7 {
+            at = from - dvec2(20.0 * step as f64, 0.0);
+            send(&mut cx, &root, &moved(at, step as f64 * FRAME));
+        }
+        // The hand rests on the row for a third of a second and then lifts.
+        send(&mut cx, &root, &release(at, 7.0 * FRAME + 0.33));
+        cx.fingers.first_mouse_button = None;
+        assert!((scroll(&row) - 120.0).abs() < 0.5, "the row drifted to {}", scroll(&row));
+        assert!(!gliding(&row), "a drag that ended standing still threw the row");
+    }
+
+    fn a_wheel_over(cx: &mut Cx, root: &WidgetRef, at: Vec2d, delta: f64, time: f64) {
+        let event = Event::Scroll(crate::event::ScrollEvent {
+            window_id: WINDOW,
+            scroll: dvec2(0.0, delta),
+            abs: at,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: true,
+            time,
+            phase: crate::event::ScrollPhase::Changed,
+        });
+        root.handle_event(cx, &event, &mut Scope::empty());
+    }
+
+    /// One notch lands whole and leaves nothing behind it; a spin of them
+    /// carries a little momentum and settles, rather than stopping dead on
+    /// the last notch. Either way the row is where the notches put it, to
+    /// within the chip the momentum is capped at.
+    #[test]
+    fn a_wheel_spin_settles_and_a_single_notch_does_not() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        let seen = row.area().rect(&cx);
+        let over = seen.pos + seen.size * 0.5;
+
+        a_wheel_over(&mut cx, &root, over, 40.0, 0.0);
+        assert_eq!(scroll(&row), 40.0, "the notch did not land whole");
+        assert!(!gliding(&row), "one notch rolled on by itself");
+
+        // A spin: notches a frame apart, the way a wheel turned hard
+        // reports them.
+        let mut time = 1.0;
+        for _ in 0..6 {
+            time += FRAME;
+            a_wheel_over(&mut cx, &root, over, 40.0, time);
+        }
+        let spun = scroll(&row);
+        assert!(spun > 40.0 + 6.0 * 40.0, "the spin stopped dead at {spun}");
+        assert!(
+            spun <= 40.0 + 6.0 * 40.0 + PITCH + 1e-9,
+            "the spin carried the row {spun}, more than a chip past the last notch"
+        );
+        assert!(gliding(&row));
+        assert!(drawn(&row) < spun, "the momentum jumped the picture on");
+        settle(&mut cx, &root, &row, time);
+        assert_eq!(drawn(&row), spun);
+    }
+
+    /// A hand put out to stop a moving row lands it: the picture and the
+    /// place are one number again from the touch on, so the chip under the
+    /// finger is the one that is drawn there -- and that press chooses
+    /// nothing, because it was put out to stop the row.
+    #[test]
+    fn a_press_lands_a_moving_row_and_chooses_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, row, _target) = start(&mut cx);
+        let seen = row.area().rect(&cx);
+        let over = seen.pos + dvec2(50.0, 40.0);
+        a_press_on_the_arrow(&mut cx, &row, true);
+        for at in 1..4 {
+            frame(&mut cx, &root, &row, at, at as f64 * FRAME);
+        }
+        let midway = drawn(&row);
+        assert!(gliding(&row));
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(over, 1.0));
+        assert!(!gliding(&row), "the row went on gliding under the hand");
+        assert_eq!(scroll(&row), midway, "the row landed somewhere other than where it was drawn");
+        assert_eq!(drawn(&row), midway);
+        let actions = send(&mut cx, &root, &release(over, 1.05));
+        cx.fingers.first_mouse_button = None;
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action.as_widget_action().map(|a| a.cast::<FabPaletteCarouselAction>()),
+                Some(FabPaletteCarouselAction::Pick(_))
+            )),
+            "the hand that stopped the row also chose a palette"
+        );
+
+        // And with the row standing still, the same press is a choice again.
+        let actions = cx.capture_actions(|cx| {
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+            root.handle_event(cx, &press(over, 2.0), &mut Scope::empty());
+            root.handle_event(cx, &release(over, 2.05), &mut Scope::empty());
+            cx.fingers.first_mouse_button = None;
+        });
+        assert!(
+            actions.iter().any(|action| matches!(
+                action.as_widget_action().map(|a| a.cast::<FabPaletteCarouselAction>()),
+                Some(FabPaletteCarouselAction::Pick(_))
+            )),
+            "a press on a row at rest no longer chooses the chip under it"
+        );
     }
 }
