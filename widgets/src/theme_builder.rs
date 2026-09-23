@@ -3541,10 +3541,26 @@ fn random_params_on(seed: u64, dark: Option<bool>) -> BuilderParams {
         // the screen a person cannot go back to by pressing again.
         text_color: None,
         text_tint: 0.0,
+        // Drawn below, once the closures above are done with the state.
         color_count: 4,
         // A roll names all four at once, so the primary is the one in hand.
         seed_slot: SeedSlot::Primary,
     };
+    // HOW MANY COLOURS, drawn evenly across the four. The Colours row offers
+    // four equal choices and a die that never rolled one of them would be
+    // saying less than the row does -- a palette of two is not a rarer thing
+    // than a palette of four, only a quieter one. There is nothing to weight
+    // them BY: the counts are not degrees of anything, they are four
+    // different palettes, and the cheapest way for a person to see all four
+    // is for the die to offer all four equally often.
+    //
+    // Drawn last of everything, so that a seed that drew a theme before the
+    // count was rolled still draws that theme's colours and dimensions; only
+    // the count is new. It is set before the text contrast is worked out
+    // below, because the count moves the page -- the colours the count
+    // derives are the page's as much as the primary's -- and the contrast is
+    // drawn across what THAT page allows.
+    params.color_count = COLOR_COUNTS[(next_unit(&mut state) * COLOR_COUNTS.len() as f64) as usize % COLOR_COUNTS.len()];
     let (least, most) = params.text_contrast_range();
     params.text_contrast = least + (most - least) * text_share;
     params.clamped()
@@ -5237,14 +5253,21 @@ impl ThemeBuilder {
     /// because that is the rule everywhere and a page nobody can read is not
     /// a surprise worth having; the draw simply never asks for it.
     ///
-    /// Nor is the number of colours: a person who has said they want two is
-    /// rolled two. Nor the text colour, for the same reason: it is a choice
-    /// about the words and not one of the palette's colours, and a roll that
-    /// undid it would be a roll of two different things.
+    /// The number of colours IS drawn, evenly across the four: a palette of
+    /// two is a different palette and not a lesser one, and a die that could
+    /// only ever hand back four colours was quietly refusing three quarters
+    /// of what the Colours row offers. Somebody who wants the count held has
+    /// the lock in front of the squares to hold it with -- and the panel is
+    /// what holds it, since a lock is a thing about a control surface and
+    /// this is the engine.
+    ///
+    /// The text colour is not drawn: it is a choice about the words and not
+    /// one of the palette's colours, and a roll that undid it would be a
+    /// roll of two different things. Nor is the tint, for the same reason.
     pub fn randomize(&mut self, seed: u64) {
         let dark = self.params.dark();
-        let BuilderParams { color_count, text_color, text_tint, .. } = self.params;
-        self.set(BuilderParams { color_count, text_color, text_tint, ..random_params_on(seed, Some(dark)) });
+        let BuilderParams { text_color, text_tint, .. } = self.params;
+        self.set(BuilderParams { text_color, text_tint, ..random_params_on(seed, Some(dark)) });
     }
 
     /// Back to the settings the builder opened on, which takes the built
@@ -6919,11 +6942,18 @@ mod theme_builder_tests {
     }
 
     /// A random theme is a theme somebody might keep: inside every range,
-    /// readable, and -- over enough draws -- every harmony and both pages.
+    /// readable, and -- over enough draws -- every harmony, both pages and
+    /// all four colour counts.
+    ///
+    /// The counts are the newest of those and the reason for the third list:
+    /// the die draws them evenly, so 300 draws that missed one would mean a
+    /// count nobody can ever roll, which is the die telling the Colours row
+    /// a lie about what it does.
     #[test]
     fn a_random_theme_is_in_range_and_reads() {
         let mut harmonies = Vec::new();
         let mut pages = Vec::new();
+        let mut counts = Vec::new();
         for seed in 0..300u64 {
             let params = random_params(seed);
             assert_eq!(params, params.clamped(), "seed {seed}");
@@ -6938,9 +6968,14 @@ mod theme_builder_tests {
             if !pages.contains(&params.dark()) {
                 pages.push(params.dark());
             }
+            if !counts.contains(&params.color_count) {
+                counts.push(params.color_count);
+            }
         }
         assert_eq!(harmonies.len(), Harmony::ALL.len());
         assert_eq!(pages.len(), 2);
+        counts.sort();
+        assert_eq!(counts, COLOR_COUNTS.to_vec(), "the die never rolled one of the four colour counts");
     }
 
     /// A theme whose globals moved is built again from source, and that is

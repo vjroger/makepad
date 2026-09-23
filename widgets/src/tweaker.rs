@@ -8297,25 +8297,35 @@ impl BuildRow {
     }
 }
 
-/// One settings row of the builder that can be held where it is: the eight
-/// sliders and the text colour picker, which is a row like the rest even
-/// though the control on it is not a slider.
+/// One row of the builder that can be held where it is: the eight sliders,
+/// the text colour picker -- which is a row like the rest even though the
+/// control on it is not a slider -- and the row of colour squares itself.
 ///
 /// The operator's ruling is "every slider will have a lock icon in front of
 /// it ... when locked the slider won't move by clicking the dice or changing
-/// the palette", and his mockup puts one in front of the picker too. So the
-/// list is [`BuildRow::ALL`] and then the picker, and the index into it is
-/// the index into [`Tweaker::tb_locks`].
+/// the palette", and his mockup puts one in front of the picker too. A later
+/// mockup puts a tenth in front of the four squares: "a lock in front of the
+/// color swatches will lock the (amount of) colors when pressing the dice",
+/// and then, in his own correction, "the lock in front of the swatches
+/// doesn't only lock the amount, it also locks the colors themselves".
+///
+/// So the list is [`BuildRow::ALL`], then the picker, then the palette row
+/// that stands above both of them, and the index into it is the index into
+/// [`Tweaker::tb_locks`]. It is not screen order and never was: it is the
+/// order the locks were added in, and nothing reads it as an order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuildLock {
     /// A slider row, by the setting it holds.
     Row(BuildRow),
     /// The row that says which of the palette's colours the words take.
     TextColor,
+    /// The four colour squares: how many of them there are, and which
+    /// colours stand on them.
+    Palette,
 }
 
 impl BuildLock {
-    const ALL: [BuildLock; 9] = [
+    const ALL: [BuildLock; 10] = [
         BuildLock::Row(BuildRow::Saturation),
         BuildLock::Row(BuildRow::Lightness),
         BuildLock::Row(BuildRow::FontSize),
@@ -8325,6 +8335,7 @@ impl BuildLock {
         BuildLock::Row(BuildRow::Spacing),
         BuildLock::Row(BuildRow::Roundness),
         BuildLock::TextColor,
+        BuildLock::Palette,
     ];
 
     /// The line it stands at the head of.
@@ -8332,6 +8343,25 @@ impl BuildLock {
         match self {
             BuildLock::Row(row) => row.line(),
             BuildLock::TextColor => live_id!(tb_text_color_row),
+            BuildLock::Palette => live_id!(tb_seed_row),
+        }
+    }
+
+    /// The lock itself, given the builder's body.
+    ///
+    /// Nine of the lines are inside `tb_rows` and the tenth is not: the
+    /// colour squares stand above that group, between the Colours row and
+    /// the carousel. One place that knows it, so that the draw, the tip and
+    /// the tests all find the same ten locks.
+    fn lock_in(self, body: &WidgetRef) -> WidgetRef {
+        self.line_in(body).child(TB_LOCK_ID)
+    }
+
+    /// The whole line the lock stands at the head of, given the body.
+    fn line_in(self, body: &WidgetRef) -> WidgetRef {
+        match self {
+            BuildLock::Palette => body.child(live_id!(tb_seed_row)),
+            other => body.child(live_id!(tb_rows)).child(other.line()),
         }
     }
 
@@ -8340,9 +8370,18 @@ impl BuildLock {
         match self {
             BuildLock::Row(row) => row.label(),
             BuildLock::TextColor => TB_TEXT_COLOR_HEADER,
+            BuildLock::Palette => TB_PALETTE_LABEL,
         }
     }
 }
+
+/// What the lock in front of the squares holds, said in one word for the
+/// tip: not "Colours", which is the row of rungs above it, and not "the
+/// swatches", which is the operator's word for the squares and not the
+/// panel's. The palette is both of the things it holds -- how many colours
+/// there are and which they are -- and it is the word the section uses
+/// everywhere else.
+const TB_PALETTE_LABEL: &str = "the palette";
 
 /// The lock's two faces inside [`TbLockT`](crate::tweaker), open first. Both
 /// are declared and only the one the row is in is drawn: see the splash for
@@ -8352,14 +8391,23 @@ const TB_LOCK_FACES: [LiveId; 2] = [live_id!(lock_open), live_id!(lock_shut)];
 /// The id the lock is declared under inside every settings row.
 const TB_LOCK_ID: LiveId = live_id!(lock);
 
-/// What a lock says it does, under the pointer. One line for all nine, with
+/// What a lock says it does, under the pointer. One line for all ten, with
 /// the row's own name in it, since the promise is the same promise and only
 /// the row differs.
+///
+/// The palette's says what it holds as well, because that row holds two
+/// things at once and the operator had to say the second one twice: how
+/// many colours there are AND the colours themselves.
 fn tb_lock_tip_text(which: BuildLock, locked: bool) -> String {
-    if locked {
-        format!("{} is held where it is \u{00b7} the die and the palettes leave it alone \u{00b7} press to let it move again", which.label())
+    let what = if matches!(which, BuildLock::Palette) {
+        " \u{00b7} how many colours and the four themselves"
     } else {
-        format!("hold {} where it is \u{00b7} the die and the palettes would then leave it alone \u{00b7} dragging it always works", which.label())
+        ""
+    };
+    if locked {
+        format!("{} is held where it is{what} \u{00b7} the die and the palettes leave it alone \u{00b7} press to let it move again", which.label())
+    } else {
+        format!("hold {} where it is{what} \u{00b7} the die and the palettes would then leave it alone \u{00b7} your own hand always works", which.label())
     }
 }
 
@@ -11557,6 +11605,21 @@ impl Tweaker {
                                 flow: Right
                                 spacing: 3
                                 align: Align{x: 0.0 y: 1.0}
+                                // THE TENTH LOCK, in front of the squares
+                                // and in the same column as the nine below
+                                // it, so that the whole sidebar has one
+                                // line of them down its left edge. It holds
+                                // the palette: how many colours there are
+                                // and which colours they are. The squares
+                                // start behind it and share what is left.
+                                //
+                                // It sits on the row's own baseline, with
+                                // the squares rather than with the words
+                                // over them, because the row is aligned to
+                                // its bottom and a padlock floating level
+                                // with four short words would read as part
+                                // of the writing rather than as a control.
+                                lock := TbLockT {}
                                 tb_color_0 := TbColorT {}
                                 tb_color_1 := TbColorT {}
                                 tb_color_2 := TbColorT {}
@@ -19320,13 +19383,14 @@ impl Tweaker {
             self.tb_text_labels_for = count;
         }
         text_pick.as_drop_down().set_selected_item(cx, tb_text_entry_at(params.text_color, count));
-        // The lock at the head of every one of those rows. The face that is
-        // drawn IS the state -- an open padlock or a shut one -- and the
-        // panel's own lit fill says it a second time, the way a colour count
-        // rung says which count is in force. Both faces are routed: the
-        // press that will take the lock off lands on the shut one.
+        // The lock at the head of every one of those rows, and of the row of
+        // colour squares above them. The face that is drawn IS the state --
+        // an open padlock or a shut one -- and the panel's own lit fill says
+        // it a second time, the way a colour count rung says which count is
+        // in force. Both faces are routed: the press that will take the lock
+        // off lands on the shut one.
         for (index, which) in BuildLock::ALL.iter().enumerate() {
-            let lock = rows.child(which.line()).child(TB_LOCK_ID);
+            let lock = which.lock_in(&body);
             let locked = self.tb_locks[index];
             for (at, face) in TB_LOCK_FACES.iter().enumerate() {
                 let button = lock.child(*face);
@@ -19497,16 +19561,10 @@ impl Tweaker {
         if !self.tb_open {
             return None;
         }
-        let rows = sidebar
-            .child(live_id!(theme_head))
-            .child(live_id!(tb_body))
-            .child(live_id!(tb_rows));
+        let body = sidebar.child(live_id!(theme_head)).child(live_id!(tb_body));
         for (index, which) in BuildLock::ALL.iter().enumerate() {
             let locked = self.tb_locks[index];
-            let face = rows
-                .child(which.line())
-                .child(TB_LOCK_ID)
-                .child(TB_LOCK_FACES[usize::from(locked)]);
+            let face = which.lock_in(&body).child(TB_LOCK_FACES[usize::from(locked)]);
             if !face.visible() {
                 continue;
             }
@@ -19715,7 +19773,13 @@ impl Tweaker {
         // background rows follow it here as they follow an edited square:
         // pressing a palette puts that palette's page on, and the sliders
         // afterwards say what the page was asked to be.
-        let now = self.tb_follow_surface(offer.params(was));
+        //
+        // Unless the squares are locked, in which case the chip's colours
+        // never land and the Surf colour is the one that was already there:
+        // asked whether it CHANGED, rather than told to follow whatever it
+        // is, the two rows are then left where the person had them. Their
+        // own locks are the rest of that question and are spent below.
+        let now = self.tb_surface_followed(&was, self.tb_colors_kept(&was, offer.params(was)));
         self.tb_builder.set(self.tb_locked_kept(&was, now));
         self.tb_chosen = Some(offer);
         self.tb_built_changed();
@@ -19738,7 +19802,7 @@ impl Tweaker {
     /// a click on the row's name never comes through here, so a locked row
     /// still answers the person who locked it.
     fn tb_locked_kept(&self, was: &BuilderParams, now: BuilderParams) -> BuilderParams {
-        let mut now = now;
+        let mut now = self.tb_colors_kept(was, now);
         for (index, which) in BuildLock::ALL.iter().enumerate() {
             if !self.tb_locks[index] {
                 continue;
@@ -19746,9 +19810,55 @@ impl Tweaker {
             now = match which {
                 BuildLock::Row(row) => row.moved(now, row.shown(was)),
                 BuildLock::TextColor => BuilderParams { text_color: was.text_color, ..now },
+                // Done above, before anything that follows the Surf colour
+                // has had a chance to look at it.
+                BuildLock::Palette => now,
             };
         }
         now
+    }
+
+    /// `now` with the colour squares put back where `was` had them, if their
+    /// lock is on: how many there are, and which colours stand on them.
+    ///
+    /// Its own call because it has to happen FIRST. The two Surface rows
+    /// follow the Surf colour whenever that colour changes, and with this
+    /// lock on it did not change, so the rows have nothing to follow --
+    /// which is only true if they are asked after the palette has been put
+    /// back and not before.
+    ///
+    /// What is put back is the recipe the four colours are read out of --
+    /// the favourite, the harmony and the seeds a chip or an edit named --
+    /// together with the count and the slot the carousel is grown from. That
+    /// is the whole of the palette as the settings store it. Where the
+    /// recipe alone is not enough the four are written down outright: an
+    /// untouched house palette names no colours at all and reads its fourth
+    /// square off the page, so a roll that moved the page would move that
+    /// square out from under a lock that promised it would not. Held
+    /// colours are colours somebody meant to keep, and keeping them is worth
+    /// writing them down for.
+    ///
+    /// The slots a count below four DERIVES are a step of the primary on the
+    /// page in force, and the page still moves under a roll. Those slots
+    /// have no square -- the row shows only the colours that were chosen --
+    /// so what the lock holds is every colour the person can see and every
+    /// colour they could get back by putting the count up again.
+    fn tb_colors_kept(&self, was: &BuilderParams, now: BuilderParams) -> BuilderParams {
+        if !self.tb_locked(BuildLock::Palette) {
+            return now;
+        }
+        let kept = BuilderParams {
+            favourite: was.favourite,
+            harmony: was.harmony,
+            seeds: was.seeds,
+            color_count: was.color_count,
+            seed_slot: was.seed_slot,
+            ..now
+        };
+        if kept.chosen_palette() == was.chosen_palette() {
+            return kept;
+        }
+        kept.with_palette(was.chosen_palette())
     }
 
     /// The two Surface rows moved onto the Surf colour these settings carry,
@@ -20177,11 +20287,17 @@ impl Tweaker {
     /// that the same press from the same place is the same theme. The die
     /// beside "Roll" is this press. Nobody touched a square, so the slot the
     /// chips are grown from goes back to the primary, and the carousel is
-    /// grown again for the new colours unless there is none.
+    /// grown again for whatever the roll left.
     ///
-    /// The page it is on is the one thing not drawn: a roll of the colours
-    /// that also turns a dark room white is a different button, and the
-    /// engine keeps the appearance for that reason.
+    /// HOW MANY COLOURS is rolled with them, evenly across the four: see
+    /// `ThemeBuilder::randomize`. The page it is on is still the one thing
+    /// not drawn: a roll of the colours that also turns a dark room white is
+    /// a different button, and the engine keeps the appearance for that
+    /// reason.
+    ///
+    /// With the palette's own lock on, none of that lands: the count, the
+    /// four colours and the slot they are grown from are the ones that were
+    /// there, and everything else still rolls.
     fn tb_surprise(&mut self) {
         self.tb_seed = next_mix_seed(self.tb_seed);
         let was = self.tb_builder.params();
@@ -20193,9 +20309,25 @@ impl Tweaker {
         // The ruling is about the Surf colour being CHANGED and about a
         // palette being chosen, and the die is neither.
         let rolled = self.tb_locked_kept(&was, self.tb_builder.params());
+        // The words keep their colour through a roll, and a slot the new
+        // count DERIVES is no longer one of the palette's colours: the
+        // choice follows the count down, exactly as a press on a rung makes
+        // it follow. Left standing, the picker would say "None" while the
+        // words went on taking their hue from a square nobody can see.
+        let rolled =
+            BuilderParams { text_color: rolled.text_color.filter(|slot| slot.chosen_at(rolled.color_count)), ..rolled };
         self.tb_builder.set(rolled);
-        self.tb_seed_slot = SeedSlot::Primary;
-        self.tb_suggest_due = self.tb_row_seed().is_some();
+        // The seed slot goes back to the primary because nobody touched a
+        // square -- except where the palette is held, in which case the
+        // square they last touched is still the one the row is grown from.
+        if !self.tb_locked(BuildLock::Palette) {
+            self.tb_seed_slot = SeedSlot::Primary;
+        }
+        // Always asked for, now that a roll can move the count: at one
+        // colour there is no row to grow, and `tb_suggest_again` is what
+        // clears the offers away rather than leaving last count's standing
+        // behind a strip nobody can see.
+        self.tb_suggest_due = true;
         self.tb_built_changed();
     }
 
@@ -22660,9 +22792,10 @@ mod tests {
             1,
             "the builder's `TbColorT` is not declared once as a View"
         );
-        // And the lock at the head of every settings row: one template,
-        // and one of it in front of each of the nine rows, under the same
-        // name in every one of them so the panel addresses them all alike.
+        // And the lock at the head of every row that carries one: one
+        // template, and one of it in front of each of the nine settings
+        // rows and of the row of colour squares, under the same name in
+        // every one of them so the panel addresses them all alike.
         assert_eq!(
             src.matches("let TbLockT = View {").count(),
             1,
@@ -22671,7 +22804,7 @@ mod tests {
         assert_eq!(
             src.matches("lock := TbLockT {}").count(),
             BuildLock::ALL.len(),
-            "the settings rows do not each carry one lock"
+            "the rows that carry a lock do not each carry one"
         );
         for face in ["lock_open := PanelButton", "lock_shut := PanelButton"] {
             assert_eq!(src.matches(face).count(), 1, "`{face}` is not declared once");
@@ -26424,9 +26557,13 @@ line two");
         }
     }
 
-    /// The colours row is the four squares and nothing else, sharing the
-    /// whole width: the seed picker that ended it is gone, and the die has
-    /// gone up into the Colours row with the switch.
+    /// The colours row is its lock and the four squares, and the four share
+    /// everything the lock leaves: the seed picker that ended the row is
+    /// gone, and the die has gone up into the Colours row with the switch.
+    ///
+    /// The lock is at the FRONT, so nothing stands after the four and the
+    /// zone after the last square still runs to the row's own edge -- which
+    /// is what the drop zones are measured against.
     ///
     /// Seen failing while both still stood at the end of this row, where the
     /// four shared what was left of it and the zone after the last square had
@@ -26446,7 +26583,12 @@ line two");
         let narrowest = squares.iter().fold(f64::INFINITY, |least, at| least.min(at.size.x));
         assert!(widest - narrowest <= 1.0, "the four squares are not equals: {squares:?}");
         let covered: f64 = squares.iter().map(|at| at.size.x).sum();
-        assert!(covered > row.size.x - 20.0, "the four share only {covered} of {}", row.size.x);
+        // What the lock leaves, less the three gaps between the squares.
+        let lock = the_lock_face(&head, BuildLock::Palette, false).area().rect(&cx);
+        assert!(lock.size.x > 0.0, "the row's lock drew nothing");
+        let theirs = row.size.x - (lock.pos.x + lock.size.x - row.pos.x);
+        assert!(covered > theirs - 20.0, "the four share only {covered} of the {theirs} the lock leaves");
+        assert!(squares[0].pos.x >= lock.pos.x + lock.size.x - 0.5, "the first square stands in front of the lock");
         let last = squares[3];
         assert!(last.pos.x + last.size.x >= row.pos.x + row.size.x - 2.0, "something still stands after the four");
         // And the die and the switch are up in the Colours row.
@@ -27060,18 +27202,29 @@ line two");
         );
     }
 
-    /// What a settings row HOLDS, as the settings store it: the number a
-    /// lock promises to leave where it is.
+    /// What a row HOLDS, as the settings store it: what a lock promises to
+    /// leave where it is.
+    ///
+    /// Nine of them hold one number. The tenth holds the palette, which is
+    /// how many colours there are and which colours they are, so the answer
+    /// cannot be a number and is the two of them together.
     ///
     /// The text contrast is read raw rather than through `BuildRow::shown`,
     /// which clamps it to what the page it will be written on allows. The
     /// page moves under a roll, and a lock is a promise about the SETTING;
     /// what a moved page then allows is that row's own older rule.
-    fn what_a_lock_holds(which: BuildLock, params: &BuilderParams) -> f64 {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Held {
+        Number(f64),
+        Palette(usize, [u32; 4]),
+    }
+
+    fn what_a_lock_holds(which: BuildLock, params: &BuilderParams) -> Held {
         match which {
-            BuildLock::Row(BuildRow::TextContrast) => params.text_contrast,
-            BuildLock::Row(row) => row.shown(params),
-            BuildLock::TextColor => params.text_color.map_or(-1.0, |slot| slot.index() as f64),
+            BuildLock::Row(BuildRow::TextContrast) => Held::Number(params.text_contrast),
+            BuildLock::Row(row) => Held::Number(row.shown(params)),
+            BuildLock::TextColor => Held::Number(params.text_color.map_or(-1.0, |slot| slot.index() as f64)),
+            BuildLock::Palette => Held::Palette(params.color_count, params.chosen_palette()),
         }
     }
 
@@ -27089,13 +27242,11 @@ line two");
         }
     }
 
-    /// The lock at the head of a settings row, and one of its two faces.
+    /// The lock at the head of a row, and one of its two faces. Nine of the
+    /// rows are inside `tb_rows` and the palette's is not: `lock_in` is what
+    /// knows that.
     fn the_lock_face(head: &WidgetRef, which: BuildLock, locked: bool) -> WidgetRef {
-        head.child(live_id!(tb_body))
-            .child(live_id!(tb_rows))
-            .child(which.line())
-            .child(TB_LOCK_ID)
-            .child(TB_LOCK_FACES[usize::from(locked)])
+        which.lock_in(&head.child(live_id!(tb_body))).child(TB_LOCK_FACES[usize::from(locked)])
     }
 
     /// THE SURF COLOUR IS THE PAGE. Choosing a palette puts its fourth
@@ -27177,10 +27328,17 @@ line two");
         let _ = head;
     }
 
-    /// A LOCKED ROW IS LEFT WHERE IT IS. Walked over all nine of them: with
-    /// the lock on, the die and a palette off the carousel leave that row's
-    /// setting exactly where it stood, and every other row goes where it
-    /// would have gone anyway.
+    /// A LOCKED ROW IS LEFT WHERE IT IS. Walked over all ten of them: with
+    /// the lock on, the die and a palette off the carousel leave that row
+    /// exactly where it stood, and every other row goes where it would have
+    /// gone anyway.
+    ///
+    /// The tenth is the row of colour squares, and what it holds is the
+    /// palette whole: how many colours there are AND the four colours
+    /// themselves, byte for byte. Seen failing before the die rolled the
+    /// count at all, and again with the count rolled and the colours left
+    /// free, where a lock the operator asked for held half of what he said
+    /// it holds.
     ///
     /// The same roll twice, from the same settings and the same seed, is
     /// what makes the last half an assertion rather than a hope: the die is
@@ -27244,6 +27402,14 @@ line two");
             // different question -- but away from where it stood.
             for other in BuildLock::ALL.iter().filter(|other| *other != which) {
                 let stood = what_a_lock_holds(*other, &start);
+                // One exception, and it is the ruling followed through:
+                // the two Surface rows move under a chip because they
+                // FOLLOW the Surf colour, and with the palette held that
+                // colour did not change, so there is nothing to follow.
+                // They are not locked -- the die still rolls them below --
+                // they simply have no reason to move.
+                let follows_the_surf = matches!(which, BuildLock::Palette)
+                    && matches!(other, BuildLock::Row(BuildRow::Saturation) | BuildLock::Row(BuildRow::Lightness));
                 if what_a_lock_holds(*other, &loose_roll) != stood {
                     assert_ne!(
                         what_a_lock_holds(*other, &tight_roll),
@@ -27253,7 +27419,7 @@ line two");
                         other.label()
                     );
                 }
-                if what_a_lock_holds(*other, &loose_chip) != stood {
+                if what_a_lock_holds(*other, &loose_chip) != stood && !follows_the_surf {
                     assert_ne!(
                         what_a_lock_holds(*other, &tight_chip),
                         stood,
@@ -27273,7 +27439,10 @@ line two");
                     which.label()
                 );
             }
-            if matches!(which, BuildLock::Row(BuildRow::Saturation) | BuildLock::Row(BuildRow::Lightness)) {
+            if matches!(
+                which,
+                BuildLock::Row(BuildRow::Saturation) | BuildLock::Row(BuildRow::Lightness) | BuildLock::Palette
+            ) {
                 assert_ne!(
                     what_a_lock_holds(*which, &loose_chip),
                     held,
@@ -27321,6 +27490,307 @@ line two");
         assert_ne!(panel.tb_builder.params().saturation, before, "a press on a locked row's track moved nothing");
     }
 
+    /// Where the lock in front of the colour squares stands in
+    /// `BuildLock::ALL`, which is the index into `Tweaker::tb_locks`.
+    fn the_palette_lock() -> usize {
+        BuildLock::ALL
+            .iter()
+            .position(|one| *one == BuildLock::Palette)
+            .expect("the colour squares have a lock")
+    }
+
+    /// The colour a square is SHOWING, which is not the same question as
+    /// what the settings hold: the control is written on every draw, and a
+    /// square that went on showing a colour the theme is no longer built
+    /// from is the lie the swatch row used to tell.
+    fn a_square_shows(head: &WidgetRef, which: usize) -> u32 {
+        let pick = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(TB_COLOR_IDS[which])
+            .child(live_id!(tb_color));
+        let shown = pick.borrow::<FabColorPick>().expect("a colour control").rgba();
+        packed_of(shown) | 0xFF
+    }
+
+    /// Whether a square is on the row at all, which is how the count says
+    /// itself over the squares: the colours a lower count derives are not
+    /// choices and have no square.
+    fn a_square_is_shown(head: &WidgetRef, which: usize) -> bool {
+        head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(TB_COLOR_IDS[which]).visible()
+    }
+
+    /// THE DIE ROLLS HOW MANY COLOURS. Over a spread of seeds it draws all
+    /// four counts, evenly and not by accident, and the panel follows it:
+    /// the squares a count derives leave the row and the ones it chooses
+    /// show the colours the theme is built from.
+    ///
+    /// Seen failing before the ruling, where `randomize` kept the count on
+    /// purpose and forty rolls in a row were four colours every time -- a
+    /// Colours row offering four choices, three of which the die could
+    /// never hand back.
+    #[test]
+    fn the_die_rolls_how_many_colours_and_the_panel_follows() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let mut seen: Vec<usize> = Vec::new();
+        let mut at = 0.0;
+        for seed in 0..40u64 {
+            panel.tb_seed = seed;
+            panel.tb_surprise();
+            let params = panel.tb_builder.params();
+            if seen.contains(&params.color_count) {
+                continue;
+            }
+            seen.push(params.color_count);
+            // That count on the screen: the squares it chooses, in the
+            // colours the theme wears, and no square for the rest.
+            at += 1.0;
+            the_palette_lands(&mut cx, &mut panel, at);
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+            let palette = panel.tb_builder.params().palette();
+            for slot in SeedSlot::ALL {
+                let which = slot.index();
+                let chosen = slot.chosen_at(params.color_count);
+                assert_eq!(
+                    a_square_is_shown(&head, which),
+                    chosen,
+                    "at {} colour(s) the {} square is on the row when it should not be, or off it when it should",
+                    params.color_count,
+                    TB_COLOR_NAMES[which]
+                );
+                if chosen {
+                    assert_eq!(
+                        a_square_shows(&head, which),
+                        palette[which] | 0xFF,
+                        "the {} square shows a colour the theme is not built from",
+                        TB_COLOR_NAMES[which]
+                    );
+                }
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, COLOR_COUNTS.to_vec(), "forty rolls of the die never drew one of the four counts");
+    }
+
+    /// THE PALETTE'S LOCK HOLDS THE COUNT AND THE COLOURS THEMSELVES. The
+    /// operator, correcting his own first wording: "the lock in front of the
+    /// swatches doesn't only lock the amount, it also locks the colors
+    /// themselves."
+    ///
+    /// So a die press with it on leaves how many colours there are and every
+    /// one of the four exactly where they stand, byte for byte, on the
+    /// settings and on the screen -- and rolls everything else, which is the
+    /// half that says the lock is what held them.
+    ///
+    /// Seen failing with the count rolled and the colours left free, where
+    /// a locked row kept its two squares and put two new colours on them.
+    #[test]
+    fn the_palette_lock_holds_the_count_and_the_four_colours() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        // A palette off the carousel, so the four squares hold four colours
+        // somebody chose rather than the house's, and a count that is not
+        // the one a roll opens on.
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        a_count_pressed(&mut cx, &mut panel, &head, 2, 1.0);
+        panel.tb_locks[the_palette_lock()] = true;
+        let start = panel.tb_builder.params();
+        assert_eq!(start.color_count, 2, "the rung never set the count, so the roll has nothing to hold");
+
+        let mut moved: Vec<f64> = Vec::new();
+        let mut at = 2.0;
+        for seed in 0..12u64 {
+            panel.tb_seed = seed;
+            panel.tb_surprise();
+            let now = panel.tb_builder.params();
+            assert_eq!(now.color_count, start.color_count, "the die moved how many colours there are, seed {seed}");
+            assert_eq!(now.chosen_palette(), start.chosen_palette(), "the die moved one of the four colours, seed {seed}");
+            // The squares that ARE shown are the chosen ones, so what the
+            // person is looking at is held byte for byte; the slots a count
+            // below four derives are a step of the primary on the page in
+            // force and have no square at all.
+            at += 1.0;
+            the_palette_lands(&mut cx, &mut panel, at);
+            draw_the_theme_head(&mut cx, &mut panel, &head);
+            for slot in SeedSlot::ALL.iter().filter(|slot| slot.chosen_at(start.color_count)) {
+                assert_eq!(
+                    a_square_shows(&head, slot.index()),
+                    start.chosen_palette()[slot.index()] | 0xFF,
+                    "the {} square moved under a locked palette, seed {seed}",
+                    TB_COLOR_NAMES[slot.index()]
+                );
+            }
+            moved.push(now.roundness);
+            moved.push(now.spacing);
+            moved.push(now.font_size);
+        }
+        // And everything else rolled: a lock that quietly held the whole
+        // section would pass every assertion above it.
+        let stood = [start.roundness, start.spacing, start.font_size];
+        assert!(
+            moved.iter().any(|value| stood.iter().all(|was| (value - was).abs() > 1e-9)),
+            "the die moved nothing at all with the palette locked: {moved:?}"
+        );
+    }
+
+    /// A PALETTE OFF THE CAROUSEL LEAVES A LOCKED ROW OF SQUARES ALONE too,
+    /// which is the first ruling's other half -- "when locked the slider
+    /// won't move by clicking the dice or changing the palette" -- held to
+    /// by the row the second ruling added.
+    ///
+    /// And the two Surface rows, which follow the Surf colour whenever it
+    /// changes, are left where they stand: with the squares held that
+    /// colour did not change, so there is nothing for them to follow. They
+    /// are not locked and the die still rolls them; they simply have no
+    /// reason to move here.
+    ///
+    /// The carousel is grown from the seed slot's colour, which was held
+    /// too, so it comes back the same row and the chip that was chosen
+    /// keeps its outline.
+    #[test]
+    fn a_locked_palette_is_left_alone_by_a_chip_and_keeps_its_outline() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        // Both Surface rows dragged well away, so a chip that moved them
+        // would be caught.
+        panel.tb_gesture_ended(BuildRow::Saturation, 30.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 21.0);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.tb_locks[the_palette_lock()] = true;
+        let start = panel.tb_builder.params();
+
+        a_press_on_chip(&mut cx, &mut panel, &head, 3);
+        let now = panel.tb_builder.params();
+        assert_eq!(now.color_count, start.color_count, "a palette moved how many colours there are");
+        assert_eq!(now.chosen_palette(), start.chosen_palette(), "a palette moved the four colours under a lock");
+        assert_eq!(now.saturation, start.saturation, "the Saturation row followed a Surf colour that never changed");
+        assert_eq!(now.lightness, start.lightness, "the Lightness row followed a Surf colour that never changed");
+
+        // The die, with the same lock on, still moves those two rows: they
+        // were not locked, they were only left with nothing to follow.
+        panel.tb_seed = 7;
+        panel.tb_surprise();
+        let rolled = panel.tb_builder.params();
+        assert_ne!(rolled.lightness, start.lightness, "the palette's lock held the Lightness row as well");
+
+        // And the chip that was chosen is still the one marked, on a row
+        // grown again from the colour that was held.
+        panel.tb_builder.set(start);
+        panel.tb_suggest_again();
+        let chosen = panel.tb_chosen_index().expect("the palette in force is marked by no chip");
+        panel.tb_seed = 9;
+        panel.tb_surprise();
+        the_palette_lands(&mut cx, &mut panel, 6.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(
+            panel.tb_chosen_index(),
+            Some(chosen),
+            "a roll with the colours held grew another row of chips, or lost the one that was chosen"
+        );
+        assert_eq!(carousel_chosen(&head), Some(chosen), "the chip on the screen lost its outline");
+    }
+
+    /// THE PALETTE'S LOCK DOES NOT DISTURB THE NINE, in either direction: a
+    /// roll with only it on still moves the sliders, and a roll with a
+    /// slider locked still rolls the colours and the count.
+    #[test]
+    fn the_palette_lock_and_the_slider_locks_keep_out_of_each_other() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        panel.tb_gesture_ended(BuildRow::Roundness, 7.0);
+        panel.tb_gesture_ended(BuildRow::Spacing, 9.0);
+        let start = panel.tb_builder.params();
+
+        // Only the palette held: the sliders still roll.
+        panel.tb_locks = [false; BuildLock::ALL.len()];
+        panel.tb_locks[the_palette_lock()] = true;
+        panel.tb_seed = 3;
+        panel.tb_surprise();
+        let rolled = panel.tb_builder.params();
+        assert_eq!(rolled.chosen_palette(), start.chosen_palette(), "the palette's lock let the colours go");
+        assert!(
+            rolled.roundness != start.roundness || rolled.spacing != start.spacing,
+            "the palette's lock held the sliders as well"
+        );
+
+        // Only a slider held: the colours and the count still roll.
+        panel.tb_builder.set(start);
+        panel.tb_locks = [false; BuildLock::ALL.len()];
+        let at = BuildLock::ALL
+            .iter()
+            .position(|one| *one == BuildLock::Row(BuildRow::Roundness))
+            .expect("the roundness has a lock");
+        panel.tb_locks[at] = true;
+        let mut counts: Vec<usize> = Vec::new();
+        for seed in 0..12u64 {
+            panel.tb_builder.set(start);
+            panel.tb_seed = seed;
+            panel.tb_surprise();
+            let rolled = panel.tb_builder.params();
+            assert_eq!(rolled.roundness, start.roundness, "the roundness moved with its own lock on, seed {seed}");
+            assert_ne!(rolled.chosen_palette(), start.chosen_palette(), "a slider's lock held the colours, seed {seed}");
+            if !counts.contains(&rolled.color_count) {
+                counts.push(rolled.color_count);
+            }
+        }
+        assert!(counts.len() > 1, "a slider's lock held the count: every roll came back {counts:?}");
+        let _ = head;
+    }
+
+    /// A LOCK NEVER STOPS THE PERSON, the tenth one either: with the colour
+    /// squares held, a press on a rung still sets the count, an edit in a
+    /// square's popover still lands, and a colour carried onto another
+    /// square still trades places with it.
+    ///
+    /// What the lock is about is what happens to the row WITHOUT a hand on
+    /// it, and a person who locks their palette and then edits it has
+    /// plainly changed their mind about one colour, not about the lock.
+    #[test]
+    fn a_locked_palette_still_answers_the_hand() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
+        panel.tb_locks[the_palette_lock()] = true;
+
+        // The rungs.
+        a_count_pressed(&mut cx, &mut panel, &head, 3, 1.0);
+        assert_eq!(panel.tb_builder.params().color_count, 3, "a locked row refused a press on a rung");
+        a_count_pressed(&mut cx, &mut panel, &head, 4, 2.0);
+        assert_eq!(panel.tb_builder.params().color_count, 4, "a locked row refused a second rung");
+
+        // A colour edited in its popover, which is the route the control
+        // reports on when a hand lets go of the wheel.
+        let edited = 0x3A_6E_C8_FF;
+        panel.tb_color_ended(1, edited);
+        assert_eq!(panel.tb_builder.params().chosen_palette()[1], edited, "a locked row refused an edit");
+        the_palette_lands(&mut cx, &mut panel, 3.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(a_square_shows(&head, 1), edited, "the edited square is not showing the colour it was given");
+
+        // And a colour carried onto another square.
+        let was = panel.tb_builder.params().palette();
+        let mut hand = Carry::down(&mut cx, &mut panel, &head, 0);
+        let over_the_tertiary = a_square_middle(&cx, &head, 2);
+        hand.move_to(&mut cx, &mut panel, &head, dvec2(hand.at.x + 10.0, hand.at.y));
+        hand.move_to(&mut cx, &mut panel, &head, over_the_tertiary);
+        hand.up(&mut cx, &mut panel, &head);
+        assert_eq!(
+            panel.tb_builder.params().palette(),
+            [was[2], was[1], was[0], was[3]],
+            "a locked row refused a colour carried onto another square"
+        );
+    }
+
     /// The locks are the person's and live as long as the panel does: the
     /// section folded and opened again finds the same rows locked, and a
     /// fresh panel opens with none of them locked. A press on the lock is
@@ -27360,6 +27830,26 @@ line two");
         let face = the_lock_face(&head, which, true);
         one_press_on(&mut cx, &mut panel, &head, &face);
         assert!(!panel.tb_locks[at], "the second press did not let the row go");
+
+        // The tenth lock is the same lock in front of a row that is not a
+        // settings row at all, so it is walked the same way: pressed, its
+        // shut face drawn, carried through a fold, and let go again.
+        let palette = the_palette_lock();
+        let face = the_lock_face(&head, BuildLock::Palette, false);
+        one_press_on(&mut cx, &mut panel, &head, &face);
+        assert!(panel.tb_locks[palette], "the press never reached the palette's lock");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(the_lock_face(&head, BuildLock::Palette, true).visible(), "the palette's shut padlock is not drawn");
+        assert!(!the_lock_face(&head, BuildLock::Palette, false).visible(), "both of the palette's padlocks are drawn");
+        panel.toggle_theme_builder(&mut cx);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.toggle_theme_builder(&mut cx);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(panel.tb_locks[palette], "the fold took the palette's lock off");
+        assert_ne!(panel.tb_lock_uids[palette][1], 0, "the palette's lock came back unrouted");
+        let face = the_lock_face(&head, BuildLock::Palette, true);
+        one_press_on(&mut cx, &mut panel, &head, &face);
+        assert!(!panel.tb_locks[palette], "the second press did not let the palette go");
     }
 
     /// A lock says what it does under the pointer, in the row's own name,
@@ -27401,14 +27891,32 @@ line two");
             panel.tb_lock_tip(&cx, &sidebar, open).is_none_or(|(_, said)| said.contains("held where it is")),
             "the padlock that is not drawn answered for the row"
         );
+
+        // The palette's says the second thing as well, because that row
+        // holds two: how many colours there are and which they are. The
+        // operator had to say the second one twice, so the tip says it.
+        let at = middle(&cx, &head, BuildLock::Palette, false);
+        let (_, text) = panel.tb_lock_tip(&cx, &sidebar, at).expect("the palette's lock says nothing");
+        assert!(text.contains(TB_PALETTE_LABEL), "the palette's tip does not name its row: {text}");
+        assert!(text.contains("how many colours"), "the palette's tip does not say it holds the count: {text}");
+        assert!(text.contains("the four themselves"), "the palette's tip does not say it holds the colours: {text}");
+        panel.tb_locks[the_palette_lock()] = true;
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let shut = middle(&cx, &head, BuildLock::Palette, true);
+        let (_, said) = panel.tb_lock_tip(&cx, &sidebar, shut).expect("the palette's shut lock says nothing");
+        assert_ne!(said, text, "the palette's lock says the same thing shut as open");
+        assert!(said.contains("held where it is"), "the palette's shut lock does not say the row is held: {said}");
     }
 
-    /// EVERY SETTINGS ROW CARRIES A LOCK, at its left and in front of its
-    /// name, and the nine of them stand in one column. Each is a square
-    /// with its padlock dead centre and no word on it -- the trap the die is
-    /// held to, and held to here for the same reason: an empty label still
-    /// takes the spacing after an icon. All of it inside the default
-    /// sidebar, which is what the operator asked to be checked.
+    /// EVERY ROW CARRIES A LOCK, at its left and in front of its name, and
+    /// the ten of them stand in one column -- the nine settings rows and
+    /// the row of colour squares above them. Each is a square with its
+    /// padlock dead centre and no word on it -- the trap the die is held
+    /// to, and held to here for the same reason: an empty label still takes
+    /// the spacing after an icon. All of it inside the default sidebar,
+    /// which is what the operator asked to be checked, and for the palette
+    /// at every one of the four counts, since each count is a different
+    /// number of squares sharing what the lock leaves.
     #[test]
     fn every_settings_row_carries_a_centred_lock_that_fits_the_sidebar() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -27449,7 +27957,7 @@ line two");
             assert!((icon.size.x - 10.0).abs() < 0.5, "{}'s padlock is {} points wide, not 10", which.label(), icon.size.x);
             // In front of the row's own control, and the whole row still
             // inside the sidebar.
-            let line = rows.child(which.line()).area().rect(&cx);
+            let line = which.line_in(&head.child(live_id!(tb_body))).area().rect(&cx);
             assert!(face.pos.x >= line.pos.x - 0.5, "{}'s lock stands outside its row", which.label());
             assert!(
                 line.pos.x + line.size.x <= right,
@@ -27463,6 +27971,15 @@ line two");
                     .child(live_id!(tb_text_color_name))
                     .area()
                     .rect(&cx),
+                // The first square of the palette, which is the primary's
+                // and is shown at every count.
+                BuildLock::Palette => head
+                    .child(live_id!(tb_body))
+                    .child(live_id!(tb_seed_row))
+                    .child(TB_COLOR_IDS[0])
+                    .child(live_id!(tb_color))
+                    .area()
+                    .rect(&cx),
             };
             assert!(after.size.x > 0.0, "{}'s control drew nothing", which.label());
             assert!(
@@ -27474,7 +27991,7 @@ line two");
         }
         let widest = lefts.iter().fold(0.0f64, |most, at| most.max(*at));
         let narrowest = lefts.iter().fold(f64::INFINITY, |least, at| least.min(*at));
-        assert!(widest - narrowest <= 0.5, "the nine locks do not stand in one column: {lefts:?}");
+        assert!(widest - narrowest <= 0.5, "the ten locks do not stand in one column: {lefts:?}");
         // The picker's name still lines up with the sliders' names behind
         // the locks, which is what makes the Text group one column.
         let name = rows
@@ -27498,6 +28015,32 @@ line two");
             name.pos.x + name.size.x,
             label.pos.x
         );
+        // And the palette's own row fits at every count, lock and all. Four
+        // squares is the tightest of them -- fewer squares is fewer columns
+        // over the same width -- and the lock takes its room off the front
+        // of all four.
+        for count in COLOR_COUNTS {
+            panel.tb_count_chosen(count);
+            the_builder_settles(&mut cx, &mut panel);
+            draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+            draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+            let seed_row = head.child(live_id!(tb_body)).child(live_id!(tb_seed_row));
+            let line = seed_row.area().rect(&cx);
+            assert!(
+                line.pos.x + line.size.x <= right,
+                "the colour squares run past the head's padding at {count} colour(s)"
+            );
+            let lock = the_lock_face(&head, BuildLock::Palette, false).area().rect(&cx);
+            assert!(lock.size.x > 0.0, "the palette's lock drew nothing at {count} colour(s)");
+            for slot in SeedSlot::ALL.iter().filter(|slot| slot.chosen_at(count)) {
+                let square = seed_row.child(TB_COLOR_IDS[slot.index()]).child(live_id!(tb_color)).area().rect(&cx);
+                assert!(square.size.x > 0.0, "a square drew nothing at {count} colour(s)");
+                assert!(
+                    square.pos.x >= lock.pos.x + lock.size.x - 0.5,
+                    "a square stands in front of the lock at {count} colour(s)"
+                );
+            }
+        }
     }
 
     /// The outline stays on the chip that was chosen across a redraw, and
@@ -28602,11 +29145,22 @@ line two");
         // Nothing regrows it while it is hidden.
         panel.tb_color_ended(0, 0xD0_40_80_FF);
         assert!(!panel.tb_suggest_due, "an edit grew a hidden row");
+        // The die rolls how many colours there are, so it can end one
+        // colour and always asks for the row again: what keeps it away is
+        // the count, not the asking. Held by its own lock, the count stays
+        // at one and the row stays hidden and ungrown.
+        panel.tb_locks[the_palette_lock()] = true;
         panel.tb_surprise();
-        assert!(!panel.tb_suggest_due, "the die grew a hidden row");
+        assert_eq!(panel.tb_builder.params().color_count, 1, "the die moved a count its lock was holding");
         the_palette_lands(&mut cx, &mut panel, 2.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert!(panel.tb_suggestions.is_empty(), "something grew the hidden row");
+        assert_eq!(
+            [panel.tb_carousel_uid, panel.tb_strip_prev_uid, panel.tb_strip_next_uid],
+            [0; 3],
+            "a route into the hidden row opened again"
+        );
+        panel.tb_locks[the_palette_lock()] = false;
 
         // Adjust and Roll stay exactly where they were, words and all, and
         // the die still rolls.
@@ -28619,8 +29173,21 @@ line two");
         one_press_on(&mut cx, &mut panel, &head, &die);
         the_palette_lands(&mut cx, &mut panel, 3.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_ne!(panel.tb_builder.params().palette()[0], before, "the die rolled nothing at one colour");
-        assert!(panel.tb_suggestions.is_empty(), "the die grew a row nobody can see");
+        let rolled = panel.tb_builder.params();
+        assert_ne!(rolled.palette()[0], before, "the die rolled nothing at one colour");
+        // The die rolls how many colours there are as well, so the row comes
+        // back exactly when the roll leaves more than one and stays away
+        // when it does not: a row nobody can see is never grown.
+        assert_eq!(
+            panel.tb_suggestions.is_empty(),
+            rolled.color_count == 1,
+            "the row and the count the die rolled disagree at {} colour(s)",
+            rolled.color_count
+        );
+        if rolled.color_count != 1 {
+            a_count_pressed(&mut cx, &mut panel, &head, 1, 3.5);
+            assert!(panel.tb_suggestions.is_empty(), "the row came back at one colour");
+        }
 
         // Two colours: the row back, grown from the colour in force now.
         a_count_pressed(&mut cx, &mut panel, &head, 2, 4.0);
@@ -28759,6 +29326,10 @@ line two");
     /// The die rolls the four colours as the surprise always did, puts the
     /// seed back on the primary -- nobody touched a square, and all four
     /// colours it rolled are new -- and grows the carousel from it.
+    ///
+    /// How many colours there are is rolled with them, so the row it grows
+    /// is the row for the count that came up: another count is another row
+    /// of chips, not the same one in other colours.
     #[test]
     fn the_die_rolls_the_four_and_grows_the_carousel_from_the_primary() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -28778,7 +29349,19 @@ line two");
         assert_eq!(header_inks(&cx, &head), [true, false, false, false]);
         let params = panel.tb_builder.params();
         let palette = params.palette();
-        assert_eq!(panel.tb_suggestions, all_suggestions_from(SeedSlot::Primary, palette[0], &panel.tb_own_schemes, Schemes::RoundThePick));
+        let grown = (params.color_count > 1)
+            .then(|| {
+                all_suggestions_for(
+                    params.color_count,
+                    SeedSlot::Primary,
+                    palette[0],
+                    params.dark(),
+                    &panel.tb_own_schemes,
+                    Schemes::RoundThePick,
+                )
+            })
+            .unwrap_or_default();
+        assert_eq!(panel.tb_suggestions, grown, "the row is not the one the rolled count and primary ask for");
         assert!(carousel_chips(&head).iter().all(|chip| chip[0] == band(palette[0])), "a chip does not hold the rolled primary");
     }
 
