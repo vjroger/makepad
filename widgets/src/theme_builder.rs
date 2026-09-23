@@ -610,6 +610,15 @@ impl BuilderParams {
         (READABLE, most.max(READABLE))
     }
 
+    /// Whether naming `slot` as the [`text_color`](BuilderParams::text_color)
+    /// would colour the words at all on these settings: whether the slot's
+    /// colour in force clears [`HAS_HUE`], the bar the rest of the builder
+    /// uses for a colour that has a hue. Below it the slot is a grey, and a
+    /// grey has no hue to give -- the words stay plain whatever the tint.
+    pub fn gives_the_words_a_hue(&self, slot: SeedSlot) -> bool {
+        text_hue_of(self, slot).is_some()
+    }
+
     /// The seed the palette is grown from. The house settings are the house
     /// seed, field for field; any other palette names all four of its colours
     /// in it, the background colour as the neutral.
@@ -3229,11 +3238,18 @@ fn text_tint_of(params: &BuilderParams) -> Option<TextTint> {
     if sat <= 0.0 {
         return None;
     }
-    let (hue, own, _) = rgb_to_hsl(params.palette()[slot.index()] | 0xFF);
-    if own < HAS_HUE {
-        return None;
-    }
+    let hue = text_hue_of(params, slot)?;
     Some(TextTint { hue, sat })
+}
+
+/// The hue a slot gives the words on these settings, or `None` where it
+/// has none to give: the slot's colour in force, as [`BuilderParams::palette`]
+/// has it, holding less colour than [`HAS_HUE`]. The one test for it, which
+/// the build and the die both ask, so that a slot the die can roll is always
+/// a slot the build will tint from.
+fn text_hue_of(params: &BuilderParams, slot: SeedSlot) -> Option<f64> {
+    let (hue, own, _) = rgb_to_hsl(params.palette()[slot.index()] | 0xFF);
+    (own >= HAS_HUE).then_some(hue)
 }
 
 /// The END the tinted inks are drawn from: the text's hue and saturation at
@@ -3492,7 +3508,7 @@ fn next_unit(state: &mut u64) -> f64 {
     ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// A theme nobody chose: pure and seeded, so the same seed is the same
+//// A theme nobody chose: pure and seeded, so the same seed is the same
 /// settings here, in a test, and on the next machine.
 ///
 /// Every field is drawn, the lightness too, and with it the appearance. The
@@ -3502,14 +3518,25 @@ fn next_unit(state: &mut u64) -> f64 {
 /// the house values and not across their whole registered range: a control
 /// may be driven to a 20 point corner and a 30 point paragraph, but a random
 /// theme that arrives there is a broken-looking app, not a surprise.
+///
+/// The words are drawn as well, by [`RolledWords`], onto a theme that had no
+/// text colour before it: two seeds in three give text with no colour in it
+/// and the tint at nought.
 pub fn random_params(seed: u64) -> BuilderParams {
-    random_params_on(seed, None)
+    let (params, words) = random_draw(seed, None);
+    words.on(params, &params, false, false)
 }
 
-/// [`random_params`], with the lightness drawn inside one appearance's half
-/// of the slider where one is named: a surprise button does not turn a dark
-/// room white.
-fn random_params_on(seed: u64, dark: Option<bool>) -> BuilderParams {
+/// [`random_params`] in its two halves: the theme with the words left
+/// plain, and the draw the words are then made of. The lightness is drawn
+/// inside one appearance's half of the slider where one is named: a surprise
+/// button does not turn a dark room white.
+///
+/// Two halves because the words are the one part of a roll that has to be
+/// worked out on the settings the roll LANDS on and not the ones it drew: a
+/// panel that holds the palette under a lock puts its own count and colours
+/// back, and the words have to be chosen among what THAT palette offers.
+fn random_draw(seed: u64, dark: Option<bool>) -> (BuilderParams, RolledWords) {
     let mut state = seed;
     let mut draw = |low: f64, high: f64| low + (high - low) * next_unit(&mut state);
     let hue = draw(0.0, 360.0);
@@ -3536,9 +3563,7 @@ fn random_params_on(seed: u64, dark: Option<bool>) -> BuilderParams {
         roundness: stepped(0.0, 8.0),
         font_size: stepped(9.0, 12.0),
         font_contrast: stepped(1.5, 3.5),
-        // Not drawn, and not because it could not be: a roll is a palette,
-        // and words that changed colour with it would be the one thing on
-        // the screen a person cannot go back to by pressing again.
+        // Plain here, and drawn at the very end: see `RolledWords`.
         text_color: None,
         text_tint: 0.0,
         // Drawn below, once the closures above are done with the state.
@@ -3554,16 +3579,149 @@ fn random_params_on(seed: u64, dark: Option<bool>) -> BuilderParams {
     // different palettes, and the cheapest way for a person to see all four
     // is for the die to offer all four equally often.
     //
-    // Drawn last of everything, so that a seed that drew a theme before the
-    // count was rolled still draws that theme's colours and dimensions; only
-    // the count is new. It is set before the text contrast is worked out
-    // below, because the count moves the page -- the colours the count
-    // derives are the page's as much as the primary's -- and the contrast is
-    // drawn across what THAT page allows.
+    // Drawn after every colour and dimension, so that a seed that drew a
+    // theme before the count was rolled still draws that theme's colours and
+    // dimensions; only the count was new. It is set before the text contrast
+    // is worked out below, because the count moves the page -- the colours
+    // the count derives are the page's as much as the primary's -- and the
+    // contrast is drawn across what THAT page allows.
     params.color_count = COLOR_COUNTS[(next_unit(&mut state) * COLOR_COUNTS.len() as f64) as usize % COLOR_COUNTS.len()];
     let (least, most) = params.text_contrast_range();
     params.text_contrast = least + (most - least) * text_share;
-    params.clamped()
+    // THE WORDS, drawn last of all and for the count's reason: every seed
+    // still draws the colours, count and dimensions it drew before there was
+    // a text colour to roll, and only the words are new. Both numbers are
+    // always drawn, whatever the first comes to, so that nothing drawn after
+    // them one day could shift with what the words landed on either.
+    let words = RolledWords { pick: next_unit(&mut state), tint: next_unit(&mut state) };
+    (params.clamped(), words)
+}
+
+/// What [`ThemeBuilder::randomize`] rolls from `was`, and the words it drew:
+/// the page's half of the lightness kept, and the words rolled onto the
+/// result with no lock on either row. Pure, so a test can roll six thousand
+/// times without building six thousand themes.
+fn rolled_from(was: &BuilderParams, seed: u64) -> (BuilderParams, RolledWords) {
+    let (params, words) = random_draw(seed, Some(was.dark()));
+    (words.on(params, was, false, false), words)
+}
+
+/// How often a roll leaves the words with no colour in them: two rolls in
+/// three. The operator's ruling, and the reason under it is what plain words
+/// are -- the theme as a person reads it every day. Coloured text is a
+/// surprise worth having now and then, and a die that tinted the words on
+/// most presses would make tinted words the ordinary thing and plain ones
+/// the rarity.
+pub const PLAIN_WORDS_SHARE: f64 = 2.0 / 3.0;
+
+/// The tint a roll gives the words when it names a slot, nought to one, on
+/// whole parts of a hundred as the Text tint row reads them.
+///
+/// The FLOOR is the panel's own first tint, the least that plainly shows:
+/// the tint is a strength, and a slot named at a strength nobody can see is
+/// a roll that changed the picker and nothing on the screen. The TOP stops
+/// short of the whole of it, because a page of words at full colour is the
+/// shout the panel's first tint was chosen to stay clear of.
+///
+/// Neither end is about reading, and neither has to be: the lightness of
+/// every tinted ink is solved from the text contrast, and an ink that cannot
+/// carry the colour to its bar is drawn in the plain end (see
+/// [`tinted_ink`]), so at whatever tint a roll lands on the words hold the
+/// contrast and the written pairs exactly as they did plain.
+pub const ROLLED_TINT: (f64, f64) = (0.35, 0.80);
+
+/// The words' half of a roll: two numbers off the roll's own seed, drawn
+/// after everything else the roll draws. What they come to is worked out on
+/// the settings the roll lands on, with [`RolledWords::on`], because which
+/// slots can colour the words depends on the count and the four colours in
+/// force, and a panel can hold both under a lock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RolledWords {
+    /// Below [`PLAIN_WORDS_SHARE`] the words stay plain; above it, where in
+    /// the rest it falls names the slot, evenly across the ones offered.
+    pick: f64,
+    /// Where in [`ROLLED_TINT`] the tint lands, if a slot is named.
+    tint: f64,
+}
+
+impl RolledWords {
+    /// The slot these words are tinted from on `params`, or `None`.
+    ///
+    /// Two rolls in three, `None` outright. The third is one of the slots
+    /// the Text colour picker offers at `params`' count -- the chosen ones,
+    /// [`SeedSlot::chosen`], which is the list the picker is written from --
+    /// evenly across those that can colour the words at all, which is what
+    /// [`BuilderParams::gives_the_words_a_hue`] decides. A slot with no hue to
+    /// give is left out because a roll that named it would change the picker
+    /// and nothing on the screen; where the count offers no slot with a hue,
+    /// the third roll is `None` as well.
+    ///
+    /// Only the chosen slots, never a derived one: the panel lets a text
+    /// colour follow the count down to None where the count stops choosing
+    /// its slot, and a roll that picked a slot its own count derives would be
+    /// undone by that rule on the same press.
+    pub fn color_on(&self, params: &BuilderParams) -> Option<SeedSlot> {
+        if self.pick < PLAIN_WORDS_SHARE {
+            return None;
+        }
+        let offered: Vec<SeedSlot> = SeedSlot::chosen(params.color_count)
+            .into_iter()
+            .filter(|slot| params.gives_the_words_a_hue(*slot))
+            .collect();
+        if offered.is_empty() {
+            return None;
+        }
+        let share = (self.pick - PLAIN_WORDS_SHARE) / (1.0 - PLAIN_WORDS_SHARE);
+        Some(offered[((share * offered.len() as f64) as usize).min(offered.len() - 1)])
+    }
+
+    /// The tint these words take if a slot is named: inside [`ROLLED_TINT`],
+    /// on a whole part of a hundred.
+    pub fn tint(&self) -> f64 {
+        let (least, most) = ROLLED_TINT;
+        ((least + (most - least) * self.tint) * 100.0).round() / 100.0
+    }
+
+    /// `params` with the words rolled onto it, `was` being the settings the
+    /// roll was pressed from. `hold_color` and `hold_tint` are the locks a
+    /// panel puts on the Text colour and Text tint rows; the engine has no
+    /// locks of its own, and [`ThemeBuilder::randomize`] holds neither.
+    ///
+    /// The tint only ever rolls together with a slot. Under None the tint
+    /// row is off, and the number on it is one the person set and comes back
+    /// to when they choose a slot again, so a roll that leaves the words
+    /// plain leaves the tint exactly where `was` had it. A roll that names a
+    /// slot draws a tint in [`ROLLED_TINT`] with it, because the tint is a
+    /// strength and a slot named at nought shows nothing.
+    ///
+    /// The four cases of the two locks:
+    ///
+    /// - Neither held: the colour rolls, and the tint rolls with it when the
+    ///   colour lands on a slot and stays where it was when it lands on None.
+    /// - Colour held, tint free: the colour stays; the tint rolls if that
+    ///   colour is a slot and stays if it is None, since a strength of no
+    ///   colour is nothing on the screen.
+    /// - Colour free, tint held: the colour rolls and the tint stays. With
+    ///   the tint held at nought the colour rolls to None, because a slot at
+    ///   a strength of nought is exactly the invisible roll the draw keeps
+    ///   out.
+    /// - Both held: neither moves.
+    ///
+    /// A held colour is still a slot the count offers, or nothing: where the
+    /// count a roll lands on derives the held slot, it goes to None, as it
+    /// does under a press on the Colours row. Holding the count is the
+    /// palette lock's work.
+    pub fn on(self, params: BuilderParams, was: &BuilderParams, hold_color: bool, hold_tint: bool) -> BuilderParams {
+        let text_color = if hold_color {
+            was.text_color.filter(|slot| slot.chosen_at(params.color_count))
+        } else if hold_tint && was.text_tint <= 0.0 {
+            None
+        } else {
+            self.color_on(&params)
+        };
+        let text_tint = if hold_tint || text_color.is_none() { was.text_tint } else { self.tint() };
+        BuilderParams { text_color, text_tint, ..params }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5314,13 +5472,26 @@ impl ThemeBuilder {
     /// what holds it, since a lock is a thing about a control surface and
     /// this is the engine.
     ///
-    /// The text colour is not drawn: it is a choice about the words and not
-    /// one of the palette's colours, and a roll that undid it would be a
-    /// roll of two different things. Nor is the tint, for the same reason.
-    pub fn randomize(&mut self, seed: u64) {
-        let dark = self.params.dark();
-        let BuilderParams { text_color, text_tint, .. } = self.params;
-        self.set(BuilderParams { text_color, text_tint, ..random_params_on(seed, Some(dark)) });
+    /// The text colour IS drawn too, by the operator's ruling: two rolls in
+    /// three leave the words plain and the third tints them from one of the
+    /// slots the Text colour picker offers at the count the roll landed on,
+    /// at a tint that plainly shows. It used to be kept, on the reasoning
+    /// that the words were a choice about the text and not one of the
+    /// palette's colours; but a die that never touched the picker left a
+    /// whole row of the builder the die could not surprise anybody with, and
+    /// the words are held by a lock now like every other row. See
+    /// [`RolledWords`] for the draw, which is made after everything else so
+    /// that every seed still rolls the colours, count and dimensions it
+    /// rolled before, and [`RolledWords::on`] for the tint, which stays
+    /// where it was whenever the roll leaves the words plain.
+    ///
+    /// The words drawn are handed back, because a panel that holds any of the
+    /// palette, the text colour or the tint puts its own settings back after
+    /// this, and the words then have to be worked out again on what it kept.
+    pub fn randomize(&mut self, seed: u64) -> RolledWords {
+        let (params, words) = rolled_from(&self.params, seed);
+        self.set(params);
+        words
     }
 
     /// Back to the settings the builder opened on, which takes the built
@@ -6992,6 +7163,45 @@ mod theme_builder_tests {
         assert_eq!(lost.text_contrast, house_text_contrast(Scheme::Dark));
     }
 
+    /// Everything a roll of `seed` draws EXCEPT the words, folded into one
+    /// number over two thousand seeds: the colours, the harmony, the count,
+    /// both background rows, the text contrast and the four dimensions,
+    /// each written out to its last bit. The whole roll is taken, words and
+    /// all, and only then are the words wiped, so that a word draw which
+    /// moved anything else would show.
+    fn what_the_rolls_drew_besides_the_words(dark: Option<bool>) -> u64 {
+        let mut hash = 0xCBF2_9CE4_8422_2325u64;
+        for seed in 0..2000u64 {
+            let (drawn, words) = random_draw(seed, dark);
+            let params = words.on(drawn, &drawn, false, false);
+            if dark.is_none() {
+                assert_eq!(params, random_params(seed), "seed {seed}");
+            }
+            let line = format!("{:?}", BuilderParams { text_color: None, text_tint: 0.0, ..params });
+            for byte in line.bytes() {
+                hash = (hash ^ byte as u64).wrapping_mul(0x0100_0000_01B3);
+            }
+        }
+        hash
+    }
+
+    /// EVERY SEED STILL ROLLS THE THEME IT ROLLED. The three numbers are
+    /// what [`what_the_rolls_drew_besides_the_words`] came to on the commit
+    /// before the die rolled the words -- on both pages the panel's die can
+    /// be pressed on, and on the free draw the tests use -- so the words'
+    /// draw came after everything else and moved nothing but the words, as
+    /// the count's draw did before it. A person who remembered a seed's
+    /// colours finds them again.
+    ///
+    /// Seen failing with the two word draws made first, where every one of
+    /// the three moved.
+    #[test]
+    fn every_seed_still_rolls_the_theme_it_rolled_before_the_words() {
+        assert_eq!(what_the_rolls_drew_besides_the_words(None), 0x090F_B108_9D1F_1D70);
+        assert_eq!(what_the_rolls_drew_besides_the_words(Some(true)), 0x3945_A53C_AA1E_6047);
+        assert_eq!(what_the_rolls_drew_besides_the_words(Some(false)), 0xA272_C2F8_7B39_145C);
+    }
+
     /// Pure: the same settings are the same theme down to the script, and the
     /// same seed is the same settings.
     #[test]
@@ -7008,15 +7218,23 @@ mod theme_builder_tests {
     /// readable, and -- over enough draws -- every harmony, both pages and
     /// all four colour counts.
     ///
-    /// The counts are the newest of those and the reason for the third list:
-    /// the die draws them evenly, so 300 draws that missed one would mean a
-    /// count nobody can ever roll, which is the die telling the Colours row
-    /// a lie about what it does.
+    /// The counts are the reason for the third list: the die draws them
+    /// evenly, so 300 draws that missed one would mean a count nobody can
+    /// ever roll, which is the die telling the Colours row a lie about what
+    /// it does.
+    ///
+    /// The words are the newest part of a roll, and a tinted theme is held
+    /// to the same bar as a plain one: every draw that names a slot has a
+    /// tint inside [`ROLLED_TINT`] and still reads, and so does the same
+    /// theme at both ends of that range, since a roll can land anywhere in
+    /// it. A roll that leaves the words plain leaves the tint at nought,
+    /// where a fresh theme has it.
     #[test]
     fn a_random_theme_is_in_range_and_reads() {
         let mut harmonies = Vec::new();
         let mut pages = Vec::new();
         let mut counts = Vec::new();
+        let mut tinted = 0;
         for seed in 0..300u64 {
             let params = random_params(seed);
             assert_eq!(params, params.clamped(), "seed {seed}");
@@ -7025,6 +7243,28 @@ mod theme_builder_tests {
             assert_eq!(params.spacing * 2.0, (params.spacing * 2.0).round(), "seed {seed} is off the half step");
             let built = build(&params);
             assert!(built.readability.holds(), "seed {seed}: {:#?}", built.readability.failures);
+            match params.text_color {
+                None => assert_eq!(params.text_tint, 0.0, "seed {seed} rolled plain words and moved the tint"),
+                Some(slot) => {
+                    tinted += 1;
+                    assert!(slot.chosen_at(params.color_count), "seed {seed} rolled a slot its count derives");
+                    assert!(params.gives_the_words_a_hue(slot), "seed {seed} rolled a slot with no hue to give");
+                    assert!(
+                        (ROLLED_TINT.0..=ROLLED_TINT.1).contains(&params.text_tint),
+                        "seed {seed} rolled a tint of {} outside {ROLLED_TINT:?}",
+                        params.text_tint
+                    );
+                    assert!(text_tint_of(&params).is_some(), "seed {seed} rolled words that are not tinted");
+                    for text_tint in [ROLLED_TINT.0, ROLLED_TINT.1] {
+                        let built = build(&BuilderParams { text_tint, ..params });
+                        assert!(
+                            built.readability.holds(),
+                            "seed {seed} at a tint of {text_tint}: {:#?}",
+                            built.readability.failures
+                        );
+                    }
+                }
+            }
             if !harmonies.contains(&params.harmony) {
                 harmonies.push(params.harmony);
             }
@@ -7039,6 +7279,127 @@ mod theme_builder_tests {
         assert_eq!(pages.len(), 2);
         counts.sort();
         assert_eq!(counts, COLOR_COUNTS.to_vec(), "the die never rolled one of the four colour counts");
+        assert!(tinted > 60, "only {tinted} of 300 random themes had coloured words");
+    }
+
+    /// THE DIE ROLLS THE WORDS, two in three plain. Over six thousand seeds
+    /// on each page: None comes up two times in three to within two parts in
+    /// a hundred overall and four at each count (the draw is even, so the
+    /// tolerance is only the spread of a finite sample, over three standard
+    /// deviations wide); every slot the Text colour picker offers at a count
+    /// comes up at that count; and no slot the count derives ever does,
+    /// since the picker has no entry for it and the panel would put it
+    /// straight back to None.
+    ///
+    /// Seen failing before the ruling, where every roll left the words with
+    /// no colour and None came up six thousand times in six thousand.
+    #[test]
+    fn the_die_rolls_the_words_plain_two_times_in_three() {
+        for dark in [true, false] {
+            let house = BuilderParams::house(dark);
+            let mut plain = [0usize; 5];
+            let mut rolls = [0usize; 5];
+            let mut seen: [Vec<SeedSlot>; 5] = Default::default();
+            for seed in 0..6000u64 {
+                let (params, _) = rolled_from(&house, seed);
+                let count = params.color_count;
+                rolls[count] += 1;
+                match params.text_color {
+                    None => plain[count] += 1,
+                    Some(slot) => {
+                        assert!(slot.chosen_at(count), "seed {seed} rolled {slot:?}, which {count} colour(s) derive");
+                        if !seen[count].contains(&slot) {
+                            seen[count].push(slot);
+                        }
+                    }
+                }
+            }
+            let share = plain.iter().sum::<usize>() as f64 / 6000.0;
+            assert!((share - PLAIN_WORDS_SHARE).abs() < 0.02, "None came up {share} of the time on the dark={dark} page");
+            for count in COLOR_COUNTS {
+                let share = plain[count] as f64 / rolls[count] as f64;
+                assert!(
+                    (share - PLAIN_WORDS_SHARE).abs() < 0.04,
+                    "None came up {share} of the time at {count} colour(s) on the dark={dark} page"
+                );
+                // A roll's favourite always has a hue, so the primary is
+                // always offered; the others are offered wherever their
+                // colour in force has one, and over this many rolls at least
+                // one theme at each count gives every chosen slot a hue.
+                let mut seen = seen[count].clone();
+                seen.sort_by_key(|slot| slot.index());
+                assert_eq!(seen, SeedSlot::chosen(count), "at {count} colour(s) the die never rolled every offered slot");
+            }
+        }
+    }
+
+    /// A SLOT WITH NO HUE IS NEVER ROLLED. A palette whose secondary is a
+    /// grey offers the secondary in the picker, but naming it would change
+    /// the picker and leave the words exactly as plain as None does, so the
+    /// die leaves it out and shares the third roll among the other three.
+    /// And a palette of nothing but greys has nothing to roll, so every roll
+    /// of it is None.
+    ///
+    /// Seen failing with the hue test taken out of the draw, where one roll
+    /// in twelve landed on the grey.
+    #[test]
+    fn a_slot_with_no_hue_to_give_is_never_rolled() {
+        let grey = 0x808080FFu32;
+        for dark in [true, false] {
+            let house = BuilderParams::house(dark);
+            let params = house.with_palette([0x2A7DE1FF, grey, 0xE8730CFF, 0x1B2433FF]);
+            assert!(!params.gives_the_words_a_hue(SeedSlot::Secondary), "the grey has a hue to give");
+            let mut seen = Vec::new();
+            let mut plain = 0;
+            for seed in 0..3000u64 {
+                let (_, words) = random_draw(seed, Some(dark));
+                match words.on(params, &params, false, false).text_color {
+                    None => plain += 1,
+                    Some(slot) => {
+                        assert_ne!(slot, SeedSlot::Secondary, "seed {seed} rolled the grey");
+                        if !seen.contains(&slot) {
+                            seen.push(slot);
+                        }
+                    }
+                }
+            }
+            seen.sort_by_key(|slot| slot.index());
+            let offered: Vec<SeedSlot> =
+                SeedSlot::ALL.into_iter().filter(|slot| params.gives_the_words_a_hue(*slot)).collect();
+            assert_eq!(seen, offered, "the die never rolled one of the slots that has a hue");
+            assert!((plain as f64 / 3000.0 - PLAIN_WORDS_SHARE).abs() < 0.03, "the grey changed how often None comes up");
+
+            let greys = house.with_palette([grey, 0x606060FF, 0xA0A0A0FF, 0x202020FF]);
+            for seed in 0..600u64 {
+                let (_, words) = random_draw(seed, Some(dark));
+                assert_eq!(words.on(greys, &greys, false, false).text_color, None, "seed {seed} tinted from a grey");
+            }
+        }
+    }
+
+    /// A ROLL THAT LEAVES THE WORDS PLAIN LEAVES THE TINT. Under None the
+    /// Text tint row is off, and the number on it is the one the person set
+    /// and gets back by choosing a slot again; a roll that moved it would
+    /// take that away from under a row nobody can touch. A roll that names
+    /// a slot rolls the tint with it, inside [`ROLLED_TINT`].
+    ///
+    /// Seen failing with the tint drawn on every roll, where a plain roll
+    /// moved the 0.23 the hand had set.
+    #[test]
+    fn a_plain_roll_leaves_the_tint_where_it_was() {
+        let start = BuilderParams { text_color: Some(SeedSlot::Primary), text_tint: 0.23, ..BuilderParams::house(true) };
+        let (mut plain, mut named) = (0, 0);
+        for seed in 0..200u64 {
+            let (params, _) = rolled_from(&start, seed);
+            if params.text_color.is_none() {
+                plain += 1;
+                assert_eq!(params.text_tint, 0.23, "seed {seed} rolled plain words and moved the tint");
+            } else {
+                named += 1;
+                assert!((ROLLED_TINT.0..=ROLLED_TINT.1).contains(&params.text_tint), "seed {seed}");
+            }
+        }
+        assert!(plain > 0 && named > 0, "{plain} plain and {named} named rolls");
     }
 
     /// A theme whose globals moved is built again from source, and that is

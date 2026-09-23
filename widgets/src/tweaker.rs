@@ -20474,24 +20474,37 @@ impl Tweaker {
     /// With the palette's own lock on, none of that lands: the count, the
     /// four colours and the slot they are grown from are the ones that were
     /// there, and everything else still rolls.
+    ///
+    /// THE TEXT COLOUR is rolled as well: None two times in three, and
+    /// otherwise one of the entries the picker offers at the count the roll
+    /// lands on, at a tint that shows. Under the palette lock that is the
+    /// HELD count and the held colours, so the words are worked out again
+    /// on what the locks kept rather than taken from the theme the engine
+    /// drew. The Text colour and Text tint locks each hold their own row;
+    /// `RolledWords::on` walks the four ways they combine.
     fn tb_surprise(&mut self) {
         self.tb_seed = next_mix_seed(self.tb_seed);
         let was = self.tb_builder.params();
-        self.tb_builder.randomize(self.tb_seed);
+        let words = self.tb_builder.randomize(self.tb_seed);
         // The rolled theme, with every LOCKED row put back. The two
         // background rows do NOT follow the rolled Surf colour: a roll draws
         // its own page as well as its own colours, and pinning the page to
         // the colour that came up would spend half of what the die is for.
         // The ruling is about the Surf colour being CHANGED and about a
         // palette being chosen, and the die is neither.
-        let rolled = self.tb_locked_kept(&was, self.tb_builder.params());
-        // The words keep their colour through a roll, and a slot the new
-        // count DERIVES is no longer one of the palette's colours: the
-        // choice follows the count down, exactly as a press on a rung makes
-        // it follow. Left standing, the picker would say "None" while the
-        // words went on taking their hue from a square nobody can see.
-        let rolled =
-            BuilderParams { text_color: rolled.text_color.filter(|slot| slot.chosen_at(rolled.color_count)), ..rolled };
+        let kept = self.tb_locked_kept(&was, self.tb_builder.params());
+        // The words, drawn onto what was kept. Only a slot the kept count
+        // chooses can come up, and a held text colour whose slot the new
+        // count DERIVES follows the count down to None, exactly as a press
+        // on a rung makes it follow: left standing, the picker would say
+        // "None" while the words went on taking their hue from a square
+        // nobody can see.
+        let rolled = words.on(
+            kept,
+            &was,
+            self.tb_locked(BuildLock::TextColor),
+            self.tb_locked(BuildLock::Row(BuildRow::TextTint)),
+        );
         self.tb_builder.set(rolled);
         // The seed slot goes back to the primary because nobody touched a
         // square -- except where the palette is held, in which case the
@@ -26336,6 +26349,12 @@ line two");
     /// the same theme, because the seed walks rather than being read off a
     /// clock. And it leaves the page alone -- a button marked "surprise"
     /// that also turns a dark room white is a different button.
+    ///
+    /// The PLACE is the settings as well as the seed. A roll that leaves the
+    /// words plain leaves the tint where it stood, so since the die rolls the
+    /// words the same seed pressed over a different tint is a different theme
+    /// -- rightly, since that tint is the person's -- and going back to the
+    /// same place means putting the settings back too.
     #[test]
     fn the_builders_surprise_is_reproducible_and_keeps_the_page() {
         use crate::desktop_style::DesktopStyle;
@@ -26344,6 +26363,7 @@ line two");
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         open_the_build_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
         let dark = panel.tb_builder.params().dark();
+        let place = panel.tb_builder.params();
 
         panel.tb_seed = 9;
         panel.tb_surprise();
@@ -26356,6 +26376,7 @@ line two");
         assert_ne!(twice, once, "the seed did not walk, so the button is one theme forever");
 
         // The same place again: the same two themes, in the same order.
+        panel.tb_builder.set(place);
         panel.tb_seed = 9;
         panel.tb_surprise();
         assert_eq!(panel.tb_builder.params(), once, "the same press from the same place differed");
@@ -27970,9 +27991,11 @@ line two");
     /// what makes the last half an assertion rather than a hope: the die is
     /// reproducible on purpose.
     ///
-    /// Two rows are moved by neither gesture as it is -- the text colour,
-    /// which only a person chooses, and the text tint, which a roll keeps.
-    /// Their locks are the same promise kept in advance.
+    /// Two rows are moved by the die and not by a palette: the text colour,
+    /// which a roll draws, and the text tint, which a roll draws with it
+    /// when the colour lands on a slot. From these settings the seed rolls
+    /// both, so their locks are proved the same way as the rest; the four
+    /// ways the two locks combine have a test of their own.
     ///
     /// Seen failing with no locks at all, where the die moved every row it
     /// had ever moved.
@@ -27994,16 +28017,36 @@ line two");
         panel.tb_text_color_chosen(Some(SeedSlot::Tertiary));
         panel.tb_gesture_ended(BuildRow::TextTint, 55.0);
         let start = panel.tb_builder.params();
-        let rolled = |panel: &mut Tweaker, locked: Option<usize>| -> BuilderParams {
+        let rolled_on = |panel: &mut Tweaker, locked: Option<usize>, seed: u64| -> BuilderParams {
             panel.tb_builder.set(start);
             panel.tb_locks = [false; BuildLock::ALL.len()];
             if let Some(at) = locked {
                 panel.tb_locks[at] = true;
             }
-            panel.tb_seed = 11;
+            panel.tb_seed = seed;
             panel.tb_surprise();
             panel.tb_builder.params()
         };
+        // A press that rolls the words onto another slot, and so moves the
+        // text colour and the tint as well as everything else: two presses
+        // in three leave the words plain, so the first seed that does not is
+        // the one taken. At four colours, the count these settings hold, so
+        // that the tertiary the words start on is still a slot a held text
+        // colour can stay on; and one where the words move off it with the
+        // palette held as well, since the held colours are not the rolled
+        // ones and a slot that is a grey in them is not offered, which can
+        // share the third roll out differently.
+        let seed = (0..200u64)
+            .find(|seed| {
+                let roll = rolled_on(&mut panel, None, *seed);
+                let held = rolled_on(&mut panel, Some(the_palette_lock()), *seed);
+                roll.color_count == 4
+                    && roll.text_color.is_some_and(|slot| Some(slot) != start.text_color)
+                    && roll.text_tint != start.text_tint
+                    && held.text_color.is_some_and(|slot| Some(slot) != start.text_color)
+            })
+            .expect("no press in 200 rolled the words onto another slot at four colours");
+        let rolled = |panel: &mut Tweaker, locked: Option<usize>| rolled_on(panel, locked, seed);
         let chipped = |panel: &mut Tweaker, locked: Option<usize>| -> BuilderParams {
             panel.tb_builder.set(start);
             panel.tb_locks = [false; BuildLock::ALL.len()];
@@ -28056,15 +28099,14 @@ line two");
                 }
             }
             // Unlocked, the same gesture from the same settings moves it,
-            // which is what says the lock is what held it.
-            if !matches!(which, BuildLock::TextColor | BuildLock::Row(BuildRow::TextTint)) {
-                assert_ne!(
-                    what_a_lock_holds(*which, &loose_roll),
-                    held,
-                    "the die leaves {} alone with no lock on it, so the lock proves nothing",
-                    which.label()
-                );
-            }
+            // which is what says the lock is what held it. Every row now,
+            // the text colour and the tint included: the die rolls the words.
+            assert_ne!(
+                what_a_lock_holds(*which, &loose_roll),
+                held,
+                "the die leaves {} alone with no lock on it, so the lock proves nothing",
+                which.label()
+            );
             if matches!(
                 which,
                 BuildLock::Row(BuildRow::Saturation) | BuildLock::Row(BuildRow::Lightness) | BuildLock::Palette
@@ -28114,6 +28156,162 @@ line two");
             dvec2(track.pos.x + track.size.x * 0.6, track.pos.y + track.size.y * 0.5),
         );
         assert_ne!(panel.tb_builder.params().saturation, before, "a press on a locked row's track moved nothing");
+    }
+
+    /// THE TWO WORD LOCKS, in all four of their cases, through the panel's
+    /// own lock path: the die pressed a hundred times from the same settings
+    /// with each combination of the Text colour and Text tint locks on.
+    ///
+    /// - Neither: the colour rolls, None two times in three; a named slot
+    ///   brings a tint inside `ROLLED_TINT`, and None leaves the tint the
+    ///   hand set.
+    /// - Colour held on a slot, tint free: the colour never moves and the
+    ///   tint rolls on every press, because that colour is a slot. Held on
+    ///   None, the tint never moves: a strength of no colour is nothing on
+    ///   the screen and the row is off.
+    /// - Colour free, tint held: the tint never moves and the colour still
+    ///   rolls. Held at nought, the colour only ever rolls None, since a slot
+    ///   at a strength of nought is a roll nobody could see.
+    /// - Both: neither moves.
+    ///
+    /// Seen failing before the die rolled the words, where every case held
+    /// both rows because nothing moved them at all -- the free rows too.
+    #[test]
+    fn the_text_colour_and_tint_locks_hold_each_on_its_own() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _head = the_builder_drawn(&mut cx, &mut panel);
+        let lock_of = |which: BuildLock| BuildLock::ALL.iter().position(|one| *one == which).expect("a lock");
+        let color_lock = lock_of(BuildLock::TextColor);
+        let tint_lock = lock_of(BuildLock::Row(BuildRow::TextTint));
+        let (least, most) = crate::theme_builder::ROLLED_TINT;
+        // Every press from `start` with the two locks as given.
+        let presses = |panel: &mut Tweaker, start: BuilderParams, hold_color: bool, hold_tint: bool| {
+            (0..100u64)
+                .map(|seed| {
+                    panel.tb_builder.set(start);
+                    panel.tb_locks = [false; BuildLock::ALL.len()];
+                    panel.tb_locks[color_lock] = hold_color;
+                    panel.tb_locks[tint_lock] = hold_tint;
+                    panel.tb_seed = seed;
+                    panel.tb_surprise();
+                    panel.tb_builder.params()
+                })
+                .collect::<Vec<_>>()
+        };
+        // The primary, because it is the one slot every count chooses: a held
+        // colour on any other can be taken to None by a roll of the count,
+        // which is the palette lock's to stop and not this one's.
+        let base = panel.tb_builder.params();
+        let on_a_slot = BuilderParams { text_color: Some(SeedSlot::Primary), text_tint: 0.55, ..base };
+        let plain = BuilderParams { text_color: None, text_tint: 0.55, ..base };
+        let plain_at_nought = BuilderParams { text_color: None, text_tint: 0.0, ..base };
+
+        // Neither held.
+        let rolls = presses(&mut panel, plain, false, false);
+        let named = rolls.iter().filter(|roll| roll.text_color.is_some()).count();
+        assert!((20..=50).contains(&named), "{named} of 100 free presses named a slot");
+        for roll in &rolls {
+            match roll.text_color {
+                None => assert_eq!(roll.text_tint, 0.55, "a plain roll moved the tint the hand set"),
+                Some(_) => assert!((least..=most).contains(&roll.text_tint), "a named slot at a tint of {}", roll.text_tint),
+            }
+        }
+
+        // Colour held on a slot, tint free: the tint rolls on every press.
+        let rolls = presses(&mut panel, on_a_slot, true, false);
+        let mut tints = Vec::new();
+        for roll in &rolls {
+            assert_eq!(roll.text_color, Some(SeedSlot::Primary), "the die moved a held text colour");
+            assert!((least..=most).contains(&roll.text_tint), "a held slot rolled a tint of {}", roll.text_tint);
+            if !tints.contains(&roll.text_tint) {
+                tints.push(roll.text_tint);
+            }
+        }
+        assert!(tints.len() > 10, "a free tint under a held slot rolled only {tints:?}");
+        // Colour held on None, tint free: nothing moves.
+        for roll in presses(&mut panel, plain, true, false) {
+            assert_eq!((roll.text_color, roll.text_tint), (None, 0.55), "a held None let the tint roll");
+        }
+
+        // Colour free, tint held: the colour rolls and the tint stays.
+        let rolls = presses(&mut panel, on_a_slot, false, true);
+        assert!(rolls.iter().any(|roll| roll.text_color.is_none()), "a free colour never rolled None");
+        assert!(
+            rolls.iter().any(|roll| roll.text_color.is_some_and(|slot| slot != SeedSlot::Primary)),
+            "a free colour never rolled another slot"
+        );
+        for roll in &rolls {
+            assert_eq!(roll.text_tint, 0.55, "the die moved a held tint");
+        }
+        // Held at nought: nothing a slot could show, so every roll is None.
+        for roll in presses(&mut panel, plain_at_nought, false, true) {
+            assert_eq!((roll.text_color, roll.text_tint), (None, 0.0), "a tint held at nought let a slot be rolled");
+        }
+
+        // Both held.
+        for start in [on_a_slot, plain] {
+            for roll in presses(&mut panel, start, true, true) {
+                assert_eq!((roll.text_color, roll.text_tint), (start.text_color, start.text_tint), "both held and one moved");
+            }
+        }
+    }
+
+    /// THE TEXT COLOUR STILL ROLLS UNDER THE PALETTE LOCK, among what the
+    /// HELD count offers. Held at two colours the picker offers None, the
+    /// primary and the surface, so those three are what the die draws --
+    /// whatever count the roll itself came up with, which the lock puts
+    /// back -- and the secondary and the tertiary, derived at two, never
+    /// come up.
+    ///
+    /// So the third of the presses that name a slot splits evenly between
+    /// those two. Seen failing with the words taken from the theme the
+    /// engine drew, where the slot was chosen among what the ROLLED count
+    /// offered and the held count then took anything it derives back to
+    /// None: the surface came up about half as often as the primary, since
+    /// a roll of one colour never offers it, and None more than two times
+    /// in three.
+    #[test]
+    fn the_words_roll_among_what_the_held_count_offers() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _head = the_builder_drawn(&mut cx, &mut panel);
+        // Two chosen colours, both with a hue to give.
+        let base = panel.tb_builder.params().with_palette([0x2A7DE1FF, 0x3C8A5AFF, 0xE8730CFF, 0x3A2A55FF]);
+        let start = BuilderParams { color_count: 2, ..base };
+        assert!(start.gives_the_words_a_hue(SeedSlot::Primary) && start.gives_the_words_a_hue(SeedSlot::Surface));
+        let mut seen = Vec::new();
+        let (mut plain, mut primary, mut surface) = (0, 0, 0);
+        for seed in 0..600u64 {
+            panel.tb_builder.set(start);
+            panel.tb_locks = [false; BuildLock::ALL.len()];
+            panel.tb_locks[the_palette_lock()] = true;
+            panel.tb_seed = seed;
+            panel.tb_surprise();
+            let params = panel.tb_builder.params();
+            assert_eq!(params.color_count, 2, "the palette lock let the count roll");
+            match params.text_color {
+                None => plain += 1,
+                Some(slot) => {
+                    assert!(slot.chosen_at(2), "seed {seed} rolled {slot:?}, which two colours derive");
+                    match slot {
+                        SeedSlot::Primary => primary += 1,
+                        _ => surface += 1,
+                    }
+                    if !seen.contains(&slot) {
+                        seen.push(slot);
+                    }
+                }
+            }
+        }
+        seen.sort_by_key(|slot| slot.index());
+        assert_eq!(seen, vec![SeedSlot::Primary, SeedSlot::Surface], "the held count's slots did not both come up");
+        // Two in three is 400 of 600 and each slot 100, give or take a few
+        // tens: the bars are some three spreads of a fair sample wide.
+        assert!((370..=430).contains(&plain), "{plain} of 600 presses under the palette lock were plain");
+        assert!(primary > 70 && surface > 70, "the primary came up {primary} times and the surface {surface}");
     }
 
     /// Where the lock in front of the colour squares stands in
@@ -29529,7 +29727,11 @@ line two");
         );
     }
 
-    /// THE DICE MUST NOT CHOOSE A TEXT COLOUR. Every dropdown drawn from one
+    /// A PRESS ON THE DIE IS NOT A PRESS ON THE TEXT COLOUR PICKER. The die
+    /// does roll the text colour now, by the operator's later ruling, but it
+    /// rolls it through `tb_surprise`, from its own seed, and only there;
+    /// this is about a text colour arriving by the wrong road, from a menu
+    /// that belonged to another picker. Every dropdown drawn from one
     /// template shares ONE popup menu instance, and that menu holds the rows
     /// of whichever dropdown last drew it. The panel has two such dropdowns
     /// -- the theme picker at the top and the text colour picker in the rows
