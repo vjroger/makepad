@@ -523,6 +523,80 @@ script_mod! {
             }
         }
     }
+
+    /** The icon-only checkbox: the custom face carrying a mark of its own
+     * for each state and nothing else in the row. Give it a `draw_icon_off`
+     * and a `draw_icon_on`, each with its svg and its ink; the one for the
+     * state it is in is what it draws, in the middle of the face, with no
+     * word beside it.
+     *
+     * The two states are handed different inks here, and a caller that
+     * retunes them should keep them apart. A mark drawn at this size moves
+     * two or three pixels between one shape and the other, so the colour is
+     * what a person reads across a column of them.
+     *
+     * What the two states MEAN is the caller's: a padlock in front of a row,
+     * an eye over a layer, a pin on a panel. The control itself only turns
+     * over, says which side it is on, and reports the change. */
+    mod.widgets.CheckBoxIcon = mod.widgets.CheckBoxCustom{
+        /** icon only: the label is empty */
+        text: ""
+        align: Align{x: 0.5, y: 0.5}
+        padding: theme.mspace_1
+
+        /** no gap: an empty label still takes the margin that clears a
+         * mark box, and that margin is what pushes the icon off centre */
+        label_walk: Walk{
+            width: Fit
+            height: Fit
+            margin: Inset{top: 0., right: 0., bottom: 0., left: 0.}
+        }
+
+        icon_walk: Walk{width: 14.0, height: 14.0}
+
+        /** the mark while off: the quieter of the two inks */
+        draw_icon_off +: {
+            color: theme.color_label_outer_off
+        }
+        /** the mark while on: the label's own ink, a step brighter */
+        draw_icon_on +: {
+            color: theme.color_label_outer
+        }
+
+        // The mark is the whole control, so the mark is what has to go
+        // dim. On every other face the disabled track works through the
+        // box and the label, and this face has neither: left alone, a dead
+        // lock was drawn exactly like a live one.
+        //
+        // It is the mark's opacity that falls, not its colour. A track that
+        // restored two inks would also hand them back on the way out, and
+        // the pair is exactly what a caller is expected to retune -- one
+        // press of a disabled switch would have thrown their colours away.
+        animator +: {
+            disabled: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {disabled: 0.0}
+                        draw_text: {disabled: 0.0}
+                        draw_icon_off: {opacity: 1.0}
+                        draw_icon_on: {opacity: 1.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {disabled: 1.0}
+                        draw_text: {disabled: 1.0}
+                        /** how much of a dead mark is left 0..1 step 0.05 */
+                        draw_icon_off: {opacity: 0.35}
+                        draw_icon_on: {opacity: 0.35}
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The three states a checkbox carries. `Mixed` is the group's "some of
@@ -597,11 +671,17 @@ pub struct CheckBox {
     #[live]
     pub draggable: bool,
 
-    /// The icon drawn on the toggle's knob while it is on; leave the svg
-    /// unset for none.
+    /// The icon drawn while the box is on; leave the svg unset for none.
+    ///
+    /// On the toggle it rides the knob. On a face with no knob -- the
+    /// icon-only checkbox -- it stands in the row, in `draw_icon`'s place,
+    /// and it is then the whole of what the control shows: its ink is what
+    /// says which state the box is in.
     #[live]
     pub draw_icon_on: DrawSvg,
-    /// The icon drawn on the toggle's knob while it is off.
+    /// The icon drawn while the box is off, in the same place as its
+    /// opposite. Its ink is the other half of the pair and belongs apart
+    /// from the on one.
     #[live]
     pub draw_icon_off: DrawSvg,
     /// Knob icon side as a fraction of the knob's diameter.
@@ -691,6 +771,11 @@ impl CheckBox {
         self.draw_bg.begin(cx, walk, self.layout);
 
         let on = self.animator_in_state(cx, ids!(active.on));
+        // Asked before the label is borrowed, because the answer decides
+        // which of three icons the row draws and all three are fields of
+        // the same struct the label is read out of.
+        let knob_carries_the_pair = self.state_icons_ride_the_knob(cx);
+        let icon_walk = self.icon_walk;
         let text: &str = if on && !self.text_on.is_empty() {
             &self.text_on
         } else if !on && !self.text_off.is_empty() {
@@ -698,31 +783,65 @@ impl CheckBox {
         } else {
             self.text.as_ref()
         };
-        if self.label_before {
-            // The label's outer margin clears the mark box; mirrored, it
-            // clears a box at the end of the row instead.
-            let margin = self.label_walk.margin;
-            let walk = Walk {
+        // The label's outer margin clears the mark box; mirrored, it
+        // clears a box at the end of the row instead.
+        let margin = self.label_walk.margin;
+        let label_walk = if self.label_before {
+            Walk {
                 margin: Inset {
                     left: margin.right,
                     right: margin.left,
                     ..margin
                 },
                 ..self.label_walk
-            };
-            self.draw_text
-                .draw_walk(cx, walk, self.label_align, text);
-            self.draw_icon.draw_walk(cx, self.icon_walk);
+            }
         } else {
-            self.draw_icon.draw_walk(cx, self.icon_walk);
-
+            self.label_walk
+        };
+        // An empty label is no label: walked all the same it still takes
+        // its own line height and the margin that clears the mark box, and
+        // on a face that is nothing but an icon that phantom is what pushes
+        // the mark off the middle.
+        let worded = !text.is_empty();
+        if worded && self.label_before {
             self.draw_text
-                .draw_walk(cx, self.label_walk, self.label_align, text);
+                .draw_walk(cx, label_walk, self.label_align, text);
+        }
+        // The mark in the row: the face for the state it is in when the
+        // pair is the row's own, and the single icon otherwise.
+        if knob_carries_the_pair {
+            self.draw_icon.draw_walk(cx, icon_walk);
+        } else if on {
+            self.draw_icon_on.draw_walk(cx, icon_walk);
+        } else {
+            self.draw_icon_off.draw_walk(cx, icon_walk);
+        }
+        if worded && !self.label_before {
+            self.draw_text
+                .draw_walk(cx, label_walk, self.label_align, text);
         }
         self.draw_bg.end(cx);
         self.draw_knob_icons(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
+    }
+
+    /// Whether the state pair belongs on a knob rather than in the row:
+    /// either there is no pair at all, in which case the row draws the
+    /// single `draw_icon` as it always has, or the mark is a pill and the
+    /// knob is where a pair rides -- drawn over the pill, after the row is
+    /// closed, so it must not also stand in the row.
+    ///
+    /// `pill_aspect` is the toggle's own uniform and reads back zero
+    /// through a shader that never declared one, which is what tells a
+    /// pill from a mark box without either of them saying so.
+    fn state_icons_ride_the_knob(&mut self, cx: &mut Cx) -> bool {
+        if self.draw_icon_on.svg.is_none() && self.draw_icon_off.svg.is_none() {
+            return true;
+        }
+        let mut aspect = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
+        aspect[0] > 0.0
     }
 
     /// The toggle's knob icons, drawn over the pill after it: the on icon
@@ -1142,6 +1261,244 @@ impl CheckBoxRef {
             inner.debug_dump_animator(heap)
         } else {
             "no borrow".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod icon_face_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    /// One icon-only checkbox wearing the two padlocks, built from the
+    /// library's own declaration so that a retuning there is a retuning
+    /// here. `side` is the side the mark is asked to take.
+    fn a_lock(cx: &mut Cx, side: f64) -> WidgetRef {
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                use mod.widgets.*
+                CheckBoxIcon{
+                    icon_walk: Walk{width: #(side), height: #(side)}
+                    draw_icon_off +: {
+                        svg: crate_resource("makepad_widgets:resources/icons/icon_lock_open.svg")
+                    }
+                    draw_icon_on +: {
+                        svg: crate_resource("makepad_widgets:resources/icons/icon_lock_shut.svg")
+                    }
+                }
+            });
+            assert!(vm.take_errors().is_empty(), "the icon-only checkbox did not build");
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// One layout pass over the widget, which is what gives every part of
+    /// it a rectangle. A control that was never drawn has none, and a press
+    /// at its middle lands nowhere.
+    fn drawn(cx: &mut Cx, widget: &WidgetRef) {
+        let size = Vec2d { x: 120.0, y: 60.0 };
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, size);
+        let mut draw_list = DrawList2d::new(cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(size, Layout::flow_down());
+        widget.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+    }
+
+    /// A press taken the whole way a hand takes it, down and up on the
+    /// control, and everything that came out of it.
+    fn a_press_on(cx: &mut Cx, widget: &WidgetRef) -> Vec<Action> {
+        const WINDOW: WindowId = WindowId(1, 1);
+        let face = widget.area().rect(cx);
+        assert!(face.size.x > 0.0, "the control was never drawn, so the press lands nowhere");
+        let at = face.pos + face.size * 0.5;
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        // Both halves are captured. A checkbox turns over on the press, not
+        // on the release, so a test that watched only the release would
+        // find the box flipped and nothing said about it.
+        let mut actions = cx.capture_actions(|cx| {
+            widget.handle_event(cx, &down, &mut Scope::empty());
+        });
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+        });
+        actions.extend(cx.capture_actions(|cx| {
+            widget.handle_event(cx, &up, &mut Scope::empty());
+        }));
+        cx.fingers.first_mouse_button = None;
+        actions
+    }
+
+    /// How many changes the widget reported in these actions, and the last
+    /// of them. Two changes off one press is as wrong as none: whoever
+    /// reads a lock acts on every change it reports.
+    fn changes(actions: &[Action], uid: WidgetUid) -> (usize, Option<bool>) {
+        let mut count = 0;
+        let mut last = None;
+        for action in actions.iter() {
+            let Some(action) = action.downcast_ref::<WidgetAction>() else {
+                continue;
+            };
+            if action.widget_uid != uid {
+                continue;
+            }
+            if let CheckBoxAction::Change(value) = action.cast() {
+                count += 1;
+                last = Some(value);
+            }
+        }
+        (count, last)
+    }
+
+    /// A press turns the face over and says so once, and the next press
+    /// turns it back. Seen failing with the state pair drawn only on a
+    /// knob: an icon-only face has none, so it showed nothing at all and
+    /// there was no mark to press.
+    #[test]
+    fn a_press_turns_the_face_over_and_reports_it_once() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = a_lock(&mut cx, 14.0);
+        let uid = widget.widget_uid();
+        drawn(&mut cx, &widget);
+        assert!(!widget.as_check_box().active(&cx), "it opened already on");
+
+        let actions = a_press_on(&mut cx, &widget);
+        assert_eq!(changes(&actions, uid), (1, Some(true)), "the first press");
+        assert!(widget.as_check_box().active(&cx), "the press did not turn it over");
+
+        drawn(&mut cx, &widget);
+        let actions = a_press_on(&mut cx, &widget);
+        assert_eq!(changes(&actions, uid), (1, Some(false)), "the second press");
+        assert!(!widget.as_check_box().active(&cx), "the second press did not turn it back");
+    }
+
+    /// The mark sits in the middle of the face and nothing else is in the
+    /// row with it, at every size the catalogue shows one at.
+    ///
+    /// Seen failing on the custom face this is built from, whose label walk
+    /// carries the margin that clears a mark box: the word was empty and
+    /// the margin was not, so the face came out wider than it was tall and
+    /// the padlock stood left of its centre by half of that.
+    #[test]
+    fn the_face_draws_its_mark_in_the_middle_with_no_word_beside_it() {
+        for side in [12.0, 14.0, 20.0, 28.0] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let widget = a_lock(&mut cx, side);
+            drawn(&mut cx, &widget);
+            let face = widget.area().rect(&cx);
+            assert!(face.size.x > 0.0 && face.size.y > 0.0, "the face at {side} drew nothing");
+            assert!(
+                (face.size.x - face.size.y).abs() < 0.5,
+                "the face at {side} is {} by {}, so something stands beside the mark",
+                face.size.x,
+                face.size.y
+            );
+            let check = widget.borrow::<CheckBox>().expect("a CheckBox");
+            assert_eq!(check.text.as_ref(), "", "the icon-only face carries a word");
+            let icon = check.draw_icon_off.area().rect(&cx);
+            assert!(icon.size.x > 0.0 && icon.size.y > 0.0, "the mark at {side} drew nothing");
+            assert!((icon.size.x - side).abs() < 0.5, "the mark at {side} is {} wide", icon.size.x);
+            let (mark, middle) = (icon.pos + icon.size * 0.5, face.pos + face.size * 0.5);
+            assert!(
+                (mark.x - middle.x).abs() <= 0.5 && (mark.y - middle.y).abs() <= 0.5,
+                "the mark at {side} sits at {mark:?}, off the face's centre {middle:?}"
+            );
+        }
+    }
+
+    /// A dead one is drawn dead, and its two inks come back untouched. The
+    /// mark is the whole of this face, so being disabled has to reach the
+    /// mark: the box and the label the other faces dim are not there to do
+    /// it. What falls is the mark's opacity, so a caller's own colours
+    /// survive the round trip.
+    ///
+    /// Seen failing before the face carried a disabled track of its own,
+    /// where a lock told to go dim was drawn exactly as it had been.
+    #[test]
+    fn a_disabled_face_goes_dim_without_losing_its_inks() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = a_lock(&mut cx, 14.0);
+        // A caller's own pair, to be found again on the way back.
+        let mine = Vec4f { x: 1.0, y: 0.25, z: 0.0, w: 1.0 };
+        let yours = Vec4f { x: 0.0, y: 0.5, z: 1.0, w: 1.0 };
+        {
+            let mut lock = widget.borrow_mut::<CheckBox>().expect("a CheckBox");
+            lock.draw_icon_off.color = mine;
+            lock.draw_icon_on.color = yours;
+        }
+        drawn(&mut cx, &widget);
+        let live = {
+            let lock = widget.borrow::<CheckBox>().expect("a CheckBox");
+            (lock.draw_icon_off.opacity, lock.draw_icon_on.opacity)
+        };
+        // Cut to each state rather than played to it: nothing here pumps
+        // the frames a 0.2 second fade would need, and the question is what
+        // the state HOLDS, not how long it takes to get there.
+        let cut = |cx: &mut Cx, disabled: bool| {
+            widget
+                .borrow_mut::<CheckBox>()
+                .expect("a CheckBox")
+                .animator_toggle(cx, disabled, Animate::No, ids!(disabled.on), ids!(disabled.off));
+        };
+        cut(&mut cx, true);
+        drawn(&mut cx, &widget);
+        let dead = {
+            let lock = widget.borrow::<CheckBox>().expect("a CheckBox");
+            assert_eq!(lock.draw_icon_off.color, mine, "going dim repainted the open mark");
+            assert_eq!(lock.draw_icon_on.color, yours, "going dim repainted the shut mark");
+            (lock.draw_icon_off.opacity, lock.draw_icon_on.opacity)
+        };
+        assert!(dead.0 < live.0, "the open mark is drawn the same dead as alive");
+        assert!(dead.1 < live.1, "the shut mark is drawn the same dead as alive");
+
+        cut(&mut cx, false);
+        drawn(&mut cx, &widget);
+        let lock = widget.borrow::<CheckBox>().expect("a CheckBox");
+        assert_eq!((lock.draw_icon_off.opacity, lock.draw_icon_on.opacity), live, "it came back dim");
+        assert_eq!(lock.draw_icon_off.color, mine, "coming back took the open mark's colour");
+        assert_eq!(lock.draw_icon_on.color, yours, "coming back took the shut mark's colour");
+    }
+
+    /// The two states are not drawn in one ink, in either appearance the
+    /// library ships. A mark this size moves two or three pixels between
+    /// the shapes, so a pair handed one colour says nothing whatever about
+    /// which state it is in.
+    ///
+    /// Seen failing on the first pair chosen for it, the label ink and the
+    /// checked mark's: the dark sheet resolves both of those to the same
+    /// token, and the two padlocks came out identical.
+    #[test]
+    fn the_two_states_are_not_drawn_in_the_same_ink() {
+        for base in [crate::BaseTheme::Dark, crate::BaseTheme::Light] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            crate::set_base_theme(&mut cx, base);
+            cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+            let widget = a_lock(&mut cx, 14.0);
+            let check = widget.borrow::<CheckBox>().expect("a CheckBox");
+            let (off, on) = (check.draw_icon_off.color, check.draw_icon_on.color);
+            assert_ne!(off, on, "{base:?}: the open mark and the shut one are one colour");
         }
     }
 }

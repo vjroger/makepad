@@ -406,7 +406,7 @@ mod tests {
         (
             "Selection",
             &[
-                ("CheckBox", &["Overview"]),
+                ("CheckBox", &["Overview", "Icon toggle"]),
                 ("RadioGroup", &["Overview"]),
                 ("Select", &["Overview", "Combo box"]),
                 ("Chip", &["Overview"]),

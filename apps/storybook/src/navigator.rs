@@ -710,7 +710,10 @@ mod tests {
         assert_eq!(carry("data-display/svg,data-display/vector"), "media/svg");
         assert_eq!(carry("data-display/tree"), "collections/tree");
         // Components that are a single row now have no folder to close.
-        assert_eq!(carry("actions/button,inputs/checkbox,media/icon"), "");
+        assert_eq!(carry("actions/button,media/icon"), "");
+        // CheckBox was a single row and is two since it grew an icon-toggle
+        // page, so an old fold of it is a folder again and carries over.
+        assert_eq!(carry("inputs/checkbox"), "selection/checkbox");
         // DataGrid has an Overview page and a List page, so its folder is
         // still one to close.
         assert_eq!(carry("data-display/datagrid"), "collections/datagrid");
