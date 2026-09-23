@@ -109,7 +109,7 @@ use crate::{
 };
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
-use crate::theme_builder::{all_suggestions_for, Applied as Built, BuilderParams, Schemes, SeedSlot, Suggestion, ThemeBuilder, COLOR_COUNTS, COMBINATION_LABEL, OWN_LABEL};
+use crate::theme_builder::{all_suggestions_for, surface_sliders, Applied as Built, BuilderParams, Schemes, SeedSlot, Suggestion, ThemeBuilder, COLOR_COUNTS, COMBINATION_LABEL, OWN_LABEL};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
@@ -8190,6 +8190,22 @@ impl BuildRow {
         }
     }
 
+    /// The line the slider is drawn on, which holds the row's lock in front
+    /// of it. Declared in the splash beside the slider, for
+    /// [`EQ_ROW_IDS`]' reason: every row this panel has is a fixed slot.
+    fn line(self) -> LiveId {
+        match self {
+            BuildRow::Saturation => live_id!(tb_saturation_row),
+            BuildRow::Lightness => live_id!(tb_lightness_row),
+            BuildRow::FontSize => live_id!(tb_font_size_row),
+            BuildRow::FontContrast => live_id!(tb_font_contrast_row),
+            BuildRow::TextContrast => live_id!(tb_text_contrast_row),
+            BuildRow::TextTint => live_id!(tb_text_tint_row),
+            BuildRow::Spacing => live_id!(tb_spacing_row),
+            BuildRow::Roundness => live_id!(tb_roundness_row),
+        }
+    }
+
     /// What it is called, written out. The column is 92 points wide and the
     /// longest of these fits it, so none of them is shortened.
     ///
@@ -8278,6 +8294,72 @@ impl BuildRow {
     fn house(self, params: BuilderParams) -> BuilderParams {
         let house = BuilderParams::house(params.dark());
         self.moved(params, self.shown(&house))
+    }
+}
+
+/// One settings row of the builder that can be held where it is: the eight
+/// sliders and the text colour picker, which is a row like the rest even
+/// though the control on it is not a slider.
+///
+/// The operator's ruling is "every slider will have a lock icon in front of
+/// it ... when locked the slider won't move by clicking the dice or changing
+/// the palette", and his mockup puts one in front of the picker too. So the
+/// list is [`BuildRow::ALL`] and then the picker, and the index into it is
+/// the index into [`Tweaker::tb_locks`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildLock {
+    /// A slider row, by the setting it holds.
+    Row(BuildRow),
+    /// The row that says which of the palette's colours the words take.
+    TextColor,
+}
+
+impl BuildLock {
+    const ALL: [BuildLock; 9] = [
+        BuildLock::Row(BuildRow::Saturation),
+        BuildLock::Row(BuildRow::Lightness),
+        BuildLock::Row(BuildRow::FontSize),
+        BuildLock::Row(BuildRow::FontContrast),
+        BuildLock::Row(BuildRow::TextContrast),
+        BuildLock::Row(BuildRow::TextTint),
+        BuildLock::Row(BuildRow::Spacing),
+        BuildLock::Row(BuildRow::Roundness),
+        BuildLock::TextColor,
+    ];
+
+    /// The line it stands at the head of.
+    fn line(self) -> LiveId {
+        match self {
+            BuildLock::Row(row) => row.line(),
+            BuildLock::TextColor => live_id!(tb_text_color_row),
+        }
+    }
+
+    /// What the row behind it is called, for the tip.
+    fn label(self) -> &'static str {
+        match self {
+            BuildLock::Row(row) => row.label(),
+            BuildLock::TextColor => TB_TEXT_COLOR_HEADER,
+        }
+    }
+}
+
+/// The lock's two faces inside [`TbLockT`](crate::tweaker), open first. Both
+/// are declared and only the one the row is in is drawn: see the splash for
+/// why a button's picture cannot simply be swapped.
+const TB_LOCK_FACES: [LiveId; 2] = [live_id!(lock_open), live_id!(lock_shut)];
+
+/// The id the lock is declared under inside every settings row.
+const TB_LOCK_ID: LiveId = live_id!(lock);
+
+/// What a lock says it does, under the pointer. One line for all nine, with
+/// the row's own name in it, since the promise is the same promise and only
+/// the row differs.
+fn tb_lock_tip_text(which: BuildLock, locked: bool) -> String {
+    if locked {
+        format!("{} is held where it is \u{00b7} the die and the palettes leave it alone \u{00b7} press to let it move again", which.label())
+    } else {
+        format!("hold {} where it is \u{00b7} the die and the palettes would then leave it alone \u{00b7} dragging it always works", which.label())
     }
 }
 
@@ -9300,6 +9382,20 @@ pub struct Tweaker {
     /// One per slider row, in `BuildRow::ALL`'s order.
     #[rust]
     tb_row_uids: [u64; 8],
+    /// Which settings rows are held where they are, in `BuildLock::ALL`'s
+    /// order. Every one of them starts open, and they are NOT cleared with
+    /// the rest of the section's state: a lock is something the person set
+    /// about a row, so folding the section and opening it again finds the
+    /// same rows locked. A fresh panel opens with none of them locked, which
+    /// is what `#[rust]` gives.
+    #[rust]
+    tb_locks: [bool; BuildLock::ALL.len()],
+    /// The two faces of each lock, open then shut, in `BuildLock::ALL`'s
+    /// order. Both are routed: only one of them is ever drawn, but which one
+    /// is the state itself, and a press has to reach whichever is up. Zero
+    /// while the section is folded, as every other route into it is.
+    #[rust]
+    tb_lock_uids: [[u64; 2]; BuildLock::ALL.len()],
     /// The text colour picker's route, and the count its entries were last
     /// written for. Nought while the section is folded, as every other route
     /// into it is.
@@ -11013,6 +11109,60 @@ impl Tweaker {
                         draggable: true
                     }
                 }
+                // THE LOCK AT THE HEAD OF A SETTINGS ROW. Pressed, it holds
+                // that one row where it is: the die and a palette off the
+                // carousel move every other row and leave this one alone.
+                // It never stops the PERSON -- the slider under it still
+                // drags, still takes the arrow keys, still resets on its
+                // name -- because a lock is about what happens WITHOUT a
+                // hand on the row.
+                //
+                // Two faces and one of them drawn, rather than one face
+                // whose picture changes: a button's icon is named where the
+                // button is declared, so the shut padlock and the open one
+                // are two buttons over the same middle and the panel shows
+                // whichever the row is in. Both carry the square, the
+                // padding and the alignment the die does, and for the die's
+                // reason: an empty label still takes the spacing after an
+                // icon, which is what pushes an icon-only face's mark off
+                // its centre.
+                let TbLockT = View {
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    spacing: 0
+                    align: Align{x: 0.5 y: 0.5}
+                    margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
+                    lock_open := PanelButton {
+                        width: 14
+                        height: 14
+                        padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                        margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                        spacing: 0
+                        align: Align{x: 0.5 y: 0.5}
+                        text: ""
+                        icon_walk: Walk{width: 10 height: 10}
+                        draw_icon +: {
+                            color: #xd8d8d8
+                            svg: crate_resource("self:resources/icons/icon_lock_open.svg")
+                        }
+                    }
+                    lock_shut := PanelButton {
+                        width: 14
+                        height: 14
+                        padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                        margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                        spacing: 0
+                        align: Align{x: 0.5 y: 0.5}
+                        visible: false
+                        text: ""
+                        icon_walk: Walk{width: 10 height: 10}
+                        draw_icon +: {
+                            color: #xd8d8d8
+                            svg: crate_resource("self:resources/icons/icon_lock_shut.svg")
+                        }
+                    }
+                }
                 View {
                     width: Fill
                     height: Fill
@@ -11490,54 +11640,94 @@ impl Tweaker {
                                     margin: Inset{top: 3}
                                     text: "Surface"
                                 }
-                                tb_saturation := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Saturation"
-                                    min: 0.0
-                                    max: 100.0
-                                    step: 1.0
+                                tb_saturation_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_saturation := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Saturation"
+                                        min: 0.0
+                                        max: 100.0
+                                        step: 1.0
+                                    }
                                 }
-                                tb_lightness := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Lightness"
-                                    min: 0.0
-                                    max: 100.0
-                                    step: 1.0
+                                tb_lightness_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_lightness := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Lightness"
+                                        min: 0.0
+                                        max: 100.0
+                                        step: 1.0
+                                    }
                                 }
                                 PanelLabelSmall {
                                     width: Fill
                                     margin: Inset{top: 3}
                                     text: "Text"
                                 }
-                                tb_font_size := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Text size"
-                                    min: 6.0
-                                    max: 30.0
-                                    step: 0.5
-                                    big_step: 2.0
-                                    precision: 1
-                                    unit: ""
+                                tb_font_size_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_font_size := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Text size"
+                                        min: 6.0
+                                        max: 30.0
+                                        step: 0.5
+                                        big_step: 2.0
+                                        precision: 1
+                                        unit: ""
+                                    }
                                 }
-                                tb_font_contrast := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Text variation"
-                                    min: 0.0
-                                    max: 8.0
-                                    step: 0.5
-                                    big_step: 1.0
-                                    precision: 1
-                                    unit: ""
+                                tb_font_contrast_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_font_contrast := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Text variation"
+                                        min: 0.0
+                                        max: 8.0
+                                        step: 0.5
+                                        big_step: 1.0
+                                        precision: 1
+                                        unit: ""
+                                    }
                                 }
-                                tb_text_contrast := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Text contrast"
-                                    min: 4.5
-                                    max: 21.0
-                                    step: 0.1
-                                    big_step: 1.0
-                                    precision: 1
-                                    unit: ""
+                                tb_text_contrast_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_text_contrast := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Text contrast"
+                                        min: 4.5
+                                        max: 21.0
+                                        step: 0.1
+                                        big_step: 1.0
+                                        precision: 1
+                                        unit: ""
+                                    }
                                 }
                                 // WHAT COLOUR THE WORDS ARE. Not a fifth
                                 // colour of the palette: whatever colour was
@@ -11559,9 +11749,18 @@ impl Tweaker {
                                     height: fab.row_height_sm
                                     flow: Right
                                     align: Align{x: 0.0 y: 0.5}
-                                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+                                    // The lock stands where the sliders' does,
+                                    // at the row's own left edge, so the left
+                                    // padding a slider carries inside itself
+                                    // is on the NAME here rather than on the
+                                    // row: nine locks on one line down the
+                                    // panel, and nine names starting at the
+                                    // same point behind them.
+                                    padding: Inset{left: 0 right: 6 top: 0 bottom: 0}
+                                    lock := TbLockT {}
                                     tb_text_color_name := PanelLabelSmall {
                                         width: fab.prop_label_width
+                                        margin: Inset{left: 8 right: 0 top: 0 bottom: 0}
                                         text: ""
                                         max_lines: 1
                                     }
@@ -11572,37 +11771,61 @@ impl Tweaker {
                                         popup_menu: PanelPopupMenu{width: 72.}
                                     }
                                 }
-                                tb_text_tint := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Text tint"
-                                    min: 0.0
-                                    max: 100.0
-                                    step: 1.0
+                                tb_text_tint_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_text_tint := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Text tint"
+                                        min: 0.0
+                                        max: 100.0
+                                        step: 1.0
+                                    }
                                 }
                                 PanelLabelSmall {
                                     width: Fill
                                     margin: Inset{top: 3}
                                     text: "Shape"
                                 }
-                                tb_spacing := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Spacing"
-                                    min: 2.0
-                                    max: 20.0
-                                    step: 0.5
-                                    big_step: 2.0
-                                    precision: 1
-                                    unit: ""
+                                tb_spacing_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_spacing := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Spacing"
+                                        min: 2.0
+                                        max: 20.0
+                                        step: 0.5
+                                        big_step: 2.0
+                                        precision: 1
+                                        unit: ""
+                                    }
                                 }
-                                tb_roundness := FabSlider {
-                                    height: fab.row_height_sm
-                                    label: "Roundness"
-                                    min: 0.0
-                                    max: 20.0
-                                    step: 0.5
-                                    big_step: 2.0
-                                    precision: 1
-                                    unit: ""
+                                tb_roundness_row := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 0
+                                    align: Align{x: 0.0 y: 0.5}
+                                    lock := TbLockT {}
+                                    tb_roundness := FabSlider {
+                                        height: fab.row_height_sm
+                                        label: "Roundness"
+                                        min: 0.0
+                                        max: 20.0
+                                        step: 0.5
+                                        big_step: 2.0
+                                        precision: 1
+                                        unit: ""
+                                    }
                                 }
                             }
                             // How the built theme reads, in the mix's own
@@ -12946,6 +13169,13 @@ impl Tweaker {
         // as loud as that ought to get.
         if let Some(label) = self.tb_chip_tip(cx, sidebar, abs) {
             return Some(label);
+        }
+        // The nine locks, found by walking the settings rows rather than by
+        // nine more lines in the table below: the tip is the same promise
+        // nine times over with the row's own name in it, and a table would
+        // have to repeat the promise instead of the name.
+        if let Some(tip) = self.tb_lock_tip(cx, sidebar, abs) {
+            return Some(tip);
         }
         let chrome: [(&[LiveId], &str); 44] = [
             (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
@@ -17104,6 +17334,21 @@ impl Tweaker {
                     }
                 }
             }
+            // A press on a settings row's lock, on whichever of its two
+            // faces was up: both say the same thing, which is to turn this
+            // row's lock over. Nothing is installed -- a lock changes no
+            // value, it changes what the NEXT die or palette is allowed to
+            // do to one.
+            if let Some(index) = self
+                .tb_lock_uids
+                .iter()
+                .position(|faces| faces.iter().any(|uid| *uid != 0 && *uid == widget_action.widget_uid.0))
+            {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.tb_locks[index] = !self.tb_locks[index];
+                    self.redraw_sidebar(cx);
+                }
+            }
             if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
                 match widget_action.cast::<FileTreeAction>() {
                     FileTreeAction::FileClicked(id) | FileTreeAction::FolderClicked(id) => {
@@ -19040,7 +19285,7 @@ impl Tweaker {
         self.draw_the_suggestion_strip(cx, &body);
         let rows = body.child(live_id!(tb_rows));
         for (index, which) in BuildRow::ALL.iter().enumerate() {
-            let slider = rows.child(which.slot());
+            let slider = rows.child(which.line()).child(which.slot());
             self.tb_row_uids[index] = slider.widget_uid().0;
             // The stops before the value: a value set first is clamped to the
             // stops the row had, which for the text contrast are last page's.
@@ -19066,6 +19311,24 @@ impl Tweaker {
             self.tb_text_labels_for = count;
         }
         text_pick.as_drop_down().set_selected_item(cx, tb_text_entry_at(params.text_color, count));
+        // The lock at the head of every one of those rows. The face that is
+        // drawn IS the state -- an open padlock or a shut one -- and the
+        // panel's own lit fill says it a second time, the way a colour count
+        // rung says which count is in force. Both faces are routed: the
+        // press that will take the lock off lands on the shut one.
+        for (index, which) in BuildLock::ALL.iter().enumerate() {
+            let lock = rows.child(which.line()).child(TB_LOCK_ID);
+            let locked = self.tb_locks[index];
+            for (at, face) in TB_LOCK_FACES.iter().enumerate() {
+                let button = lock.child(*face);
+                self.tb_lock_uids[index][at] = button.widget_uid().0;
+                let shut = at == 1;
+                button.set_visible(cx, shut == locked);
+                if shut == locked {
+                    set_button_fill(cx, button, locked);
+                }
+            }
+        }
         let reading = self.tb_reading.clone();
         body.child(live_id!(tb_read)).set_text(cx, &reading);
     }
@@ -19083,6 +19346,9 @@ impl Tweaker {
         self.tb_adjust_uid = 0;
         self.tb_text_color_uid = 0;
         self.tb_row_uids = [0; BuildRow::ALL.len()];
+        // The routes go; what was LOCKED stays. A lock is a thing the person
+        // set about a row and not a thing about the section being open.
+        self.tb_lock_uids = [[0; 2]; BuildLock::ALL.len()];
         self.tb_carousel_uid = 0;
         self.tb_strip_prev_uid = 0;
         self.tb_strip_next_uid = 0;
@@ -19213,6 +19479,36 @@ impl Tweaker {
 
     /// The tooltip for the chip under the pointer: the name its palette is
     /// offered under, over the part of the chip that shows.
+    /// The lock under the pointer, if one is, and what it says it does.
+    ///
+    /// Only the face that is DRAWN answers: the other one is there and has a
+    /// rectangle from the last time it was up, and a tip off a control
+    /// nobody can see is a tip about nothing.
+    fn tb_lock_tip(&self, cx: &Cx, sidebar: &WidgetRef, abs: Vec2d) -> Option<(Rect, String)> {
+        if !self.tb_open {
+            return None;
+        }
+        let rows = sidebar
+            .child(live_id!(theme_head))
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_rows));
+        for (index, which) in BuildLock::ALL.iter().enumerate() {
+            let locked = self.tb_locks[index];
+            let face = rows
+                .child(which.line())
+                .child(TB_LOCK_ID)
+                .child(TB_LOCK_FACES[usize::from(locked)]);
+            if !face.visible() {
+                continue;
+            }
+            let rect = face.area().rect(cx);
+            if rect.size.x > 0.0 && rect.size.y > 0.0 && rect.contains(abs) {
+                return Some((rect, tb_lock_tip_text(*which, locked)));
+            }
+        }
+        None
+    }
+
     fn tb_chip_tip(&self, cx: &Cx, sidebar: &WidgetRef, abs: Vec2d) -> Option<(Rect, String)> {
         if !self.tb_open || self.tb_row_seed().is_none() {
             return None;
@@ -19405,9 +19701,73 @@ impl Tweaker {
         let Some(offer) = self.tb_suggestions.get(index).cloned() else {
             return;
         };
-        self.tb_builder.set(offer.params(self.tb_builder.params()));
+        let was = self.tb_builder.params();
+        // The palette's own fourth colour becomes the Surf colour, so the two
+        // background rows follow it here as they follow an edited square:
+        // pressing a palette puts that palette's page on, and the sliders
+        // afterwards say what the page was asked to be.
+        let now = self.tb_follow_surface(offer.params(was));
+        self.tb_builder.set(self.tb_locked_kept(&was, now));
         self.tb_chosen = Some(offer);
         self.tb_built_changed();
+    }
+
+    /// Whether a settings row is held where it is.
+    fn tb_locked(&self, which: BuildLock) -> bool {
+        BuildLock::ALL
+            .iter()
+            .position(|at| *at == which)
+            .is_some_and(|at| self.tb_locks[at])
+    }
+
+    /// `now` with every locked row put back where `was` had it.
+    ///
+    /// One place, for the two gestures that move rows nobody has a hand on:
+    /// the die, which rolls a whole theme, and a palette off the carousel,
+    /// which moves the two background rows onto its own page. A lock is a
+    /// promise about those and about nothing else -- a drag, an arrow key or
+    /// a click on the row's name never comes through here, so a locked row
+    /// still answers the person who locked it.
+    fn tb_locked_kept(&self, was: &BuilderParams, now: BuilderParams) -> BuilderParams {
+        let mut now = now;
+        for (index, which) in BuildLock::ALL.iter().enumerate() {
+            if !self.tb_locks[index] {
+                continue;
+            }
+            now = match which {
+                BuildLock::Row(row) => row.moved(now, row.shown(was)),
+                BuildLock::TextColor => BuilderParams { text_color: was.text_color, ..now },
+            };
+        }
+        now
+    }
+
+    /// The two Surface rows moved onto the Surf colour these settings carry,
+    /// so that the page the theme builds IS that colour and the person tunes
+    /// AWAY from it rather than towards it.
+    ///
+    /// The colour becomes the two numbers in `theme_builder::surface_sliders`,
+    /// which says exactly how and is the inverse of the page the sliders
+    /// ask for: the saturation row is a share of the colour's own saturation
+    /// and goes to all of it, and the lightness row is the `L*` axis run
+    /// backwards from the colour's own lightness, inside the appearance in
+    /// force. What the page finally wears may still be a step off, because a
+    /// page that cannot be told from an accent still moves clear of it; that
+    /// rule is untouched and these rows show what was ASKED for.
+    ///
+    /// A locked row is left exactly where it is, which is the whole of what
+    /// a lock on either of these two rows means.
+    fn tb_follow_surface(&self, params: BuilderParams) -> BuilderParams {
+        let surface = params.palette()[SeedSlot::Surface.index()];
+        let (saturation, lightness) = surface_sliders(surface, params.dark());
+        let mut params = params;
+        if !self.tb_locked(BuildLock::Row(BuildRow::Saturation)) {
+            params = BuilderParams { saturation, ..params };
+        }
+        if !self.tb_locked(BuildLock::Row(BuildRow::Lightness)) {
+            params = BuilderParams { lightness, ..params };
+        }
+        params
     }
 
     /// Open or close the builder section.
@@ -19701,7 +20061,23 @@ impl Tweaker {
             return None;
         }
         palette[which] = color;
-        Some(params.with_palette(palette))
+        Some(self.tb_surface_followed(&params, params.with_palette(palette)))
+    }
+
+    /// `now` with the two Surface rows moved onto its Surf colour, where
+    /// that colour is not the one `was` had.
+    ///
+    /// Asked this way round rather than by which square was touched, because
+    /// the Surf colour is not only moved by the Surf square: a colour
+    /// carried onto it from another square puts a different colour there, and
+    /// so does a colour carried off it. Every one of those is the Surf colour
+    /// being changed, which is what the ruling names.
+    fn tb_surface_followed(&self, was: &BuilderParams, now: BuilderParams) -> BuilderParams {
+        let at = SeedSlot::Surface.index();
+        if was.palette()[at] | 0xFF == now.palette()[at] | 0xFF {
+            return now;
+        }
+        self.tb_follow_surface(now)
     }
 
     /// One of the four colours under a hand that is still moving it: the
@@ -19770,7 +20146,9 @@ impl Tweaker {
         if now.iter().zip(was.iter()).all(|(a, b)| a | 0xFF == b | 0xFF) {
             return;
         }
-        self.tb_builder.set(params.with_palette(now));
+        // A drop can put another colour on the Surf square, or take the one
+        // that was there away, and both are the Surf colour changing.
+        self.tb_builder.set(self.tb_surface_followed(&params, params.with_palette(now)));
         // The seed is a role and stays on its slot, so the row is grown
         // again where a different colour came to stand under it.
         if let Some(slot) = self.tb_row_seed() {
@@ -19797,7 +20175,16 @@ impl Tweaker {
     /// engine keeps the appearance for that reason.
     fn tb_surprise(&mut self) {
         self.tb_seed = next_mix_seed(self.tb_seed);
+        let was = self.tb_builder.params();
         self.tb_builder.randomize(self.tb_seed);
+        // The rolled theme, with every LOCKED row put back. The two
+        // background rows do NOT follow the rolled Surf colour: a roll draws
+        // its own page as well as its own colours, and pinning the page to
+        // the colour that came up would spend half of what the die is for.
+        // The ruling is about the Surf colour being CHANGED and about a
+        // palette being chosen, and the die is neither.
+        let rolled = self.tb_locked_kept(&was, self.tb_builder.params());
+        self.tb_builder.set(rolled);
         self.tb_seed_slot = SeedSlot::Primary;
         self.tb_suggest_due = self.tb_row_seed().is_some();
         self.tb_built_changed();
@@ -22226,16 +22613,24 @@ mod tests {
             ("tb_roll_name", "PanelLabelSmall"),
             ("tb_random", "PanelButton"),
             ("tb_rows", "View"),
+            ("tb_saturation_row", "View"),
             ("tb_saturation", "FabSlider"),
+            ("tb_lightness_row", "View"),
             ("tb_lightness", "FabSlider"),
+            ("tb_font_size_row", "View"),
             ("tb_font_size", "FabSlider"),
+            ("tb_font_contrast_row", "View"),
             ("tb_font_contrast", "FabSlider"),
+            ("tb_text_contrast_row", "View"),
             ("tb_text_contrast", "FabSlider"),
             ("tb_text_color_row", "View"),
             ("tb_text_color_name", "PanelLabelSmall"),
             ("tb_text_color", "PanelDropDown"),
+            ("tb_text_tint_row", "View"),
             ("tb_text_tint", "FabSlider"),
+            ("tb_spacing_row", "View"),
             ("tb_spacing", "FabSlider"),
+            ("tb_roundness_row", "View"),
             ("tb_roundness", "FabSlider"),
             ("tb_read", "PanelLabelSmall"),
         ] {
@@ -22256,6 +22651,22 @@ mod tests {
             1,
             "the builder's `TbColorT` is not declared once as a View"
         );
+        // And the lock at the head of every settings row: one template,
+        // and one of it in front of each of the nine rows, under the same
+        // name in every one of them so the panel addresses them all alike.
+        assert_eq!(
+            src.matches("let TbLockT = View {").count(),
+            1,
+            "the builder's `TbLockT` is not declared once as a View"
+        );
+        assert_eq!(
+            src.matches("lock := TbLockT {}").count(),
+            BuildLock::ALL.len(),
+            "the settings rows do not each carry one lock"
+        );
+        for face in ["lock_open := PanelButton", "lock_shut := PanelButton"] {
+            assert_eq!(src.matches(face).count(), 1, "`{face}` is not declared once");
+        }
         // And the paged strip the carousel replaced is gone, slots, page
         // button, page count and all: a slot left declared is a slot a
         // press can still be routed to. So is the line that named the palette
@@ -26153,7 +26564,7 @@ line two");
             ("tb_read", body.child(live_id!(tb_read))),
         ];
         for which in BuildRow::ALL {
-            drawn.push((which.label(), rows.child(which.slot())));
+            drawn.push((which.label(), rows.child(which.line()).child(which.slot())));
         }
         for (which, id) in TB_COLOR_IDS.iter().enumerate() {
             drawn.push((TB_COLOR_NAMES[which], seed_row.child(*id).child(live_id!(tb_color))));
@@ -26203,6 +26614,7 @@ line two");
         let row = head
             .child(live_id!(tb_body))
             .child(live_id!(tb_rows))
+            .child(live_id!(tb_saturation_row))
             .child(live_id!(tb_saturation));
 
         let before = panel.tb_builder.params().saturation;
@@ -26234,7 +26646,7 @@ line two");
         let rows = head.child(live_id!(tb_body)).child(live_id!(tb_rows));
         let names: Vec<String> = BuildRow::ALL
             .iter()
-            .map(|which| rows.child(which.slot()).as_fab_slider().borrow().expect("a slider row").label().to_string())
+            .map(|which| rows.child(which.line()).child(which.slot()).as_fab_slider().borrow().expect("a slider row").label().to_string())
             .collect();
         assert_eq!(
             names,
@@ -26255,7 +26667,7 @@ line two");
 
         let house = BuilderParams::house(panel.tb_builder.params().dark());
         assert_eq!(house.saturation, 1.0, "the saturation's default is not its top");
-        let contrast = rows.child(BuildRow::TextContrast.slot()).as_fab_slider();
+        let contrast = rows.child(BuildRow::TextContrast.line()).child(BuildRow::TextContrast.slot()).as_fab_slider();
         assert_eq!(contrast.range(), house.text_contrast_range(), "the text contrast's track is not the page's range");
         assert!((contrast.value() - house.text_contrast).abs() < 1e-9, "the text contrast row is not on the house ratio");
 
@@ -26586,10 +26998,11 @@ line two");
             Some(offered.seeds),
             "the press never reached the builder, or reached it without the palette's companions"
         );
-        // A chip is a palette: the two background sliders stay where the
-        // person put them, and so does the colour they picked.
-        assert_eq!(panel.tb_builder.params().saturation, before.saturation, "the chip moved the saturation");
-        assert_eq!(panel.tb_builder.params().lightness, before.lightness, "the chip moved the lightness");
+        // A chip is a palette, and the rows a palette does not name stay
+        // where the person put them -- the text contrast here, and the
+        // colour they picked. The two SURFACE rows are the exception and the
+        // ruling: the chip's fourth colour is the page, so they move onto
+        // it. See `a_palette_moves_the_surface_rows_onto_its_own_colour`.
         assert_eq!(panel.tb_builder.params().text_contrast, before.text_contrast, "the chip moved the text contrast");
         assert_eq!(panel.tb_builder.params().favourite, before.favourite, "the chip moved the colour picked");
         assert_eq!(panel.tb_chosen_index(), Some(2), "the chip that was pressed is not the one marked");
@@ -26605,8 +27018,8 @@ line two");
         // settings: drawn again, every row still reads what it read.
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let rows = head.child(live_id!(tb_body)).child(live_id!(tb_rows));
-        for which in [BuildRow::Saturation, BuildRow::Lightness, BuildRow::TextContrast] {
-            let reads = rows.child(which.slot()).as_fab_slider().value();
+        for which in [BuildRow::TextContrast] {
+            let reads = rows.child(which.line()).child(which.slot()).as_fab_slider().value();
             assert!(
                 (reads - which.shown(&before)).abs() < 1e-9,
                 "the {} row reads {reads} after a chip, where it read {}",
@@ -26621,6 +27034,446 @@ line two");
             panel.tb_builder.params().spacing,
             BuilderParams::house(panel.tb_builder.params().dark()).spacing,
             "picking a palette moved the spacing"
+        );
+    }
+
+    /// What a settings row HOLDS, as the settings store it: the number a
+    /// lock promises to leave where it is.
+    ///
+    /// The text contrast is read raw rather than through `BuildRow::shown`,
+    /// which clamps it to what the page it will be written on allows. The
+    /// page moves under a roll, and a lock is a promise about the SETTING;
+    /// what a moved page then allows is that row's own older rule.
+    fn what_a_lock_holds(which: BuildLock, params: &BuilderParams) -> f64 {
+        match which {
+            BuildLock::Row(BuildRow::TextContrast) => params.text_contrast,
+            BuildLock::Row(row) => row.shown(params),
+            BuildLock::TextColor => params.text_color.map_or(-1.0, |slot| slot.index() as f64),
+        }
+    }
+
+    /// Everything a gesture left owed, spent: the install and the module
+    /// rebuild that carries it. A draw with an install still owed reads the
+    /// clock, which a bare test `Cx` has never started, so a test that moves
+    /// the engine by hand and then draws has to come through here.
+    fn the_builder_settles(cx: &mut Cx, panel: &mut Tweaker) {
+        panel.tb_settle(cx, 0.0);
+        if std::mem::take(&mut cx.pending_style_reload) {
+            cx.pending_live_edit_request = false;
+            cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+            panel.tb_module_rebuilt();
+            panel.tb_settle(cx, 0.0);
+        }
+    }
+
+    /// The lock at the head of a settings row, and one of its two faces.
+    fn the_lock_face(head: &WidgetRef, which: BuildLock, locked: bool) -> WidgetRef {
+        head.child(live_id!(tb_body))
+            .child(live_id!(tb_rows))
+            .child(which.line())
+            .child(TB_LOCK_ID)
+            .child(TB_LOCK_FACES[usize::from(locked)])
+    }
+
+    /// THE SURF COLOUR IS THE PAGE. Choosing a palette puts its fourth
+    /// colour on the two Surface rows -- all of its saturation, and its own
+    /// lightness -- so the theme the chip builds opens AS that palette's
+    /// page and the person tunes away from it rather than towards it.
+    ///
+    /// Seen failing before the ruling, where a chip left both rows exactly
+    /// where a hand had dragged them: a palette pressed at a saturation of
+    /// 30 built a page with under a third of its colour in it, and nothing
+    /// on the screen said why.
+    #[test]
+    fn a_palette_moves_the_surface_rows_onto_its_own_colour() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        // Both rows dragged well away first, so that a chip which moved
+        // neither would be caught.
+        panel.tb_gesture_ended(BuildRow::Saturation, 30.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 20.0);
+        panel.tb_settle(&mut cx, 0.0);
+        the_build_reload_lands(&mut cx, &mut panel, 0.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let before = panel.tb_builder.params();
+
+        a_press_on_chip(&mut cx, &mut panel, &head, 2);
+        let params = panel.tb_builder.params();
+        let surface = params.palette()[SeedSlot::Surface.index()];
+        let (saturation, lightness) = surface_sliders(surface, params.dark());
+        assert_eq!(params.saturation, saturation, "the chip left the saturation where the hand had it");
+        assert_eq!(params.lightness, lightness, "the chip left the lightness where the hand had it");
+        assert_ne!(params.lightness, before.lightness, "the palette asked for the page that was already on");
+        // The two rows say so on the screen as well.
+        the_builder_settles(&mut cx, &mut panel);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        for which in [BuildRow::Saturation, BuildRow::Lightness] {
+            let reads = the_row(&head, which).as_fab_slider().value();
+            assert!(
+                (reads - which.shown(&params)).abs() < 1e-9,
+                "the {} row reads {reads} and the settings hold {}",
+                which.label(),
+                which.shown(&params)
+            );
+        }
+    }
+
+    /// A colour put on the Surf square by hand takes the two Surface rows
+    /// with it, and the page they then ask for is that colour exactly --
+    /// the round trip `theme_builder` proves over the whole axis, on the
+    /// panel's own controls.
+    ///
+    /// The other three squares do not move the rows: they are accents, and
+    /// the page only ever moves out of THEIR way.
+    #[test]
+    fn a_colour_put_on_the_surf_square_takes_the_surface_rows_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        panel.tb_gesture_ended(BuildRow::Saturation, 30.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 45.0);
+        // A colour a dark page can actually be: a deep blue.
+        let asked = 0x101C33FFu32;
+        panel.tb_color_ended(SeedSlot::Surface.index(), asked);
+        let params = panel.tb_builder.params();
+        assert_eq!(params.palette()[SeedSlot::Surface.index()] | 0xFF, asked);
+        assert_eq!(
+            crate::theme_builder::asked_page(&params),
+            asked,
+            "the page the two rows ask for is not the colour that was put on the square"
+        );
+        // An accent moves neither row.
+        let (saturation, lightness) = (params.saturation, params.lightness);
+        panel.tb_color_ended(SeedSlot::Primary.index(), 0xE8730CFF);
+        let params = panel.tb_builder.params();
+        assert_eq!(params.saturation, saturation, "the primary moved the saturation");
+        assert_eq!(params.lightness, lightness, "the primary moved the lightness");
+        let _ = head;
+    }
+
+    /// A LOCKED ROW IS LEFT WHERE IT IS. Walked over all nine of them: with
+    /// the lock on, the die and a palette off the carousel leave that row's
+    /// setting exactly where it stood, and every other row goes where it
+    /// would have gone anyway.
+    ///
+    /// The same roll twice, from the same settings and the same seed, is
+    /// what makes the last half an assertion rather than a hope: the die is
+    /// reproducible on purpose.
+    ///
+    /// Two rows are moved by neither gesture as it is -- the text colour,
+    /// which only a person chooses, and the text tint, which a roll keeps.
+    /// Their locks are the same promise kept in advance.
+    ///
+    /// Seen failing with no locks at all, where the die moved every row it
+    /// had ever moved.
+    #[test]
+    fn a_locked_row_is_left_alone_by_the_die_and_by_a_palette() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        // Settings no row is at its house value on, so that a gesture
+        // putting a row back to the house would be caught as a move.
+        panel.tb_gesture_ended(BuildRow::Saturation, 42.0);
+        panel.tb_gesture_ended(BuildRow::Lightness, 21.0);
+        panel.tb_gesture_ended(BuildRow::TextContrast, 7.5);
+        panel.tb_gesture_ended(BuildRow::Spacing, 9.0);
+        panel.tb_gesture_ended(BuildRow::Roundness, 7.0);
+        panel.tb_gesture_ended(BuildRow::FontSize, 12.0);
+        panel.tb_gesture_ended(BuildRow::FontContrast, 3.5);
+        panel.tb_text_color_chosen(Some(SeedSlot::Tertiary));
+        panel.tb_gesture_ended(BuildRow::TextTint, 55.0);
+        let start = panel.tb_builder.params();
+        let rolled = |panel: &mut Tweaker, locked: Option<usize>| -> BuilderParams {
+            panel.tb_builder.set(start);
+            panel.tb_locks = [false; BuildLock::ALL.len()];
+            if let Some(at) = locked {
+                panel.tb_locks[at] = true;
+            }
+            panel.tb_seed = 11;
+            panel.tb_surprise();
+            panel.tb_builder.params()
+        };
+        let chipped = |panel: &mut Tweaker, locked: Option<usize>| -> BuilderParams {
+            panel.tb_builder.set(start);
+            panel.tb_locks = [false; BuildLock::ALL.len()];
+            if let Some(at) = locked {
+                panel.tb_locks[at] = true;
+            }
+            panel.tb_chip_pressed(2);
+            panel.tb_builder.params()
+        };
+        let loose_roll = rolled(&mut panel, None);
+        let loose_chip = chipped(&mut panel, None);
+        for (at, which) in BuildLock::ALL.iter().enumerate() {
+            let held = what_a_lock_holds(*which, &start);
+            let tight_roll = rolled(&mut panel, Some(at));
+            assert_eq!(what_a_lock_holds(*which, &tight_roll), held, "the die moved {} with its lock on", which.label());
+            let tight_chip = chipped(&mut panel, Some(at));
+            assert_eq!(what_a_lock_holds(*which, &tight_chip), held, "a palette moved {} with its lock on", which.label());
+            // And the lock did not spread: every other row the gesture
+            // moves is still moved. Not to the same number, necessarily --
+            // the contrast a roll draws is drawn for the page the roll
+            // landed on, so holding the lightness hands the next row a
+            // different question -- but away from where it stood.
+            for other in BuildLock::ALL.iter().filter(|other| *other != which) {
+                let stood = what_a_lock_holds(*other, &start);
+                if what_a_lock_holds(*other, &loose_roll) != stood {
+                    assert_ne!(
+                        what_a_lock_holds(*other, &tight_roll),
+                        stood,
+                        "{}'s lock held {} as well",
+                        which.label(),
+                        other.label()
+                    );
+                }
+                if what_a_lock_holds(*other, &loose_chip) != stood {
+                    assert_ne!(
+                        what_a_lock_holds(*other, &tight_chip),
+                        stood,
+                        "{}'s lock held {} as well, under a palette",
+                        which.label(),
+                        other.label()
+                    );
+                }
+            }
+            // Unlocked, the same gesture from the same settings moves it,
+            // which is what says the lock is what held it.
+            if !matches!(which, BuildLock::TextColor | BuildLock::Row(BuildRow::TextTint)) {
+                assert_ne!(
+                    what_a_lock_holds(*which, &loose_roll),
+                    held,
+                    "the die leaves {} alone with no lock on it, so the lock proves nothing",
+                    which.label()
+                );
+            }
+            if matches!(which, BuildLock::Row(BuildRow::Saturation) | BuildLock::Row(BuildRow::Lightness)) {
+                assert_ne!(
+                    what_a_lock_holds(*which, &loose_chip),
+                    held,
+                    "a palette leaves {} alone with no lock on it, so the lock proves nothing",
+                    which.label()
+                );
+            }
+        }
+        let _ = head;
+    }
+
+    /// A LOCK NEVER STOPS THE PERSON. With every row locked, a drag, a
+    /// release, a click on the row's name and a press on the track all
+    /// still move it: a lock is about what happens to a row nobody has a
+    /// hand on.
+    #[test]
+    fn a_locked_row_still_moves_under_the_hand() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        panel.tb_locks = [true; BuildLock::ALL.len()];
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.tb_row_moved(BuildRow::Roundness, 13.0);
+        assert_eq!(panel.tb_builder.params().roundness, 13.0, "a locked row refused a drag");
+        panel.tb_gesture_ended(BuildRow::Roundness, 11.0);
+        assert_eq!(panel.tb_builder.params().roundness, 11.0, "a locked row refused a release");
+        panel.tb_row_cleared(BuildRow::Roundness);
+        let house = BuilderParams::house(panel.tb_builder.params().dark());
+        assert_eq!(panel.tb_builder.params().roundness, house.roundness, "a locked row refused its own name");
+        // And the picker on the locked text colour row still chooses.
+        panel.tb_text_color_chosen(Some(SeedSlot::Secondary));
+        assert_eq!(panel.tb_builder.params().text_color, Some(SeedSlot::Secondary), "a locked picker refused a choice");
+        // A real press on the track of a locked row, taken the whole way.
+        the_builder_settles(&mut cx, &mut panel);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let before = panel.tb_builder.params().saturation;
+        let track = the_row(&head, BuildRow::Saturation).area().rect(&cx);
+        one_press_at(
+            &mut cx,
+            &mut panel,
+            &head,
+            dvec2(track.pos.x + track.size.x * 0.6, track.pos.y + track.size.y * 0.5),
+        );
+        assert_ne!(panel.tb_builder.params().saturation, before, "a press on a locked row's track moved nothing");
+    }
+
+    /// The locks are the person's and live as long as the panel does: the
+    /// section folded and opened again finds the same rows locked, and a
+    /// fresh panel opens with none of them locked. A press on the lock is
+    /// what sets it, and the face that is drawn turns over with it.
+    #[test]
+    fn the_locks_survive_the_fold_and_a_fresh_panel_opens_unlocked() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        assert_eq!(panel.tb_locks, [false; BuildLock::ALL.len()], "a fresh panel opens with a row locked");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let which = BuildLock::Row(BuildRow::Lightness);
+        let at = BuildLock::ALL.iter().position(|one| *one == which).expect("the lightness has a lock");
+        assert!(the_lock_face(&head, which, false).visible(), "the open padlock is not the one drawn");
+        assert!(!the_lock_face(&head, which, true).visible(), "both padlocks are drawn at once");
+
+        let face = the_lock_face(&head, which, false);
+        one_press_on(&mut cx, &mut panel, &head, &face);
+        assert!(panel.tb_locks[at], "the press never reached the lock");
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(the_lock_face(&head, which, true).visible(), "the shut padlock is not the one drawn");
+        assert!(!the_lock_face(&head, which, false).visible(), "the open padlock is still drawn");
+
+        // Folded and opened again: the routes went and came back, the lock
+        // stayed where the person set it.
+        panel.toggle_theme_builder(&mut cx);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert_eq!(panel.tb_lock_uids, [[0; 2]; BuildLock::ALL.len()], "a lock is still routed with the section folded");
+        assert!(panel.tb_locks[at], "folding the section took the lock off");
+        panel.toggle_theme_builder(&mut cx);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(panel.tb_locks[at], "opening the section again took the lock off");
+        assert!(the_lock_face(&head, which, true).visible(), "the row came back without its lock drawn");
+        assert_ne!(panel.tb_lock_uids[at][1], 0, "the lock came back unrouted");
+
+        // And the next press lets the row go again.
+        let face = the_lock_face(&head, which, true);
+        one_press_on(&mut cx, &mut panel, &head, &face);
+        assert!(!panel.tb_locks[at], "the second press did not let the row go");
+    }
+
+    /// A lock says what it does under the pointer, in the row's own name,
+    /// and says a different thing shut from open. Only the face that is
+    /// DRAWN answers: the other one keeps a rectangle from the last time it
+    /// was up, and a tip off a control nobody can see is a tip about
+    /// nothing.
+    #[test]
+    fn a_lock_says_what_it_does_under_the_pointer() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let which = BuildLock::Row(BuildRow::Spacing);
+        let at = BuildLock::ALL.iter().position(|one| *one == which).expect("the spacing has a lock");
+        fn middle(cx: &Cx, head: &WidgetRef, which: BuildLock, locked: bool) -> Vec2d {
+            let face = the_lock_face(head, which, locked).area().rect(cx);
+            face.pos + face.size * 0.5
+        }
+
+        let open = middle(&cx, &head, which, false);
+        let (rect, text) = panel.tb_lock_tip(&cx, &sidebar, open).expect("the open lock says nothing");
+        assert!(rect.size.x > 0.0);
+        assert!(text.contains("Spacing"), "the tip does not name the row: {text}");
+        assert!(text.starts_with("hold "), "the open lock's tip does not offer to hold the row: {text}");
+        // Nowhere near a lock, nothing.
+        assert!(panel.tb_lock_tip(&cx, &sidebar, dvec2(open.x - 200.0, open.y)).is_none());
+
+        panel.tb_locks[at] = true;
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let shut = middle(&cx, &head, which, true);
+        let (_, text) = panel.tb_lock_tip(&cx, &sidebar, shut).expect("the shut lock says nothing");
+        assert!(text.contains("Spacing"), "the tip does not name the row: {text}");
+        assert!(text.contains("held where it is"), "the shut lock's tip does not say the row is held: {text}");
+        // And the face that is not drawn answers nothing, though it still
+        // has the rectangle it had.
+        assert!(
+            panel.tb_lock_tip(&cx, &sidebar, open).is_none_or(|(_, said)| said.contains("held where it is")),
+            "the padlock that is not drawn answered for the row"
+        );
+    }
+
+    /// EVERY SETTINGS ROW CARRIES A LOCK, at its left and in front of its
+    /// name, and the nine of them stand in one column. Each is a square
+    /// with its padlock dead centre and no word on it -- the trap the die is
+    /// held to, and held to here for the same reason: an empty label still
+    /// takes the spacing after an icon. All of it inside the default
+    /// sidebar, which is what the operator asked to be checked.
+    #[test]
+    fn every_settings_row_carries_a_centred_lock_that_fits_the_sidebar() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        // A text colour chosen, so the tint row answers and is drawn like
+        // the rest rather than dimmed.
+        panel.tb_text_color_chosen(Some(SeedSlot::Tertiary));
+        the_builder_settles(&mut cx, &mut panel);
+        let width = DEFAULT_SIDEBAR_WIDTH - 8.0;
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, width);
+        let head_rect = head.area().rect(&cx);
+        let right = head_rect.pos.x + head_rect.size.x - 4.0 + 0.5;
+        let rows = head.child(live_id!(tb_body)).child(live_id!(tb_rows));
+        let mut lefts: Vec<f64> = Vec::new();
+        for which in BuildLock::ALL {
+            let button = the_lock_face(&head, which, false);
+            let face = button.area().rect(&cx);
+            assert!(face.size.x > 0.0 && face.size.y > 0.0, "{}'s lock drew nothing", which.label());
+            assert!(
+                (face.size.x - face.size.y).abs() < 0.5,
+                "{}'s lock is {} by {}",
+                which.label(),
+                face.size.x,
+                face.size.y
+            );
+            assert_eq!(button.text(), "", "{}'s lock carries a word", which.label());
+            let icon = button.borrow::<crate::Button>().expect("the lock is a button").draw_icon.area().rect(&cx);
+            assert!(icon.size.x > 0.0 && icon.size.y > 0.0, "{}'s padlock drew nothing", which.label());
+            let (icon_mid, face_mid) = (icon.pos + icon.size * 0.5, face.pos + face.size * 0.5);
+            assert!(
+                (icon_mid.x - face_mid.x).abs() <= 0.5 && (icon_mid.y - face_mid.y).abs() <= 0.5,
+                "{}'s padlock sits at {icon_mid:?}, off its button's centre {face_mid:?}",
+                which.label()
+            );
+            assert!((icon.size.x - 10.0).abs() < 0.5, "{}'s padlock is {} points wide, not 10", which.label(), icon.size.x);
+            // In front of the row's own control, and the whole row still
+            // inside the sidebar.
+            let line = rows.child(which.line()).area().rect(&cx);
+            assert!(face.pos.x >= line.pos.x - 0.5, "{}'s lock stands outside its row", which.label());
+            assert!(
+                line.pos.x + line.size.x <= right,
+                "{} runs past the head's padding at the default sidebar",
+                which.label()
+            );
+            let after = match which {
+                BuildLock::Row(one) => the_row(&head, one).area().rect(&cx),
+                BuildLock::TextColor => rows
+                    .child(live_id!(tb_text_color_row))
+                    .child(live_id!(tb_text_color_name))
+                    .area()
+                    .rect(&cx),
+            };
+            assert!(after.size.x > 0.0, "{}'s control drew nothing", which.label());
+            assert!(
+                face.pos.x + face.size.x <= after.pos.x + 0.5,
+                "{}'s lock is not in front of the row",
+                which.label()
+            );
+            lefts.push(face.pos.x);
+        }
+        let widest = lefts.iter().fold(0.0f64, |most, at| most.max(*at));
+        let narrowest = lefts.iter().fold(f64::INFINITY, |least, at| least.min(*at));
+        assert!(widest - narrowest <= 0.5, "the nine locks do not stand in one column: {lefts:?}");
+        // The picker's name still lines up with the sliders' names behind
+        // the locks, which is what makes the Text group one column.
+        let name = rows
+            .child(live_id!(tb_text_color_row))
+            .child(live_id!(tb_text_color_name))
+            .area()
+            .rect(&cx);
+        // The picker's word stands inside the same name column the sliders
+        // write theirs in: a slider draws its name from the column's left
+        // edge and a label centres its word in the column, so the two are
+        // the same column rather than the same point.
+        let label = the_row(&head, BuildRow::TextContrast)
+            .as_fab_slider()
+            .borrow()
+            .expect("a slider row")
+            .label_rect(&cx);
+        assert!(
+            name.pos.x >= label.pos.x - 0.5 && name.pos.x + name.size.x <= label.pos.x + 92.0 + 0.5,
+            "the picker's name runs {}..{} and the sliders' column starts at {}",
+            name.pos.x,
+            name.pos.x + name.size.x,
+            label.pos.x
         );
     }
 
@@ -27619,7 +28472,7 @@ line two");
         let widget = bare_panel(&mut cx);
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let head = a_builder_with_a_palette_on(&mut cx, &mut panel);
-        let tint = head.child(live_id!(tb_body)).child(live_id!(tb_rows)).child(BuildRow::TextTint.slot()).as_fab_slider();
+        let tint = the_row(&head, BuildRow::TextTint).as_fab_slider();
         assert!(!tint.borrow().expect("a slider row").enabled(), "the tint answers with no colour chosen");
         assert_eq!(panel.tb_builder.params().text_tint, 0.0);
         // A slot: the row comes on, at a tint that can be seen.
@@ -29350,7 +30203,7 @@ line two");
     }
 
     fn the_row(head: &WidgetRef, which: BuildRow) -> WidgetRef {
-        head.child(live_id!(tb_body)).child(live_id!(tb_rows)).child(which.slot())
+        head.child(live_id!(tb_body)).child(live_id!(tb_rows)).child(which.line()).child(which.slot())
     }
 
     /// The count is a row of four rungs on a line of its own over the seed

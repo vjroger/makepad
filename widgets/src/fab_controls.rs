@@ -2559,6 +2559,16 @@ impl FabSlider {
         (self.min, self.max)
     }
 
+    /// Where the row's NAME was drawn. The face is one area and the name is
+    /// a box inside it, so a host lining a column of rows up on their names
+    /// -- a panel that puts a control of its own on a row beside sliders --
+    /// has something to line up on. Never hit-tested: see `label_area` for
+    /// why a second area over the same press is a slider nobody can drag
+    /// from its legend.
+    pub fn label_rect(&self, cx: &Cx) -> Rect {
+        self.label_area.rect(cx)
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }

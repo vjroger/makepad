@@ -803,6 +803,73 @@ fn house_lightness(dark: bool) -> f64 {
     0.5 + 0.5 * (lstar - LIGHT_DARKEST) / (LIGHT_LIGHTEST - LIGHT_DARKEST)
 }
 
+/// The least lightness that is still a LIGHT page. The slider's two runs
+/// meet at a half and the half itself belongs to the dark one
+/// ([`BuilderParams::dark`] asks whether the lightness is past it), so the
+/// light run opens at the next number a `f64` has. It stands for `L*` 68 to
+/// fourteen decimal places, which is nearer than a colour's own lightness
+/// can be told anyway.
+const LIGHT_FLOOR: f64 = 0.5 + f64::EPSILON;
+
+/// Where a page of this lightness stands on the slider: [`lightness_lstar`]
+/// run backwards, inside one appearance's run.
+///
+/// The run is the one `dark` names, and the number is clamped into it. Two
+/// things follow, and both are wanted. A `L*` past the run's ends -- black
+/// past the dark run's bottom, white past the light run's top -- lands on
+/// the end, because that is as near as a page gets. And a `L*` in the band
+/// between the two runs, which is most of the middle of the colour space,
+/// lands on the near end of the run it is being read into rather than
+/// crossing over: no page can be written on in that band, and which
+/// appearance the theme wears is the lightness slider's own question and not
+/// a question a colour gets to answer. See [`surface_sliders`].
+fn page_lightness_of(color: u32, dark: bool) -> f64 {
+    let lstar = lstar_of(luminance(color | 0xFF));
+    if dark {
+        (0.5 * (lstar - DARK_DARKEST) / (dark_lightest() - DARK_DARKEST)).clamp(0.0, 0.5)
+    } else {
+        (0.5 + 0.5 * (lstar - LIGHT_DARKEST) / (LIGHT_LIGHTEST - LIGHT_DARKEST)).clamp(LIGHT_FLOOR, 1.0)
+    }
+}
+
+/// Where the two background sliders have to stand for the page to BE this
+/// colour: the saturation first, then the lightness, both in the 0..1 the
+/// settings hold them in.
+///
+/// A colour becomes the two numbers like this, and it is worth writing down
+/// because the two halves are not the same kind of arithmetic.
+///
+/// * The SATURATION slider is a share of the background colour's own
+///   saturation, not a saturation of its own: the page carries `own * share`
+///   of it ([`page_hue_and_sat`]). The share at which the page carries all
+///   the colour there is in the colour is therefore one, whatever the colour
+///   -- a pale grey-blue surface asks for the same whole share as a loud one,
+///   and gets its own pale result. So this half is a constant, and the number
+///   the row shows afterwards is a hundred.
+/// * The LIGHTNESS slider names a `L*` on two even runs ([`lightness_lstar`]),
+///   so this half is that map run backwards from the colour's own `L*`
+///   ([`page_lightness_of`]), clamped into the run the appearance in force is
+///   on.
+///
+/// And back again: [`asked_page`] takes the hue and the saturation off the
+/// background colour, works out the luminance the lightness names, and asks
+/// [`at_luminance`] for the colour of that hue and saturation at that
+/// luminance. Put the two numbers this returns into the settings and the
+/// answer is the colour itself, exactly, for every colour a page can be --
+/// the hue and the saturation are the colour's own and never left it, and
+/// the luminance is the one the colour's own `L*` came from. For a colour a
+/// page CANNOT be -- one in the unwritable band, or past either end -- the
+/// lightness lands on the nearest page there is and the round trip is as
+/// near as the axis allows, which is what "trying to match" comes to.
+///
+/// What the page finally WEARS can still be a step off, and that is a
+/// separate rule left untouched: a page that cannot be told from one of the
+/// accents walks along this same axis until it can ([`page_scheme_and_crowding`]).
+/// The sliders show what was ASKED for.
+pub fn surface_sliders(color: u32, dark: bool) -> (f64, f64) {
+    (1.0, page_lightness_of(color, dark))
+}
+
 /// The colour of `hue` at HSL saturation `sat` whose luminance is `y`, or the
 /// nearest the eight bits allow.
 ///
@@ -941,6 +1008,28 @@ fn page_of(params: &BuilderParams) -> u32 {
     page_scheme_and_crowding(params).0
 }
 
+/// What colour the page takes and how much of it: the background colour's
+/// own hue, and the share of that colour's own saturation the saturation
+/// slider names. A background with no colour in it has none to share, so the
+/// page is a grey wherever the slider stands.
+fn page_hue_and_sat(params: &BuilderParams) -> (f64, f64) {
+    let [_, _, _, background] = params.palette();
+    let (hue, own, _) = rgb_to_hsl(background | 0xFF);
+    (hue, if own < 0.01 { 0.0 } else { own * params.saturation.clamp(0.0, 1.0) })
+}
+
+/// The page the two background sliders ASK for: their colour at their
+/// lightness, before anything moves it clear of the accents.
+///
+/// It is [`page_of`] with the one rule that can move a page left out, and it
+/// is what [`surface_sliders`] is the inverse of: the two are a round trip,
+/// and a Surf colour read into the sliders and built again here is that
+/// colour.
+pub fn asked_page(params: &BuilderParams) -> u32 {
+    let (hue, sat) = page_hue_and_sat(params);
+    at_luminance(hue, sat, luminance_at(lightness_lstar(params.lightness)))
+}
+
 /// The page these settings make, the appearance it lands in, and the accent
 /// it could not be moved clear of, if any.
 ///
@@ -968,9 +1057,7 @@ fn page_of(params: &BuilderParams) -> u32 {
 /// close to it, for the panel to say under its controls. Moving the colour
 /// instead would be the old fault with better manners.
 fn page_scheme_and_crowding(params: &BuilderParams) -> (u32, Scheme, Option<SeedSlot>) {
-    let [_, _, _, background] = params.palette();
-    let (hue, own, _) = rgb_to_hsl(background | 0xFF);
-    let sat = if own < 0.01 { 0.0 } else { own * params.saturation.clamp(0.0, 1.0) };
+    let (hue, sat) = page_hue_and_sat(params);
     let at = |lstar: f64| at_luminance(hue, sat, luminance_at(lstar));
     let asked = lightness_lstar(params.lightness);
     let (lstar, crowding) = clear_of(asked, &page_accents(params), params.seed_slot, &at);
@@ -6298,6 +6385,69 @@ mod theme_builder_tests {
         assert!((at(0.5) - dark_lightest()).abs() < 0.8, "{}", at(0.5));
         assert!((at(0.5000001) - LIGHT_DARKEST).abs() < 0.8, "{}", at(0.5000001));
         assert!((at(1.0) - LIGHT_LIGHTEST).abs() < 0.8, "{}", at(1.0));
+    }
+
+    /// A Surf colour read into the two background sliders and built again is
+    /// that colour, exactly: [`surface_sliders`] and [`asked_page`] are one
+    /// round trip, over every hue, every saturation and the whole of both
+    /// runs of the lightness axis.
+    ///
+    /// This is what lets the panel say that the page the theme builds IS the
+    /// colour on the Surf square. Seen failing with the saturation read as
+    /// the colour's OWN saturation rather than as the whole share of it: the
+    /// page then came out at the square of the saturation and only a grey
+    /// went round the trip unhurt.
+    #[test]
+    fn a_surface_colour_read_into_the_sliders_builds_back_to_itself() {
+        for dark in [true, false] {
+            let (low, high) = if dark { (DARK_DARKEST, dark_lightest()) } else { (LIGHT_DARKEST, LIGHT_LIGHTEST) };
+            for hue in [0.0, 47.0, 123.0, 210.0, 299.0] {
+                for own in [0.0, 0.2, 0.55, 0.9] {
+                    for step in 0..=10 {
+                        let lstar = low + (high - low) * f64::from(step) / 10.0;
+                        let color = at_luminance(hue, own, luminance_at(lstar));
+                        let (saturation, lightness) = surface_sliders(color, dark);
+                        let house = BuilderParams::house(dark);
+                        let params = BuilderParams {
+                            saturation,
+                            lightness,
+                            ..house.with_palette([0x3366CCFF, 0xCC6633FF, 0x33CC66FF, color])
+                        };
+                        assert_eq!(params.dark(), dark, "reading a {dark} page's colour left the appearance");
+                        let back = asked_page(&params);
+                        // To within one step of a channel, which is the only
+                        // rounding in the trip: the luminance a L* names is a
+                        // real number and a page is three bytes, so at the
+                        // very bottom of the dark run -- where a whole
+                        // channel is a few units wide -- the nearest byte can
+                        // be the neighbour of the one that was read.
+                        for shift in [24, 16, 8, 0] {
+                            let (was, now) = ((color >> shift) & 0xFF, (back >> shift) & 0xFF);
+                            assert!(
+                                was.abs_diff(now) <= 1,
+                                "a {hue} degree colour at saturation {own} and L* {lstar} came back as {back:#010x}, not {color:#010x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A colour no page can be -- one in the band between the two runs, or
+    /// past either end -- lands on the nearest page there is, inside the
+    /// appearance in force. The colour decides how light the page is; it
+    /// does not decide whether the theme is dark or light, because that is
+    /// the lightness slider's own question.
+    #[test]
+    fn a_colour_no_page_can_be_lands_on_the_nearest_page_in_the_appearance() {
+        let middle = at_luminance(200.0, 0.6, luminance_at((dark_lightest() + LIGHT_DARKEST) / 2.0));
+        assert_eq!(surface_sliders(middle, true), (1.0, 0.5), "a colour in the band left the dark run");
+        assert_eq!(surface_sliders(middle, false), (1.0, LIGHT_FLOOR), "a colour in the band left the light run");
+        assert!(BuilderParams { lightness: LIGHT_FLOOR, ..BuilderParams::house(false) }.dark() == false);
+        assert_eq!(surface_sliders(BLACK, true).1, 0.0, "black is darker than the dark run and did not land on its floor");
+        assert_eq!(surface_sliders(WHITE, false).1, 1.0, "white did not land on the top of the light run");
+        assert_eq!(surface_sliders(WHITE, true).1, 0.5, "white read into a dark page left the dark run");
     }
 
     /// The band is where the doc says, and it is a band because no ink
