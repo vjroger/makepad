@@ -7465,8 +7465,20 @@ script_mod! {
     mod.widgets.Tweaker = set_type_default() do mod.widgets.TweakerBase{
         width: 0
         height: 0
+        // The doc chip's words. The face has to be NAMED here: `draw_label`
+        // is a bare `DrawText`, and a bare one inherits the draw crate's own
+        // default family, whose single member is a font file that crate does
+        // not carry into an app. That family lays out nothing, so the chip
+        // drew its plate and no words -- and, worse, the plate took its width
+        // from the character-count fallback `draw_walk` keeps for text that
+        // will not lay out, which is far wider than the words: a blank band
+        // the width of the sidebar, parked over the row above the pointer,
+        // which reads as that row having gone dim. The app's own regular
+        // family is the one face the build is guaranteed to carry, and it
+        // carries the fallback members with it, so a doc line can spell
+        // whatever its author wrote in it.
         draw_label +: {
-            text_style +: {
+            text_style: theme.font_regular{
                 font_size: 7.5
             }
             color: #xffffff
@@ -7942,11 +7954,47 @@ struct ConstRef {
 
 /// One visible sidebar entry, with the rects the raw-pointer gestures
 /// (section fold, label double-click reset) hit-test against.
-/// The doc tooltip a hovered row shows (text + pointer position).
+/// The doc tooltip a hovered row shows: its words, and the ROW they are
+/// about -- not a position worked out when the pointer moved. The plate is
+/// placed from that row when it is drawn, so the note and the row it
+/// explains can never come to disagree about which row is meant.
 #[derive(Clone, PartialEq)]
 struct HoverDoc {
     text: String,
-    pos: Vec2d,
+    row: Rect,
+}
+
+/// The entry under the pointer: the one whose DRAWN rect holds it, and no
+/// other. The sidebar list is virtual and its entries are not one height --
+/// section headings, the composite rows and the plain property rows all
+/// measure differently -- and a scrolled list hands out rects that begin
+/// above the band, so an index worked out from a row pitch would count rows
+/// the draw never laid down. Containment over the drawn rects is the only
+/// test that cannot drift off the row the person is pointing at.
+fn entry_under<T: Copy>(entries: &[(T, Rect)], abs: Vec2d) -> Option<(T, Rect)> {
+    entries
+        .iter()
+        .copied()
+        .find(|(_, rect)| rect.size.y > 0.0 && rect.contains(abs))
+}
+
+/// The air between the doc chip and the row it is about.
+const DOC_CHIP_GAP: f64 = 2.0;
+
+/// Where the doc chip goes: as wide as its words, in the space above the row
+/// it explains, and never out of the band. A note ABOUT a row must not lie
+/// over that row -- it would cover the very thing it names -- so it sits
+/// clear of it by [`DOC_CHIP_GAP`], and at the top of the list, where there
+/// is no room above, it stops at the window edge rather than walking off it.
+fn doc_chip_rect(row: Rect, band: Rect, width: f64, height: f64) -> Rect {
+    let right = (band.pos.x + band.size.x - width).max(band.pos.x);
+    Rect {
+        pos: dvec2(
+            row.pos.x.clamp(band.pos.x, right),
+            (row.pos.y - height - DOC_CHIP_GAP).max(0.0),
+        ),
+        size: dvec2(width, height),
+    }
 }
 
 /// The side panel's tabs.
@@ -22072,21 +22120,19 @@ impl Widget for Tweaker {
                         .open_popup
                         .is_some_and(|rect| rect.contains(e.abs))
                 {
-                    let hit = self
+                    let rects: Vec<(VisKind, Rect)> = self
                         .visible
                         .iter()
                         .map(|row| (row.kind, row.item.area().clipped_rect(cx)))
-                        .find(|(_, rect)| rect.size.y > 0.0 && rect.contains(e.abs));
+                        .collect();
+                    let hit = entry_under(&rects, e.abs);
                     if let Some((VisKind::Prop(index), rect)) = hit {
                         if let Some(doc) = self.row_docs.get(&self.rows[index].prop) {
                             let mut line = doc.lines().next().unwrap_or("").to_string();
                             if doc.lines().count() > 1 {
                                 line.push_str(" \u{2026}");
                             }
-                            new = Some(HoverDoc {
-                                text: line,
-                                pos: dvec2(rect.pos.x, rect.pos.y - 18.0),
-                            });
+                            new = Some(HoverDoc { text: line, row: rect });
                         }
                     }
                 }
@@ -22568,13 +22614,9 @@ impl Widget for Tweaker {
                 .map(|run| run.width_in_lpxs as f64)
                 .unwrap_or_else(|| (hover.text.chars().count() as f64) * 5.4)
                 + 10.0;
-            let mut pos = hover.pos;
-            pos.x = pos
-                .x
-                .clamp(band.pos.x, (band.pos.x + band.size.x - approx).max(band.pos.x));
-            pos.y = pos.y.max(0.0);
-            self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(approx, label_height) });
-            self.draw_label.draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
+            let chip = doc_chip_rect(hover.row, band, approx, label_height);
+            self.draw_label_bg.draw_abs(cx, chip);
+            self.draw_label.draw_abs(cx, chip.pos + dvec2(5.0, 2.0), &hover.text);
         }
         // Last into the topmost list, so it lies over the panel too.
         if draw_hands_off_frame(cx, &mut self.draw_outline) {
@@ -22592,6 +22634,112 @@ mod tests {
     use super::*;
     use crate::theme_builder::{all_suggestions_from, Harmony};
     use crate::theme_combinations::COMBINATIONS;
+
+    /// A sidebar the way one really comes out of the draw: entries of three
+    /// different heights, a heading among them, and the whole run pushed up
+    /// by a scroll so the first rows begin above the band -- the two rows
+    /// scrolled out are clipped to nothing, which is how the list says "not
+    /// drawn".
+    fn scrolled_sidebar() -> Vec<(usize, Rect)> {
+        let mut out = Vec::new();
+        let mut y = 40.0;
+        for (i, height) in [0.0, 0.0, 18.0, 24.0, 24.0, 40.0, 24.0, 24.0].into_iter().enumerate() {
+            out.push((
+                i,
+                Rect { pos: dvec2(1129.0, y), size: dvec2(265.0, height) },
+            ));
+            y += height;
+        }
+        out
+    }
+
+    /// The row the panel answers with is the row the pointer is inside, and
+    /// there is never a second one. Walked over the whole list: the first
+    /// row that is actually drawn, the row straight after the heading, both
+    /// sides of every boundary, and the last row -- because an off-by-one
+    /// shows itself at a boundary and nowhere else.
+    #[test]
+    fn the_row_under_the_pointer_is_the_row_whose_rect_holds_it() {
+        let rows = scrolled_sidebar();
+        for (index, rect) in rows.iter().copied().filter(|(_, r)| r.size.y > 0.0) {
+            for y in [rect.pos.y + 0.5, rect.pos.y + rect.size.y * 0.5, rect.pos.y + rect.size.y - 0.5] {
+                let at = dvec2(rect.pos.x + 20.0, y);
+                let hit = entry_under(&rows, at).map(|(index, _)| index);
+                assert_eq!(hit, Some(index), "the pointer at {at:?} is inside row {index}");
+                let holding = rows
+                    .iter()
+                    .filter(|(_, r)| r.size.y > 0.0 && r.contains(at))
+                    .count();
+                assert_eq!(holding, 1, "one row at a time wears it, at {at:?}");
+            }
+        }
+        // Scrolled out above, and past the end below: neither is a row.
+        assert!(entry_under(&rows, dvec2(1149.0, 20.0)).is_none());
+        assert!(entry_under(&rows, dvec2(1149.0, 400.0)).is_none());
+        // Beside the band, at the row's own height: not a row either.
+        assert!(entry_under(&rows, dvec2(900.0, 60.0)).is_none());
+    }
+
+    /// The doc chip is a note ABOUT a row, so it is placed clear of that row
+    /// and inside the band, wherever in the list the row is. It may lie over
+    /// the row above -- a tooltip has to lie over something -- but never over
+    /// the row it names, and never off the top of the window.
+    #[test]
+    fn the_doc_chip_sits_clear_of_the_row_it_explains() {
+        let band = Rect { pos: dvec2(1120.0, 29.0), size: dvec2(280.0, 871.0) };
+        for (_, row) in scrolled_sidebar().into_iter().filter(|(_, r)| r.size.y > 0.0) {
+            for width in [60.0, 150.0, 400.0] {
+                let chip = doc_chip_rect(row, band, width, 16.0);
+                assert!(
+                    chip.pos.y + chip.size.y <= row.pos.y,
+                    "the chip for the row at {} ends at {}, inside the row it is about",
+                    row.pos.y,
+                    chip.pos.y + chip.size.y
+                );
+                assert!(chip.pos.y >= 0.0, "the chip is never off the top of the window");
+                assert!(chip.pos.x >= band.pos.x, "the chip starts inside the band");
+                assert_eq!(chip.size, dvec2(width, 16.0), "the chip is as wide as its words");
+            }
+        }
+        // A row at the very top of the window: there is no room above it, so
+        // the chip stops at the edge rather than walking off it.
+        let top = Rect { pos: dvec2(1129.0, 4.0), size: dvec2(265.0, 24.0) };
+        assert_eq!(doc_chip_rect(top, band, 150.0, 16.0).pos.y, 0.0);
+        // Words wider than the band start at its left edge, not past it.
+        let wide = doc_chip_rect(top, band, 900.0, 16.0);
+        assert_eq!(wide.pos.x, band.pos.x);
+    }
+
+    /// The chip's words are drawn in a face this build carries. `draw_label`
+    /// is a bare `DrawText`, and a bare one inherits the draw crate's own
+    /// default family, whose single member is a font file that crate does not
+    /// carry into an app: the family lays out nothing, the chip shows no
+    /// words, and its plate -- sized from the character-count fallback kept
+    /// for text that will not lay out -- spreads into a blank band over the
+    /// row above the pointer. Read off the resolved template, so naming the
+    /// face anywhere in the chain counts and dropping it fails here.
+    #[test]
+    fn the_doc_chip_is_drawn_in_a_face_this_build_carries() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (chip, regular) = cx.with_vm(|vm| {
+            let widgets = vm.module(LiveId::from_str("widgets"));
+            let theme = vm.module(LiveId::from_str("theme"));
+            let field = |vm: &mut crate::makepad_platform::ScriptVm, obj, name: &str| {
+                vm.bx.heap.value(obj, LiveId::from_str(name).into(), NoTrap).as_object()
+            };
+            let chip = field(vm, widgets, "Tweaker")
+                .and_then(|t| field(vm, t, "draw_label"))
+                .and_then(|l| field(vm, l, "text_style"))
+                .and_then(|s| field(vm, s, "font_family"));
+            let regular = field(vm, theme, "font_regular")
+                .and_then(|f| field(vm, f, "font_family"));
+            (chip, regular)
+        });
+        assert!(regular.is_some(), "the theme has no regular face to compare against");
+        assert!(chip.is_some(), "the doc chip names no face, so it draws no words");
+        assert_eq!(chip, regular, "the doc chip is not in the app's own regular face");
+    }
 
     #[test]
     fn the_theme_picker_offers_every_base_theme_and_every_sheet_the_library_ships() {
