@@ -5227,22 +5227,75 @@ impl ThemeBuilder {
         self.params
     }
 
-    /// Move the controls. Clamped on the way in, so what
-    /// [`ThemeBuilder::params`] hands back is what will be built, and built
-    /// at once, so [`ThemeBuilder::readability`] and [`ThemeBuilder::built`]
-    /// follow a drag frame by frame. It installs nothing: that is
-    /// [`ThemeBuilder::apply`], behind whatever settle the gesture wants.
+    /// Whether the theme in hand is the theme these controls ask for. False
+    /// after a [`ThemeBuilder::set_moving`] that has not been derived yet.
+    fn derived(&self) -> bool {
+        self.built.as_ref().is_some_and(|built| built.params == self.params)
+    }
+
+    /// Move the controls, and work the theme out now. Clamped on the way in,
+    /// so what [`ThemeBuilder::params`] hands back is what will be built. It
+    /// installs nothing: that is [`ThemeBuilder::apply`], behind whatever
+    /// settle the gesture wants.
+    ///
+    /// This is the form for a setting that ARRIVES -- a press, a pick, a
+    /// typed hex, the thumb let go. A setting still moving under a hand wants
+    /// [`ThemeBuilder::set_moving`], because working the theme out is not
+    /// cheap.
     ///
     /// A closed builder ignores it. See [`ThemeBuilder::is_open`].
     pub fn set(&mut self, params: BuilderParams) {
         if !self.is_open() {
             return;
         }
-        let params = params.clamped();
-        if params != self.params || self.built.is_none() {
-            self.params = params;
-            self.built = Some(build(&params));
+        self.params = params.clamped();
+        self.derive();
+    }
+
+    /// Move the controls and leave the theme for later: the settle works it
+    /// out, along with the install it is going in on.
+    ///
+    /// Deriving a theme is the expensive half of this engine and it is not
+    /// close. A palette with colour in it spends some twelve milliseconds a
+    /// build -- most of it reading the base theme's own file back for every
+    /// token the mapping touches, on each of the three pages an accent is
+    /// chosen on -- and a drag reports a move per frame, which is twelve
+    /// milliseconds of the sixteen a frame has, before anything is drawn.
+    /// That is a gesture that cannot keep up with the hand however cheap the
+    /// rest of the frame is, and it was the whole of why a slider felt
+    /// jagged: not the install, which is dear but rare, but the derive, which
+    /// is dear and was paid on every single move.
+    ///
+    /// Nothing wants the derived theme between one settle and the next, and
+    /// that is worth checking rather than assuming: in the panel that hosts
+    /// this, every reader of it -- the reading line, the crowding note, the
+    /// question of whether the built theme still stands at the seam -- is
+    /// already reached from the settle and from nowhere else. The controls
+    /// draw from the settings, which are moved here on the move as they
+    /// always were, so the row under the hand still follows it frame by
+    /// frame. What the theme was being worked out FOR, on every one of those
+    /// frames, was an install that came at most once per settle.
+    ///
+    /// So the derive keeps the install company instead of running ahead of
+    /// it, and what [`ThemeBuilder::built`] hands out in between is the last
+    /// theme that was worked out, up to one settle old. A host that wants it
+    /// fresher than that asks for [`ThemeBuilder::derive`] and pays for it.
+    ///
+    /// A closed builder ignores it. See [`ThemeBuilder::is_open`].
+    pub fn set_moving(&mut self, params: BuilderParams) {
+        if !self.is_open() {
+            return;
         }
+        self.params = params.clamped();
+    }
+
+    /// Work out the theme the controls ask for, if it is not the one in hand
+    /// already. The settle's own call, and free when nothing moved.
+    pub fn derive(&mut self) {
+        if !self.is_open() || self.derived() {
+            return;
+        }
+        self.built = Some(build(&self.params));
     }
 
     /// [`random_params`], on the page that is showing. The appearance is the
@@ -5280,13 +5333,19 @@ impl ThemeBuilder {
 
     /// The theme the controls come to: the roles for a row of swatches, the
     /// exports, the script. `None` while the builder is closed.
+    ///
+    /// Up to one settle behind the controls while a hand is moving them, and
+    /// deliberately: see [`ThemeBuilder::set_moving`]. Its own `params` say
+    /// which settings it is the theme of, and [`ThemeBuilder::apply`] never
+    /// installs a theme older than the controls.
     pub fn built(&self) -> Option<&BuiltTheme> {
         self.built.as_ref()
     }
 
     /// How the theme on the controls reads, pair by pair. Free: it was taken
-    /// when the controls last moved. It installs nothing, and a closed
-    /// builder has measured nothing.
+    /// when the theme was last worked out, so it moves with the swatches and
+    /// with the app, at the settle. It installs nothing, and a closed builder
+    /// has measured nothing.
     pub fn readability(&self) -> Readability {
         self.built.as_ref().map(|built| built.readability.clone()).unwrap_or_default()
     }
@@ -5351,6 +5410,10 @@ impl ThemeBuilder {
         if !self.is_open() {
             return Applied::Nothing;
         }
+        // The settle is where a theme is worked out as well as worn: a drag
+        // leaves its last move owing a derive, and everything below reads the
+        // built theme. See [`ThemeBuilder::set_moving`].
+        self.derive();
         if let Some(mine) = &self.installed {
             if crate::theme_mix(vm.cx_mut()).as_deref() != Some(mine.as_str()) {
                 self.installed = None;

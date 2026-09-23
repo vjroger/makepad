@@ -441,14 +441,11 @@ impl Widget for ValueInput {
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerHoverOver(_) => {
-                // A track is a place to put the value, so it points like one
-                // and the pointer stays where the hand left it; the scrub is
-                // a sideways pull and says so.
-                cx.set_cursor(if self.track {
-                    MouseCursor::Hand
-                } else {
-                    MouseCursor::EwResize
-                });
+                // Both say the same thing with the same arrows: what the hand
+                // is about to do here is move a value left and right. A track
+                // used to point with a hand, which says no more than "this
+                // answers a press" — true of every row in the panel.
+                cx.set_cursor(MouseCursor::EwResize);
             }
             // The wheel over a number is the cheapest way to nudge one,
             // and every other numeric control in the library answers to
@@ -486,6 +483,10 @@ impl Widget for ValueInput {
                 }
             }
             Hit::FingerMove(fe) if self.tracking => {
+                // Held for the whole pull: a captured area is sent moves and
+                // not hovers, so the arrows from the hover would go stale the
+                // moment the pointer left the row.
+                cx.set_cursor(MouseCursor::EwResize);
                 let v = self.track_value(cx, fe.abs.x);
                 self.track_to(cx, uid, v);
             }

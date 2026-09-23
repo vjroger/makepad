@@ -208,6 +208,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
             stepper: 1.0
             fill_pad_l: 0.0
             fill_pad_r: 0.0
+            num_box: 0.0
+            num_box_r: 0.0
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -229,6 +231,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     let x1 = max(x0 + 2.0, w - 1.0 - self.fill_pad_r)
                     sdf.box(x0, 1.0, max(2.0, (x1 - x0) * self.fill), h - 2.0, fab.radius)
                     sdf.fill(vec4(fab.color_num_fill.xyz, 0.85))
+                }
+                // The readout's own well, at the end the number is drawn in.
+                // It is the track's end too, so the fill above stops at its
+                // edge and the two never overlap; what the eye reads is a
+                // slider that ends in a field, which is exactly what a press
+                // in either half does.
+                if self.num_box > 2.0 {
+                    let bx = w - self.num_box_r - self.num_box
+                    sdf.box(bx, 1.5, self.num_box, h - 3.0, fab.radius)
+                    sdf.fill_keep(vec4(fab.color_input_active.xyz, dim))
+                    let edge = fab.color_border.mix(fab.color_focus_ring, self.focus)
+                    sdf.stroke(vec4(edge.xyz, edge.w * dim), 1.0)
                 }
                 // Hover arrows in the end zones; they retire while the field
                 // is a text editor (focus carries the editing state), while
@@ -1154,6 +1168,14 @@ pub fn format_hex(rgba: [f32; 4], with_alpha: bool) -> String {
     }
 }
 
+/// Air before the first figure inside a track row's readout well, in points.
+/// The editor drawn in the well starts here, and a single-line field draws
+/// its text from its own left edge, so this is what keeps the figures off the
+/// well's border.
+pub const NUM_BOX_PAD_L: f64 = 5.0;
+/// Air after the last figure inside that well.
+pub const NUM_BOX_PAD_R: f64 = 6.0;
+
 /// Ring outer radius as a fraction of the widget size (the shader uses the
 /// same constants, so hit testing and pixels never disagree).
 pub const RING_OUTER: f64 = 0.48;
@@ -1274,6 +1296,17 @@ pub struct DrawDragNum {
     fill_pad_l: f32,
     #[live]
     fill_pad_r: f32,
+    /// The readout's WELL: its width in points, or zero for no well. A box
+    /// the number sits in, so that a place a number can be typed looks like
+    /// one. Off on a scrub field, whose whole face is the well.
+    #[live]
+    num_box: f32,
+    /// How far the well's right edge is held off the row's, in points — the
+    /// row's own right padding, so the well and the editor drawn in it line
+    /// up exactly. Both are in points because the row's width is not known
+    /// when the instance is written.
+    #[live]
+    num_box_r: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1586,6 +1619,11 @@ pub struct FabValueInput {
     /// eye is looking at.
     #[rust]
     track_columns: (f64, f64),
+    /// The readout column's width as the font last measured it, and the
+    /// (figures, font size) it was measured for. Kept because the measure is
+    /// a text layout and the answer only moves when one of those two does.
+    #[rust]
+    number_px: Option<(usize, f64, f64)>,
     /// Pointer over the field: the ‹ › stepper chevrons reveal.
     #[rust]
     hovered: bool,
@@ -1665,6 +1703,74 @@ impl FabValueInput {
             .max(self.format().chars().count())
     }
 
+    /// How wide the readout column has to be, MEASURED rather than guessed.
+    ///
+    /// The number is drawn in the row's own face, and the column it stands in
+    /// is also the end of the track: get it wrong and either the figures clip
+    /// or the tracks of a stack of rows end in different places. It used to be
+    /// `(figures + 0.5) * font_size * 0.72`, a ratio picked to be safe for the
+    /// one font the panel ships and wrong for any other.
+    ///
+    /// So it is asked of the font instead: lay out each of the ten digits at
+    /// the size the row draws at, take the WIDEST — proportional faces do not
+    /// give "1" and "8" the same advance, and a column measured on the number
+    /// standing there now would move as 9 became 255 — and give the well that
+    /// many of them plus [`NUM_BOX_PAD_L`] and [`NUM_BOX_PAD_R`] of air, so
+    /// the figures do not touch its edges. The COLUMN is the well plus the
+    /// row's own right padding, which is what holds the well off the row's
+    /// edge.
+    ///
+    /// [`FabValueInput::widest_number`] says how many figures, which for the
+    /// colour popover's seven rows is three (255, 360, 100) on every one of
+    /// them: that is why they come out one width without being told to.
+    ///
+    /// The row's label text and the embedded editor's are the same family at
+    /// the same size, so one of them can answer for both.
+    fn number_column(&mut self, cx: &mut Cx2d) -> f64 {
+        // `widest_number` counts the suffix in with the figures; here the two
+        // are measured apart, because a suffix is letters and not digits.
+        let figures = self
+            .widest_number()
+            .saturating_sub(self.suffix.chars().count());
+        let fs = self.draw_text.text_style.font_size as f64;
+        if let Some((cached_figures, cached_fs, px)) = self.number_px {
+            if cached_figures == figures && (cached_fs - fs).abs() < f64::EPSILON {
+                return px;
+            }
+        }
+        let mut widest_digit = 0.0_f64;
+        for digit in 0..10u32 {
+            let text = digit.to_string();
+            let laidout =
+                self.draw_text
+                    .layout(cx, 0.0, 0.0, None, false, Align::default(), &text);
+            if let Some(row) = laidout.rows.first() {
+                widest_digit = widest_digit.max(row.width_in_lpxs as f64);
+            }
+        }
+        // No font loaded yet (the first frame, or a headless test): fall back
+        // to the old estimate rather than collapsing the column to nothing.
+        if widest_digit <= 0.0 {
+            widest_digit = fs * 0.72;
+        }
+        let suffix = if self.suffix.is_empty() {
+            0.0
+        } else {
+            self.draw_text
+                .layout(cx, 0.0, 0.0, None, false, Align::default(), &self.suffix)
+                .rows
+                .first()
+                .map_or(0.0, |row| row.width_in_lpxs as f64)
+        };
+        let px = self.layout.padding.right
+            + NUM_BOX_PAD_L
+            + figures as f64 * widest_digit
+            + suffix
+            + NUM_BOX_PAD_R;
+        self.number_px = Some((figures, fs, px));
+        px
+    }
+
     /// The string offered for editing: full precision, trailing zeros
     /// trimmed, so opening and committing an edit can never silently round
     /// the stored value.
@@ -1703,20 +1809,37 @@ impl FabValueInput {
         cleaned.parse::<f64>().ok()
     }
 
+    /// `TextInput::set_text` re-filters the string, clears the marks and the
+    /// undo history, refloors the selection and throws the laid-out text away
+    /// so the whole run is shaped again — all of it whether or not the string
+    /// moved. Down a colour drag that is five text runs re-shaped per pointer
+    /// move for numbers that mostly did not change, so the field is only
+    /// written when what it says is not what it should say. (Guarded here and
+    /// at the hex field rather than inside `set_text`, where a caller that
+    /// sets the same string deliberately to clear the history would quietly
+    /// stop working.)
     fn sync_text(&mut self, cx: &mut Cx) {
         let t = self.format();
-        self.text_input.set_text(cx, &t);
+        if self.text_input.text() != t {
+            self.text_input.set_text(cx, &t);
+        }
     }
 
     /// What the pointer says it can do here. A scrub's middle is a
     /// sideways pull; a track's is a place to put the value, and the two
     /// columns beside it are a word and a number to click.
+    ///
+    /// The track's arrows are the same sideways pair the scrub shows, and for
+    /// the same reason: what the hand is about to do is move a value left and
+    /// right. A hand was pointing at the fact that the row answers a press at
+    /// all, which every row does.
     fn cursor_at(&self, abs_x: f64, face: Rect) -> MouseCursor {
         if self.track {
             let (label_px, readout_px) = self.track_columns;
             match slider_zone(abs_x - face.pos.x, face.size.x, label_px, readout_px) {
-                SliderZone::Track => MouseCursor::Hand,
-                _ => MouseCursor::Default,
+                SliderZone::Track => MouseCursor::EwResize,
+                SliderZone::Readout => MouseCursor::Text,
+                SliderZone::Label => MouseCursor::Hand,
             }
         } else {
             match field_zone(abs_x - face.pos.x, face.size.x, face.size.y) {
@@ -1765,6 +1888,23 @@ impl FabValueInput {
 
     pub fn value(&self) -> f64 {
         self.value
+    }
+
+    /// Whether the number at the row's right hand end is open for typing.
+    pub fn is_editing(&self) -> bool {
+        self.editing
+    }
+
+    /// The middle of that number's box, in window points, for a host that
+    /// wants to put a pointer there. Meaningless before the row has drawn,
+    /// and on a row that is not a track, which has no box.
+    pub fn number_box_middle(&self, cx: &Cx) -> Vec2d {
+        let face = self.draw_bg.area().rect(cx);
+        let well = self.draw_bg.num_box as f64;
+        dvec2(
+            face.pos.x + face.size.x - self.layout.padding.right - well * 0.5,
+            face.pos.y + face.size.y * 0.5,
+        )
     }
 
     pub fn enabled(&self) -> bool {
@@ -1944,14 +2084,19 @@ impl Widget for FabValueInput {
             } else {
                 self.layout.padding.left + self.label.chars().count() as f64 * fs * 0.62 + 2.0
             };
-            let number =
-                self.layout.padding.right + (self.widest_number() as f64 + 0.5) * fs * 0.72 + 6.0;
+            let number = self.number_column(cx);
             self.track_columns = (name, number);
             self.draw_bg.fill_pad_l = name as f32;
             self.draw_bg.fill_pad_r = number as f32;
+            // The well is the column minus the row's own right padding, and
+            // it sits exactly where the editor below will be drawn.
+            self.draw_bg.num_box = (number - self.layout.padding.right) as f32;
+            self.draw_bg.num_box_r = self.layout.padding.right as f32;
         } else {
             self.draw_bg.fill_pad_l = 0.0;
             self.draw_bg.fill_pad_r = 0.0;
+            self.draw_bg.num_box = 0.0;
+            self.draw_bg.num_box_r = 0.0;
         }
         self.draw_bg.begin(cx, walk, self.layout);
         if !self.label.is_empty() {
@@ -1961,7 +2106,16 @@ impl Widget for FabValueInput {
             let row = cx.turtle().rect().size.x;
             let pad = self.layout.padding.left + self.layout.padding.right;
             let fs = self.draw_text.text_style.font_size as f64;
-            let value_reserve = (self.format().chars().count() as f64 + 0.5) * fs * 0.72 + 6.0;
+            // A track's readout is a fixed column, so the label takes the
+            // whole of the rest: that is what puts the box hard against the
+            // row's right padding and every row's track end on one line. A
+            // scrub's value is drawn where it falls, so there the label
+            // reserves what this number needs and no more.
+            let value_reserve = if self.track {
+                self.track_columns.1 - self.layout.padding.right - NUM_BOX_PAD_L
+            } else {
+                (self.format().chars().count() as f64 + 0.5) * fs * 0.72 + 6.0
+            };
             let label_w = (row - pad - value_reserve).max(0.0);
             // A label that cannot fit is not drawn at all: a crushed "w"
             // renders as a stray dot beside the number.
@@ -1973,7 +2127,18 @@ impl Widget for FabValueInput {
                     .draw_walk(cx, label_walk, Align::default(), &self.label);
             }
         }
-        let iw = self.text_input.walk(cx);
+        let mut iw = self.text_input.walk(cx);
+        if self.track {
+            // The editor sits inside the well, [`NUM_BOX_PAD_L`] in from its
+            // left: a single-line field lays its text out at its natural
+            // width and draws it from the left, so that inset is what gives
+            // the first figure its air. Fixed, because a `Fill` editor would
+            // stretch back over the track and swallow presses meant for it.
+            let (_, number) = self.track_columns;
+            iw.width = Size::Fixed(
+                (number - self.layout.padding.right - NUM_BOX_PAD_L).max(2.0),
+            );
+        }
         if self.enabled {
             let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);
         } else {
@@ -2198,18 +2363,34 @@ impl Widget for FabValueInput {
                 self.animator_play(cx, ids!(hover.down));
                 if self.track_zone(cx, fe.abs.x) == SliderZone::Track {
                     self.tracking = true;
+                    self.drag_moves = 0;
+                    self.drag_publishes = 0;
                     let v = self.track_value(cx, fe.abs.x);
                     self.publish(cx, uid, v, false);
                 }
             }
             Hit::FingerMove(fe) if self.tracking => {
+                // The arrows stay for the whole pull. A captured area is sent
+                // moves and not hovers, so nothing else would set a cursor
+                // here and the one from the hover would simply go stale.
+                cx.set_cursor(MouseCursor::EwResize);
+                self.drag_moves += 1;
                 let v = self.track_value(cx, fe.abs.x);
+                let before = self.value;
                 self.publish(cx, uid, v, false);
+                if (self.value - before).abs() > f64::EPSILON {
+                    self.drag_publishes += 1;
+                }
             }
             Hit::FingerUp(fe) if self.track => {
                 self.cancel_scope = None;
                 if self.tracking {
                     self.tracking = false;
+                    log!(
+                        "TRACK stats: finger_moves={} publishes={}",
+                        self.drag_moves,
+                        self.drag_publishes
+                    );
                     cx.widget_action(uid, FabValueInputAction::Ended(self.value));
                 } else {
                     // Nothing moved, so the column the release is over says
@@ -5609,7 +5790,15 @@ pub struct FabColorPick {
     walk: Walk,
     #[layout]
     layout: Layout,
-    #[live]
+    /// Whether the colour has a transparency at all.
+    ///
+    /// Off, the A row is not drawn, the colour is held fully opaque however it
+    /// arrives — dragged onto the square, sampled with the eyedropper, typed
+    /// as an eight-figure hex — and the hex field reads and writes six
+    /// figures. A theme colour has no transparency: a square that quietly
+    /// carried an alpha of 20 was showing `#92755014` to somebody who never
+    /// asked for an alpha and had no row to put it back with.
+    #[live(true)]
     with_alpha: bool,
     /// The popover panel (wheel + rows + hex), from the type default.
     #[live]
@@ -5722,7 +5911,19 @@ impl FabColorPick {
     pub fn rgba(&self) -> [f32; 4] {
         let [h, s, v] = self.hsv;
         let [r, g, b] = hsv_to_rgb(h, s, v);
-        [r, g, b, self.alpha]
+        [r, g, b, self.opacity()]
+    }
+
+    /// The alpha this picker reports. Without the A row there is no such
+    /// thing as a partly transparent colour here, so one never leaves: a
+    /// value that arrived carrying an alpha is made opaque rather than kept
+    /// out of sight where nothing can put it right.
+    fn opacity(&self) -> f32 {
+        if self.with_alpha {
+            self.alpha
+        } else {
+            1.0
+        }
     }
 
     /// Take a colour that arrived as RGB, KEEPING the hue and saturation the
@@ -5748,6 +5949,7 @@ impl FabColorPick {
     pub fn set_rgba(&mut self, cx: &mut Cx, rgba: [f32; 4]) {
         self.adopt_rgb([rgba[0], rgba[1], rgba[2]]);
         self.alpha = rgba[3];
+        let rgba = self.rgba();
         self.draw_swatch.swatch = vec4(rgba[0], rgba[1], rgba[2], rgba[3]);
         self.draw_swatch.redraw(cx);
         if self.open {
@@ -5957,15 +6159,23 @@ impl FabColorPick {
             (live_id!(num_v), (v * 100.0) as f64),
         ];
         for (id, channel) in nums {
+            if id == live_id!(num_a) && !self.with_alpha {
+                continue;
+            }
             if let Some(mut num) = self.popover.child(id).borrow_mut::<FabValueInput>() {
                 num.set_value(cx, channel);
             }
         }
         let hex = self.popover.child(live_id!(hex_row)).child(live_id!(hex));
         if !hex.is_empty() {
-            // Don't stomp the hex text while the person is typing in it.
+            // Don't stomp the hex text while the person is typing in it, and
+            // don't re-shape the run for a string it is already showing (see
+            // `FabValueInput::sync_text` for what a `set_text` costs).
             if hex.area() == Area::Empty || !cx.has_key_focus(hex.area()) {
-                hex.set_text(cx, &format_hex(rgba, self.with_alpha));
+                let text = format_hex(rgba, self.with_alpha);
+                if hex.text() != text {
+                    hex.set_text(cx, &text);
+                }
             }
         }
         if let Some(mut strip) = self.popover.child(live_id!(palette)).borrow_mut::<FabPaletteStrip>() {
@@ -6038,6 +6248,14 @@ impl FabColorPick {
         cx.redraw_all();
     }
 
+    /// One of the popover's channel rows by name -- `num_r`, `num_h` and the
+    /// rest. Empty before the popover has been built. For a host that has to
+    /// reach past the control to the row itself, which is what a test of how
+    /// a press reaches a row needs.
+    pub fn channel_row(&self, id: LiveId) -> WidgetRef {
+        self.popover.child(id)
+    }
+
     /// The open popover's window-local rect (zero when closed). The panel
     /// host uses it to give the popup input priority over its scroll list.
     pub fn popover_rect(&self) -> Rect {
@@ -6101,12 +6319,24 @@ impl Widget for FabColorPick {
                 .child(live_id!(palette))
                 .borrow::<FabPaletteStrip>()
                 .map_or(0.0, |s| s.height_for(width - 16.0));
+            // The A row is not drawn when this picker has no alpha, so it is
+            // counted rather than assumed: the estimate decides which side of
+            // the swatch the popover hangs from, and one row too many near
+            // the foot of the window flips it over for nothing.
+            let a_row = self.popover.child(live_id!(num_a));
+            if a_row.visible() != self.with_alpha {
+                a_row.set_visible(cx, self.with_alpha);
+            }
+            let rows = if self.with_alpha { 8.0 } else { 7.0 };
             // Tall enough to decide which side of the swatch to hang from,
             // counted rather than guessed: 8 of padding at each end, the
-            // wheel, then eight rows of `row_height` — the seven channels
-            // and the hex line — with 6 of spacing between every child.
-            let est_height =
-                16.0 + 228.0 + 8.0 * 24.0 + 8.0 * 6.0 + if strip_height > 0.0 { strip_height + 26.0 } else { 0.0 };
+            // wheel, then the channel rows and the hex line at `row_height`,
+            // with 6 of spacing between every child.
+            let est_height = 16.0
+                + 228.0
+                + rows * 24.0
+                + rows * 6.0
+                + if strip_height > 0.0 { strip_height + 26.0 } else { 0.0 };
             let mut pos = dvec2(anchor.pos.x + anchor.size.x - width, anchor.pos.y + anchor.size.y + 2.0);
             if pos.y + est_height > pass_size.y {
                 pos.y = (anchor.pos.y - est_height - 2.0).max(0.0);
@@ -6350,7 +6580,11 @@ impl Widget for FabColorPick {
                     {
                         if let Some((rgba, had_alpha)) = parse_hex(&text) {
                             self.adopt_rgb([rgba[0], rgba[1], rgba[2]]);
-                            if had_alpha {
+                            // An eight-figure hex typed into a picker with no
+                            // alpha keeps its colour and loses its
+                            // transparency, rather than being refused: what
+                            // was pasted is nearly always the colour.
+                            if had_alpha && self.with_alpha {
                                 self.alpha = rgba[3];
                             }
                             changed = true;
@@ -9709,6 +9943,225 @@ mod fab_value_input_track {
         let actions = send(&mut cx, &root, &key(KeyCode::ArrowLeft));
         assert_eq!(changed(&actions, &band), Some(stood), "and back again");
     }
+
+    /// The seven rows of the colour popover, as the popover declares them.
+    fn seven(cx: &mut Cx) -> (WidgetRef, Vec<WidgetRef>) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 244.
+                    height: Fill
+                    flow: Down
+                    num_r := FabValueInput{ label: "R" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                    num_g := FabValueInput{ label: "G" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                    num_b := FabValueInput{ label: "B" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                    num_a := FabValueInput{ label: "A" min: 0.0 max: 255.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                    num_h := FabValueInput{ label: "H" min: 0.0 max: 360.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                    num_s := FabValueInput{ label: "S" min: 0.0 max: 100.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                    num_v := FabValueInput{ label: "V" min: 0.0 max: 100.0 step: 1.0 precision: 0 show_fill: true quantize: true track: true }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let rows = [
+            ids!(num_r), ids!(num_g), ids!(num_b), ids!(num_a),
+            ids!(num_h), ids!(num_s), ids!(num_v),
+        ]
+        .into_iter()
+        .map(|id| root.widget(cx, id))
+        .collect::<Vec<_>>();
+        (root, rows)
+    }
+
+    /// Every box one width, that width holding three figures, and every
+    /// track therefore ending at the same x.
+    ///
+    /// The widths are not set to a number anywhere: each row measures the
+    /// widest digit of its own font and multiplies by how many figures its
+    /// range can print, which is three on all seven (255, 360, 100). That is
+    /// why they agree, and why they would still agree in another font.
+    #[test]
+    fn the_seven_boxes_are_one_column_of_one_width_fitting_three_figures() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, rows) = seven(&mut cx);
+        let widths = rows
+            .iter()
+            .map(|row| row.borrow::<FabValueInput>().unwrap().track_columns.1)
+            .collect::<Vec<_>>();
+        let first = widths[0];
+        assert!(first > 2.0, "the readout column was never measured");
+        // The well is the column less the row's own right padding, and the
+        // shader draws one at all only above two points: a row whose readout
+        // is not a box says nothing about being typed in.
+        let well = rows[0].borrow::<FabValueInput>().unwrap().draw_bg.num_box as f64;
+        let pad = rows[0].borrow::<FabValueInput>().unwrap().layout.padding.right;
+        assert!(
+            well > 2.0,
+            "the readout is not drawn as a box, so nothing says it can be typed in"
+        );
+        assert!(
+            (well + pad - first).abs() < 0.01,
+            "the box drawn and the column measured are different widths: {well} + {pad} against {first}"
+        );
+        for (row, width) in rows.iter().zip(&widths) {
+            assert!(
+                (width - first).abs() < 0.01,
+                "the boxes are not one width: {widths:?}"
+            );
+            // The track ends where the box begins, so one column means one
+            // end for every track.
+            let face = row.borrow::<FabValueInput>().unwrap().draw_bg.area().rect(&cx);
+            let (_, hi) = row.borrow::<FabValueInput>().unwrap().track_span(face.size.x);
+            assert!(
+                ((face.pos.x + hi) - (rows[0].borrow::<FabValueInput>().unwrap().draw_bg.area().rect(&cx).pos.x
+                    + rows[0].borrow::<FabValueInput>().unwrap().track_span(face.size.x).1))
+                    .abs()
+                    < 0.01,
+                "the tracks end in different places"
+            );
+        }
+
+        // And three figures really do fit: the widest three-digit string the
+        // font can draw, measured in the font, against the box the row drew.
+        let padding = rows[0].borrow::<FabValueInput>().unwrap().layout.padding.right;
+        let measure = |cx: &mut Cx, text: &str| {
+            let row = rows[0].borrow::<FabValueInput>().unwrap();
+            row.draw_text
+                .layout(cx, 0.0, 0.0, None, false, Align::default(), text)
+                .rows
+                .first()
+                .map_or(0.0, |r| r.width_in_lpxs as f64)
+        };
+        let mut widest = String::new();
+        for _ in 0..3 {
+            let mut worst = ('0', 0.0_f64);
+            for digit in "0123456789".chars() {
+                let w = measure(&mut cx, &digit.to_string());
+                if w > worst.1 {
+                    worst = (digit, w);
+                }
+            }
+            widest.push(worst.0);
+        }
+        let drawn = measure(&mut cx, &widest);
+        assert!(drawn > 0.0, "the font measured nothing, so this proves nothing");
+        assert!(
+            first - padding >= drawn,
+            "three figures ({widest}, {drawn:.2} points) do not fit the {first:.2}-point box"
+        );
+    }
+
+    /// The box at the row's right-hand end is a place a number is typed, and
+    /// it is its own target: a press in it opens the editor and moves
+    /// nothing, and a press on the track moves the value and opens nothing.
+    ///
+    /// The box is not a separate widget — it is the row's own embedded editor
+    /// drawn in the row's own face — so which of the three it is is decided
+    /// by the column the press lands in, and the columns are the ones the
+    /// draw measured.
+    #[test]
+    fn the_box_types_and_the_track_drags_and_neither_does_the_others_job() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, band, _scrub) = start(&mut cx);
+        // Hoisted: taken inside a `borrow_mut` it would be asked of a
+        // widget already borrowed and come back as nothing.
+        let uid = band.widget_uid();
+        let editing = || band.borrow::<FabValueInput>().unwrap().editing;
+        let tracking = || band.borrow::<FabValueInput>().unwrap().tracking;
+
+        // A press in the box: nothing moves, and the release opens it.
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = on_the_number(&cx, &band);
+        let down = press(at, 0.0);
+        let actions = send(&mut cx, &root, &down);
+        assert_eq!(changed(&actions, &band), None, "a press in the box moved the value");
+        assert!(!tracking(), "a press in the box started a drag of the track");
+        send(&mut cx, &root, &release(at, 0.1));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert!(editing(), "a press in the box did not open it for typing");
+
+        // A number typed there commits on Return, and the fill follows it.
+        let before = band.borrow::<FabValueInput>().unwrap().draw_bg.fill;
+        let actions = cx.capture_actions(|cx| {
+            band.borrow_mut::<FabValueInput>()
+                .unwrap()
+                .commit_edit_text(cx, uid, "200");
+        });
+        assert_eq!(ended(&actions, &band), Some(200.0), "Return did not commit what was typed");
+        assert_eq!(value(&band), 200.0, "the row is not holding what was typed");
+        assert!(!editing(), "the editor stayed open after Return");
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        assert!(
+            band.borrow::<FabValueInput>().unwrap().draw_bg.fill > before,
+            "the fill did not follow what was typed"
+        );
+
+        // Out of range is held to the row's own ends, not refused.
+        cx.capture_actions(|cx| {
+            band.borrow_mut::<FabValueInput>()
+                .unwrap()
+                .commit_edit_text(cx, uid, "900");
+        });
+        assert_eq!(value(&band), 255.0, "a number past the end was refused instead of held");
+
+        // Escape puts back what was there.
+        let stood = value(&band);
+        cx.capture_actions(|cx| band.borrow_mut::<FabValueInput>().unwrap().begin_edit(cx));
+        assert!(editing(), "the editor did not open");
+        cx.capture_actions(|cx| band.borrow_mut::<FabValueInput>().unwrap().end_edit(cx));
+        assert_eq!(value(&band), stood, "Escape did not put back what was there");
+
+        // And a press on the track drags and opens nothing.
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let at = along(&cx, &band, 0.25);
+        let down = press(at, 1.0);
+        let actions = send(&mut cx, &root, &down);
+        assert!(changed(&actions, &band).is_some(), "a press on the track landed nothing");
+        assert!(tracking(), "a press on the track did not start the drag");
+        assert!(!editing(), "a press on the track opened the box");
+        send(&mut cx, &root, &release(at, 1.1));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+        assert!(!editing(), "the release of a track drag opened the box");
+    }
+
+    /// The pointer over a track says what a track is for, and keeps saying
+    /// it for the whole pull. The horizontal arrows were what he was seeing
+    /// by accident, over the splitter that was crossing the popover.
+    #[test]
+    fn a_track_points_with_the_horizontal_arrows_and_holds_them() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, band, _scrub) = start(&mut cx);
+        let face = face(&cx, &band);
+        let on_track = along(&cx, &band, 0.5);
+        assert_eq!(
+            band.borrow::<FabValueInput>().unwrap().cursor_at(on_track.x, face),
+            MouseCursor::EwResize,
+            "hovering a track did not show the horizontal arrows"
+        );
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(on_track, 0.0);
+        send(&mut cx, &root, &down);
+        let to = on_track + dvec2(20.0, 0.0);
+        send(&mut cx, &root, &moved(to, 0.1));
+        assert_eq!(
+            cx.mouse_cursor(),
+            MouseCursor::EwResize,
+            "the arrows went during the drag"
+        );
+        send(&mut cx, &root, &release(to, 0.2));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
 }
 
 #[cfg(test)]
@@ -10400,6 +10853,272 @@ mod fab_color_pick_shield {
         cx.fingers.first_mouse_button = None;
         assert_eq!(carry_said(&all, &plain), vec!["opened"], "a plain picker carried");
         plain.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+    }
+
+    /// The panel's splitter, standing in for every gesture that reads raw
+    /// events: what it asks the platform while a popover control is held.
+    ///
+    /// The bar is drawn across the whole window height at the panel's left
+    /// edge, and the popover hangs LEFT of its swatch, so the two cross. The
+    /// bar used to take its press off `Event::MouseDown` by x-coordinate
+    /// alone: one press armed both, and every move after it resized the
+    /// sidebar under the hand — dragging the popover sideways out from under
+    /// the very row being pulled. Asked through `hits`, as it is now, it
+    /// hears nothing at all while the popover holds the pointer, which is
+    /// what these check.
+    fn splitter_asks(cx: &mut Cx, event: &Event, bar: Area) -> Hit {
+        event.hits_with_options(
+            cx,
+            bar,
+            HitOptions::new()
+                .with_margin(Inset { left: 3.0, right: 3.0, top: 0.0, bottom: 0.0 })
+                .with_capture_overload(true),
+        )
+    }
+
+    /// A point inside the open popover, `t` of the way across its width, on
+    /// the row `rows` rows up from its foot.
+    fn in_popover(cx: &Cx, pick: &WidgetRef, id: LiveId) -> Vec2d {
+        let child = pick.borrow::<FabColorPick>().unwrap().popover.child(id);
+        let rect = child.area().rect(cx);
+        assert!(rect.size.x > 0.0, "{id:?} was never drawn in the popover");
+        rect.pos + rect.size * 0.5
+    }
+
+    /// Held on a channel row, the bar across the popover is deaf — it takes
+    /// neither the press, nor a hover, nor any of the moves that follow.
+    #[test]
+    fn a_held_channel_row_leaves_the_splitter_nothing_to_hear() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, mut target) = start(&mut cx);
+        let pick = root.widget(&cx, ids!(pick));
+        let under = root.widget(&cx, ids!(under));
+        open_by_hand(&mut cx, &root, &mut target, &pick);
+        let bar = under.area();
+        let at = in_popover(&cx, &pick, live_id!(num_r));
+        assert!(
+            pick.borrow::<FabColorPick>().unwrap().popover_rect().contains(at),
+            "the row is not inside the popover, so this tests nothing"
+        );
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        send(&mut cx, &root, &down);
+        assert!(
+            matches!(splitter_asks(&mut cx, &down, bar), Hit::Nothing),
+            "the splitter took the press that belongs to the channel row"
+        );
+        for step in 1..4 {
+            let to = at + dvec2(step as f64 * 12.0, 0.0);
+            let move_event = moved(to);
+            send(&mut cx, &root, &move_event);
+            assert!(
+                matches!(splitter_asks(&mut cx, &move_event, bar), Hit::Nothing),
+                "the splitter took a move of the row's drag"
+            );
+        }
+        send(&mut cx, &root, &release(at + dvec2(36.0, 0.0)));
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// And the same for the other three things a press in the popover can
+    /// land on. The rule is the popover's, not any one control's, so all of
+    /// them are covered by the one lock — which is the point of fixing this
+    /// where ownership is decided rather than teaching the bar about rows.
+    #[test]
+    fn the_wheel_the_square_and_the_strip_hold_the_pointer_too() {
+        for which in ["ring", "square", "strip"] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let (root, mut target) = start(&mut cx);
+            let pick = root.widget(&cx, ids!(pick));
+            let under = root.widget(&cx, ids!(under));
+            pick.borrow_mut::<FabColorPick>().unwrap().set_palette(
+                &mut cx,
+                vec![
+                    ("one".to_string(), [1.0, 0.0, 0.0, 1.0]),
+                    ("two".to_string(), [0.0, 1.0, 0.0, 1.0]),
+                ],
+            );
+            open_by_hand(&mut cx, &root, &mut target, &pick);
+            target.draw(&mut cx, &root);
+            let bar = under.area();
+            let wheel = in_popover(&cx, &pick, live_id!(wheel));
+            let size = {
+                let child = pick.borrow::<FabColorPick>().unwrap().popover.child(live_id!(wheel));
+                child.area().rect(&cx).size.x
+            };
+            let at = match which {
+                // Straight up from the middle is the hue ring; the middle
+                // itself is the saturation square.
+                "ring" => wheel - dvec2(0.0, size * (RING_OUTER + RING_INNER) * 0.5),
+                "square" => wheel,
+                _ => in_popover(&cx, &pick, live_id!(palette)),
+            };
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+            let down = press(at);
+            send(&mut cx, &root, &down);
+            assert!(
+                matches!(splitter_asks(&mut cx, &down, bar), Hit::Nothing),
+                "the splitter took the press meant for the {which}"
+            );
+            let to = at + dvec2(18.0, 6.0);
+            let move_event = moved(to);
+            send(&mut cx, &root, &move_event);
+            assert!(
+                matches!(splitter_asks(&mut cx, &move_event, bar), Hit::Nothing),
+                "the splitter took a move of the {which}'s drag"
+            );
+            send(&mut cx, &root, &release(to));
+            down.unhandle(&mut cx, &claimed(&down));
+            cx.fingers.first_mouse_button = None;
+        }
+    }
+
+    /// With the popover shut the bar is the bar again: it takes a press on
+    /// itself, so the fix bought the rule and not a dead splitter.
+    #[test]
+    fn a_shut_popover_gives_the_splitter_its_press_back() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _target) = start(&mut cx);
+        let under = root.widget(&cx, ids!(under));
+        let bar = under.area();
+        let at = middle(&cx, bar);
+        assert_eq!(cx.sweep_lock_area(), None, "nothing should hold the pointer here");
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = press(at);
+        assert!(
+            matches!(splitter_asks(&mut cx, &down, bar), Hit::FingerDown(_)),
+            "the splitter cannot be grabbed at all any more"
+        );
+        let up = release(at);
+        assert!(
+            matches!(splitter_asks(&mut cx, &up, bar), Hit::FingerUp(_)),
+            "the splitter never heard its own release"
+        );
+        down.unhandle(&mut cx, &claimed(&down));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The A row can be left out, and then there is no alpha anywhere: not
+    /// in the rows, not in what the picker reports, not in the hex. A colour
+    /// that arrives carrying one is made opaque rather than quietly keeping
+    /// it where nothing can put it right — his square was reading #92755014,
+    /// an alpha of 20 that nothing used and nobody asked for.
+    ///
+    /// Two scenes rather than two pickers in one, because the keyboard has
+    /// one focus and the typed hex needs it.
+    #[test]
+    fn a_picker_without_alpha_holds_its_colour_opaque() {
+        let mut columns = Vec::new();
+        for with_alpha in [false, true] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.init_cx_os();
+            cx.with_vm(crate::script_mod);
+            let root = cx.with_vm(|vm| {
+                let value = if with_alpha {
+                    crate::script_eval!(vm, {
+                        use mod.prelude.widgets.*
+                        use mod.widgets.*
+                        View{ width: Fill height: Fill flow: Down
+                            pick := FabColorPick{width: 300. height: 20.}
+                        }
+                    })
+                } else {
+                    crate::script_eval!(vm, {
+                        use mod.prelude.widgets.*
+                        use mod.widgets.*
+                        View{ width: Fill height: Fill flow: Down
+                            pick := FabColorPick{width: 300. height: 20. with_alpha: false}
+                        }
+                    })
+                };
+                WidgetRef::script_from_value(vm, value)
+            });
+            let mut target = Target::new(&mut cx);
+            target.draw(&mut cx, &root);
+            let pick = root.widget(&cx, ids!(pick));
+            let rgba = || pick.borrow::<FabColorPick>().unwrap().rgba();
+
+            // A colour with an alpha of 20/255, the way one arrives from a
+            // drag or the eyedropper.
+            let carried = [0.573_f32, 0.459, 0.314, 20.0 / 255.0];
+            pick.borrow_mut::<FabColorPick>().unwrap().set_rgba(&mut cx, carried);
+            let expected = if with_alpha { 20.0 / 255.0 } else { 1.0 };
+            assert!(
+                (rgba()[3] - expected).abs() < 1e-6,
+                "with_alpha={with_alpha}: the picker reported alpha {}",
+                rgba()[3]
+            );
+            assert_eq!(
+                pick.borrow::<FabColorPick>().unwrap().drawn_swatch().w,
+                expected,
+                "with_alpha={with_alpha}: the square is drawn with the wrong alpha"
+            );
+
+            pick.borrow_mut::<FabColorPick>().unwrap().open_popover(&mut cx);
+            target.draw(&mut cx, &root);
+            let hex = pick
+                .borrow::<FabColorPick>()
+                .unwrap()
+                .popover
+                .child(live_id!(hex_row))
+                .child(live_id!(hex));
+            let figures = if with_alpha { 9 } else { 7 };
+            assert_eq!(
+                hex.text().len(),
+                figures,
+                "with_alpha={with_alpha}: the hex reads {}",
+                hex.text()
+            );
+            assert_eq!(
+                pick.borrow::<FabColorPick>().unwrap().popover.child(live_id!(num_a)).visible(),
+                with_alpha,
+                "with_alpha={with_alpha}: the A row is drawn the wrong way round"
+            );
+            // And the column does not move when the row goes: the boxes are
+            // measured from the font and the figures, not from the stack.
+            let column = pick
+                .borrow::<FabColorPick>()
+                .unwrap()
+                .popover
+                .child(live_id!(num_r))
+                .borrow::<FabValueInput>()
+                .unwrap()
+                .track_columns
+                .1;
+            assert!(column > 2.0, "the R row's box was never measured");
+            columns.push(column);
+
+            // And an eight-figure hex typed in: the colour is taken, the
+            // transparency only where there is a row to put it back with.
+            hex.set_text(&mut cx, "#11223344");
+            cx.set_key_focus(hex.area());
+            cx.handle_actions();
+            assert!(cx.has_key_focus(hex.area()), "the hex field never took the keyboard");
+            let returned = Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                is_repeat: false,
+                modifiers: KeyModifiers::default(),
+                time: 2.0,
+            });
+            send(&mut cx, &root, &returned);
+            assert!(
+                (rgba()[0] - 0x11 as f32 / 255.0).abs() < 0.01,
+                "with_alpha={with_alpha}: the typed hex was not taken"
+            );
+            let expected = if with_alpha { 0x44 as f32 / 255.0 } else { 1.0 };
+            assert!(
+                (rgba()[3] - expected).abs() < 1e-6,
+                "with_alpha={with_alpha}: a typed eight-figure hex left alpha {}",
+                rgba()[3]
+            );
+            pick.borrow_mut::<FabColorPick>().unwrap().close_popover(&mut cx, false);
+        }
+        assert!(
+            (columns[0] - columns[1]).abs() < 0.01,
+            "the readout column moved when the A row went: {columns:?}"
+        );
     }
 }
 

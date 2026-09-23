@@ -2484,10 +2484,16 @@ pub fn window_intercept(
     if !finish_consumed_down {
         let band = tweaker.borrow::<Tweaker>().map(|tw| tw.band).unwrap_or_default();
         // The panel splitter announces itself: the resize cursor over its
-        // grab band (it is the intercept's own gesture, not a Splitter
-        // widget, so nothing else would set one).
+        // grab band. The bar takes its press through `Event::hits` and would
+        // set this cursor from its own hover, but the app's body is walked
+        // first and claims the hover over the three points of overhang, so
+        // the band says it here as well. Not while something else holds the
+        // pointer, though: the resize arrows over an open popover's slider
+        // were the splitter's, and they were the giveaway that the press
+        // underneath was the splitter's too.
         if kind == PointerKind::Move
             && band.size.x > 0.0
+            && !pointer_is_elsewhere(cx)
             && abs.x >= band.pos.x - 3.0
             && abs.x <= band.pos.x + SPLITTER_WIDTH + 3.0
             && abs.y >= band.pos.y
@@ -8706,6 +8712,27 @@ fn tb_dropped_list(palette: &[u32], from: usize, drop: TbDrop) -> Vec<u32> {
 /// millisecond, and it is the only one that reaches a widget.
 const EQ_SETTLE: f64 = 0.15;
 
+/// How still the hand has to be before a built theme goes in: the other half
+/// of the settle, and the half that is actually about smoothness.
+///
+/// An install is a module rebuild, and with the derive that now rides along
+/// with it (`ThemeBuilder::set_moving`) the frame that carries one costs some
+/// forty-five milliseconds. There is no making that cheap from here -- it re-
+/// runs the module and re-applies the tree, which is what reaching a widget
+/// costs. What CAN be chosen is when it is spent, and a stall is only felt
+/// where something is meant to be moving. Spent while the hand is dragging it
+/// is three lost frames out of nine, which is the stutter; spent in a pause,
+/// it is invisible, because nothing on the screen was going anywhere.
+///
+/// So a drag in flight installs nothing and stays free, and the theme lands
+/// in the first gap in the moving -- a hesitation, the hand changing
+/// direction, or the release, which does not wait for anything. Sixty
+/// milliseconds is four frames: long enough that a stroke at any speed a
+/// mouse reports at never looks like a pause, short enough that the ordinary
+/// hesitations in a hand's work all count as one, so the app keeps following
+/// during a drag rather than waiting for the end of it.
+const TB_QUIET: f64 = 0.06;
+
 /// The panel lies over the app rather than pushing it inward. Compressing
 /// the body cost a jump the width of the panel on every module rebuild --
 /// the rebuild forgot the compression and the next draw put it back -- and
@@ -9369,6 +9396,11 @@ pub struct Tweaker {
     /// install per [`EQ_SETTLE`].
     #[rust]
     tb_apply_due: bool,
+    /// What [`body_applies`] and the builder's rebuild count stood at when
+    /// the colour drag now in flight began, so its cost can be said at the
+    /// release. `None` between drags.
+    #[rust]
+    tb_drag_from: Option<(u32, u32)>,
     /// The built theme goes in on the next draw whatever the settle says.
     /// Set by everything that is a press rather than a drag.
     #[rust]
@@ -9376,6 +9408,13 @@ pub struct Tweaker {
     /// When a built theme last actually went in, on the app clock.
     #[rust]
     tb_installed_at: f64,
+    /// A move arrived since the last frame looked. The draw is what has the
+    /// clock, so this is how a move that has none says when it happened.
+    #[rust]
+    tb_moving: bool,
+    /// When the last move arrived, on the app clock. See [`TB_QUIET`].
+    #[rust]
+    tb_moved_at: f64,
     /// How the built theme reads, as the last install measured it.
     #[rust]
     tb_reading: String,
@@ -9805,6 +9844,33 @@ fn body_margin_needs_apply(applied: f64, desired: f64, stale: bool) -> bool {
     stale || (applied - desired).abs() >= 0.5
 }
 
+/// How many times the app's body has been re-evaluated to carry the panel's
+/// margin. Each one is a script parse and a re-apply of the whole body — the
+/// most expensive thing on the panel's frame — so the number is the measure
+/// of whether a gesture is leaking into the app's layout. A colour drag must
+/// leave it exactly where it found it.
+static BODY_APPLIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// See [`BODY_APPLIES`].
+pub fn body_applies() -> u32 {
+    BODY_APPLIES.load(Ordering::Relaxed)
+}
+
+/// Whether something other than this panel's chrome owns the pointer.
+///
+/// The house rule is that a press on a control locks the mouse to it until
+/// the release and nothing else reacts meanwhile, and that an overlay which
+/// has grabbed the pointer — a popover, a drop-down, a modal — turns every
+/// hit test but its own away while it is up. `Event::hits` enforces both for
+/// anything that asks through it, which is why the splitter now does. The
+/// panel also has chrome that reads RAW events (its hover scans, the cursor
+/// the window intercept paints over the band), and this is what those have to
+/// ask for themselves: the platform's own answer, not a list of the overlays
+/// they happen to know about.
+fn pointer_is_elsewhere(cx: &Cx) -> bool {
+    cx.sweep_lock_area().is_some() || cx.fingers.is_mouse_held_outside(&[])
+}
+
 /// The body's OWN right margin, as read back off the widget -- or `None`
 /// when what came back is the panel's own compression still standing on it,
 /// in which case the body's own is whatever was remembered before.
@@ -9914,6 +9980,7 @@ impl Tweaker {
         let chunk = format!(
             "margin: Inset{{left: {left} top: {top} right: {right:.0} bottom: {bottom}}}"
         );
+        BODY_APPLIES.fetch_add(1, Ordering::Relaxed);
         match eval_chunk(cx, &body, &chunk) {
             Ok(()) => {
                 self.applied_margin = desired;
@@ -11155,6 +11222,12 @@ impl Tweaker {
                         width: Fill
                         height: 18
                         draggable: true
+                        // A theme colour has no transparency: the A row is
+                        // one more thing to read past on the way to the
+                        // three that matter, and an alpha that slipped in
+                        // from a drag or a pasted hex would ride into the
+                        // built theme where nothing can see it.
+                        with_alpha: false
                     }
                 }
                 // THE LOCK AT THE HEAD OF A SETTINGS ROW. Pressed, it holds
@@ -17272,10 +17345,28 @@ impl Tweaker {
             {
                 match widget_action.cast::<FabColorPickAction>() {
                     FabColorPickAction::Changed(v) => {
+                        if self.tb_drag_from.is_none() {
+                            self.tb_drag_from =
+                                Some((body_applies(), self.tb_builder.rebuilds()));
+                        }
                         self.tb_color_moving(which, packed_of([v.x, v.y, v.z, v.w]));
                         self.redraw_panel(cx);
                     }
                     FabColorPickAction::Ended(v) => {
+                        // What the gesture cost, said once where it can be
+                        // read off a log rather than guessed at: the body
+                        // re-evaluations it caused (zero is the only right
+                        // answer — the app's layout has nothing to do with
+                        // a colour) and the module rebuilds the settle
+                        // spent, which are the drag's seconds over the
+                        // settle interval and no more.
+                        if let Some((applies, rebuilds)) = self.tb_drag_from.take() {
+                            log!(
+                                "TWEAK colour drag cost: body_applies={} module_rebuilds={}",
+                                body_applies() - applies,
+                                self.tb_builder.rebuilds() - rebuilds
+                            );
+                        }
                         self.tb_color_ended(which, packed_of([v.x, v.y, v.z, v.w]));
                         self.redraw_panel(cx);
                     }
@@ -17389,12 +17480,27 @@ impl Tweaker {
                         // Every move lands here and NOT in an install: see
                         // `tb_row_moved`, and `eq_weight_moved` for why.
                         FabSliderAction::Changed(shown) => {
+                            if self.tb_drag_from.is_none() {
+                                self.tb_drag_from =
+                                    Some((body_applies(), self.tb_builder.rebuilds()));
+                            }
                             self.tb_row_moved(which, shown);
                             self.redraw_panel(cx);
                         }
                         FabSliderAction::Ended(shown) => {
                             self.tb_gesture_ended(which, shown);
                             self.redraw_panel(cx);
+                            // What the gesture cost, on the same terms a
+                            // colour drag says it in: see the release of a
+                            // square's popover below. A slider pays the same
+                            // two things and used to pay more of the second.
+                            if let Some((applies, rebuilds)) = self.tb_drag_from.take() {
+                                log!(
+                                    "TWEAK slider drag cost: body_applies={} module_rebuilds={}",
+                                    body_applies() - applies,
+                                    self.tb_builder.rebuilds() - rebuilds
+                                );
+                            }
                         }
                         // The name was clicked: that one setting goes back
                         // to the house theme's value.
@@ -19270,6 +19376,7 @@ impl Tweaker {
         }
         if self.tb_apply_due {
             let now = cx.seconds_since_app_start();
+            self.tb_saw_the_hand(now);
             if self.tb_settle(cx, now) {
                 // A move that arrived inside the settle is still owed its
                 // install, and a drag that has stopped sends nothing more to
@@ -19941,6 +20048,7 @@ impl Tweaker {
         self.tb_open = false;
         self.tb_apply_due = false;
         self.tb_apply_at_once = false;
+        self.tb_moving = false;
         self.tb_theme_stands = false;
         self.tb_reading.clear();
         // A colour's popover shuts with the section. Left open it holds the
@@ -19991,11 +20099,14 @@ impl Tweaker {
         self.tb_apply_at_once = true;
     }
 
-    /// One setting moved under the pointer. The install waits on the settle:
-    /// see `eq_weight_moved` for the whole of that bargain.
+    /// One setting moved under the pointer. The theme and the install both
+    /// wait on the settle: see `eq_weight_moved` for the whole of that
+    /// bargain, and `ThemeBuilder::set_moving` for why the theme waits with
+    /// it rather than being worked out per frame.
     fn tb_row_moved(&mut self, which: BuildRow, shown: f64) {
-        self.tb_row_set(which.moved(self.tb_builder.params(), shown));
+        self.tb_row_set_as(which.moved(self.tb_builder.params(), shown), true);
         self.tb_apply_due = true;
+        self.tb_moving = true;
     }
 
     /// The thumb was let go, on this value: a commit, so it does not wait.
@@ -20030,12 +20141,24 @@ impl Tweaker {
     /// seed changing and not the appearance changing, and asking the question
     /// that way is what tells the two apart.
     fn tb_row_set(&mut self, params: BuilderParams) {
+        self.tb_row_set_as(params, false);
+    }
+
+    /// [`Tweaker::tb_row_set`], saying whether the hand is still on the
+    /// control. A setting that is still moving leaves the theme for the
+    /// settle to work out; one that has arrived wants it now, because
+    /// whatever asked for it is about to read it.
+    fn tb_row_set_as(&mut self, params: BuilderParams, moving: bool) {
         let seed_of = |panel: &Self| {
             let params = panel.tb_builder.params();
             panel.tb_row_seed().map(|slot| slot.seed_of(&params))
         };
         let was = seed_of(self);
-        self.tb_builder.set(params);
+        if moving {
+            self.tb_builder.set_moving(params);
+        } else {
+            self.tb_builder.set(params);
+        }
         let now = seed_of(self);
         if now.is_some() && now != was {
             self.tb_suggest_due = true;
@@ -20208,8 +20331,13 @@ impl Tweaker {
         let Some(params) = self.tb_with_color(which, color) else {
             return;
         };
-        self.tb_builder.set(params);
+        // The theme waits for the settle with the install, exactly as a
+        // slider's move does: see `ThemeBuilder::set_moving`. A wheel round
+        // the colour picker reports per frame like any other drag, and a
+        // theme per frame is more than a frame has.
+        self.tb_builder.set_moving(params);
         self.tb_apply_due = true;
+        self.tb_moving = true;
         self.tb_seed_touched(which);
         if self.tb_is_seed(which) {
             self.tb_suggest_due = true;
@@ -20332,9 +20460,23 @@ impl Tweaker {
     }
 
     /// Whether a built theme goes in on this frame. A press says so
-    /// outright; a drag waits out [`EQ_SETTLE`] since the last install.
+    /// outright; a drag waits out [`EQ_SETTLE`] since the last install AND a
+    /// gap in the moving, [`TB_QUIET`], so the frame that pays for it is one
+    /// where nothing was moving anyway.
     fn build_due(&self, now: f64) -> bool {
-        self.tb_apply_due && (self.tb_apply_at_once || now - self.tb_installed_at >= EQ_SETTLE)
+        self.tb_apply_due
+            && (self.tb_apply_at_once
+                || (now - self.tb_installed_at >= EQ_SETTLE && now - self.tb_moved_at >= TB_QUIET))
+    }
+
+    /// Stamp the move the frame is about to settle for, so [`TB_QUIET`] is
+    /// measured from when the hand last moved. The move itself has no clock
+    /// -- it arrives on an action, not on a frame -- so it leaves word and
+    /// the draw reads the time.
+    fn tb_saw_the_hand(&mut self, now: f64) {
+        if std::mem::take(&mut self.tb_moving) {
+            self.tb_moved_at = now;
+        }
     }
 
     /// The install this frame owes the builder, if the settle says now.
@@ -21058,7 +21200,19 @@ impl Tweaker {
     /// underneath picked the chip's palette instead, and one over a slider
     /// dragged the slider. Only the presses that fell between controls
     /// reached the wheel, which is what made its pucks move only sometimes.
-    fn popover_first(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    ///
+    /// Answers whether it dispatched, because the caller must then NOT walk
+    /// the sidebar with the same event. The popover's owner is inside that
+    /// sidebar, so a second walk hands the control the very same press a
+    /// second time -- a captured area answers every `hits` call and never
+    /// marks the event handled -- and a control that reads two presses at one
+    /// timestamp reads a double press. That is what stopped a click in a
+    /// channel row's number box opening it for typing: the first delivery
+    /// opened the editor and the second, arriving with the same time, came
+    /// inside the double-press window and shut it again. The rule it now
+    /// follows is the one the panel's rows already follow: a pointer inside
+    /// an open popover belongs to the popover alone.
+    fn popover_first(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) -> bool {
         let pointer = match event {
             Event::MouseMove(e) => Some(e.abs),
             Event::MouseDown(e) => Some(e.abs),
@@ -21066,10 +21220,10 @@ impl Tweaker {
             _ => None,
         };
         let Some(abs) = pointer else {
-            return;
+            return false;
         };
         if !self.open_popup.is_some_and(|rect| rect.contains(abs)) {
-            return;
+            return false;
         }
         let owner = self
             .visible
@@ -21083,17 +21237,19 @@ impl Tweaker {
             .map(|v| v.item.clone());
         if let Some(item) = owner {
             item.handle_event(cx, event, scope);
-            return;
+            return true;
         }
         let Some(which) = self.tb_color_opened else {
-            return;
+            return false;
         };
         let Some(control) = self.tb_color_controls().into_iter().nth(which) else {
-            return;
+            return false;
         };
         if control.borrow::<FabColorPick>().is_some_and(|p| p.is_open()) {
             control.handle_event(cx, event, scope);
+            return true;
         }
+        false
     }
 
     /// The builder's four colour controls, in `TB_COLOR_IDS` order; none
@@ -21431,20 +21587,81 @@ impl Widget for Tweaker {
                 self.redraw_overlay(cx);
             }
         }
+        // THE SPLITTER ASKS FOR THE PRESS THE WAY EVERY OTHER CONTROL DOES.
+        //
+        // It used to read the raw `Event::MouseDown` and take the drag on an
+        // x-coordinate alone. Nothing about that consulted the platform, so
+        // nothing about it obeyed the house rule that a press on a control
+        // owns the pointer until the release: the colour popover hangs LEFT
+        // of the swatch it belongs to and overhangs the app, so its channel
+        // rows sit right across this band, and one press armed both — the
+        // row tracked the colour while the splitter resized the sidebar
+        // under it, dragging the popover sideways out from under the hand.
+        //
+        // Going through `Event::hits` hands both halves of the rule to the
+        // platform instead of restating them here. While the popover holds
+        // its sweep lock every hit test that is not its own answers
+        // `Hit::Nothing`, so the bar is deaf for the whole time the popover
+        // is up — wheel, saturation square, palette strip and channel rows
+        // alike, since the lock is the popover's and not any one control's.
+        // Once a control has captured, the moves go to the captured area and
+        // never reach here at all.
+        //
+        // `capture_overload` is kept: the app's body extends under the band
+        // and is walked before this widget, so `handled` is often already
+        // set by whatever is drawn there. The sweep-lock test runs BEFORE
+        // the handled test in `hits`, so the bar still loses to the popover
+        // while keeping the precedence over app content it has always had.
+        let splitter_hit = if self.band.size.x > 0.0 {
+            event.hits_with_options(
+                cx,
+                self.draw_splitter.area(),
+                HitOptions::new()
+                    .with_margin(Inset { left: 3.0, right: 3.0, top: 0.0, bottom: 0.0 })
+                    .with_capture_overload(true),
+            )
+        } else {
+            Hit::Nothing
+        };
+        let splitter_took_press = matches!(splitter_hit, Hit::FingerDown(_));
+        match splitter_hit {
+            Hit::FingerDown(_) => {
+                self.splitter_drag = true;
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
+            }
+            Hit::FingerMove(fe) if self.splitter_drag => {
+                let window_right = self.band.pos.x + self.band.size.x;
+                let width = (window_right - fe.abs.x).clamp(180.0, 560.0);
+                let mut session = session().lock().unwrap();
+                // Dragging past either clamp moves nothing, and a whole-app
+                // relayout for a width that did not change is the most
+                // expensive way of doing nothing there is.
+                if (session.sidebar_width - width).abs() >= 0.01 {
+                    session.sidebar_width = width;
+                    drop(session);
+                    cx.redraw_all();
+                }
+                cx.set_cursor(MouseCursor::EwResize);
+            }
+            Hit::FingerUp(_) => {
+                self.splitter_drag = false;
+                self.cancel_scope = None;
+            }
+            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
+                cx.set_cursor(MouseCursor::EwResize);
+            }
+            _ => {}
+        }
         // Picking arrives pre-resolved through `window_intercept`; here the
-        // tweaker handles its own chrome: the splitter, the sidebar, and
-        // the fold / double-click-reset gestures on its rows.
+        // tweaker handles its own chrome: the sidebar, and the fold /
+        // double-click-reset gestures on its rows.
         match event {
-            Event::MouseDown(e) if Some(e.window_id.id()) == self.my_window => {
+            Event::MouseDown(e)
+                if Some(e.window_id.id()) == self.my_window && !splitter_took_press =>
+            {
                 let x = self.band.pos.x;
                 let grip = self.spec_grip_hit(cx, e.abs);
-                if e.abs.x >= x - 3.0
-                    && e.abs.x <= x + SPLITTER_WIDTH + 3.0
-                    && e.abs.y >= self.band.pos.y
-                {
-                    self.splitter_drag = true;
-                    self.cancel_scope = Some(self.begin_cancel_scope(cx));
-                } else if let Some(k) = grip {
+                if let Some(k) = grip {
                     // Grab where it was grabbed: the boundary moves by how far
                     // the pointer has moved since, not to where it is. The
                     // weights are taken as they are; the screen is measured
@@ -21780,13 +21997,21 @@ impl Widget for Tweaker {
             Event::MouseMove(e)
                 if Some(e.window_id.id()) == self.my_window
                     && tweak_is_on()
+                    && !pointer_is_elsewhere(cx)
                     && self.spec_grip_hit(cx, e.abs).is_some() =>
             {
                 cx.set_cursor(MouseCursor::NsResize);
             }
+            // The panel's hover work — the footer's hand, the tree outline,
+            // the doc tooltip — is a reaction to a pointer that is free. It
+            // used to be skipped during a colour drag only by accident,
+            // because the splitter had armed itself on the same press and
+            // the guard below said so; now that the splitter stands down
+            // properly, the rule has to be stated properly too.
             Event::MouseMove(e)
                 if Some(e.window_id.id()) == self.my_window
                     && !self.splitter_drag
+                    && !pointer_is_elsewhere(cx)
                     && tweak_is_on() =>
             {
                 // The footer's path line copies on click, so it says so
@@ -21870,13 +22095,6 @@ impl Widget for Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
-            Event::MouseMove(e) if self.splitter_drag => {
-                let window_right = self.band.pos.x + self.band.size.x;
-                let width = (window_right - e.abs.x).clamp(180.0, 560.0);
-                session().lock().unwrap().sidebar_width = width;
-                cx.set_cursor(MouseCursor::ColResize);
-                cx.redraw_all();
-            }
             // ANY up releases the drag, wherever it lands — the capture
             // must never outlive the press.
             Event::MouseUp(_) | Event::WindowLostFocus(_) => {
@@ -21907,9 +22125,12 @@ impl Widget for Tweaker {
         // the property list underneath it.
         let swallow_scroll = matches!(event, Event::Scroll(e)
             if self.open_popup.is_some_and(|rect| rect.contains(e.abs)));
-        self.popover_first(cx, event, scope);
+        // A pointer the popover took is the popover's, and the walk that
+        // would hand it to the same control a second time does not happen.
+        // See `popover_first`.
+        let popover_took = self.popover_first(cx, event, scope);
         if let Some(sidebar) = self.sidebar.clone() {
-            if !swallow_scroll {
+            if !swallow_scroll && !popover_took {
                 sidebar.handle_event(cx, event, scope);
             }
         }
@@ -22791,6 +23012,16 @@ mod tests {
             src.matches("let TbColorT = View {").count(),
             1,
             "the builder's `TbColorT` is not declared once as a View"
+        );
+        // And the four squares take the alpha-less form of the picker. A
+        // theme colour has no transparency, so the A row is one more thing
+        // to read past — and an alpha that came in on a drag or a pasted hex
+        // would ride into the built theme where nothing can see it. The
+        // Props tab's pickers are untouched: there a colour may well have
+        // one.
+        assert!(
+            src.contains("with_alpha: false"),
+            "the builder's colour squares no longer ask for the alpha-less picker"
         );
         // And the lock at the head of every row that carries one: one
         // template, and one of it in front of each of the nine settings
@@ -25586,13 +25817,25 @@ line two");
         let entry = theme_color(&mut cx, "color_bg_app");
 
         // Half a second of one thumb, reported a change per frame, with the
-        // draw that would spend them after each.
+        // draw that would spend them after each -- and the hand's own pauses
+        // in it, because a hand has them and they are what the app follows
+        // on: a stroke, a hesitation long enough to be one, another stroke.
+        // See `TB_QUIET`.
         const SPAN: f64 = 0.5;
         const FRAMES: u32 = 40;
+        let mut now = 1.0;
         for step in 0..FRAMES {
-            let now = 1.0 + f64::from(step) * (SPAN / f64::from(FRAMES));
+            now += SPAN / f64::from(FRAMES);
             panel.tb_row_moved(BuildRow::Saturation, f64::from(step) * 2.5);
+            panel.tb_saw_the_hand(now);
             panel.tb_settle(&mut cx, now);
+            if step % 13 == 12 {
+                // The hand rests. Nothing is moving, so this is where an
+                // install can be spent without anybody seeing it.
+                now += TB_QUIET * 2.0;
+                panel.tb_saw_the_hand(now);
+                panel.tb_settle(&mut cx, now);
+            }
         }
         let during = panel.tb_builder.rebuilds();
         let most = (SPAN / EQ_SETTLE).ceil() as u32 + 1;
@@ -25608,7 +25851,7 @@ line two");
         // come round again: a drag that stopped twenty milliseconds short
         // must not leave the app a theme behind the rows.
         panel.tb_gesture_ended(BuildRow::Roundness, 14.0);
-        panel.tb_settle(&mut cx, 1.0 + SPAN);
+        panel.tb_settle(&mut cx, now);
         assert_eq!(
             panel.tb_builder.rebuilds(),
             during + 1,
@@ -25616,7 +25859,7 @@ line two");
         );
         assert!(!panel.tb_apply_due, "a move is still waiting after the gesture ended");
         assert!(!panel.tb_builder.is_dirty(), "the app is a theme behind what the rows read");
-        the_build_reload_lands(&mut cx, &mut panel, 1.0 + SPAN);
+        the_build_reload_lands(&mut cx, &mut panel, now);
         assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the drag never reached the app");
         assert!(panel.tb_theme_stands, "the panel does not know the app is wearing a built theme");
         assert_eq!(sheet_in_force(&mut cx), None, "a built theme stands on its base, not on a sheet");
@@ -25625,6 +25868,142 @@ line two");
             Some(14.0),
             "the roundness the hand stopped on never reached the theme"
         );
+    }
+
+    /// A palette with colour in it, and the app wearing the theme it makes.
+    ///
+    /// The house palette's background is a grey, which has no saturation to
+    /// share, so with it the two background rows move NOTHING: the page stays
+    /// the house page at either end of either slider and the built script
+    /// never changes. A test of what a drag costs has to start from a palette
+    /// whose rows actually build a different theme, or it measures a drag that
+    /// had nothing to do.
+    fn a_coloured_palette(cx: &mut Cx, panel: &mut Tweaker) {
+        panel.tb_color_ended(3, 0x927550FF);
+        panel.tb_color_ended(0, 0x3A7BD5FF);
+        panel.tb_settle(cx, 0.5);
+        the_build_reload_lands(cx, panel, 0.6);
+    }
+
+    /// A move under the hand works no theme out; the settle does.
+    ///
+    /// Deriving a theme costs about twelve milliseconds on a palette with
+    /// colour in it -- most of a frame -- and a drag reports a move per
+    /// frame, so a theme per move is a gesture that cannot keep up with the
+    /// hand whatever else is done about it. Both drags are held to it, the
+    /// section's own sliders and a colour popover's channel rows, because it
+    /// is one fault and they were both paying it.
+    #[test]
+    fn a_move_works_out_no_theme_and_the_settle_works_out_the_one_it_installs() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_build_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        a_coloured_palette(&mut cx, &mut panel);
+
+        // A slider under the hand.
+        let derived = |panel: &Tweaker| {
+            panel.tb_builder.built().map(|built| built.params) == Some(panel.tb_builder.params())
+        };
+        assert!(derived(&panel), "the settle left the theme owing before the drag began");
+        panel.tb_row_moved(BuildRow::Lightness, 44.0);
+        assert!(!derived(&panel), "the move worked the theme out instead of leaving it for the settle");
+        assert_eq!(
+            panel.tb_builder.params().lightness,
+            0.44,
+            "the move did not move the control it was reporting"
+        );
+        panel.tb_saw_the_hand(1.0);
+        panel.tb_settle(&mut cx, 1.0 + TB_QUIET);
+        assert!(derived(&panel), "the settle installed without working the theme out first");
+
+        // And a channel row of a colour's popover, which reports the same way.
+        the_build_reload_lands(&mut cx, &mut panel, 1.2);
+        panel.tb_color_moving(0, 0x20B0A0FF);
+        assert!(!derived(&panel), "a colour move worked the theme out under the hand");
+        panel.tb_saw_the_hand(1.3);
+        panel.tb_settle(&mut cx, 1.3 + EQ_SETTLE);
+        assert!(derived(&panel), "the settle after a colour move installed a stale theme");
+    }
+
+    /// What the settle installs is what the old eager derive would have
+    /// installed: the same theme, byte for byte. Moving WHEN the work is done
+    /// must not move WHAT it comes to.
+    #[test]
+    fn the_theme_a_drag_settles_on_is_the_theme_it_always_was() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_build_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        a_coloured_palette(&mut cx, &mut panel);
+
+        let mut now = 1.0;
+        for step in 0..20 {
+            now += 0.012;
+            panel.tb_row_moved(BuildRow::Lightness, 30.0 + f64::from(step));
+            panel.tb_saw_the_hand(now);
+            panel.tb_settle(&mut cx, now);
+        }
+        now += 0.2;
+        panel.tb_gesture_ended(BuildRow::Lightness, 49.0);
+        panel.tb_settle(&mut cx, now);
+        let settled = panel.tb_builder.built().expect("a theme after the gesture").clone();
+
+        // The same settings, worked out the way they used to be: straight off
+        // the parameters, with nothing deferred anywhere.
+        let alone = crate::theme_builder::build(&panel.tb_builder.params());
+        assert_eq!(settled.params, alone.params, "the drag settled on other settings than it ended on");
+        assert_eq!(settled.script, alone.script, "the deferred derive built a different theme");
+        assert_eq!(
+            settled.readability, alone.readability,
+            "the deferred derive came to a different reading"
+        );
+    }
+
+    /// A stroke the hand does not break costs no install at all, and the
+    /// first gap in it is where the theme lands.
+    ///
+    /// This is the whole of what makes a drag smooth. An install is a module
+    /// rebuild and cannot be made cheap from here; what it can be is spent
+    /// where nothing is moving, which is a pause, and never in the middle of
+    /// one of the strokes it would be stuttering. See [`TB_QUIET`].
+    #[test]
+    fn an_unbroken_stroke_installs_nothing_and_the_pause_after_it_installs_once() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_build_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        a_coloured_palette(&mut cx, &mut panel);
+        let was = panel.tb_builder.rebuilds();
+
+        // Half a second of unbroken stroke, a move every frame.
+        let mut now = 1.0;
+        for step in 0..40 {
+            now += 0.0125;
+            panel.tb_row_moved(BuildRow::Lightness, 30.0 + f64::from(step) * 0.5);
+            panel.tb_saw_the_hand(now);
+            panel.tb_settle(&mut cx, now);
+        }
+        assert_eq!(
+            panel.tb_builder.rebuilds(),
+            was,
+            "an unbroken stroke stopped to rebuild the module under the hand"
+        );
+        assert!(panel.tb_apply_due, "the stroke's moves were dropped rather than kept for the pause");
+
+        // The hand rests, and the app catches up on the frame after.
+        now += TB_QUIET * 2.0;
+        panel.tb_saw_the_hand(now);
+        panel.tb_settle(&mut cx, now);
+        assert_eq!(
+            panel.tb_builder.rebuilds(),
+            was + 1,
+            "the pause the hand left did not carry the theme to the app"
+        );
+        assert!(!panel.tb_apply_due, "the pause installed and still thinks it owes one");
     }
 
     /// Untouched controls are the house theme, and the house theme is not
@@ -26067,10 +26446,12 @@ line two");
         let hue = |_: &Cx| wheel.borrow::<crate::fab_controls::FabColorWheel>().expect("a wheel").hsv()[0];
         cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
         let send = |cx: &mut Cx, panel: &mut Tweaker, event: Event| {
-            // The panel's own order: the popover's owner, then the sidebar.
+            // The panel's own order: the popover's owner, and the sidebar
+            // only where the popover did not take it.
             let actions = cx.capture_actions(|cx| {
-                panel.popover_first(cx, &event, &mut Scope::empty());
-                head.handle_event(cx, &event, &mut Scope::empty());
+                if !panel.popover_first(cx, &event, &mut Scope::empty()) {
+                    head.handle_event(cx, &event, &mut Scope::empty());
+                }
             });
             panel.handle_sidebar_actions(cx, &actions);
         };
@@ -26124,6 +26505,102 @@ line two");
         }));
         cx.fingers.first_mouse_button = None;
     }
+    /// A pointer the popover answers is not walked into the sidebar as well,
+    /// and a click in a channel row's number box opens it for typing.
+    ///
+    /// The two are the same fact. The popover's owner lives inside the
+    /// sidebar, so a second walk handed it the same press again; a captured
+    /// area answers every `hits` call and marks nothing handled, so nothing
+    /// downstream could tell the copy from a new press. A row reading two
+    /// presses at one timestamp reads a double press, and the double press is
+    /// what shut the editor the first delivery had just opened -- the box
+    /// looked like a box, took the click, and did nothing.
+    #[test]
+    fn a_press_in_the_popover_is_delivered_once_and_the_number_box_opens() {
+        use std::cell::Cell;
+        const WINDOW: WindowId = WindowId(1, 1);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let head = the_builder_drawn(&mut cx, &mut panel);
+        let control = head
+            .child(live_id!(tb_body))
+            .child(live_id!(tb_seed_row))
+            .child(TB_COLOR_IDS[0])
+            .child(live_id!(tb_color));
+        a_press_down_on(&mut cx, &mut panel, &head, &control);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        panel.popups_start_over();
+        let popup = panel.open_popup.expect("the builder's popover was never parked");
+
+        // Inside the popover it answers, so the caller leaves the sidebar
+        // alone; outside it does not, and the sidebar goes on being walked.
+        let inside = popup.pos + popup.size * 0.5;
+        let outside = dvec2(popup.pos.x - 40.0, popup.pos.y - 40.0);
+        let at = |abs: Vec2d| {
+            Event::MouseMove(MouseMoveEvent {
+                abs,
+                lock_delta: Vec2d::default(),
+                window_id: WINDOW,
+                modifiers: KeyModifiers::default(),
+                time: 20.0,
+                handled: Cell::new(Area::Empty),
+            })
+        };
+        assert!(
+            panel.popover_first(&mut cx, &at(inside), &mut Scope::empty()),
+            "a pointer inside the popover was not taken by it, so the sidebar walks it too"
+        );
+        assert!(
+            !panel.popover_first(&mut cx, &at(outside), &mut Scope::empty()),
+            "a pointer outside the popover was swallowed by it"
+        );
+
+        // And the box really opens: a press and a release on the number, sent
+        // the panel's own way, with the sidebar walked only where the popover
+        // did not answer -- which is what the panel now does.
+        let row = control
+            .borrow::<FabColorPick>()
+            .expect("a colour control")
+            .channel_row(live_id!(num_r));
+        let on_the_number = row
+            .borrow::<FabValueInput>()
+            .expect("an R row")
+            .number_box_middle(&cx);
+        assert!(on_the_number.x > 0.0, "the popover's R row never drew");
+        let send = |cx: &mut Cx, panel: &mut Tweaker, event: &Event| {
+            let actions = cx.capture_actions(|cx| {
+                if !panel.popover_first(cx, event, &mut Scope::empty()) {
+                    head.handle_event(cx, event, &mut Scope::empty());
+                }
+            });
+            panel.handle_sidebar_actions(cx, &actions);
+        };
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: on_the_number,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 21.0,
+        });
+        send(&mut cx, &mut panel, &down);
+        send(&mut cx, &mut panel, &Event::MouseUp(MouseUpEvent {
+            abs: on_the_number,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 21.05,
+        }));
+        cx.fingers.first_mouse_button = None;
+        assert!(
+            row.borrow::<FabValueInput>().expect("an R row").is_editing(),
+            "a click in the number box did not open it for typing"
+        );
+    }
+
     /// A hand carrying one of the builder's colours: down on a square, the
     /// moves, and the release (or Escape), each routed the panel's own way --
     /// the popover's owner, then the head -- and what came of each handed
@@ -26147,8 +26624,9 @@ line two");
 
         fn send(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef, event: &Event) {
             let actions = cx.capture_actions(|cx| {
-                panel.popover_first(cx, event, &mut Scope::empty());
-                head.handle_event(cx, event, &mut Scope::empty());
+                if !panel.popover_first(cx, event, &mut Scope::empty()) {
+                    head.handle_event(cx, event, &mut Scope::empty());
+                }
             });
             panel.handle_sidebar_actions(cx, &actions);
         }
