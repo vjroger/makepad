@@ -19564,6 +19564,11 @@ impl Tweaker {
     /// a carried colour let go on it. It installs nothing: which colour the
     /// chips follow moves no colour in force.
     ///
+    /// The slot goes into the settings all the same, because it is also the
+    /// colour the page has to be able to be told from where a palette pulls
+    /// two ways at once: see `BuilderParams::seed_slot`. Everywhere else that
+    /// changes nothing about the theme.
+    ///
     /// Where a colour is also going in, the row waits for the settle with
     /// it: the commonest way to touch a square is to drag its wheel, which
     /// reports per frame, and two dozen themes' worth of arithmetic per frame
@@ -19576,6 +19581,10 @@ impl Tweaker {
             return;
         }
         self.tb_seed_slot = slot;
+        let params = self.tb_builder.params();
+        if params.seed_slot != slot {
+            self.tb_row_set(BuilderParams { seed_slot: slot, ..params });
+        }
         if self.tb_row_seed().is_none() {
             return;
         }
@@ -19645,10 +19654,11 @@ impl Tweaker {
         // primary a shade off, and words quietly retinted from a slot
         // nobody can see any more would be a colour nobody chose.
         let text_color = params.text_color.filter(|slot| slot.chosen_at(count));
-        self.tb_builder.set(BuilderParams { color_count: count, text_color, ..params });
         if !self.tb_seed_slot.chosen_at(count) {
             self.tb_seed_slot = SeedSlot::Primary;
         }
+        let seed_slot = self.tb_seed_slot;
+        self.tb_builder.set(BuilderParams { color_count: count, text_color, seed_slot, ..params });
         // Another count is another row, not the same one grown again, so
         // nothing chosen off the old one is carried across by name.
         self.tb_chosen = None;
@@ -19857,14 +19867,18 @@ impl Tweaker {
                 reading.measured, reading.tightest,
             ),
         };
-        // And the one thing the pairs cannot say: a colour picked so close to
-        // the page that the page ran to the end of its half still standing on
-        // it. The colour is used exactly all the same -- that is the promise
-        // -- so the line names the case and leaves the choice where it
-        // belongs, which is with the person who picked the colour.
+        // And the one thing the pairs cannot say: a palette that pulls the
+        // page two ways at once. The page goes wherever it has to for the
+        // colour in hand -- across the middle and into the other appearance
+        // if that is where the room is -- and there is always somewhere for
+        // one colour; what there is not always is one page that clears a
+        // near-black colour and a near-white one together. The colours are
+        // used exactly all the same -- that is the promise -- so the line
+        // names the one left standing on the page and leaves the choice where
+        // it belongs, which is with the person who picked it.
         if let Some(slot) = self.tb_builder.crowding() {
             out.push_str(&format!(
-                " \u{00b7} the {} stands too close to the page to be told from it",
+                " \u{00b7} the {} stands too close to the page, which cannot clear it and your other colours at once",
                 TB_COLOR_WORDS[slot.index()],
             ));
         }
@@ -26712,9 +26726,15 @@ line two");
         let _store = a_store_of_its_own(&mut panel);
         let head = the_builder_drawn(&mut cx, &mut panel);
 
-        // One the rule grew, which is its harmony and its mood: the first
-        // six are the plain harmonies, so the seventh is the first mood.
-        a_press_on_chip(&mut cx, &mut panel, &head, 6);
+        // One the rule grew, which is its harmony and its mood. The rule's
+        // chips stand behind the curated ones now, so the row is asked where
+        // its first mood is rather than counted along to it.
+        let first_mood = panel
+            .tb_suggestions
+            .iter()
+            .position(|offer| offer.harmony.is_some() && offer.mood.is_some())
+            .expect("the rule grew no palette in a mood");
+        a_press_on_chip(&mut cx, &mut panel, &head, first_mood);
         the_palette_lands(&mut cx, &mut panel, 0.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let was = panel.tb_chosen.clone().expect("a palette was chosen");
@@ -26860,13 +26880,15 @@ line two");
         assert!(!panel.tb_apply_at_once, "a drag along the row asked for an install");
         assert_eq!(panel.tb_builder.rebuilds(), was);
 
-        // Dragged past either end, it stops at the end.
+        // Dragged past either end, it stops at the end. The drag is measured
+        // off the row rather than named, since how long the row is depends on
+        // how many palettes the colour found.
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        a_drag_on(&mut cx, &mut panel, &head, from, from - dvec2(5000.0, 0.0));
         let end = the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx);
         assert!(end > 0.0);
+        a_drag_on(&mut cx, &mut panel, &head, from, from - dvec2(end + 1000.0, 0.0));
         assert_eq!(carousel_scroll(&head), end, "a drag ran the row past its last chip");
-        a_drag_on(&mut cx, &mut panel, &head, from, from + dvec2(5000.0, 0.0));
+        a_drag_on(&mut cx, &mut panel, &head, from, from + dvec2(end + 1000.0, 0.0));
         assert_eq!(carousel_scroll(&head), 0.0, "a drag ran the row back past its first chip");
 
         // A hand that wobbles a point or two is still pressing, and a chip
@@ -26956,15 +26978,34 @@ line two");
         let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
         let _store = a_store_of_its_own(&mut panel);
         let head = the_builder_drawn(&mut cx, &mut panel);
+        // A favourite the page can be told from on EITHER side of the
+        // lightness axis, so that carrying the lightness across its middle is
+        // genuinely a second theme. A brighter colour than this can only have
+        // a dark page and a darker one only a light page -- the page goes
+        // where the colour leaves it room -- and such a palette builds the
+        // same theme in both halves of the slider, with nothing for the carry
+        // below to install.
+        panel.tb_color_ended(0, 0x20_60_E0_FF);
+        the_palette_lands(&mut cx, &mut panel, 0.0);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
         // One the rule grew, far enough along that it is off the screen at
-        // the start of the row.
+        // the start of the row, and one the other page really does change.
+        let here = panel.tb_builder.params();
+        let there = BuilderParams::house(!here.dark()).lightness;
         let far = panel
             .tb_suggestions
             .iter()
-            .rposition(|offer| offer.harmony.is_some() && offer.mood.is_some())
-            .expect("the rule grew no palette in a mood");
+            .rposition(|offer| {
+                if offer.harmony.is_none() || offer.mood.is_none() {
+                    return false;
+                }
+                let worn = offer.params(here);
+                crate::theme_builder::build(&worn).script
+                    != crate::theme_builder::build(&BuilderParams { lightness: there, ..worn }).script
+            })
+            .expect("the rule grew no palette in a mood that the other page changes");
         a_press_on_chip(&mut cx, &mut panel, &head, far);
-        the_palette_lands(&mut cx, &mut panel, 0.0);
+        the_palette_lands(&mut cx, &mut panel, 1.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         assert_eq!(panel.tb_chosen_index(), Some(far));
         // The row scrolled back to its start by hand, the chip out of sight.
@@ -26978,7 +27019,7 @@ line two");
         assert_eq!(carousel_scroll(&head), 0.0, "a redraw brought the chip in force back into view");
 
         across_the_middle(&mut panel);
-        the_palette_lands(&mut cx, &mut panel, 1.0);
+        the_palette_lands(&mut cx, &mut panel, 2.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
         let at = panel.tb_chosen_index().expect("the other page left no chip marked");
         assert_eq!(carousel_chosen(&head), Some(at), "the carousel outlines some other chip than the one in force");
@@ -27017,14 +27058,17 @@ line two");
         assert_ne!(panel.tb_suggestions, offers, "the new colour grew the same row, so nothing was tested");
         assert_eq!(carousel_scroll(&head), 0.0, "a new colour's row opened where the old one was left");
 
-        // And the surprise, which is a new favourite too.
+        // And the surprise, which is a new favourite too. Its own palette is
+        // one the rule grew, and those stand behind the curated ones in the
+        // row, so the new row opens on that chip rather than at its start:
+        // what it does not do is keep the place the old row was left at.
         a_scroll_over(&mut cx, &mut panel, &head, over, 0.0, 150.0);
         assert_eq!(carousel_scroll(&head), 150.0);
         panel.tb_surprise();
         the_palette_lands(&mut cx, &mut panel, 3.0);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(carousel_scroll(&head), 0.0, "the surprise's row opened where the old one was left");
-        // Its palette is one of the six plain harmonies, at the row's start.
+        assert_ne!(carousel_scroll(&head), 150.0, "the surprise's row opened where the old one was left");
+        // And its palette is on the screen, wherever along the row it stands.
         let at = panel.tb_chosen_index().expect("the surprise's palette is marked by no chip");
         assert!(a_chip_shown_whole(&mut cx, &head, at), "the surprise's palette is off the screen");
     }
@@ -27248,7 +27292,15 @@ line two");
             for (at, chip) in shown.iter().enumerate() {
                 assert_eq!(chip[slot.index()], band(palette[slot.index()]), "{slot:?}: chip {at} does not hold the seed in its slot");
             }
-            assert_eq!(panel.tb_builder.params(), before, "{slot:?}: touching a square moved the theme");
+            // The slot the hand is on goes into the settings -- it is also
+            // the colour the page has to be able to be told from -- and
+            // nothing else about them moves.
+            assert_eq!(panel.tb_builder.params().seed_slot, slot, "{slot:?}: the settings do not hold the slot");
+            assert_eq!(
+                BuilderParams { seed_slot: before.seed_slot, ..panel.tb_builder.params() },
+                before,
+                "{slot:?}: touching a square moved the theme"
+            );
             panel.tb_settle(&mut cx, 5.0 + which as f64);
             assert_eq!(panel.tb_builder.rebuilds(), rebuilt, "{slot:?}: touching a square installed a theme");
         }
@@ -27669,13 +27721,20 @@ line two");
         assert!(carousel_scroll(&head) < far - 0.5, "the back arrow did not bring the row back");
 
         // A window wide enough for every chip: both arrows out, because there
-        // is nowhere to go either way.
+        // is nowhere to go either way. How wide that is depends on how many
+        // chips the colour found, and a row that leads with every match out
+        // of the book runs a good deal longer than the rule's own two dozen,
+        // so the width is measured rather than named.
         draw_the_theme_head_at(&mut cx, &mut panel, &head, 4000.0);
         draw_the_theme_head_at(&mut cx, &mut panel, &head, 4000.0);
+        let over = the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx);
+        let wide = 4000.0 + over + 100.0;
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, wide);
+        draw_the_theme_head_at(&mut cx, &mut panel, &head, wide);
         assert_eq!(
             the_carousel(&head).borrow::<FabPaletteCarousel>().expect("a carousel").max_scroll(&cx),
             0.0,
-            "the window does not hold the whole row even at 4000 points"
+            "the window does not hold the whole row even at {wide} points"
         );
         assert!(back.disabled(&cx) && on.disabled(&cx), "an arrow is live over a row the window holds whole");
     }
@@ -27851,14 +27910,15 @@ line two");
     /// Every kind of palette on the row is outlined while it is in force,
     /// and named by its tooltip while a hand rests on it.
     ///
-    /// The six harmonies are the first six chips and there is no harmony
-    /// picker beside them, and nothing under the row names the palette, so
-    /// a palette out of the book or out of the person's own file is told by
-    /// its outline or by nothing. The row opens with nothing outlined; a
-    /// plain harmony, a combination and a scheme of their own are each
-    /// outlined once pressed; and a palette whose colours were then edited
-    /// by hand is outlined by no chip at all -- never the chip it started
-    /// from.
+    /// The six harmonies are the first six of the chips the RULE grew --
+    /// which stand behind the curated ones in the row -- and there is no
+    /// harmony picker beside them, and nothing under the row names the
+    /// palette, so a palette out of the book or out of the person's own file
+    /// is told by its outline or by nothing. The row opens with nothing
+    /// outlined; a plain harmony, a combination and a scheme of their own are
+    /// each outlined once pressed; and a palette whose colours were then
+    /// edited by hand is outlined by no chip at all -- never the chip it
+    /// started from.
     #[test]
     fn every_kind_of_palette_is_outlined_while_it_is_in_force() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -27869,16 +27929,25 @@ line two");
         let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
         // Nothing chosen and nothing moved: nothing is outlined.
         assert_eq!(carousel_chosen(&head), None, "an untouched builder outlines a palette nobody chose");
-        // The first six are the six harmonies, in their plain form and by
-        // their own names, so the first page is what the picker used to be.
-        for (at, harmony) in Harmony::ALL.iter().enumerate() {
+        // The rule's own first six are the six harmonies, in their plain form
+        // and by their own names, so they are what the picker used to be.
+        let rule: Vec<usize> = panel
+            .tb_suggestions
+            .iter()
+            .enumerate()
+            .filter(|(_, offer)| offer.harmony.is_some())
+            .map(|(at, _)| at)
+            .collect();
+        for (step, harmony) in Harmony::ALL.iter().enumerate() {
+            let at = rule[step];
             let offer = &panel.tb_suggestions[at];
             assert_eq!((offer.harmony, offer.mood), (Some(*harmony), None), "chip {at} is not the plain {harmony:?}");
         }
-        a_press_on_chip(&mut cx, &mut panel, &head, 5);
+        let plain = rule[5];
+        a_press_on_chip(&mut cx, &mut panel, &head, plain);
         the_palette_lands(&mut cx, &mut panel, 0.5);
         draw_the_theme_head(&mut cx, &mut panel, &head);
-        assert_eq!(carousel_chosen(&head), Some(5), "the plain harmony pressed is not the chip outlined");
+        assert_eq!(carousel_chosen(&head), Some(plain), "the plain harmony pressed is not the chip outlined");
 
         // A colour lifted out of the book, so that the strip has a
         // combination on it to press.
