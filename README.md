@@ -11,25 +11,6 @@ It also has a large set of AI backends integrated for embedding llms or generati
 
 This repository contains the core engine, widgets, tools, and examples.
 
-## Building the widget catalogue
-
-The widget catalogue shows every widget in the library, organised,
-documented and previewed live.
-
-Rust stable is the toolchain everywhere: https://rustup.rs
-
-**macOS** — install Rust and the Xcode command line tools, then:
-
-```bash
-cargo run -p makepad-storybook --release
-```
-
-**Windows** — install Rust and Visual Studio 2022 (Desktop development with
-C++). Then the same `cargo run -p makepad-storybook --release`.
-
-**Linux** — install the packages under Linux Dependencies below. Then the
-same `cargo run -p makepad-storybook --release`.
-
 ## What Makepad Is
 
 - A cross-platform UI runtime for native and web targets.

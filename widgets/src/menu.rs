@@ -185,7 +185,9 @@ pub enum MenuAction {
     },
     /// Replace the rows of the menu `owner` has open, leaving it open and
     /// leaving the highlight where it is. This is how a set of switches
-    /// shows a mark changing under the pointer.
+    /// shows a mark changing under the pointer. A flyout that is open shows
+    /// its row's new submenu, so a switch inside one changes under the
+    /// pointer as well.
     Update { owner: LiveId, rows: Vec<MenuRow> },
     /// A row was chosen. The `Closed` for that menu is in the same pass.
     Picked { owner: LiveId, id: LiveId },
@@ -339,6 +341,21 @@ struct Level {
     press: Option<usize>,
     /// Row of the PARENT level that opened this flyout.
     from_row: Option<usize>,
+}
+
+/// Each open flyout shows its parent row's submenu again, after the root's
+/// rows were replaced: a switch picked inside one then shows its new mark.
+/// A flyout whose rows no longer line up is left as it was, and so is
+/// everything past it.
+fn refresh_flyouts(levels: &mut [Level]) {
+    for index in 1..levels.len() {
+        let Some(from) = levels[index].from_row else { break };
+        let Some(submenu) = levels[index - 1].rows.get(from).map(|row| row.submenu.clone()) else { break };
+        if submenu.len() != levels[index].rows.len() {
+            break;
+        }
+        levels[index].rows = submenu;
+    }
 }
 
 impl Level {
@@ -807,7 +824,8 @@ impl MenuLayer {
     }
 
     /// Replace the rows of the menu that is open for `owner`, keeping it
-    /// open and keeping the highlight where it is.
+    /// open and keeping the highlight where it is. Open flyouts take
+    /// their rows from the new ones too.
     pub fn update_rows(&mut self, cx: &mut Cx, owner: LiveId, rows: Vec<MenuRow>) {
         let Some(level) = self.levels.first_mut() else {
             return;
@@ -816,6 +834,7 @@ impl MenuLayer {
             return;
         }
         level.rows = rows;
+        refresh_flyouts(&mut self.levels);
         self.redraw_menus(cx);
     }
 
@@ -1247,6 +1266,10 @@ impl Widget for MenuLayer {
                 self.held_press = None;
                 self.raised_by_held_press = false;
             }
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                self.held_press = None;
+                self.raised_by_held_press = false;
+            }
             _ => {}
         }
         if self.next_frame.is_event(event).is_some() && !self.levels.is_empty() {
@@ -1282,7 +1305,9 @@ impl Widget for MenuLayer {
         }
         // The release that belongs to a dismissing press: eat it, then drop
         // the grab, unless a fresh menu is already up.
-        if let Event::MouseUp(_) = event {
+        if matches!(event, Event::MouseUp(_))
+            || matches!(event, Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id))
+        {
             if self.swallow_up {
                 self.swallow_up = false;
                 if self.levels.is_empty() {
@@ -1337,6 +1362,13 @@ impl Widget for MenuLayer {
                         cx.action(MenuAction::ClickAway { at: e.abs });
                     }
                 }
+            }
+            // The mouse press itself taken away chooses no row.
+            Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id) => {
+                for level in &mut self.levels {
+                    level.press = None;
+                }
+                self.redraw_menus(cx);
             }
             Event::MouseUp(e) => {
                 for level in &mut self.levels {
@@ -1458,6 +1490,7 @@ mod tests {
     /// and a disabled row are all skipped, in both directions, wrapping.
     #[test]
     fn the_arrows_walk_only_the_rows_that_can_be_chosen() {
+        crate::on_test_cx(|| {
         let l = level();
         assert_eq!(l.step(None, 1), Some(1), "the heading is skipped");
         assert_eq!(l.step(Some(1), 1), Some(2));
@@ -1465,12 +1498,14 @@ mod tests {
         assert_eq!(l.step(Some(5), 1), Some(1), "and it wraps");
         assert_eq!(l.step(None, -1), Some(5), "up from nowhere is the last row");
         assert_eq!(l.step(Some(1), -1), Some(5));
+        });
     }
 
     /// A letter walks the rows starting with it, from after the highlight,
     /// so pressing it again finds the next one rather than sticking.
     #[test]
     fn a_letter_walks_the_rows_that_start_with_it() {
+        crate::on_test_cx(|| {
         let mut l = level();
         assert_eq!(l.typeahead('s'), Some(2), "Save");
         assert_eq!(l.typeahead('o'), Some(1), "Open");
@@ -1480,12 +1515,40 @@ mod tests {
         // A heading and a disabled row never answer, whatever their letter.
         assert_eq!(l.typeahead('f'), None, "the File heading is not selectable");
         assert_eq!(l.typeahead('c'), None, "the disabled Close is not selectable");
+        });
+    }
+
+    /// A switch picked inside an open flyout shows its new mark: replacing
+    /// the root's rows hands the open flyout its row's new submenu, and a
+    /// flyout whose rows no longer line up keeps what it had.
+    #[test]
+    fn replacing_the_rows_refreshes_the_open_flyout() {
+        crate::on_test_cx(|| {
+        let switches = |on: bool| vec![MenuRow::new(live_id!(a), "A").checked(on), MenuRow::new(live_id!(b), "B")];
+        let root = |on: bool| vec![MenuRow::new(live_id!(group), "Group").submenu(switches(on)), MenuRow::new(live_id!(other), "Other")];
+        let mut root_level = level();
+        root_level.rows = root(false);
+        let mut flyout = level();
+        flyout.rows = switches(false);
+        flyout.from_row = Some(0);
+        let mut levels = vec![root_level, flyout];
+        levels[0].rows = root(true);
+        refresh_flyouts(&mut levels);
+        assert_eq!(levels[1].rows[0].mark, MenuMark::Check, "the flyout shows the new mark");
+        // A submenu that changed length is not forced onto the open flyout.
+        levels[0].rows[0].submenu.push(MenuRow::new(live_id!(c), "C"));
+        levels[0].rows[0].submenu[0].mark = MenuMark::None;
+        refresh_flyouts(&mut levels);
+        assert_eq!(levels[1].rows.len(), 2);
+        assert_eq!(levels[1].rows[0].mark, MenuMark::Check);
+        });
     }
 
     /// Rows are measured where they are drawn: a rule is thinner than a
     /// row, a heading shorter, and the bubble is the sum plus its padding.
     #[test]
     fn the_bubble_is_as_tall_as_the_rows_it_holds() {
+        crate::on_test_cx(|| {
         let size = measure_rows(&rows());
         let expected = MENU_PAD * 2.0 + SECTION_H + ROW_H * 4.0 + SEP_H;
         assert_eq!(size.y, expected);
@@ -1494,6 +1557,7 @@ mod tests {
         assert_eq!(l.row_rect(0).size.y, SECTION_H);
         assert_eq!(l.row_rect(3).size.y, SEP_H);
         assert_eq!(l.row_rect(1).size.y, ROW_H);
+        });
     }
 
     /// The open menu is one fact, and every change of it broadcasts the
@@ -1501,6 +1565,7 @@ mod tests {
     /// once.
     #[test]
     fn one_menu_is_open_and_every_change_says_so_in_order() {
+        crate::on_test_cx(|| {
         let mut open = OpenMenu::default();
         assert_eq!(open.owner(), None);
         assert_eq!(open.set(Some(live_id!(a))), vec![MenuChange::Opened(live_id!(a))]);
@@ -1512,6 +1577,7 @@ mod tests {
             "close before open"
         );
         assert_eq!(open.set(None), vec![MenuChange::Closed(live_id!(b))]);
+        });
     }
 
     /// The app-wide rule and its one exception, in one place: a menu follows
@@ -1519,16 +1585,19 @@ mod tests {
     /// raised the menu is the one holding it.
     #[test]
     fn a_menu_follows_only_a_pointer_that_is_its_own() {
+        crate::on_test_cx(|| {
         assert!(menu_follows_pointer(false, false), "a free pointer is everyone's");
         assert!(!menu_follows_pointer(true, false), "another control is being dragged");
         assert!(menu_follows_pointer(true, true), "the press that raised it is still down");
         assert!(menu_follows_pointer(false, true));
+        });
     }
 
     /// Whose press it is, read from where it landed: on the control the menu
     /// hangs off, or somewhere else entirely.
     #[test]
     fn the_press_that_raised_a_menu_is_the_one_that_landed_on_its_anchor() {
+        crate::on_test_cx(|| {
         let anchor = Rect { pos: dvec2(100.0, 40.0), size: dvec2(80.0, 20.0) };
         assert!(raised_by_the_press(anchor, Some(dvec2(140.0, 50.0))));
         assert!(!raised_by_the_press(anchor, Some(dvec2(400.0, 300.0))), "a press on something else");
@@ -1537,6 +1606,7 @@ mod tests {
         // raised it IS that point.
         let at = dvec2(400.0, 300.0);
         assert!(raised_by_the_press(Rect { pos: at, size: dvec2(0.0, 0.0) }, Some(at)));
+        });
     }
 }
 
@@ -1580,11 +1650,8 @@ mod pointer_tests {
         }
     }
 
-    fn cx() -> Cx {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.init_cx_os();
-        cx.with_vm(crate::script_mod);
-        cx
+    fn cx() -> crate::PooledCx {
+        crate::checkout_test_cx()
     }
 
     /// A button to hold the pointer down on, and a layer to raise menus in.
@@ -1673,6 +1740,7 @@ mod pointer_tests {
     /// it.
     #[test]
     fn a_menu_stands_down_for_a_drag_it_was_not_raised_by() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1690,6 +1758,7 @@ mod pointer_tests {
         assert_eq!(lit(&cx, &root), "", "no row lights from a pointer another control holds");
         root.handle_event(&mut cx, &release(row), &mut Scope::empty());
         assert!(is_open(&cx, &root), "and the release chooses nothing");
+        });
     }
 
     /// The other half: a menu raised BY the press that is still held is the
@@ -1697,6 +1766,7 @@ mod pointer_tests {
     /// release on one — and goes on walking and choosing.
     #[test]
     fn a_menu_raised_by_the_held_press_still_walks_and_chooses() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1712,6 +1782,7 @@ mod pointer_tests {
         assert_eq!(lit(&cx, &root), "Save", "the gesture's own pointer still lights rows");
         root.handle_event(&mut cx, &release(row), &mut Scope::empty());
         assert!(!is_open(&cx, &root), "and the release chooses the row it ended on");
+        });
     }
 
     /// Dismissal is not a gesture that stands down: a menu left up while
@@ -1719,6 +1790,7 @@ mod pointer_tests {
     /// it, or nothing could ever take it down.
     #[test]
     fn a_press_outside_still_dismisses_a_menu_while_another_control_is_dragged() {
+        crate::on_test_cx(|| {
         let mut cx = cx();
         let root = page(&mut cx);
         let mut target = Target::new(&mut cx);
@@ -1732,5 +1804,6 @@ mod pointer_tests {
         // The second button, since the first is down on the control.
         root.handle_event(&mut cx, &press(dvec2(40.0, 560.0)), &mut Scope::empty());
         assert!(!is_open(&cx, &root), "a press nowhere near the menu closes it all the same");
+        });
     }
 }

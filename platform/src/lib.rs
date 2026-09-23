@@ -100,6 +100,9 @@ pub mod web_socket;
 pub mod audio_stream;
 
 pub mod file_dialogs;
+pub mod hosted_relay;
+#[cfg(any(linux_direct, test))]
+mod direct_clipboard;
 
 mod media_api;
 mod media_host;
@@ -163,7 +166,7 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
-        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace, ScreenEdges},
+        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,

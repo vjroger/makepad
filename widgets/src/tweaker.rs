@@ -20859,7 +20859,7 @@ impl Tweaker {
         // seam wherever it meets different content behind it, which reads as
         // a rendering bug rather than as "the rest is out of the way".
         self.draw_outline.fill_color = vec4(0.09, 0.09, 0.10, 1.0);
-        let mut band = |this: &mut Self, cx: &mut Cx2d, x: f64, y: f64, w: f64, h: f64| {
+        let band = |this: &mut Self, cx: &mut Cx2d, x: f64, y: f64, w: f64, h: f64| {
             if w > 0.0 && h > 0.0 {
                 this.draw_outline
                     .draw_abs(cx, Rect { pos: dvec2(x, y), size: dvec2(w, h) });
@@ -23761,10 +23761,6 @@ mod tests {
             // Display drops the enum and the fields equal to the defaults.
             assert_eq!(fmt_enum(heap, fill_obj, EnumFmt::Display).as_deref(), Some("Fill"));
         });
-    }
-
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
     }
 
     #[test]
