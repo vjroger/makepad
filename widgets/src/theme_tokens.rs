@@ -1137,38 +1137,35 @@ pub fn roles_from_seed_tuned(seed: &SeedColors, scheme: Scheme, tuning: &RoleTun
 /// One brand family grown from a colour somebody named, rather than from a
 /// hue the rule brings its own saturation and lightness to.
 ///
-/// The colour IS the base, byte for byte, wherever it can be: a person who
-/// picked a colour and got a different one back has been told their choice
-/// was a suggestion. It moves for one reason only, which is that it cannot
-/// be seen: a base that does not stand `LEGIBLE` off `page` is carried along
-/// the lightness axis away from the page, a hundredth at a time, until it
-/// does -- the hue and the saturation exactly as they were given, because
-/// the hue is what a person recognises their colour by. What is drawn ON it
-/// needs no such move: one of black and white clears `READABLE` on any
-/// ground there is, and `readable_on` falls to it.
+/// The colour IS the base, byte for byte. Nothing here moves it -- not to
+/// make it stand off a page, not for any other reason: a person who picked a
+/// colour and got a different one back has been told their choice was a
+/// suggestion.
 ///
-/// `page` is the page the family is made to stand off. A caller that wants
-/// its accents to stay put while its page moves passes a page that does not
-/// move -- which is what the theme builder does -- and holds the real page
-/// to what is drawn on it separately.
+/// It used to move. A base that did not stand `LEGIBLE` off `page` was
+/// carried along the lightness axis away from the page until it did, hue and
+/// saturation untouched, which meant that a colour picked close to the page
+/// came back CHANGED -- and the closer somebody's taste ran to the page they
+/// had chosen, the further their colour was walked from them. What has to
+/// give when a colour cannot be told from the page is the PAGE, which is
+/// derived anyway, and the theme builder moves it (`theme_builder::page_of`).
+/// Nothing in a palette is derived from the page, so the walk left nothing
+/// behind when it went.
+///
+/// `page` is now only what the inks are settled against, and is kept in the
+/// signature because that is what it was always for as well: one of black and
+/// white clears `READABLE` on any ground there is, and `readable_on` falls to
+/// it.
 ///
 /// The container and the inks follow from the base the way the rule's own
 /// families do: the container at the scheme's house container lightness in
 /// the base's hue, and every ink put through `readable_on`, so a family made
-/// here reads exactly as well as one the rule grew.
-pub fn family_from_color(scheme: Scheme, color: u32, page: u32) -> RoleFamily {
+/// here reads exactly as well as one the rule grew. Those may move; only the
+/// base is fixed.
+pub fn family_from_color(scheme: Scheme, color: u32, _page: u32) -> RoleFamily {
     let color = color | 0xFF;
-    let (hue, sat, light) = rgb_to_hsl(color);
-    let away = match scheme {
-        Scheme::Light => -0.01,
-        _ => 0.01,
-    };
-    let mut base = color;
-    let mut at = light;
-    while contrast(base, page | 0xFF) < LEGIBLE && (0.0..=1.0).contains(&(at + away)) {
-        at += away;
-        base = hsl_to_rgb(hue, sat, at);
-    }
+    let (hue, sat, _) = rgb_to_hsl(color);
+    let base = color;
     let tuning = RoleTuning::HOUSE;
     match scheme {
         Scheme::Light => {
@@ -1973,12 +1970,12 @@ mod tuning_tests {
 
 
     /// A family grown from a colour somebody named is that colour, byte for
-    /// byte, wherever it stands off the page; where it does not, only its
-    /// lightness moves, away from the page, and only until it does. Its inks
+    /// byte, whatever page it is put to -- including a page it cannot be told
+    /// from, which is the case this used to walk the colour out of. Its inks
     /// read on it and on its container whatever the colour, and the intents
     /// are the house rule's.
     #[test]
-    fn a_named_colour_is_the_family_base_moved_only_to_be_seen() {
+    fn a_named_colour_is_the_family_base_and_nothing_moves_it() {
         let dark_page = 0x4C4C4CFF;
         let light_page = 0xD8D8D8FF;
         let mut checked = 0;
@@ -1987,16 +1984,10 @@ mod tuning_tests {
                 for (sat, light) in [(0.9, 0.5), (0.5, 0.2), (0.4, 0.85), (0.0, 0.5), (1.0, 0.05), (1.0, 0.97)] {
                     let color = hsl_to_rgb(step as f64 * 10.0, sat, light);
                     let family = family_from_color(scheme, color, page);
-                    if contrast(color, page) >= LEGIBLE {
-                        assert_eq!(family.base, color, "{color:08X} in {}", scheme.theme_name());
-                    } else {
-                        let (h, s, _) = rgb_to_hsl(color);
-                        let (bh, bs, _) = rgb_to_hsl(family.base);
-                        if s > 0.05 && bs > 0.05 {
-                            assert!(apart(h, bh) < 3.0, "{color:08X} turned to {:08X}", family.base);
-                        }
-                        assert!(contrast(family.base, page) >= LEGIBLE, "{color:08X} still cannot be seen");
-                    }
+                    assert_eq!(family.base, color, "{color:08X} in {}", scheme.theme_name());
+                    // And on the page it is nearest of all, its own: still
+                    // itself, where the old rule walked it furthest.
+                    assert_eq!(family_from_color(scheme, color, color).base, color, "{color:08X} on itself");
                     assert!(contrast(family.on_base, family.base) >= READABLE);
                     assert!(contrast(family.on_container, family.container) >= READABLE);
                     checked += 1;
