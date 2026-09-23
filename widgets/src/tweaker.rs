@@ -11126,6 +11126,15 @@ impl Tweaker {
                 // reason: an empty label still takes the spacing after an
                 // icon, which is what pushes an icon-only face's mark off
                 // its centre.
+                //
+                // The two faces are not drawn in the same ink, and that is
+                // the point of them: open is a quiet grey, a shade under
+                // the row's own name so that nine unlocked rows do not
+                // shout over the words beside them, and shut is white on
+                // the panel's lit fill. Which state a row is in has to be
+                // readable as a COLOUR down the column, since the only
+                // other difference is where a shackle sits, which at ten
+                // points is three pixels.
                 let TbLockT = View {
                     width: Fit
                     height: Fit
@@ -11143,7 +11152,7 @@ impl Tweaker {
                         text: ""
                         icon_walk: Walk{width: 10 height: 10}
                         draw_icon +: {
-                            color: #xd8d8d8
+                            color: #x8a8a8a
                             svg: crate_resource("self:resources/icons/icon_lock_open.svg")
                         }
                     }
@@ -11158,7 +11167,7 @@ impl Tweaker {
                         text: ""
                         icon_walk: Walk{width: 10 height: 10}
                         draw_icon +: {
-                            color: #xd8d8d8
+                            color: #xffffff
                             svg: crate_resource("self:resources/icons/icon_lock_shut.svg")
                         }
                     }
@@ -22667,6 +22676,20 @@ mod tests {
         for face in ["lock_open := PanelButton", "lock_shut := PanelButton"] {
             assert_eq!(src.matches(face).count(), 1, "`{face}` is not declared once");
         }
+        // And the two are not drawn in one ink. The operator, on his
+        // mockup: "the lock/unlock icon should not have the same color".
+        // A shackle ten points wide moves three pixels between the states,
+        // so the colour is what carries a row's state down the column.
+        let lock_ink = |face: &str| -> String {
+            let rest = &src[src.find(face).expect("the face is declared")..];
+            let at = rest.find("color: #x").expect("the face names an icon colour") + "color: #x".len();
+            rest[at..at + 6].to_string()
+        };
+        assert_ne!(
+            lock_ink("lock_open := PanelButton"),
+            lock_ink("lock_shut := PanelButton"),
+            "the open lock and the shut one are drawn in the same colour"
+        );
         // And the paged strip the carousel replaced is gone, slots, page
         // button, page count and all: a slot left declared is a slot a
         // press can still be routed to. So is the line that named the palette
