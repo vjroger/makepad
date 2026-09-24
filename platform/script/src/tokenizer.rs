@@ -544,8 +544,11 @@ impl ScriptTokenizer {
         self.push_tok(self.pos - len, ScriptToken::Color(color));
     }
 
+    /// A block token for the character just consumed: `pos` has already
+    /// moved past it, so the token starts one back, as every other
+    /// token's position names its first character.
     fn emit_token_here(&mut self, token: ScriptToken) {
-        self.push_tok(self.pos, token)
+        self.push_tok(self.pos - 1, token)
     }
 
     fn append_unfinished_string(&mut self, c: char) {
