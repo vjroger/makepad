@@ -816,4 +816,383 @@ mod tests {
             );
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Band occupancy measurement.
+    //
+    // Quantifies what re-enabling band acceleration would buy, on CPU, with
+    // no GPU involved. The shipping shader path runs scan_horizontal_all +
+    // scan_vertical_all, i.e. two passes over every curve in the glyph (2N
+    // per sample). The banded path selects one horizontal band from the
+    // sample's y and one vertical band from its x, and scans only those two
+    // lists. Averaged uniformly over bands, banded cost is
+    // mean(|h_band|) + mean(|v_band|).
+    //
+    //   cargo test -p makepad-draw --release band_occupancy -- --nocapture
+    // ---------------------------------------------------------------------
+
+    const MEASURE_NUM_BANDS: usize = 24;
+
+    fn curve_is_horizontal_t(c: &TestCurve) -> bool {
+        (c.p0.1 - c.p1.1).abs() <= 0.000001 && (c.p0.1 - c.p2.1).abs() <= 0.000001
+    }
+
+    fn curve_is_vertical_t(c: &TestCurve) -> bool {
+        (c.p0.0 - c.p1.0).abs() <= 0.000001 && (c.p0.0 - c.p2.0).abs() <= 0.000001
+    }
+
+    fn band_range_t(min_value: f32, max_value: f32, num_bands: usize) -> Option<(usize, usize)> {
+        if num_bands == 0 {
+            return None;
+        }
+        let bands_f = num_bands as f32;
+        let max_band = (num_bands - 1) as isize;
+        let mut lo = (min_value.clamp(0.0, 1.0) * bands_f).floor() as isize;
+        let mut hi = (max_value.clamp(0.0, 1.0) * bands_f).floor() as isize;
+        lo = lo.clamp(0, max_band);
+        hi = hi.clamp(0, max_band);
+        if hi < lo {
+            std::mem::swap(&mut lo, &mut hi);
+        }
+        Some((lo as usize, hi as usize))
+    }
+
+    /// Mirrors the band assignment in `DrawGlyph::build_bands`
+    /// (draw_glyph.rs:946-1031), returning per-band index lists instead of
+    /// the packed texel payload.
+    fn build_band_lists(
+        curves: &[TestCurve],
+        num_bands: usize,
+    ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        let mut h = vec![Vec::<usize>::new(); num_bands];
+        let mut v = vec![Vec::<usize>::new(); num_bands];
+        let epsilon = 1.0 / 1024.0;
+
+        for (i, c) in curves.iter().enumerate() {
+            if !curve_is_horizontal_t(c) {
+                let lo_v = c.p0.1.min(c.p1.1).min(c.p2.1) - epsilon;
+                let hi_v = c.p0.1.max(c.p1.1).max(c.p2.1) + epsilon;
+                if let Some((lo, hi)) = band_range_t(lo_v, hi_v, num_bands) {
+                    for b in lo..=hi {
+                        h[b].push(i);
+                    }
+                }
+            }
+            if !curve_is_vertical_t(c) {
+                let lo_v = c.p0.0.min(c.p1.0).min(c.p2.0) - epsilon;
+                let hi_v = c.p0.0.max(c.p1.0).max(c.p2.0) + epsilon;
+                if let Some((lo, hi)) = band_range_t(lo_v, hi_v, num_bands) {
+                    for b in lo..=hi {
+                        v[b].push(i);
+                    }
+                }
+            }
+        }
+        (h, v)
+    }
+
+    fn band_index_for(value: f32, num_bands: usize) -> usize {
+        ((value.clamp(0.0, 1.0) * num_bands as f32).floor() as usize).min(num_bands - 1)
+    }
+
+    /// Same coverage math as `alpha_at_full_scan`, but restricted to the two
+    /// band lists the shader would select for this sample — the parity
+    /// oracle for re-enabling bands.
+    fn alpha_at_banded(
+        curves: &[TestCurve],
+        h_bands: &[Vec<usize>],
+        v_bands: &[Vec<usize>],
+        sample: (f32, f32),
+        px_x: f32,
+        px_y: f32,
+    ) -> f32 {
+        let mut coverage_x = 0.0;
+        let mut weight_x: f32 = 0.0;
+        let mut coverage_y = 0.0;
+        let mut weight_y: f32 = 0.0;
+
+        let hb = band_index_for(sample.1, MEASURE_NUM_BANDS);
+        let vb = band_index_for(sample.0, MEASURE_NUM_BANDS);
+
+        for &i in &h_bands[hb] {
+            let curve = &curves[i];
+            let p12 = [
+                curve.p0.0 - sample.0,
+                curve.p0.1 - sample.1,
+                curve.p1.0 - sample.0,
+                curve.p1.1 - sample.1,
+            ];
+            let p3 = [curve.p2.0 - sample.0, curve.p2.1 - sample.1];
+            let h_code = calc_root_code(p12[1], p12[3], p3[1]);
+            if h_code != 0 {
+                let (r0, r1) = solve_horiz_poly(p12, p3);
+                let r0 = r0 / px_x;
+                let r1 = r1 / px_x;
+                if (h_code & 1) != 0 {
+                    coverage_x += saturate(r0 + 0.5);
+                    weight_x = weight_x.max(saturate(1.0 - r0.abs() * 2.0));
+                }
+                if h_code > 1 {
+                    coverage_x -= saturate(r1 + 0.5);
+                    weight_x = weight_x.max(saturate(1.0 - r1.abs() * 2.0));
+                }
+            }
+        }
+
+        for &i in &v_bands[vb] {
+            let curve = &curves[i];
+            let p12 = [
+                curve.p0.0 - sample.0,
+                curve.p0.1 - sample.1,
+                curve.p1.0 - sample.0,
+                curve.p1.1 - sample.1,
+            ];
+            let p3 = [curve.p2.0 - sample.0, curve.p2.1 - sample.1];
+            let v_code = calc_root_code(p12[0], p12[2], p3[0]);
+            if v_code != 0 {
+                let (r0, r1) = solve_vert_poly(p12, p3);
+                let r0 = r0 / px_y;
+                let r1 = r1 / px_y;
+                if (v_code & 1) != 0 {
+                    coverage_y -= saturate(r0 + 0.5);
+                    weight_y = weight_y.max(saturate(1.0 - r0.abs() * 2.0));
+                }
+                if v_code > 1 {
+                    coverage_y += saturate(r1 + 0.5);
+                    weight_y = weight_y.max(saturate(1.0 - r1.abs() * 2.0));
+                }
+            }
+        }
+
+        calc_coverage(coverage_x, coverage_y, weight_x, weight_y)
+    }
+
+    fn load_font_from(rel: &str) -> Option<std::rc::Rc<crate::text::font::Font>> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        if !path.exists() {
+            return None;
+        }
+        let mut loader = Loader::new(layouter::Settings::default().loader);
+        let font_id: FontId = 0x5151_0002_u64.into();
+        let font_data = SharedBytes::from_file_mmap_or_read(path).ok()?;
+        loader.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        Some(loader.get_or_load_font(font_id).clone())
+    }
+
+    struct GlyphMeasure {
+        curves: usize,
+        mean_h: f64,
+        mean_v: f64,
+        worst_band: usize,
+    }
+
+    fn measure_font(label: &str, rel_path: &str, sample: &str) {
+        let Some(font) = load_font_from(rel_path) else {
+            println!("  {label:<22} SKIPPED (font not found at {rel_path})");
+            return;
+        };
+        let Ok(face) = rustybuzz::ttf_parser::Face::parse(font.data().as_slice(), 0) else {
+            println!("  {label:<22} SKIPPED (face failed to parse)");
+            return;
+        };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut atlas = SlugAtlas::new(&mut cx);
+
+        let mut measures: Vec<GlyphMeasure> = Vec::new();
+
+        for ch in sample.chars() {
+            let Some(gid) = face.glyph_index(ch) else {
+                continue;
+            };
+            let info = match atlas.get_or_cache_glyph(font.as_ref(), gid.0, true) {
+                SlugGlyphCacheResult::NeedsUpload { glyph, .. }
+                | SlugGlyphCacheResult::Ready(glyph) => glyph,
+                _ => continue,
+            };
+            if info.curve_count == 0 {
+                continue;
+            }
+            let curves = curves_for_glyph(&atlas, info.curve_offset, info.curve_count);
+            let (h, v) = build_band_lists(&curves, MEASURE_NUM_BANDS);
+            let bands_f = MEASURE_NUM_BANDS as f64;
+            measures.push(GlyphMeasure {
+                curves: curves.len(),
+                mean_h: h.iter().map(|l| l.len()).sum::<usize>() as f64 / bands_f,
+                mean_v: v.iter().map(|l| l.len()).sum::<usize>() as f64 / bands_f,
+                worst_band: h
+                    .iter()
+                    .chain(v.iter())
+                    .map(|l| l.len())
+                    .max()
+                    .unwrap_or(0),
+            });
+        }
+
+        if measures.is_empty() {
+            println!("  {label:<22} SKIPPED (no glyphs with curves)");
+            return;
+        }
+
+        let n = measures.len() as f64;
+        let mean_curves = measures.iter().map(|m| m.curves).sum::<usize>() as f64 / n;
+        let max_curves = measures.iter().map(|m| m.curves).max().unwrap_or(0);
+        // Shipping cost per sample: two full passes over all curves.
+        let full: f64 = measures.iter().map(|m| 2.0 * m.curves as f64).sum::<f64>() / n;
+        // Banded cost per sample: one horizontal list + one vertical list.
+        let banded: f64 = measures.iter().map(|m| m.mean_h + m.mean_v).sum::<f64>() / n;
+        // Worst case: the single fattest band across the corpus.
+        let worst = measures.iter().map(|m| m.worst_band).max().unwrap_or(0);
+
+        let mut ratios: Vec<f64> = measures
+            .iter()
+            .map(|m| {
+                let b = m.mean_h + m.mean_v;
+                if b > 0.0 {
+                    2.0 * m.curves as f64 / b
+                } else {
+                    f64::INFINITY
+                }
+            })
+            .filter(|r| r.is_finite())
+            .collect();
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median_ratio = ratios[ratios.len() / 2];
+        let min_ratio = ratios[0];
+        let max_ratio = ratios[ratios.len() - 1];
+
+        println!(
+            "  {label:<22} glyphs={:<4} curves avg={:<6.1} max={:<4}  \
+             cost/sample full={:<7.1} banded={:<6.1}  \
+             speedup avg={:.2}x median={:.2}x range={:.2}-{:.2}x  worst_band={}",
+            measures.len(),
+            mean_curves,
+            max_curves,
+            full,
+            banded,
+            full / banded,
+            median_ratio,
+            min_ratio,
+            max_ratio,
+            worst,
+        );
+    }
+
+    #[test]
+    fn band_occupancy_measurement() {
+        const LATIN: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                             abcdefghijklmnopqrstuvwxyz\
+                             0123456789.,;:!?'\"()[]{}@#$%&*+-=/\\<>";
+        // Common CJK plus a few high-stroke-count characters.
+        const CJK: &str = "的一是不了人我在有他这为之大来以个中上们\
+                           到说国和地也子时道出而要于就下得可你年生\
+                           鬱靈麤齾龘齉爨矗贔";
+        const MATH: &str = "∫∑∏√∞≈≠≤≥±×÷∂∇αβγδεθλμπστφχψω";
+
+        println!();
+        println!(
+            "SLUG band occupancy, NUM_BANDS={MEASURE_NUM_BANDS} \
+             (cost model: full = 2N per sample, banded = |h_band| + |v_band|)"
+        );
+        measure_font(
+            "IBMPlexSans (latin)",
+            "../widgets/resources/IBMPlexSans-Text.ttf",
+            LATIN,
+        );
+        measure_font(
+            "LiberationMono",
+            "../widgets/resources/LiberationMono-Regular.ttf",
+            LATIN,
+        );
+        measure_font(
+            "LXGWWenKai (CJK)",
+            "../widgets/resources/LXGWWenKaiRegular.ttf",
+            CJK,
+        );
+        measure_font(
+            "NewCMMath",
+            "../libs/latex_math/fonts/NewCMMath-Regular.otf",
+            MATH,
+        );
+        println!();
+    }
+
+    #[test]
+    fn banded_scan_matches_full_curve_scan() {
+        // Latin, mono (many axis-aligned stems -> exercises the
+        // curve_is_horizontal / curve_is_vertical exclusions), CJK (highest
+        // curve counts, most band crossings), and math.
+        for (rel, sample) in [
+            ("../widgets/resources/IBMPlexSans-Text.ttf", "AgWSLOoxE8#@"),
+            ("../widgets/resources/LiberationMono-Regular.ttf", "ELTHio0#"),
+            ("../widgets/resources/LXGWWenKaiRegular.ttf", "鬱靈麤齾龘的一是"),
+            ("../libs/latex_math/fonts/NewCMMath-Regular.otf", "∫∑∏√≈"),
+        ] {
+            check_band_parity_for(rel, sample);
+        }
+    }
+
+    fn check_band_parity_for(rel: &str, sample_chars: &str) {
+        let Some(font) = load_font_from(rel) else {
+            println!("  parity SKIPPED (font not found: {rel})");
+            return;
+        };
+        let face = rustybuzz::ttf_parser::Face::parse(font.data().as_slice(), 0)
+            .expect("font face should parse");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut atlas = SlugAtlas::new(&mut cx);
+
+        let mut worst_delta: f32 = 0.0;
+        let mut checked = 0usize;
+
+        for ch in sample_chars.chars() {
+            let Some(gid) = face.glyph_index(ch) else {
+                continue;
+            };
+            let info = match atlas.get_or_cache_glyph(font.as_ref(), gid.0, true) {
+                SlugGlyphCacheResult::NeedsUpload { glyph, .. }
+                | SlugGlyphCacheResult::Ready(glyph) => glyph,
+                _ => continue,
+            };
+            if info.curve_count == 0 {
+                continue;
+            }
+            let curves = curves_for_glyph(&atlas, info.curve_offset, info.curve_count);
+            let (h, v) = build_band_lists(&curves, MEASURE_NUM_BANDS);
+
+            for y in 0..65 {
+                for x in 0..65 {
+                    let sample = (x as f32 / 64.0, y as f32 / 64.0);
+                    let full = alpha_at_full_scan(&curves, sample, 1.0 / 192.0, 1.0 / 192.0);
+                    let band =
+                        alpha_at_banded(&curves, &h, &v, sample, 1.0 / 192.0, 1.0 / 192.0);
+                    let delta = (full - band).abs();
+                    if delta > worst_delta {
+                        worst_delta = delta;
+                    }
+                    checked += 1;
+                    assert!(
+                        delta < 1e-4,
+                        "band scan diverged for {ch:?} at {sample:?}: \
+                         full={full} banded={band} delta={delta}"
+                    );
+                }
+            }
+        }
+
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        println!(
+            "  parity {name:<28} {checked:>6} samples, worst delta {worst_delta:e}"
+        );
+        assert!(checked > 0, "expected to check at least one glyph in {rel}");
+    }
 }
