@@ -34,6 +34,30 @@ script_mod! {
     let neu_light_ink = #xFFFFFFFF
     let neu_shadow_ink = #x9299B3FF
     let neu_glow_ink = #x7C4DFFFF
+    // The ground every control stands on and is moulded out of, and the ink
+    // its label is written in. The bench shades each face from its ground,
+    // so a face takes it in every state and the relief carries the state.
+    let neu_ground = #xEEF0F6FF
+    let neu_ink = #x3A4052FF
+
+    // THE HOUSING IS THE STAGE. Each preset brings a ground of its own --
+    // the neumorphic's near-white, the obsidian's near-black -- and the
+    // controls throw their shadows and lips onto it, as on the bench's
+    // canvas. Flat itself whatever the catalogue's theme says of material:
+    // it is only the surface the relief lands on.
+    let Stage = RoundedView{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: theme.space_3
+        padding: theme.mspace_3
+        draw_bg +: {
+            color: neu_ground
+            material: 0.0
+            border_radius: 10.0
+            border_size: 0.0
+        }
+    }
 
     // The margin is the room the shadow falls into, paid for again in the
     // padding, since a control keeps its quad and insets its face rather
@@ -41,6 +65,11 @@ script_mod! {
     let Cap = Button{
         padding: Inset{left: 22. right: 22. top: 16. bottom: 16.}
         draw_bg +: {
+            color: neu_ground
+            color_hover: neu_ground
+            color_down: neu_ground
+            color_focus: neu_ground
+            color_disabled: neu_ground
             material: neu_tier
             material_margin: 10.0
             material_light: neu_light
@@ -54,7 +83,14 @@ script_mod! {
             material_glow_ink: neu_glow_ink
             border_size: 0.0
         }
-        draw_text +: {material_ink_glow: 0.0}
+        draw_text +: {
+            color: neu_ink
+            color_hover: neu_ink
+            color_down: neu_ink
+            color_focus: neu_ink
+            color_disabled: neu_ink
+            material_ink_glow: 0.0
+        }
     }
     // The three press idioms, one signed number each. The illuminating cap
     // keeps a glow of its own, which the panel leaves alone.
@@ -67,6 +103,12 @@ script_mod! {
 
     let Well = CheckBox{
         draw_bg +: {
+            color: neu_ground
+            color_hover: neu_ground
+            color_down: neu_ground
+            color_focus: neu_ground
+            color_active: neu_ground
+            color_disabled: neu_ground
             material: neu_tier
             material_light: neu_light
             material_relief: neu_relief
@@ -78,10 +120,24 @@ script_mod! {
             material_shadow_ink: neu_shadow_ink
             material_glow_ink: neu_glow_ink
             border_size: 0.0
+        }
+        draw_text +: {
+            color: neu_ink
+            color_hover: neu_ink
+            color_down: neu_ink
+            color_focus: neu_ink
+            color_active: neu_ink
+            color_disabled: neu_ink
         }
     }
     let Pill = Toggle{
         draw_bg +: {
+            color: neu_ground
+            color_hover: neu_ground
+            color_down: neu_ground
+            color_focus: neu_ground
+            color_active: neu_ground
+            color_disabled: neu_ground
             material: neu_tier
             material_light: neu_light
             material_relief: neu_relief
@@ -94,10 +150,31 @@ script_mod! {
             material_glow_ink: neu_glow_ink
             border_size: 0.0
         }
+        draw_text +: {
+            color: neu_ink
+            color_hover: neu_ink
+            color_down: neu_ink
+            color_focus: neu_ink
+            color_active: neu_ink
+            color_disabled: neu_ink
+        }
     }
+    // The handle is a cap of the same ground, not the stock slider's
+    // two-tone gradient: a gradient face would read as a second material.
     let Groove = Slider{
         width: Fill
         draw_bg +: {
+            color: neu_ground
+            color_hover: neu_ground
+            color_focus: neu_ground
+            color_drag: neu_ground
+            color_disabled: neu_ground
+            handle_color: neu_ground
+            handle_color_hover: neu_ground
+            handle_color_focus: neu_ground
+            handle_color_drag: neu_ground
+            handle_color_disabled: neu_ground
+            handle_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
             material: neu_tier
             material_light: neu_light
             material_relief: neu_relief
@@ -108,11 +185,28 @@ script_mod! {
             material_light_ink: neu_light_ink
             material_shadow_ink: neu_shadow_ink
             border_size: 0.0
+        }
+        draw_text +: {
+            color: neu_ink
+            color_hover: neu_ink
+            color_drag: neu_ink
+            color_focus: neu_ink
+            color_disabled: neu_ink
+        }
+        text_input +: {
+            draw_text +: {
+                color: neu_ink
+                color_hover: neu_ink
+                color_focus: neu_ink
+                color_down: neu_ink
+                color_disabled: neu_ink
+            }
         }
     }
     let Knob = RotaryKnob{
         text: ""
         draw_bg +: {
+            color: neu_ground
             material: neu_tier
             material_margin: 8.0
             material_light: neu_light
@@ -129,24 +223,17 @@ script_mod! {
     }
 
     mod.stories.SurfaceMaterialOverview = StoryPage{
-        // THE HOUSING IS THE PAGE. Every control here is moulded out of the
-        // housing colour, theme.color_outset, and throws its shadow and lip
-        // onto it; each material sheet sets the window's colour to that same
-        // value. A stock theme does not, so the page paints it itself, or the
-        // controls read as parts of one material lying on another.
-        show_bg: true
-        draw_bg +: {color: theme.color_outset}
-        StoryNote{text: "The base shaders carry a moulded material behind one uniform. At 0, every stock theme, they draw what they always drew; at 1 a face is lit from its own distance field (a shoulder, a cast shadow, a well's inner shadow); at 2 it also takes a rim, a gloss sweep and a specular. This page raises the tier on each control, whatever theme is showing, so the relief can be read against the flat page around it."}
-        StoryNote{text: "The Controls tab carries the material bench's controls, in its groups: Light, Relief, Surface, Finish, Shadow and Colours, each folded away or back by a click on its heading, and a preset that sets them all to one of the bench's eleven materials. They write every control on this page at once. The page starts on the bench's neumorphic preset at tier 2; its inks were picked for a pale ground, so the Light theme or the Neumorphic sheet shows it as it was tuned."}
+        StoryNote{text: "The base shaders carry a moulded material behind one uniform. At 0, every stock theme, they draw what they always drew; at 1 a face is lit from its own distance field (a shoulder, a cast shadow, a well's inner shadow); at 2 it also takes a rim, a gloss sweep and a specular. This page raises the tier on each control, whatever theme is showing, so the relief can be read against the flat ground around it."}
+        StoryNote{text: "The Controls tab carries the material bench's controls, in its groups: Light, Relief, Surface, Finish, Shadow and Colours, each folded away or back by a click on its heading, and a preset that sets them all to one of the bench's eleven materials. They write every control on this page at once. A preset also brings the bench's ground for its material, which the examples stand on and are moulded out of, and its label ink, so each is seen as it was tuned whatever theme is showing. The page starts on the neumorphic preset at tier 2."}
 
         StoryHeading{text: "Raised and sunken"}
         StoryNote{text: "The same material lit from opposite sides. A rounded view stands off the page: its face is lit and its cast shadow, contact ring and light-side lip go UNDER the face, inside the margin border_inset reclaims. A panel is a shallow step in the housing; sunken, it takes the surround's shadow across its face."}
-        StoryRow{
+        stage_views := Stage{StoryRow{
             spacing: theme.space_3
             raised := RoundedView{
                 width: 160. height: 90.
                 draw_bg +: {
-                    color: theme.color_outset
+                    color: neu_ground
                     border_radius: 8.
                     border_inset: vec4(12. 12. 12. 12.)
                     material: neu_tier
@@ -163,6 +250,7 @@ script_mod! {
             panel := PanelView{
                 width: 160. height: 90.
                 draw_bg +: {
+                    color: neu_ground
                     material: neu_tier
                     material_light: neu_light
                     material_relief: neu_relief
@@ -177,6 +265,7 @@ script_mod! {
             inset := InsetPanelView{
                 width: 160. height: 90.
                 draw_bg +: {
+                    color: neu_ground
                     material: neu_tier
                     material_light: neu_light
                     material_relief: neu_relief
@@ -188,56 +277,58 @@ script_mod! {
                     material_shadow_ink: neu_shadow_ink
                 }
             }
-        }
+        }}
 
         StoryHeading{text: "A button that really goes down"}
         StoryNote{text: "Rest, hover, pressed, focused, disabled. The pointer lifts a cap a quarter more; a press adds material_press, and its sign and size pick the idiom. Disabled moulds the cap flat into the page, which also takes its shadow away. The focus ring stays what it was: focus is a ring, never a change of relief."}
         StoryNote{text: "INVERT: past minus the raise the face crosses zero, the lit and shaded shoulders swap and the cap reads as pushed into the page. material_press_invert dishes the face as well. The neumorphic sheet, and the row the panel's press controls move."}
-        StoryRow{
+        stage_invert := Stage{StoryRow{
             subject := Invert{text: "Rest"}
             invert_hover := Invert{text: "Hover" animator +: {hover: {default: @on}}}
             invert_pressed := Invert{text: "Pressed" animator +: {hover: {default: @down}}}
             invert_focused := Invert{text: "Focused" animator +: {focus: {default: @on}}}
             invert_disabled := Invert{text: "Disabled" animator +: {disabled: {default: @on}}}
-        }
+        }}
         StoryNote{text: "DEEPEN: the cap drops but stays above the page, its face still convex, so the shadow closes up and the specular dims. Moulded plastic flexes; it does not turn inside out. The molded sheet."}
-        StoryRow{
+        stage_deepen := Stage{StoryRow{
             deepen_rest := Deepen{text: "Rest"}
             deepen_hover := Deepen{text: "Hover" animator +: {hover: {default: @on}}}
             deepen_pressed := Deepen{text: "Pressed" animator +: {hover: {default: @down}}}
             deepen_focused := Deepen{text: "Focused" animator +: {focus: {default: @on}}}
             deepen_disabled := Deepen{text: "Disabled" animator +: {disabled: {default: @on}}}
-        }
+        }}
         StoryNote{text: "ILLUMINATE: the cap barely moves and the glow carries the state -- the face lifts toward the glow ink, a halo spills onto the page, and the label lights with it, pushed past full brightness so it clips bright rather than tints. The glossy and milled sheets."}
-        StoryRow{
+        stage_illuminate := Stage{StoryRow{
             illuminate_rest := Illuminate{text: "Rest"}
             illuminate_hover := Illuminate{text: "Hover" animator +: {hover: {default: @on}}}
             illuminate_pressed := Illuminate{text: "Pressed" animator +: {hover: {default: @down}}}
             illuminate_focused := Illuminate{text: "Focused" animator +: {focus: {default: @on}}}
             illuminate_disabled := Illuminate{text: "Disabled" animator +: {disabled: {default: @on}}}
-        }
+        }}
 
         StoryHeading{text: "Wells and caps"}
         StoryNote{text: "A check box is a well cut into the housing. A toggle is a sunken track with one solid knob travelling in it, the same substance as the housing, throwing its shadow on the track and taking the active ink as it turns on. A slider's track is a groove and its handle a cap standing in it."}
-        StoryRow{
-            spacing: theme.space_3
-            well_off := Well{text: "Off"}
-            well_on := Well{text: "On" active: true}
-            pill_off := Pill{text: "Off"}
-            pill_on := Pill{text: "On" active: true}
-        }
-        StoryRow{
-            groove := Groove{text: "Level"}
+        stage_wells := Stage{
+            StoryRow{
+                spacing: theme.space_3
+                well_off := Well{text: "Off"}
+                well_on := Well{text: "On" active: true}
+                pill_off := Pill{text: "Off"}
+                pill_on := Pill{text: "On" active: true}
+            }
+            StoryRow{
+                groove := Groove{text: "Level"}
+            }
         }
         StoryNote{text: "The knob is a domed cap: the shoulder rolls into a shallow dome so the whole face catches the light, and it keeps back from its box by the margin its shadow falls into, held to a third of the radius so a 24-square knob keeps a face. At 24, 32, 44 and 64."}
-        StoryRow{
+        stage_knobs := Stage{StoryRow{
             spacing: theme.space_3
             align: Align{x: 0. y: 1.}
             knob_24 := Knob{width: 24. height: 24.}
             knob_32 := Knob{width: 32. height: 32.}
             knob_44 := Knob{width: 44. height: 44.}
             knob_64 := Knob{width: 64. height: 64.}
-        }
+        }}
     }
 }
 
@@ -266,23 +357,54 @@ macro_rules! illuminate_row {
         "illuminate_rest illuminate_hover illuminate_pressed illuminate_focused illuminate_disabled"
     };
 }
-macro_rules! wells_and_knobs {
+macro_rules! wells {
     () => {
-        "well_off well_on pill_off pill_on knob_24 knob_32 knob_44 knob_64"
+        "well_off well_on pill_off pill_on"
+    };
+}
+macro_rules! knobs {
+    () => {
+        "knob_24 knob_32 knob_44 knob_64"
+    };
+}
+macro_rules! stages {
+    () => {
+        "stage_views stage_invert stage_deepen stage_illuminate stage_wells stage_knobs"
     };
 }
 
 /// Every material control on the page.
-const EVERY: &str =
-    concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells_and_knobs!(), " groove");
+const EVERY: &str = concat!(
+    views!(), " ", invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells!(), " ", knobs!(), " groove"
+);
 /// Every one but the illuminating row, which keeps its glow.
-const INNER: &str = concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", wells_and_knobs!(), " groove");
+const INNER: &str = concat!(views!(), " ", invert_row!(), " ", deepen_row!(), " ", wells!(), " ", knobs!(), " groove");
 /// Every one with a glow ink.
-const GLOW_INK: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells_and_knobs!());
+const GLOW_INK: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!(), " ", wells!(), " ", knobs!());
 /// The inverting row, the neumorphic idiom the press controls move.
 const PRESSED: &str = invert_row!();
 /// The buttons whose label does not already glow.
 const LIT_LABEL: &str = concat!(invert_row!(), " ", deepen_row!());
+/// Every button on the page.
+const BUTTONS: &str = concat!(invert_row!(), " ", deepen_row!(), " ", illuminate_row!());
+/// What takes the ground as one colour: the stages, the views moulded
+/// straight out of them, and the knobs, which have no state colours.
+const PLAIN_GROUND: &str = concat!(stages!(), " ", views!(), " ", knobs!());
+
+// The ground and the label ink, by the properties each widget names them
+// with: a face in every state, so the relief alone carries the state.
+const BUTTON_FACE: &str = "draw_bg.color draw_bg.color_hover draw_bg.color_down draw_bg.color_focus draw_bg.color_disabled";
+const WELL_FACE: &str =
+    "draw_bg.color draw_bg.color_hover draw_bg.color_down draw_bg.color_focus draw_bg.color_active draw_bg.color_disabled";
+const GROOVE_FACE: &str = "draw_bg.color draw_bg.color_hover draw_bg.color_focus draw_bg.color_drag draw_bg.color_disabled \
+    draw_bg.handle_color draw_bg.handle_color_hover draw_bg.handle_color_focus draw_bg.handle_color_drag draw_bg.handle_color_disabled";
+const BUTTON_INK: &str =
+    "draw_text.color draw_text.color_hover draw_text.color_down draw_text.color_focus draw_text.color_disabled";
+const WELL_INK: &str = "draw_text.color draw_text.color_hover draw_text.color_down draw_text.color_focus draw_text.color_active \
+    draw_text.color_disabled";
+const GROOVE_INK: &str = "draw_text.color draw_text.color_hover draw_text.color_drag draw_text.color_focus draw_text.color_disabled \
+    text_input.draw_text.color text_input.draw_text.color_hover text_input.draw_text.color_focus text_input.draw_text.color_down \
+    text_input.draw_text.color_disabled";
 
 // The bench's labels, shared by the controls and the presets that set them.
 const TIER: &str = "Tier (0 / 1 / 2)";
@@ -313,11 +435,13 @@ const CONTACT: &str = "Contact occlusion";
 const INNER_SHADOW: &str = "Inner shadow (sunken)";
 const INNER_BLUR: &str = "Inner blur (pt)";
 const GROUND_LIP: &str = "Ground lip (extruded)";
+const GROUND: &str = "Ground";
 const LIGHT_INK: &str = "Light ink";
 const SHADOW_INK: &str = "Shadow ink";
 const GLOW_INK_LABEL: &str = "Glow ink";
+const LABEL_INK: &str = "Label ink";
 
-/// One of the bench's materials, the part of it this page has a uniform for.
+/// One of the bench's materials, the part of it this page has a property for.
 #[derive(Clone, Copy)]
 struct Material {
     level: f64,
@@ -348,9 +472,11 @@ struct Material {
     inner: f64,
     inner_r: f64,
     lip: f64,
+    ground: u32,
     light_ink: u32,
     shadow_ink: u32,
     glow_ink: u32,
+    ink: u32,
 }
 
 // The bench's four base materials, and the seven it derives from them by
@@ -388,9 +514,11 @@ const NEUMORPHIC: Material = Material {
     inner: 0.55,
     inner_r: 10.0,
     lip: 0.70,
+    ground: 0xEEF0F6FF,
     light_ink: 0xFFFFFFFF,
     shadow_ink: 0x9299B3FF,
     glow_ink: 0x7C4DFFFF,
+    ink: 0x3A4052FF,
 };
 const MOULDED: Material = Material {
     level: 2.0,
@@ -421,9 +549,11 @@ const MOULDED: Material = Material {
     inner: 0.50,
     inner_r: 7.0,
     lip: 0.0,
+    ground: 0xD8DAD6FF,
     light_ink: 0xF6F6F3FF,
     shadow_ink: 0x6B7176FF,
     glow_ink: 0xD24B3AFF,
+    ink: 0x2C3033FF,
 };
 const GLOSSY: Material = Material {
     level: 2.0,
@@ -454,9 +584,11 @@ const GLOSSY: Material = Material {
     inner: 0.72,
     inner_r: 9.0,
     lip: 0.0,
+    ground: 0x2B2F34FF,
     light_ink: 0xFFFFFFFF,
     shadow_ink: 0x05070AFF,
     glow_ink: 0x4DD0E1FF,
+    ink: 0xC6CED6FF,
 };
 const MILLED: Material = Material {
     level: 2.0,
@@ -487,9 +619,11 @@ const MILLED: Material = Material {
     inner: 0.66,
     inner_r: 6.0,
     lip: 0.0,
+    ground: 0x15171BFF,
     light_ink: 0x9AA3ADFF,
     shadow_ink: 0x000000FF,
     glow_ink: 0xFF7A18FF,
+    ink: 0x9AA3ADFF,
 };
 const PORCELAIN: Material = Material {
     level: 2.0,
@@ -520,14 +654,18 @@ const PORCELAIN: Material = Material {
     hair: 0.15,
     aoreach: 1.2,
     pinvert: 0.0,
+    ground: 0xE3E7EEFF,
     light_ink: 0xFFFFFFFF,
     shadow_ink: 0x8E98ADFF,
     glow_ink: 0xFFFFFFFF,
+    ink: 0x8A919EFF,
 };
 const ONYX: Material = Material {
+    ground: 0xE3E7EEFF,
     light_ink: 0xFFF6EAFF,
     shadow_ink: 0x8E98ADFF,
     glow_ink: 0xFF7F1AFF,
+    ink: 0x2A2623FF,
     inkglow: 0.9,
     lx: -0.22,
     ly: -0.72,
@@ -578,15 +716,19 @@ const GUNMETAL: Material = Material {
     hair: 0.85,
     aoreach: 0.85,
     inkglow: 0.15,
+    ground: 0x2B2F35FF,
     light_ink: 0xCFD5DCFF,
     shadow_ink: 0x07090CFF,
     glow_ink: 0xFF3B30FF,
+    ink: 0xB3BAC2FF,
     ..MILLED
 };
 const CHARCOAL: Material = Material {
+    ground: 0x2B2826FF,
     light_ink: 0xF0E9E0FF,
     shadow_ink: 0x0B0908FF,
     glow_ink: 0x5CC8FFFF,
+    ink: 0xF2EEE8FF,
     inkglow: 0.35,
     lx: -0.22,
     ly: -0.72,
@@ -640,9 +782,11 @@ const OBSIDIAN: Material = Material {
     facegrad: 0.22,
     hair: 0.22,
     aoreach: 1.0,
+    ground: 0x0E1013FF,
     light_ink: 0x7C838CFF,
     shadow_ink: 0x020305FF,
     glow_ink: 0x38D1E6FF,
+    ink: 0x7F868FFF,
     ..MILLED
 };
 const ALUMINIUM: Material = Material {
@@ -664,18 +808,22 @@ const ALUMINIUM: Material = Material {
     hair: 0.65,
     aoreach: 0.9,
     inkglow: 0.85,
+    ground: 0x8A8A8AFF,
     light_ink: 0xF7F8FAFF,
     shadow_ink: 0x3A3D42FF,
     glow_ink: 0xFFFFFFFF,
+    ink: 0x2B2E32FF,
     ..MILLED
 };
 // A mirror metal on a dark panel. Its metal, reflection, environment and
 // highlight roll-off have no uniform here; what is left is a hard, bright
 // specular with no rim, gloss sweep or face gradient.
 const CHROME: Material = Material {
+    ground: 0x1B1E23FF,
     light_ink: 0xFFFFFFFF,
     shadow_ink: 0x040506FF,
     glow_ink: 0x7FD4FFFF,
+    ink: 0xC9CED6FF,
     level: 2.0,
     spec: 1.0,
     rough: 0.06,
@@ -743,9 +891,11 @@ fn material_preset(option: usize) -> Vec<(&'static str, ControlValue)> {
         (INNER_SHADOW, Number(m.inner)),
         (INNER_BLUR, Number(m.inner_r)),
         (GROUND_LIP, Number(m.lip)),
+        (GROUND, Color(m.ground)),
         (LIGHT_INK, Color(m.light_ink)),
         (SHADOW_INK, Color(m.shadow_ink)),
         (GLOW_INK_LABEL, Color(m.glow_ink)),
+        (LABEL_INK, Color(m.ink)),
     ]
 }
 
@@ -756,6 +906,13 @@ const fn number(label: &'static str, target: &'static str, prop: &'static str, m
 
 const fn section(label: &'static str) -> Control {
     Control { label, target: "", kind: ControlKind::Section { open: true } }
+}
+
+/// A bench colour: the properties in `prop` on every control in `target`.
+/// Written once for each way the page's widgets name it, under one label,
+/// so the panel shows one row.
+const fn color(label: &'static str, target: &'static str, prop: &'static str, default: u32) -> Control {
+    Control { label, target, kind: ControlKind::Color { prop, default } }
 }
 
 pub const STORIES: &[Story] = &[Story {
@@ -799,9 +956,11 @@ Lit ink is one `mix` in the label's existing `get_color`, toward `color_material
 
 Every instance here sets the whole material itself, because the catalogue's own theme leaves it off: the material bench's neumorphic preset, at tier 2 rather than the bench's 1 so the rim, gloss and specular controls have something to show.
 
-The Controls tab has the bench's controls in the bench's groups, each a heading that folds its controls away or back. **Rest cap** is the tier, margin and press of the first button alone. **Material** picks one of the bench's eleven presets, which sets every control below it. **Light**, **Relief**, **Surface**, **Finish**, **Shadow** and **Colours** write their uniform on every material control on the page at once, a packed vector whole; the press controls move the inverting row only, and the illuminating row keeps its own glow, so the three press idioms stay apart.
+Each row of examples stands on a stage of the preset's ground, as the bench's canvas does, and every face on it is moulded out of that ground in each of its states, so the relief alone carries hover, press and focus. The labels take the preset's label ink. A material is therefore seen on the ground it was tuned for -- the neumorphic's near-white, the obsidian's near-black -- whatever theme the catalogue is showing, and the notes between the rows stay on the catalogue's own page.
 
-The bench's metallic, clearcoat, environment, reflection, exposure and highlight roll-off, its groove and knob geometry, and its ground, body, label, cap and pointer inks have no shader or token behind them here, and are not offered.",
+The Controls tab has the bench's controls in the bench's groups, each a heading that folds its controls away or back. **Rest cap** is the tier, margin and press of the first button alone. **Material** picks one of the bench's eleven presets, which sets every control below it. **Light**, **Relief**, **Surface**, **Finish**, **Shadow** and **Colours** write their uniform on every material control on the page at once, a packed vector whole; the press controls move the inverting row only, and the illuminating row keeps its own glow, so the three press idioms stay apart. **Ground** and **Label ink** in Colours write the stages, the faces and the labels.
+
+The bench's metallic, clearcoat, environment, reflection, exposure and highlight roll-off, its groove and knob geometry, and its knob body, cap and pointer inks have no shader or token behind them here, and are not offered; a knob here is moulded out of the ground like everything else.",
     subject: "subject",
     feature: None,
     controls: &[
@@ -846,9 +1005,16 @@ The bench's metallic, clearcoat, environment, reflection, exposure and highlight
         number(INNER_BLUR, INNER, "draw_bg.material_inner[1]", 0.5, 32., 0.5, 10.),
         number(GROUND_LIP, INNER, "draw_bg.material_inner[2]", 0., 1., 0.01, 0.70),
         section("Colours"),
-        Control { label: LIGHT_INK, target: EVERY, kind: ControlKind::Color { prop: "draw_bg.material_light_ink", default: 0xFFFFFFFF } },
-        Control { label: SHADOW_INK, target: EVERY, kind: ControlKind::Color { prop: "draw_bg.material_shadow_ink", default: 0x9299B3FF } },
-        Control { label: GLOW_INK_LABEL, target: GLOW_INK, kind: ControlKind::Color { prop: "draw_bg.material_glow_ink", default: 0x7C4DFFFF } },
+        color(GROUND, PLAIN_GROUND, "draw_bg.color", 0xEEF0F6FF),
+        color(GROUND, BUTTONS, BUTTON_FACE, 0xEEF0F6FF),
+        color(GROUND, wells!(), WELL_FACE, 0xEEF0F6FF),
+        color(GROUND, "groove", GROOVE_FACE, 0xEEF0F6FF),
+        color(LIGHT_INK, EVERY, "draw_bg.material_light_ink", 0xFFFFFFFF),
+        color(SHADOW_INK, EVERY, "draw_bg.material_shadow_ink", 0x9299B3FF),
+        color(GLOW_INK_LABEL, GLOW_INK, "draw_bg.material_glow_ink", 0x7C4DFFFF),
+        color(LABEL_INK, BUTTONS, BUTTON_INK, 0x3A4052FF),
+        color(LABEL_INK, wells!(), WELL_INK, 0x3A4052FF),
+        color(LABEL_INK, "groove", GROOVE_INK, 0x3A4052FF),
     ],
     on_actions: None,
 }];

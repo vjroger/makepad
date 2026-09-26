@@ -61,6 +61,11 @@ pub struct Story {
 }
 
 pub struct Control {
+    /// The row's name. Controls that share a label are one control: the
+    /// panel shows the first of them, and a hand edit, a preset or a page
+    /// widget setting that label moves every one, each writing its own
+    /// property on its own targets. That is how one value reaches widgets
+    /// that name it differently.
     pub label: &'static str,
     /// Id path of the widget the control writes to, relative to the story
     /// root; empty means the subject. Several paths separated by spaces
@@ -82,6 +87,8 @@ pub enum ControlKind {
     Number { prop: &'static str, min: f64, max: f64, step: f64, default: f64 },
     Choice { prop: &'static str, options: &'static [&'static str], default: usize },
     Text { prop: &'static str, default: &'static str },
+    /// `prop` may name several properties, separated by spaces, that all
+    /// take the one colour: a face and each of its states.
     Color { prop: &'static str, default: u32 },
     Disabled { default: bool },
     /// A heading, the control's label, over the controls that follow it up

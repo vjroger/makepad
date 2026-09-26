@@ -147,9 +147,30 @@ pub fn chunk_for(control: &Control, value: &ControlValue) -> Option<String> {
             let escaped = t.replace('\\', "\\\\").replace('"', "\\\"");
             Some(format!("{{{prop}: \"{escaped}\"}}"))
         }
-        (ControlKind::Color { prop, .. }, ControlValue::Color(c)) => Some(format!("{{{prop}: #x{c:08X}}}")),
+        (ControlKind::Color { prop, .. }, ControlValue::Color(c)) => {
+            let writes: Vec<String> = prop.split_whitespace().map(|p| format!("{p}: #x{c:08X}")).collect();
+            Some(format!("{{{}}}", writes.join(" ")))
+        }
         _ => None,
     }
+}
+
+/// Whether a control is one the panel links to others by label: a section
+/// is a heading and a preset a picker, and neither moves with a namesake.
+fn links(control: &Control) -> bool {
+    !matches!(control.kind, ControlKind::Section { .. } | ControlKind::Preset { .. })
+}
+
+/// Every control that is one control with `index`: those sharing its label
+/// (see [`Control::label`]), itself among them.
+fn linked(controls: &[Control], index: usize) -> Vec<usize> {
+    let Some(control) = controls.get(index) else {
+        return Vec::new();
+    };
+    if !links(control) {
+        return vec![index];
+    }
+    (0..controls.len()).filter(|&i| links(&controls[i]) && controls[i].label == control.label).collect()
 }
 
 /// A lane prop split into the vector property and the lane:
@@ -191,7 +212,8 @@ pub fn write_for(controls: &[Control], values: &[ControlValue], index: usize) ->
 }
 
 /// The rows the list shows: every control's index, less those under a
-/// folded section. A section's value is whether it is open.
+/// folded section and those an earlier control of the same label already
+/// shows. A section's value is whether it is open.
 fn visible_rows(controls: &[Control], values: &[ControlValue]) -> Vec<usize> {
     let mut open = true;
     let mut rows = Vec::new();
@@ -199,7 +221,7 @@ fn visible_rows(controls: &[Control], values: &[ControlValue]) -> Vec<usize> {
         if let ControlKind::Section { .. } = control.kind {
             open = !matches!(values.get(index), Some(ControlValue::Bool(false)));
             rows.push(index);
-        } else if open {
+        } else if open && linked(controls, index).first() == Some(&index) {
             rows.push(index);
         }
     }
@@ -351,22 +373,24 @@ impl ControlsPanel {
     /// row shows the value and the edit goes out like any other. A label
     /// that names no control, or names a section, does nothing.
     pub fn set_by_label(&mut self, cx: &mut Cx, label: &str, value: ControlValue) {
-        let Some(index) = self
+        let Some(first) = self
             .controls
             .iter()
             .position(|c| c.label == label && !matches!(c.kind, ControlKind::Section { .. }))
         else {
             return;
         };
-        if self.values.get(index) == Some(&value) {
+        if self.values.get(first) == Some(&value) {
             return;
         }
-        self.values[index] = value.clone();
-        if let Some(synced) = self.synced.get_mut(index) {
-            *synced = false;
+        for index in linked(self.controls, first) {
+            self.values[index] = value.clone();
+            if let Some(synced) = self.synced.get_mut(index) {
+                *synced = false;
+            }
+            cx.widget_action(self.widget_uid(), ControlsAction::Changed { index, value: value.clone() });
         }
         self.view.redraw(cx);
-        cx.widget_action(self.widget_uid(), ControlsAction::Changed { index, value });
     }
 
     fn template_for(kind: &ControlKind) -> LiveId {
@@ -426,20 +450,20 @@ impl ControlsPanel {
         }
     }
 
-    /// The controls a preset's option sets, by index, with their new values.
-    /// A label that names no control, or names a section or another preset,
-    /// is passed over.
+    /// The controls a preset's option sets, by index, with their new values:
+    /// every control of each label it names. A label that names no control,
+    /// or names a section or another preset, is passed over.
     fn preset_changes(&self, index: usize, option: usize) -> Vec<(usize, ControlValue)> {
         let Some(ControlKind::Preset { values, .. }) = self.controls.get(index).map(|c| &c.kind) else {
             return Vec::new();
         };
+        let controls = self.controls;
         values(option)
             .into_iter()
-            .filter_map(|(label, value)| {
-                let target = self.controls.iter().position(|c| {
-                    c.label == label && !matches!(c.kind, ControlKind::Section { .. } | ControlKind::Preset { .. })
-                })?;
-                Some((target, value))
+            .flat_map(|(label, value)| {
+                (0..controls.len())
+                    .filter(move |&i| links(&controls[i]) && controls[i].label == label)
+                    .map(move |i| (i, value.clone()))
             })
             .collect()
     }
@@ -533,7 +557,9 @@ impl Widget for ControlsPanel {
                 }
             };
             if let Some(value) = value {
-                changes.push((index, value));
+                for index in linked(controls, index) {
+                    changes.push((index, value.clone()));
+                }
             }
         }
         if folded {
@@ -622,6 +648,63 @@ mod tests {
             kind: ControlKind::Choice { prop: "flow", options: &["Right", "Down"], default: 0 },
         };
         assert_eq!(chunk_for(&choice, &ControlValue::Choice(1)).unwrap(), "{flow: Down}");
+        let face = Control {
+            label: "Face",
+            target: "",
+            kind: ControlKind::Color { prop: "draw_bg.color draw_bg.color_hover", default: 0 },
+        };
+        assert_eq!(
+            chunk_for(&face, &ControlValue::Color(0x0E1013FF)).unwrap(),
+            "{draw_bg.color: #x0E1013FF draw_bg.color_hover: #x0E1013FF}"
+        );
+    }
+
+    /// Controls that share a label show as one row, the first, and each is
+    /// linked to all of them; a section never links, whatever it is called.
+    #[test]
+    fn a_shared_label_is_one_row() {
+        const fn ground(target: &'static str) -> Control {
+            Control { label: "Ground", target, kind: ControlKind::Color { prop: "draw_bg.color", default: 0 } }
+        }
+        let controls = [
+            Control { label: "Ground", target: "", kind: ControlKind::Section { open: true } },
+            ground("stage"),
+            Control { label: "Ink", target: "a", kind: ControlKind::Color { prop: "draw_text.color", default: 0 } },
+            ground("a b"),
+        ];
+        let values: Vec<ControlValue> = controls.iter().map(default_of).collect();
+        assert_eq!(visible_rows(&controls, &values), vec![0, 1, 2]);
+        assert_eq!(linked(&controls, 3), vec![1, 3]);
+        assert_eq!(linked(&controls, 0), vec![0]);
+        assert_eq!(linked(&controls, 2), vec![2]);
+    }
+
+    /// Controls that share a label are one control, so they must be one
+    /// kind with one default, or the row would show one value and write
+    /// another.
+    #[test]
+    fn shared_labels_agree() {
+        for story in crate::registry::all() {
+            for (index, control) in story.controls.iter().enumerate() {
+                for other in linked(story.controls, index) {
+                    let other = &story.controls[other];
+                    assert_eq!(
+                        default_of(control),
+                        default_of(other),
+                        "{} / {}: two controls of one label start apart",
+                        story.key,
+                        control.label
+                    );
+                    assert_eq!(
+                        std::mem::discriminant(&control.kind),
+                        std::mem::discriminant(&other.kind),
+                        "{} / {}: two controls of one label are different kinds",
+                        story.key,
+                        control.label
+                    );
+                }
+            }
+        }
     }
 
     /// The theme's easings read as words, each different from the rest, a
