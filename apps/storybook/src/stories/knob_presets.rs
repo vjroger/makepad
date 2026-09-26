@@ -6,11 +6,9 @@
 //! engine (`crate::knob`); this page is its host: it holds the material the
 //! controls write, hands it to every knob and to the 3D view, and picks the
 //! style a knob in the gallery is tapped on.
-use crate::controls::ControlValue;
+use crate::controls::{ControlValue, StoryControlAction};
 use crate::knob::presets::{KnobMaterial, MATERIALS, STYLES};
-use crate::knob::widgets::{
-    set_material_uniforms, KnobView3dWidgetExt, TurnedKnobAction, TurnedKnobWidgetExt,
-};
+use crate::knob::widgets::{set_material_uniforms, KnobView3dWidgetExt, TurnedKnobAction, TurnedKnobWidgetExt};
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -41,11 +39,11 @@ mod page {
 
         // One gallery cell: a knob and its style's name under it.
         let KnobCell = View{
-            width: 140.
+            width: 136.
             height: Fit
             flow: Down
             align: Align{x: 0.5 y: 0.0}
-            knob := TurnedKnob{width: 140. height: 132. fill: 0.5}
+            knob := TurnedKnob{width: 136. height: 128. fill: 0.5}
             name := Label{
                 text: ""
                 draw_text +: {text_style: theme.font_regular{font_size: 9.5}}
@@ -69,30 +67,16 @@ mod page {
             // The page is the material's ground, through the same exposure
             // and roll-off as the knobs, so their quads meet it seamlessly.
             show_bg: true
-            draw_bg +: {
-                m_ground: uniform(vec4(0.106, 0.118, 0.137, 1.0))
-                m_env: uniform(vec4(1.0, 0.7, 1.0, 0.75))
-                pixel: fn() {
-                    var hc = self.m_ground.xyz * self.m_env.z
-                    let ro = clamp(self.m_env.w, 0.0, 1.0)
-                    if ro < 0.001 { return vec4(hc, 1.0) }
-                    let mx = max(max(hc.x, hc.y), hc.z)
-                    let lift = max(mx - 1.0, 0.0) * 0.6 * ro
-                    hc = hc + vec3(lift, lift, lift)
-                    let k = mix(1.0, 0.72, ro)
-                    let over = max(hc - vec3(k, k, k), vec3(0.0, 0.0, 0.0))
-                    return vec4(min(hc, vec3(k, k, k)) + (1.0 - k) * (vec3(1.0, 1.0, 1.0) - exp(-over / max(1.0 - k, 0.001))), 1.0)
-                }
-            }
+            draw_bg +: {..mod.storybook.KnobGroundFill}
 
-            intro := PageNote{text: "The Material Bench's knob engine, ported: nineteen knob styles in eleven materials. Every knob here is live -- drag one to turn them all, tap one to pick its style. The large knob and the 3D view show the picked style; drag the 3D view to orbit it, scroll to zoom, double-tap to put the camera back."}
+            intro := PageNote{text: "The Material Bench's knob engine, ported: nineteen knob styles in eleven materials. Every knob here is live -- drag one to turn them all, tap one to pick its style. The large knob and the 3D view show the picked style; drag the 3D view to orbit it, ctrl-scroll to zoom, double-tap to put the camera back."}
             stage := View{
                 width: Fill
                 height: Fit
                 flow: Flow.Right{wrap: true}
                 spacing: 16.
                 align: Align{x: 0.0 y: 0.5}
-                view3d := KnobView3d{width: 400. height: 290.}
+                view3d := KnobView3d{width: 403. height: 290.}
                 side := View{
                     width: 270.
                     height: Fit
@@ -368,7 +352,11 @@ impl KnobPresets {
         let luma = ground[0] * 0.2126 + ground[1] * 0.7152 + ground[2] * 0.0722;
         let text: Vec4f = if luma > 0.45 { vec4(0.14, 0.15, 0.18, 1.0) } else { vec4(0.86, 0.88, 0.91, 1.0) };
         let meta: Vec4f = if luma > 0.45 { vec4(0.30, 0.32, 0.37, 1.0) } else { vec4(0.62, 0.65, 0.70, 1.0) };
-        let accent = color_of(m.glow_ink);
+        // The picked style's name in the glow ink, where that reads on the
+        // ground; a white glow on porcelain does not, and takes the text's.
+        let glow = crate::knob::bake::ink(m.glow_ink);
+        let glow_luma = glow[0] * 0.2126 + glow[1] * 0.7152 + glow[2] * 0.0722;
+        let accent = if (glow_luma - luma).abs() > 0.3 { color_of(m.glow_ink) } else { text };
         let recolour = first || old.map(|o| o.0.ground != m.ground || o.0.glow_ink != m.glow_ink).unwrap_or(true);
         let restyle = first || old.map(|o| o.1 != style).unwrap_or(true);
         for i in 0..STYLES.len() {
@@ -396,7 +384,18 @@ impl KnobPresets {
         view3d.set_value(cx, self.value);
         if recolour || restyle {
             let mut caption = self.view.widget(cx, &[live_id!(caption)]);
-            caption.set_text(cx, &format!("{} in {}", STYLES[style].label(), MATERIALS.iter().find(|p| p.ground == m.ground && p.body_ink == m.body_ink).map(|p| p.name).unwrap_or("this material")));
+            caption.set_text(
+                cx,
+                &format!(
+                    "{} in {}",
+                    STYLES[style].label(),
+                    MATERIALS
+                        .iter()
+                        .find(|p| p.ground == m.ground && p.body_ink == m.body_ink)
+                        .map(|p| p.name)
+                        .unwrap_or("this material")
+                ),
+            );
             script_apply_eval!(cx, caption, { draw_text +: {color: #(text)} });
             let mut intro = self.view.widget(cx, &[live_id!(intro)]);
             script_apply_eval!(cx, intro, { draw_text +: {color: #(meta)} });
@@ -446,14 +445,23 @@ impl Widget for KnobPresets {
                 TurnedKnobAction::None => {}
             }
         }
+        // What a knob does on the page, the controls show: the value
+        // slider follows a turn and the style's two controls a pick.
+        let uid = self.widget_uid();
         if let Some(v) = turned {
             self.value = v;
             self.push(cx);
+            cx.widget_action(uid, StoryControlAction::Set { label: VALUE, value: ControlValue::Number(v) });
         }
         if let Some(i) = picked {
             self.style = i as f64;
             self.push(cx);
-            cx.widget_action(self.widget_uid(), KnobPresetsAction::StylePicked(i));
+            cx.widget_action(uid, KnobPresetsAction::StylePicked(i));
+            cx.widget_action(uid, StoryControlAction::Set { label: STYLE_PRESET, value: ControlValue::Choice(i) });
+            cx.widget_action(
+                uid,
+                StoryControlAction::Set { label: STYLE_INDEX, value: ControlValue::Number(i as f64) },
+            );
         }
         cx.extend_actions(actions);
     }
@@ -656,7 +664,7 @@ What the bench works out in JavaScript is worked out here in Rust, once per styl
 
 ## Using it
 
-Drag any knob, the large one included, to turn them all; tap a knob in the gallery to pick its style. On the 3D view a drag orbits the camera, the wheel zooms and a double tap puts the camera back.
+Drag any knob, the large one included, to turn them all; tap a knob in the gallery to pick its style. On the 3D view a drag orbits the camera, ctrl and the wheel zoom, and a double tap puts the camera back.
 
 The Controls tab has the style and value, a material preset that sets every material control at once, and the bench's material controls in folding groups: Light, Surface, Environment, Relief, Wells, Shadow and Colours.",
     subject: "",

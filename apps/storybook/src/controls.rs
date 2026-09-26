@@ -123,6 +123,17 @@ pub enum ControlsAction {
     None,
 }
 
+/// A widget on a story's page moving one of the story's own controls, by
+/// label: a gallery item picked by a click, a knob turned on the page. The
+/// panel shows the new value and writes it as a hand edit would, so the
+/// control, the page and a page rebuilt from its edits agree.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum StoryControlAction {
+    Set { label: &'static str, value: ControlValue },
+    #[default]
+    None,
+}
+
 /// The chunk that writes a control's value, and whether it is the disabled
 /// switch instead (which is applied through the widget, not a chunk).
 pub fn chunk_for(control: &Control, value: &ControlValue) -> Option<String> {
@@ -336,6 +347,28 @@ impl ControlsPanel {
         self.controls.iter().zip(self.values.iter().cloned()).collect()
     }
 
+    /// Set the control under `label` as if it had been moved by hand: its
+    /// row shows the value and the edit goes out like any other. A label
+    /// that names no control, or names a section, does nothing.
+    pub fn set_by_label(&mut self, cx: &mut Cx, label: &str, value: ControlValue) {
+        let Some(index) = self
+            .controls
+            .iter()
+            .position(|c| c.label == label && !matches!(c.kind, ControlKind::Section { .. }))
+        else {
+            return;
+        };
+        if self.values.get(index) == Some(&value) {
+            return;
+        }
+        self.values[index] = value.clone();
+        if let Some(synced) = self.synced.get_mut(index) {
+            *synced = false;
+        }
+        self.view.redraw(cx);
+        cx.widget_action(self.widget_uid(), ControlsAction::Changed { index, value });
+    }
+
     fn template_for(kind: &ControlKind) -> LiveId {
         match kind {
             ControlKind::Bool { .. } => live_id!(RowBool),
@@ -514,6 +547,12 @@ impl Widget for ControlsPanel {
 }
 
 impl ControlsPanelRef {
+    pub fn set_by_label(&self, cx: &mut Cx, label: &str, value: ControlValue) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_by_label(cx, label, value);
+        }
+    }
+
     pub fn set_story(&self, cx: &mut Cx, story: &Story) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_story(cx, story);

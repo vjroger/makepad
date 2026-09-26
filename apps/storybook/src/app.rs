@@ -565,6 +565,14 @@ impl MatchEvent for App {
             self.ui.controls_panel(cx, ids!(controls)).reset(cx);
             self.ui.actions_panel(cx, ids!(actions)).clear(cx);
         }
+        // A page moving its own controls: a knob picked or turned on it.
+        for action in actions.iter() {
+            if let Some(wa) = action.as_widget_action() {
+                if let StoryControlAction::Set { label, value } = wa.cast::<StoryControlAction>() {
+                    self.ui.controls_panel(cx, ids!(controls)).set_by_label(cx, label, value);
+                }
+            }
+        }
         for edit in self.ui.controls_panel(cx, ids!(controls)).edits(actions) {
             self.apply_edit(cx, &edit);
         }

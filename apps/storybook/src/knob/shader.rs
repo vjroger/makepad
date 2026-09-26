@@ -2,14 +2,16 @@
 //! GLSL to the shader DSL.
 //!
 //! One set of functions (`KnobCore`) holds the solid, the outline, the
-//! shadows, the shading and the marks; three draw shaders spread it:
+//! shadows, the shading and the marks; two draw shaders spread it, and a
+//! fill for the page under them shares its exposure:
 //!
 //! * `DrawTurnedKnob`, the 2D knob: the bench's `layerFlat` (the wells),
 //!   `layerTurned` and `knob()` in one quad;
 //! * `DrawKnobView3d`, the bench's `VIEW3D` program: a ray march of the same
 //!   solid, with the same materials;
-//! * `DrawKnobGround`, the page the knobs stand on, through the same
-//!   exposure and roll-off, so a knob's quad meets it without a seam.
+//! * `mod.storybook.KnobGroundFill`, a fill for a view's `draw_bg`: the
+//!   page the knobs stand on, through the same exposure and roll-off, so a
+//!   knob's quad meets it without a seam.
 //!
 //! What the bench kept in globals is threaded through arguments and return
 //! vectors: the solid returns (height, wing weight, distance to the nearest
@@ -35,8 +37,38 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    // The exposure every knob surface and the page under them share:
+    // `m_env` is reflection, perspective, exposure (linear), roll-off.
+    let KnobExposure = {
+        m_env: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        m_ground: uniform(vec4(0.93, 0.94, 0.96, 1.0))
+
+        // Exposure and the highlight roll-off.
+        hdr_out: fn(hc0: vec3) -> vec3 {
+            var hc = hc0 * self.m_env.z
+            let ro = clamp(self.m_env.w, 0.0, 1.0)
+            if ro < 0.001 { return hc }
+            let mx = max(max(hc.x, hc.y), hc.z)
+            let lift = max(mx - 1.0, 0.0) * 0.6 * ro
+            hc = hc + vec3(lift, lift, lift)
+            let k = mix(1.0, 0.72, ro)
+            let over = max(hc - vec3(k, k, k), vec3(0.0, 0.0, 0.0))
+            return min(hc, vec3(k, k, k)) + (1.0 - k) * (vec3(1.0, 1.0, 1.0) - exp(-over / max(1.0 - k, 0.001)))
+        }
+    }
+
+    // THE PAGE UNDER THE KNOBS, for a view's `draw_bg`: the ground through
+    // the knobs' exposure, so their quads meet it without a seam.
+    mod.storybook.KnobGroundFill = {
+        ..KnobExposure,
+        pixel: fn() {
+            return vec4(self.hdr_out(self.m_ground.xyz), 1.0)
+        }
+    }
+
     let KnobCore = {
-        // Always 0: loops start from it so no compiler can count them.
+        ..KnobExposure,
+        // Always 0: added to a loop's bound, so no compiler can count it.
         knob_zero: uniform(0.0)
 
         // Material. light: x, y, z, intensity; relief: bevel width and
@@ -50,14 +82,12 @@ script_mod! {
         m_light: uniform(vec4(-0.35, -0.55, 0.66, 0.7))
         m_relief: uniform(vec4(4.0, 0.7, 4.0, 0.0))
         m_finish: uniform(vec4(0.25, 0.4, 0.0, 0.85))
-        m_env: uniform(vec4(0.0, 0.0, 1.0, 0.0))
         m_surf: uniform(vec4(0.0, 0.0, 0.08, 0.0))
         m_shadow: uniform(vec4(0.85, 12.0, 1.0, 0.25))
         m_inner: uniform(vec4(0.55, 10.0, 0.7, 0.0))
         m_tune: uniform(vec4(1.0, 4.0, 0.0, 1.2))
         m_knob: uniform(vec4(0.55, 0.0, 1.5, 0.45))
         m_env_ref: uniform(vec4(0.05, 0.0, 0.0, 0.0))
-        m_ground: uniform(vec4(0.93, 0.94, 0.96, 1.0))
         m_body: uniform(vec4(0.93, 0.94, 0.96, 1.0))
         m_light_ink: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         m_shadow_ink: uniform(vec4(0.61, 0.64, 0.73, 1.0))
@@ -795,19 +825,6 @@ script_mod! {
             return max(o, vec3(0.0, 0.0, 0.0))
         }
 
-        // Exposure and the highlight roll-off.
-        hdr_out: fn(hc0: vec3) -> vec3 {
-            var hc = hc0 * self.m_env.z
-            let ro = clamp(self.m_env.w, 0.0, 1.0)
-            if ro < 0.001 { return hc }
-            let mx = max(max(hc.x, hc.y), hc.z)
-            let lift = max(mx - 1.0, 0.0) * 0.6 * ro
-            hc = hc + vec3(lift, lift, lift)
-            let k = mix(1.0, 0.72, ro)
-            let over = max(hc - vec3(k, k, k), vec3(0.0, 0.0, 0.0))
-            return min(hc, vec3(k, k, k)) + (1.0 - k) * (vec3(1.0, 1.0, 1.0) - exp(-over / max(1.0 - k, 0.001)))
-        }
-
         // THE FACE (the bench's shadeFace): lit from its normal, occluded,
         // with the hairline, the well's inner shadow, the reflection -- over
         // the crease's two one-sided normals where the surface folds inside
@@ -1466,30 +1483,34 @@ script_mod! {
                     m = m + 1.0
                 }
             }
-            if touched < 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
-            let c = self.hdr_out(col)
-            return vec4(c * qa, qa)
+            // Opaque: the quad is the ground, what the knob does to it fading
+            // out over the last points of the quad before the exposure, so
+            // its edge is the page's own colour by the same arithmetic.
+            if touched < 0.5 { return vec4(self.hdr_out(self.m_ground.xyz), 1.0) }
+            return vec4(self.hdr_out(mix(self.m_ground.xyz, col, qa)), 1.0)
         }
     }
 
     // THE 3D VIEW (the bench's VIEW3D program): the same solid ray marched
-    // under an orbiting camera. k_cam: yaw, elevation, zoom, unused.
+    // under an orbiting camera. k_cam: yaw, elevation, zoom, and the
+    // samples per pixel along each axis (1 is the bench's one ray; 2 is four
+    // rays on a rotated grid, which is what takes the stairs off the
+    // silhouettes and the rims).
     set_type_default() do #(DrawKnobView3d::script_shader(vm)){
         ..mod.draw.DrawQuad,
         ..KnobCore
         k_state: uniform(vec4(0.34, 0.0, 0.0, 0.0))
-        k_cam: uniform(vec4(0.55, 0.62, 1.0, 0.0))
+        k_cam: uniform(vec4(0.55, 0.62, 1.0, 1.0))
 
-        pixel: fn() {
+        // One ray through `pos` (0..1 over the view): premultiplied colour.
+        view_ray: fn(pos: vec2, res: vec2) -> vec4 {
             let R = 56.0
-            let dpi = max(self.draw_pass.dpi_factor, 0.5)
-            let res = self.rect_size * dpi
             let spin = (self.k_state.x * 2.0 - 1.0) * 2.35619
             let dir = vec2(sin(spin), -cos(spin))
             let hk = R * max(self.m_knob.x, 0.001)
             let cam = self.k_cam
             let span = R * 1.75 / max(cam.z, 0.2)
-            let uv = vec2((self.pos.x - 0.5) * 2.0 * res.x / res.y, (0.5 - self.pos.y) * 2.0)
+            let uv = vec2((pos.x - 0.5) * 2.0 * res.x / res.y, (0.5 - pos.y) * 2.0)
             let px = 2.0 * span / res.y
             let yaw = cam.x
             let el = clamp(cam.y, 0.12, 1.55)
@@ -1678,15 +1699,33 @@ script_mod! {
             }
             return vec4(self.hdr_out(col), 1.0)
         }
-    }
 
-    // THE PAGE UNDER THE KNOBS: the ground through the same exposure, so a
-    // knob's quad meets it without a seam.
-    set_type_default() do #(DrawKnobGround::script_shader(vm)){
-        ..mod.draw.DrawQuad,
-        ..KnobCore
+        // The rays of one pixel, the ray's work at one call site.
         pixel: fn() {
-            return vec4(self.hdr_out(self.m_ground.xyz), 1.0)
+            let dpi = max(self.draw_pass.dpi_factor, 0.5)
+            let res = self.rect_size * dpi
+            let ns = clamp(floor(self.k_cam.w + 0.5), 1.0, 2.0)
+            let nsub = ns * ns
+            var acc = vec4(0.0, 0.0, 0.0, 0.0)
+            var k = 0.0
+            loop {
+                if k >= nsub { break }
+                var off = vec2(0.0, 0.0)
+                if nsub > 1.5 {
+                    if k < 0.5 {
+                        off = vec2(0.125, 0.375)
+                    } else if k < 1.5 {
+                        off = vec2(0.375, -0.125)
+                    } else if k < 2.5 {
+                        off = vec2(-0.125, -0.375)
+                    } else {
+                        off = vec2(-0.375, 0.125)
+                    }
+                }
+                acc = acc + self.view_ray(self.pos + off / res, res)
+                k = k + 1.0
+            }
+            return acc / nsub
         }
     }
 }
@@ -1703,14 +1742,6 @@ pub struct DrawTurnedKnob {
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawKnobView3d {
-    #[deref]
-    pub draw_super: DrawQuad,
-}
-
-/// The page ground's shader.
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawKnobGround {
     #[deref]
     pub draw_super: DrawQuad,
 }

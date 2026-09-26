@@ -115,10 +115,7 @@ fn fix_tangents(p: &mut [Pt]) {
 
 /// The curve as a polyline, 96 samples a cubic segment.
 fn polyline(anchors: &[Anchor]) -> Vec<[f64; 2]> {
-    let mut p: Vec<Pt> = anchors
-        .iter()
-        .map(|a| Pt { x: a[0], y: a[1], ty: a[2] as u8, ..Pt::default() })
-        .collect();
+    let mut p: Vec<Pt> = anchors.iter().map(|a| Pt { x: a[0], y: a[1], ty: a[2] as u8, ..Pt::default() }).collect();
     fix_tangents(&mut p);
     let mut out = Vec::with_capacity(p.len() * 97);
     for i in 0..p.len().saturating_sub(1) {
@@ -137,9 +134,13 @@ fn polyline(anchors: &[Anchor]) -> Vec<[f64; 2]> {
     out
 }
 
-/// The curve resampled to `n` evenly spaced taps over x in 0..1.
+/// The curve resampled to `n` evenly spaced taps over x in 0..1. The
+/// polyline's x never runs backwards (the pair rule sees to that), so each
+/// tap's search resumes at the segment the last one found, which is the
+/// segment the bench's search from the start finds.
 pub fn resample(anchors: &[Anchor], n: usize) -> Vec<f64> {
     let pts = polyline(anchors);
+    let mut k0 = 0;
     (0..n)
         .map(|i| {
             let r = i as f64 / (n - 1) as f64;
@@ -147,10 +148,11 @@ pub fn resample(anchors: &[Anchor], n: usize) -> Vec<f64> {
             if r <= pts[0][0] {
                 y = pts[0][1];
             } else {
-                for k in 0..pts.len() - 1 {
+                for k in k0..pts.len() - 1 {
                     if r >= pts[k][0] && r <= pts[k + 1][0] {
                         let t = (r - pts[k][0]) / (pts[k + 1][0] - pts[k][0]).max(1e-6);
                         y = pts[k][1] + t * (pts[k + 1][1] - pts[k][1]);
+                        k0 = k;
                         break;
                     }
                 }
@@ -173,9 +175,7 @@ fn slope_code(sl: f64) -> f64 {
 /// Central differences, both ends clamped (the profile's rule).
 fn central_slopes(h: &[f64]) -> Vec<f64> {
     let n = h.len();
-    (0..n)
-        .map(|i| -(h[(i + 1).min(n - 1)] - h[i.saturating_sub(1)]) * (n - 1) as f64 / 2.0)
-        .collect()
+    (0..n).map(|i| -(h[(i + 1).min(n - 1)] - h[i.saturating_sub(1)]) * (n - 1) as f64 / 2.0).collect()
 }
 
 /// Central differences with one-sided ends (`bakeCurve`'s rule).
@@ -289,9 +289,9 @@ fn dp_idx(curves: &[Vec<[f64; 2]>], tol0: f64, max_n: usize) -> Vec<usize> {
     vec![0, n - 1]
 }
 
-/// What a bake hands the shader beside its two textures.
+/// What the geometry bake hands the shader beside its curve texture.
 #[derive(Clone, Debug, Default)]
-pub struct BakeConsts {
+pub struct GeomConsts {
     /// The grip's band, in radii: where the profile anchors `ffrom` and
     /// `fto` sit.
     pub flute_r: [f64; 2],
@@ -306,6 +306,18 @@ pub struct BakeConsts {
     pub wing_rc: [f64; 2],
     /// In cut mode, where the cutters reach the ground (-1 never).
     pub wing_thru: f64,
+    /// The profile's height at 0.9 R and under a spherical dimple.
+    pub prof09: f64,
+    pub prof_cut: f64,
+    /// Whether the foot is notched (cut through, or fluted to the rim):
+    /// the contact ring then reads the outline.
+    pub foot_notched: bool,
+}
+
+/// What the shadow bake hands the shader beside its knot texture and
+/// self-shadow table.
+#[derive(Clone, Debug, Default)]
+pub struct ShadeConsts {
     /// The revolve outline's knots, their count and the height scale.
     pub sil: [[f64; 4]; 8],
     pub sil_n: f64,
@@ -316,30 +328,43 @@ pub struct BakeConsts {
     pub wk_n: f64,
     pub wk_b: f64,
     pub wt: [f64; 4],
-    /// The profile's height at 0.9 R and under a spherical dimple.
-    pub prof09: f64,
-    pub prof_cut: f64,
-    /// Whether the foot is notched (cut through, or fluted to the rim):
-    /// the contact ring then reads the outline.
-    pub foot_notched: bool,
 }
 
-/// One style under one light and profile setting, baked.
-pub struct KnobBake {
+/// A style's geometry, baked: everything that depends on its curves and
+/// the material's crease blur, and nothing that depends on the light.
+pub struct GeomBake {
     /// `DATA_ROWS` rows of `TAPS` texels, each (slope, value) at 16 bits as
     /// the bench packs them: slope high byte in red and low in blue, value
     /// high in green and low in alpha. BGRA in a u32.
     pub data: Vec<u32>,
+    pub consts: GeomConsts,
+    /// The profile, wing section, width and height at 256 taps, which the
+    /// shadow bake reads.
+    h: Vec<f64>,
+    pv: Vec<f64>,
+    wvs: Vec<f64>,
+    hvs: Vec<f64>,
+}
+
+/// A style's shadows under one light and depth, baked.
+pub struct ShadeBake {
     /// The knots as floats: the outline's eight, then the wing's four.
     pub knots: Vec<f32>,
     /// The self-shadow table, BGRA: .r = .b the 2D measure, .g the 3D one.
     pub shade: Vec<u32>,
-    pub consts: BakeConsts,
+    pub consts: ShadeConsts,
 }
 
-/// Everything in a bake depends on the style, and on these of the material.
+/// The geometry bake depends on the style and the material's crease blur.
 #[derive(Clone, Copy, PartialEq)]
-pub struct BakeKey {
+pub struct GeomKey {
+    pub style: usize,
+    pub psmooth: f64,
+}
+
+/// The shadow bake on the style, the knob's depth and the light.
+#[derive(Clone, Copy, PartialEq)]
+pub struct ShadeKey {
     pub style: usize,
     pub psmooth: f64,
     pub pdepth: f64,
@@ -348,15 +373,22 @@ pub struct BakeKey {
     pub lz: f64,
 }
 
-impl BakeKey {
+impl GeomKey {
+    pub fn new(style: usize, m: &KnobMaterial) -> Self {
+        Self { style, psmooth: m.psmooth.round() }
+    }
+}
+
+impl ShadeKey {
     pub fn new(style: usize, m: &KnobMaterial) -> Self {
         Self { style, psmooth: m.psmooth.round(), pdepth: m.pdepth, lx: m.lx, ly: m.ly, lz: m.lz }
     }
 }
 
-/// Bake one style for one material's light, depth and smoothing.
-pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
-    let mut c = BakeConsts::default();
+/// Bake one style's curves and wing (the bench's `bakeProfile`,
+/// `bakeFlute`, `bakeWing`).
+pub fn bake_geometry(style: &KnobStyle, key: &GeomKey) -> GeomBake {
+    let mut c = GeomConsts::default();
     let prof = bake_profile(style.prof, key.psmooth);
     let flute = bake_curve(style.flute);
     let wwid = bake_curve(style.wwid);
@@ -405,17 +437,44 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
         }
     }
 
+    let h = resample(style.prof, TAPS);
+    let hvs = resample(style.whgt, 256);
+
+    // What the shader precomputed per draw in the bench (solidPre).
+    c.prof09 = row_at(&prof, 0.9)[1];
+    c.prof_cut = row_at(&prof, style.cr.clamp(0.0, 1.0))[1];
+    let cut_through = style.cut > 0.5 && style.cf < 0.001 && (style.cut > 1.5 || style.csph < 0.5);
+    c.foot_notched = cut_through || (style.flutes >= 1.0 && c.flute_r[1] > 0.9);
+
+    // The curve texture, 16 bits a value as the bench packs it.
+    let mut data = vec![0u32; TAPS * DATA_ROWS];
+    for (r, row) in [&prof, &flute, &wwid, &whgt, &wprof].iter().enumerate() {
+        for (i, t) in row.iter().enumerate() {
+            let sv = (t[0] * 65535.0).round() as u32;
+            let hv = (t[1] * 65535.0).round() as u32;
+            let (red, blue) = (sv >> 8, sv & 255);
+            let (green, alpha) = (hv >> 8, hv & 255);
+            data[r * TAPS + i] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+        }
+    }
+    GeomBake { data, consts: c, h, pv, wvs: wv, hvs }
+}
+
+/// Bake one style's shadows under one light (the bench's `bakeShade`): the
+/// revolve's outline by height, the wing's knots and taper, and the
+/// self-shadow table.
+pub fn bake_shade(style: &KnobStyle, geom: &GeomBake, key: &ShadeKey) -> ShadeBake {
+    let mut c = ShadeConsts::default();
+    let g = &geom.consts;
+    let (h, pv, wvs, hvs) = (&geom.h, &geom.pv, &geom.wvs, &geom.hvs);
     // bakeShade.
     let np = TAPS;
-    let h = resample(style.prof, np);
     let ll = key.lx.hypot(key.ly);
     let tanel = key.lz.max(0.02).max(0.05) / ll.max(0.05);
     let zs = key.pdepth.max(0.001) / tanel;
     let has_wing = style.wr1 - style.wr0 > 0.01;
     let cut_mode = has_wing && style.wmode > 0.5;
     let mut zclip = 1e9;
-    let wvs = resample(style.wwid, 256);
-    let hvs = resample(style.whgt, 256);
     c.wt = [1.0; 4];
     if has_wing && !cut_mode {
         let t_of = |f: f64| -> f64 {
@@ -427,11 +486,11 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
             0.0
         };
         c.wt = [t_of(0.0), t_of(0.33), t_of(0.67), t_of(0.95).max(0.05)];
-        let (ga0, ga1) = (c.wing_geo[0], c.wing_geo[1]);
+        let (ga0, ga1) = (g.wing_geo[0], g.wing_geo[1]);
         let la = (ga1 - ga0).max(1e-3);
         let lh = (style.wr1 - style.wr0).max(1e-3);
-        let w_at = |al: f64| (at(&wvs, (al - ga0) / la) * style.wwmax * 0.5).max(0.004);
-        let z_at = |al: f64| at(&hvs, (al - style.wr0) / lh) * 2.0 + style.wbase;
+        let w_at = |al: f64| (at(wvs, (al - ga0) / la) * style.wwmax * 0.5).max(0.004);
+        let z_at = |al: f64| at(hvs, (al - style.wr0) / lh) * 2.0 + style.wbase;
         let mut s0 = style.wr0 + 0.9 * w_at(style.wr0);
         let mut s1 = style.wr1 - 0.9 * w_at(style.wr1);
         if s1 < s0 {
@@ -458,8 +517,8 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
         c.wk_n = ki.len() as f64;
         c.wk_b = 0.0;
     } else if cut_mode {
-        let depth = at(&hvs, 0.5) * 2.0;
-        let gap = at(&wvs, 0.5) * style.wwmax * 0.5;
+        let depth = at(hvs, 0.5) * 2.0;
+        let gap = at(wvs, 0.5) * style.wwmax * 0.5;
         let mut xr = 0.16;
         for (i, v) in pv.iter().enumerate() {
             if *v <= 0.25 {
@@ -467,7 +526,7 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
                 break;
             }
         }
-        zclip = (1.0 - depth * (1.0 - at(&pv, xr))).max(0.0);
+        zclip = (1.0 - depth * (1.0 - at(pv, xr))).max(0.0);
         let ztop = h[0];
         let mut rtop = 0.0;
         for i in (0..np).rev() {
@@ -538,7 +597,7 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
     let n = SHADE_N;
     let (dx, dy) = if ll > 1e-4 { (key.lx / ll, key.ly / ll) } else { (0.0, -1.0) };
     let kz = tanel / key.pdepth.max(0.001);
-    let ztop2 = c.wing_top.max(1.0);
+    let ztop2 = g.wing_top.max(1.0);
     let m_steps = 24;
     let lz3 = key.lz.max(0.02);
     let ln3 = (key.lx * key.lx + key.ly * key.ly + lz3 * lz3).sqrt();
@@ -565,17 +624,19 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
                 for m in 0..m_steps {
                     let fi = (m as f64 + 0.5) / m_steps as f64;
                     let t = tb * fi * fi.sqrt();
-                    occ += ((hh_at((x + dx * t).hypot(y + dy * t)) - zp - t * kz) / 0.25).clamp(0.0, 1.0);
+                    let (qx, qy) = (x + dx * t, y + dy * t);
+                    occ += ((hh_at((qx * qx + qy * qy).sqrt()) - zp - t * kz) / 0.25).clamp(0.0, 1.0);
                 }
                 v = (occ / m_steps as f64 / 0.375).clamp(0.0, 1.0);
                 let hh = 56.0 * key.pdepth.max(0.001);
                 let mut res: f64 = 1.0;
-                let tm = (hh * c.wing_top.max(1.0) * 1.1 + 1.0 - zp * hh) / l3[2];
+                let tm = (hh * g.wing_top.max(1.0) * 1.1 + 1.0 - zp * hh) / l3[2];
                 for m in 0..48 {
                     let t3 = tm * (m as f64 + 0.5) / 48.0;
                     let hx = x * 56.0 + l3[0] * t3;
                     let hy = y * 56.0 + l3[1] * t3;
-                    let clear = zp * hh + l3[2] * t3 - (hh_at(hx.hypot(hy) / 56.0) * hh).max(0.0) + (t3 * 0.04).max(0.5);
+                    let clear = zp * hh + l3[2] * t3 - (hh_at((hx * hx + hy * hy).sqrt() / 56.0) * hh).max(0.0)
+                        + (t3 * 0.04).max(0.5);
                     res = res.min(6.0 * clear / t3.max(1.0));
                 }
                 let res = res.clamp(0.0, 1.0);
@@ -589,30 +650,13 @@ pub fn bake(style: &KnobStyle, key: &BakeKey) -> KnobBake {
         }
     }
 
-    // What the shader precomputed per draw in the bench (solidPre).
-    c.prof09 = row_at(&prof, 0.9)[1];
-    c.prof_cut = row_at(&prof, style.cr.clamp(0.0, 1.0))[1];
-    let cut_through = style.cut > 0.5 && style.cf < 0.001 && (style.cut > 1.5 || style.csph < 0.5);
-    c.foot_notched = cut_through || (style.flutes >= 1.0 && c.flute_r[1] > 0.9);
-
-    // The curve texture, 16 bits a value as the bench packs it.
-    let mut data = vec![0u32; TAPS * DATA_ROWS];
-    for (r, row) in [&prof, &flute, &wwid, &whgt, &wprof].iter().enumerate() {
-        for (i, t) in row.iter().enumerate() {
-            let sv = (t[0] * 65535.0).round() as u32;
-            let hv = (t[1] * 65535.0).round() as u32;
-            let (red, blue) = (sv >> 8, sv & 255);
-            let (green, alpha) = (hv >> 8, hv & 255);
-            data[r * TAPS + i] = (alpha << 24) | (red << 16) | (green << 8) | blue;
-        }
-    }
     let mut knots = vec![0.0f32; KNOT_FLOATS];
     for (i, k) in c.sil.iter().chain(c.wk.iter()).enumerate() {
         for (lane, v) in k.iter().enumerate() {
             knots[i * 4 + lane] = *v as f32;
         }
     }
-    KnobBake { data, knots, shade, consts: c }
+    ShadeBake { knots, shade, consts: c }
 }
 
 fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
@@ -664,7 +708,9 @@ fn env_up(m: &KnobMaterial, rgh: f64) -> [f64; 3] {
         q[0].max(0.0).hypot(q[1].max(0.0)) + q[0].max(q[1]).min(0.0) - rc
     };
     let rect_cov = |d: f64, w: f64| 1.0 - smoothstep(-w, w, d);
-    let mix3 = |a: [f64; 3], b: [f64; 3], t: f64| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let mix3 = |a: [f64; 3], b: [f64; 3], t: f64| {
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    };
     if m.envk > 1.5 {
         let s = rv[2].clamp(0.0, 1.0).sqrt();
         let sky = mix3([1.5, 0.97 * 1.5, 0.92 * 1.5], [0.28, 0.46, 0.85], s);

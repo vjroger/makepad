@@ -1,9 +1,9 @@
 //! The knob engine's widgets: `TurnedKnob`, one knob of a style in a
 //! material in its own quad, turned by a drag; `KnobView3d`, the same solid
 //! ray marched under an orbiting camera; and the bake cache they share.
-use super::bake::{self, BakeConsts, BakeKey, DATA_ROWS, KNOT_FLOATS, SHADE_N, TAPS};
+use super::bake::{self, GeomBake, GeomConsts, GeomKey, ShadeConsts, ShadeKey, DATA_ROWS, KNOT_FLOATS, SHADE_N, TAPS};
 use super::presets::{KnobMaterial, KnobStyle, MATERIALS, STYLES};
-use super::shader::{DrawKnobGround, DrawKnobView3d, DrawTurnedKnob};
+use super::shader::{DrawKnobView3d, DrawTurnedKnob};
 use crate::makepad_widgets::*;
 use std::rc::Rc;
 
@@ -20,81 +20,122 @@ script_mod! {
     }
 
     mod.storybook.KnobView3dBase = #(KnobView3d::register_widget(vm))
-    /** The knob's solid ray marched in 3D. A drag orbits the camera, the
-     * wheel zooms, a double tap puts the camera back. */
+    /** The knob's solid ray marched in 3D. A drag orbits the camera,
+     * ctrl and the wheel zoom, a double tap puts the camera back. */
     mod.storybook.KnobView3d = set_type_default() do mod.storybook.KnobView3dBase{
         width: 320.
         height: 230.
     }
 }
 
-/// One bake as the GPU holds it.
-pub struct KnobAssets {
-    pub key: BakeKey,
+/// A style's geometry bake as the GPU holds it.
+pub struct GeomAssets {
+    pub key: GeomKey,
     pub data: Texture,
+    pub consts: GeomConsts,
+    bake: GeomBake,
+}
+
+/// A style's shadow bake as the GPU holds it.
+pub struct ShadeAssets {
+    pub key: ShadeKey,
     pub knots: Texture,
     pub shade: Texture,
-    pub consts: BakeConsts,
+    pub consts: ShadeConsts,
 }
 
-/// The bakes in use, newest last. A style under one light is baked once and
-/// shared by every knob and view that draws it.
+/// Both bakes a knob draws with.
+#[derive(Clone)]
+pub struct KnobAssets {
+    pub geom: Rc<GeomAssets>,
+    pub shade: Rc<ShadeAssets>,
+}
+
+impl KnobAssets {
+    /// Whether these are the bakes for this style in this material.
+    pub fn fits(&self, style: usize, m: &KnobMaterial) -> bool {
+        self.shade.key == ShadeKey::new(style, m)
+    }
+}
+
+/// The bakes in use, newest last. A style's curves are baked once per crease
+/// blur and its shadows once per light, and every knob and view that draws
+/// it shares them: moving the light re-bakes the shadows only.
 #[derive(Default)]
 struct BakeCache {
-    entries: Vec<Rc<KnobAssets>>,
+    geoms: Vec<Rc<GeomAssets>>,
+    shades: Vec<Rc<ShadeAssets>>,
 }
 
-/// How many bakes the cache keeps: every style under two lights, so a
+/// How many of each the cache keeps: every style under two lights, so a
 /// gallery survives a light being moved back and forth.
 const CACHE_SIZE: usize = 48;
 
-/// The bake for this style under this material, from the cache or made now.
-pub fn knob_assets(cx: &mut Cx, style: usize, m: &KnobMaterial) -> Rc<KnobAssets> {
+fn cached<T, K: PartialEq>(list: &mut Vec<Rc<T>>, key: &K, key_of: impl Fn(&T) -> &K) -> Option<Rc<T>> {
+    let pos = list.iter().position(|a| key_of(a) == key)?;
+    let hit = list.remove(pos);
+    list.push(hit.clone());
+    Some(hit)
+}
+
+fn keep<T>(list: &mut Vec<Rc<T>>, item: Rc<T>) {
+    list.push(item);
+    if list.len() > CACHE_SIZE {
+        list.remove(0);
+    }
+}
+
+/// The bakes for this style in this material, from the cache or made now.
+pub fn knob_assets(cx: &mut Cx, style: usize, m: &KnobMaterial) -> KnobAssets {
     let style = style.min(STYLES.len() - 1);
-    let key = BakeKey::new(style, m);
-    {
-        let cache = cx.global::<BakeCache>();
-        if let Some(pos) = cache.entries.iter().position(|a| a.key == key) {
-            let hit = cache.entries.remove(pos);
-            cache.entries.push(hit.clone());
-            return hit;
+    let gkey = GeomKey::new(style, m);
+    let skey = ShadeKey::new(style, m);
+    let geom = match cached(&mut cx.global::<BakeCache>().geoms, &gkey, |a| &a.key) {
+        Some(g) => g,
+        None => {
+            let bake = bake::bake_geometry(&STYLES[style], &gkey);
+            let data = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: TAPS,
+                    height: DATA_ROWS,
+                    data: Some(bake.data.clone()),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            let g = Rc::new(GeomAssets { key: gkey, data, consts: bake.consts.clone(), bake });
+            keep(&mut cx.global::<BakeCache>().geoms, g.clone());
+            g
         }
-    }
-    let baked = bake::bake(&STYLES[style], &key);
-    let data = Texture::new_with_format(
-        cx,
-        TextureFormat::VecBGRAu8_32 {
-            width: TAPS,
-            height: DATA_ROWS,
-            data: Some(baked.data),
-            updated: TextureUpdated::Full,
-        },
-    );
-    let knots = Texture::new_with_format(
-        cx,
-        TextureFormat::VecRf32 {
-            width: KNOT_FLOATS,
-            height: 1,
-            data: Some(baked.knots),
-            updated: TextureUpdated::Full,
-        },
-    );
-    let shade = Texture::new_with_format(
-        cx,
-        TextureFormat::VecBGRAu8_32 {
-            width: SHADE_N,
-            height: SHADE_N,
-            data: Some(baked.shade),
-            updated: TextureUpdated::Full,
-        },
-    );
-    let assets = Rc::new(KnobAssets { key, data, knots, shade, consts: baked.consts });
-    let cache = cx.global::<BakeCache>();
-    cache.entries.push(assets.clone());
-    if cache.entries.len() > CACHE_SIZE {
-        cache.entries.remove(0);
-    }
-    assets
+    };
+    let shade = match cached(&mut cx.global::<BakeCache>().shades, &skey, |a| &a.key) {
+        Some(s) => s,
+        None => {
+            let bake = bake::bake_shade(&STYLES[style], &geom.bake, &skey);
+            let knots = Texture::new_with_format(
+                cx,
+                TextureFormat::VecRf32 {
+                    width: KNOT_FLOATS,
+                    height: 1,
+                    data: Some(bake.knots),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            let table = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: SHADE_N,
+                    height: SHADE_N,
+                    data: Some(bake.shade),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            let s = Rc::new(ShadeAssets { key: skey, knots, shade: table, consts: bake.consts });
+            keep(&mut cx.global::<BakeCache>().shades, s.clone());
+            s
+        }
+    };
+    KnobAssets { geom, shade }
 }
 
 fn texture_slot(cx: &Cx, vars: &DrawVars, id: LiveId) -> Option<usize> {
@@ -133,7 +174,8 @@ pub fn set_material_uniforms(cx: &Cx, vars: &mut DrawVars, m: &KnobMaterial) {
 
 /// The style's uniforms and its bake's textures.
 pub fn set_style_uniforms(cx: &Cx, vars: &mut DrawVars, s: &KnobStyle, a: &KnobAssets) {
-    let c = &a.consts;
+    let c = &a.geom.consts;
+    let d = &a.shade.consts;
     u4(cx, vars, live_id!(knob_zero), [0.0; 4]);
     u4(cx, vars, live_id!(s_flute), [s.flutes, s.fd, s.fs, s.gtaper]);
     u4(cx, vars, live_id!(s_cap), [c.flute_r[0], c.flute_r[1], s.capr, s.spun]);
@@ -149,25 +191,18 @@ pub fn set_style_uniforms(cx: &Cx, vars: &mut DrawVars, s: &KnobStyle, a: &KnobA
     u4(cx, vars, live_id!(s_cut), [s.cut, s.cn, s.cr, s.cs]);
     u4(cx, vars, live_id!(s_cut2), [s.cl, s.cf, s.cw, s.cfil]);
     u4(cx, vars, live_id!(s_cut3), [s.csph, s.cz, c.wing_thru, if c.foot_notched { 1.0 } else { 0.0 }]);
-    u4(cx, vars, live_id!(s_sil), [c.sil_n, c.sil_s, c.wk_n, c.wk_b]);
-    u4(cx, vars, live_id!(s_wt), c.wt);
+    u4(cx, vars, live_id!(s_sil), [d.sil_n, d.sil_s, d.wk_n, d.wk_b]);
+    u4(cx, vars, live_id!(s_wt), d.wt);
     u4(cx, vars, live_id!(s_pre), [c.prof09, c.prof_cut, 0.0, 0.0]);
     if let Some(slot) = texture_slot(cx, vars, live_id!(knob_data)) {
-        vars.set_texture(slot, &a.data);
+        vars.set_texture(slot, &a.geom.data);
     }
     if let Some(slot) = texture_slot(cx, vars, live_id!(knob_knots)) {
-        vars.set_texture(slot, &a.knots);
+        vars.set_texture(slot, &a.shade.knots);
     }
     if let Some(slot) = texture_slot(cx, vars, live_id!(knob_self)) {
-        vars.set_texture(slot, &a.shade);
+        vars.set_texture(slot, &a.shade.shade);
     }
-}
-
-/// Paint the ground a set of knobs stands on, through the same exposure as
-/// the knobs, so the two meet without a seam.
-pub fn draw_ground(cx: &mut Cx2d, draw: &mut DrawKnobGround, m: &KnobMaterial, rect: Rect) {
-    set_material_uniforms(cx, &mut draw.draw_vars, m);
-    draw.draw_abs(cx, rect);
 }
 
 /// What a knob raised.
@@ -233,7 +268,7 @@ pub struct TurnedKnob {
     #[rust]
     custom: Option<KnobMaterial>,
     #[rust]
-    assets: Option<Rc<KnobAssets>>,
+    assets: Option<KnobAssets>,
     #[rust]
     drag: Option<Drag>,
 }
@@ -283,7 +318,7 @@ impl Widget for TurnedKnob {
         let m = self.material();
         let style = self.style_index();
         let assets = match &self.assets {
-            Some(a) if a.key == BakeKey::new(style, &m) => a.clone(),
+            Some(a) if a.fits(style, &m) => a.clone(),
             _ => {
                 let a = knob_assets(cx, style, &m);
                 self.assets = Some(a.clone());
@@ -411,10 +446,15 @@ pub struct KnobView3d {
     pub elevation: f64,
     #[live(1.0)]
     pub zoom: f64,
+    /// Rays per pixel along each axis: 1 is the bench's single ray, 2 four
+    /// rays on a rotated grid (anti-aliased silhouettes and rims, at four
+    /// times the march). While the camera is being dragged it takes one.
+    #[live(2.0)]
+    pub samples: f64,
     #[rust]
     custom: Option<KnobMaterial>,
     #[rust]
-    assets: Option<Rc<KnobAssets>>,
+    assets: Option<KnobAssets>,
     #[rust]
     orbit: Option<(Vec2d, [f64; 2])>,
 }
@@ -464,7 +504,7 @@ impl Widget for KnobView3d {
         let m = self.material();
         let style = self.style_index();
         let assets = match &self.assets {
-            Some(a) if a.key == BakeKey::new(style, &m) => a.clone(),
+            Some(a) if a.fits(style, &m) => a.clone(),
             _ => {
                 let a = knob_assets(cx, style, &m);
                 self.assets = Some(a.clone());
@@ -475,7 +515,8 @@ impl Widget for KnobView3d {
         set_material_uniforms(cx, vars, &m);
         set_style_uniforms(cx, vars, &STYLES[style], &assets);
         u4(cx, vars, live_id!(k_state), [self.value, 0.0, 0.0, 0.0]);
-        u4(cx, vars, live_id!(k_cam), [self.yaw, self.elevation, self.zoom, 0.0]);
+        let samples = if self.orbit.is_some() { 1.0 } else { self.samples.round().clamp(1.0, 2.0) };
+        u4(cx, vars, live_id!(k_cam), [self.yaw, self.elevation, self.zoom, samples]);
         self.draw_view.draw_abs(cx, rect);
         DrawStep::done()
     }
@@ -499,12 +540,18 @@ impl Widget for KnobView3d {
                 }
             }
             Hit::FingerUp(_) => {
+                // Back to the full samples once the camera is let go.
                 self.orbit = None;
+                self.draw_view.redraw(cx);
                 cx.set_cursor(MouseCursor::Hand);
             }
-            Hit::FingerScroll(fe) => {
+            // Ctrl (or Cmd) and the wheel zoom; the wheel alone scrolls the
+            // page, so a page scrolled past the view is not caught by it.
+            Hit::FingerScroll(fe) if fe.modifiers.control || fe.modifiers.logo => {
                 let z = self.zoom * (1.0 - fe.scroll.y * 0.002).clamp(0.5, 2.0);
                 self.set_camera(cx, self.yaw, self.elevation, z);
+                event.set_scroll_handled(Vec2Index::X);
+                event.set_scroll_handled(Vec2Index::Y);
             }
             _ => {}
         }
