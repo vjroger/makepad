@@ -1,7 +1,7 @@
 //! Quiet controls and row-owned hit regions shared by Calendar presentations.
 use crate::model::*;
 use crate::presentation::*;
-use crate::presentation::rect;
+use crate::presentation::{contrast, rect};
 use makepad_civil_time::Day;
 use makepad_widgets::animator::Ease;
 use makepad_widgets::makepad_platform::event::TouchState;
