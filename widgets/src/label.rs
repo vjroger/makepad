@@ -361,11 +361,14 @@ impl Widget for Label {
             Some(t) => t,
             None => self.text.as_ref(),
         };
-        let text_w = if text.is_empty() {
-            0.0
-        } else {
-            crate::badge::advance(&self.draw_text, cx, text)
-        };
+        // An empty label draws a space: `draw_walk` writes one in before it
+        // draws. Priced as nothing, it is a label a space narrower than it
+        // draws for as long as it stays empty -- which is only until its
+        // first draw, and then again every time somebody sets it empty. An
+        // app does that on every rebuild, so a row on its edge took that
+        // space as room and gave a concession back for exactly one frame.
+        let text = if text.is_empty() { " " } else { text };
+        let text_w = crate::badge::advance(&self.draw_text, cx, text);
         Some(pad.width() + text_w + margin.width())
     }
 

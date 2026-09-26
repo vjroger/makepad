@@ -432,7 +432,7 @@ mod tests {
         (
             "Selection",
             &[
-                ("CheckBox", &["Overview"]),
+                ("CheckBox", &["Overview", "Icon toggle"]),
                 ("RadioGroup", &["Overview"]),
                 ("Select", &["Overview", "Combo box"]),
                 ("Chip", &["Overview"]),
@@ -484,7 +484,7 @@ mod tests {
             "Collections",
             &[
                 ("Lists", &["Overview", "List item"]),
-                ("Table", &["Overview"]),
+                ("Table", &["Overview", "Diagonal headings"]),
                 ("Tree", &["Overview", "Files"]),
                 ("DataGrid", &["Overview", "List"]),
                 ("TileList", &["Overview", "Item grid"]),

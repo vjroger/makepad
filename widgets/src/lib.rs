@@ -31,6 +31,8 @@ pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
 pub mod theme_store;
 pub mod theme_lab;
+pub mod theme_builder;
+pub mod theme_combinations;
 pub mod conceding_row;
 pub mod widget;
 pub mod width_override;
@@ -114,6 +116,7 @@ pub mod overlay_layers;
 pub mod value_input;
 pub mod ease_editor;
 pub mod sequencer;
+pub mod diagonal_text;
 pub mod fab_controls;
 pub mod menu_bar;
 
@@ -339,6 +342,7 @@ pub use crate::{
     avatar::*,
     card::*,
     media::*,
+    diagonal_text::*,
     table::*,
     empty_state::*,
     timeline::*,
@@ -832,6 +836,9 @@ true
     crate::ease_editor::script_mod(vm);
     crate::tween_inspector::script_mod(vm);
     crate::sequencer::script_mod(vm);
+    // Before the panel kit and the tables: all three turn a heading with the
+    // lean this one declares.
+    crate::diagonal_text::script_mod(vm);
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);

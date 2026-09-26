@@ -786,7 +786,7 @@ impl ThemeLab {
             // a theme's text carries an alpha, and white at 65 percent on a
             // mid grey is not white.
             let stands = reads_on(g | 0xFF, i);
-            let line = format!("{ink} on {ground} = {stands:.2}, wants {need}");
+            let line = format!("{ink} on {ground} = {stands:.2}, wants {need:.1}");
             out.measured += 1;
             if margin.is_none_or(|best| stands - need < best) {
                 margin = Some(stands - need);

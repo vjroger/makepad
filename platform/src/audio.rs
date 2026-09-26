@@ -111,6 +111,16 @@ impl AudioDevicesEvent {
         Vec::new()
     }
 
+    /// The loopback devices to capture the machine's own output from, the
+    /// one mirroring the default output first.
+    ///
+    /// They are listed in whatever order the platform enumerated them,
+    /// and an app that takes the first one it is handed can end up
+    /// capturing an endpoint nothing is playing to: that capture simply
+    /// never fires a callback, so it looks exactly like listening to
+    /// silence. The default output is the one the machine is actually
+    /// playing through, so its loopback goes first. Devices known to have
+    /// failed are left out; the rest keep the platform's order.
     pub fn loopback_capture_order(&self) -> Vec<AudioDeviceId> {
         let mut devices: Vec<&AudioDeviceDesc> = self
             .descs

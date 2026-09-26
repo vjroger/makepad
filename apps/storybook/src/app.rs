@@ -677,6 +677,7 @@ fn new_count_line(new: usize, days: u32) -> String {
 mod tests {
     use super::*;
     use crate::makepad_widgets::makepad_draw::cx_draw::CxDraw;
+    use crate::makepad_widgets::theme_lab::{Applied, ThemeLab};
 
     #[test]
     fn the_new_count_says_how_far_back_it_looked() {
@@ -944,6 +945,177 @@ mod tests {
             );
         }
         assert_eq!(shown(&cx, &app), expected(0), "the faces did not all come back");
+    }
+
+    /// The row inside a stand-in for the window's view, laid out beside the
+    /// design panel's band: the caption, the app's body with the row in it,
+    /// the panel. A function of its own so that a module run can build it
+    /// again, the way the reload that lands a theme install builds the app
+    /// again.
+    fn docked(vm: &mut ScriptVm) -> ScriptValue {
+        script_eval!(vm, {
+            use mod.prelude.widgets.*
+            use mod.widgets.*
+            View{
+                width: Fill
+                height: Fill
+                flow: Down
+                caption := View{width: Fill height: 30}
+                body := View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 0.
+                    margin: 0.
+                    toolbar := mod.storybook.CatalogueToolbar{}
+                }
+                tweaker := View{width: 0 height: 0}
+            }
+        })
+    }
+
+    /// The docked stand-in, built, with what it was built from.
+    fn docked_fixture() -> (Cx, App, DrawPass, DrawList2d, ScriptValue) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let (ui, value) = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = docked(vm);
+            assert!(vm.take_errors().is_empty());
+            (WidgetRef::script_from_value(vm, value), value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let list = DrawList2d::new(&mut cx);
+        (cx, App { ui, current: None }, pass, list, value)
+    }
+
+    /// Keep `band` back from the body, the way the window does before every
+    /// draw.
+    fn keep_back(app: &App, band: f64) {
+        let mut root = app.ui.borrow_mut::<View>().expect("the root is a View");
+        root.set_child_reserve(live_id!(body), (band > 0.0).then(|| Inset { right: band, ..Default::default() }));
+    }
+
+    fn body_width(cx: &Cx, app: &App) -> f64 {
+        app.ui.widget(cx, ids!(body)).area().rect(cx).size.x
+    }
+
+    fn reapply(cx: &mut Cx, app: &App, value: ScriptValue, apply: &Apply) {
+        let mut ui = app.ui.clone();
+        cx.with_vm(|vm| {
+            ui.script_apply(vm, apply, &mut Scope::empty(), value);
+            assert!(vm.take_errors().is_empty(), "the reload did not apply cleanly");
+        });
+    }
+
+    /// The level the row itself says it drew at.
+    fn level(cx: &Cx, app: &App) -> usize {
+        app.ui
+            .widget(cx, ids!(toolbar))
+            .borrow::<crate::makepad_widgets::conceding_row::ConcedingRow>()
+            .expect("the toolbar is a ConcedingRow")
+            .level()
+    }
+
+    /// One move of the equalizer: the weight set and the mix applied, by the
+    /// very calls the panel makes (`eq_weight_moved`, then `ThemeLab::apply`
+    /// once its settle is up), and then the style reload that asks for landed
+    /// the way `app_main!` lands it -- `script_mod` run again under
+    /// `with_reload`, the tree applied over the new module with
+    /// `ScriptReapply`, and the app's own `Event::LiveEdit` after that. The
+    /// app's module value is its window; here the window is the docked
+    /// stand-in, built in the same run.
+    fn equalizer_install(cx: &mut Cx, app: &mut App, lab: &mut ThemeLab, weight: f64) {
+        lab.set_weight(1, weight);
+        let applied = cx.with_vm(|vm| lab.apply(vm));
+        assert!(matches!(applied, Ok(Applied::Mix)), "the mix did not go in: {applied:?}");
+        assert!(
+            std::mem::take(&mut cx.pending_style_reload),
+            "the install asked for no style reload"
+        );
+        let mut ui = app.ui.clone();
+        cx.with_vm(|vm| {
+            let value = vm.with_reload(|vm| {
+                <App as AppMain>::script_mod(vm);
+                docked(vm)
+            });
+            ui.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), value);
+            assert!(vm.take_errors().is_empty(), "the install did not apply cleanly");
+        });
+        <App as AppMain>::handle_event(app, cx, &Event::LiveEdit);
+    }
+
+    /// The flash the operator saw, through the calls that made it: the
+    /// equalizer's own install, landed as `app_main!` lands it.
+    ///
+    /// The window keeps the panel's band back from the app on every draw, so
+    /// the row's room no longer moves on a reload, and the top bar still
+    /// showed its title for one frame per install. Not the rebuild: a module
+    /// run and a re-apply leave every child pricing as it did. The app's
+    /// `LiveEdit` does it. It writes the empty match count back into a label
+    /// that had drawn itself a space, and a row on its edge priced that label
+    /// a space narrower than it draws -- room, for one frame, to give its
+    /// title back. The reloads this used to be tested with applied the old
+    /// tree again and sent no `LiveEdit`, so they never wrote anything back.
+    ///
+    /// The row is put on its edge on purpose: a point narrower than the
+    /// narrowest window at which mix A gives the title back. Each round
+    /// installs B and then A again, so the frame under test is always the
+    /// first draw of an install, and the one it must match is the faces the
+    /// row settled on under A.
+    #[test]
+    fn an_equalizer_install_under_the_docked_panel_leaves_the_top_bar_as_it_was() {
+        const BAND: f64 = 280.0;
+        const A: f64 = 30.0;
+        const B: f64 = 60.0;
+        let (mut cx, mut app, pass, mut list, value) = docked_fixture();
+        let mut lab = ThemeLab::new();
+        cx.with_vm(|vm| lab.enter(vm));
+        // Entering resolves every theme in module runs of its own, and asks
+        // for the tree to be walked over what they left behind.
+        reapply(&mut cx, &app, value, &Apply::ScriptReapply);
+
+        equalizer_install(&mut cx, &mut app, &mut lab, A);
+        // Narrow enough that the row starts with its title gone.
+        let mut window = 1000.0;
+        loop {
+            keep_back(&app, BAND);
+            settle(&mut cx, &mut app, &pass, &mut list, window);
+            if level(&cx, &app) < 2 {
+                break;
+            }
+            window += 1.0;
+            assert!(window < 1800.0, "the row never had its title back");
+        }
+        let at = window - 1.0;
+        keep_back(&app, BAND);
+        settle(&mut cx, &mut app, &pass, &mut list, at);
+        assert_eq!(level(&cx, &app), 2, "a point narrower did not take the title again");
+        let settled = shown(&cx, &app);
+        assert_eq!(settled, expected(2));
+
+        for round in 0..3 {
+            equalizer_install(&mut cx, &mut app, &mut lab, B);
+            keep_back(&app, BAND);
+            settle(&mut cx, &mut app, &pass, &mut list, at);
+
+            equalizer_install(&mut cx, &mut app, &mut lab, A);
+            keep_back(&app, BAND);
+            draw(&mut cx, &app, &pass, &mut list, at);
+            assert_eq!(body_width(&cx, &app), at - BAND, "round {round}: the install frame was not beside the band");
+            assert_eq!(level(&cx, &app), 2, "round {round}: the install frame drew another level");
+            assert!(
+                !app.ui.widget(&cx, ids!(catalogue_title)).visible(),
+                "round {round}: the install frame showed the title"
+            );
+            assert_eq!(shown(&cx, &app), settled, "round {round}: the top bar moved on the install frame");
+            for _ in 0..3 {
+                keep_back(&app, BAND);
+                draw(&mut cx, &app, &pass, &mut list, at);
+                assert_eq!(level(&cx, &app), 2, "round {round}: the row moved after the install");
+                assert_eq!(shown(&cx, &app), settled, "round {round}: the top bar moved after the install");
+            }
+        }
     }
 
     /// The reset is one command with two faces, and a press on either is
