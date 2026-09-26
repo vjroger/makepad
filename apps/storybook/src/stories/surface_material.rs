@@ -129,6 +129,13 @@ script_mod! {
     }
 
     mod.stories.SurfaceMaterialOverview = StoryPage{
+        // THE HOUSING IS THE PAGE. Every control here is moulded out of the
+        // housing colour, theme.color_outset, and throws its shadow and lip
+        // onto it; each material sheet sets the window's colour to that same
+        // value. A stock theme does not, so the page paints it itself, or the
+        // controls read as parts of one material lying on another.
+        show_bg: true
+        draw_bg +: {color: theme.color_outset}
         StoryNote{text: "The base shaders carry a moulded material behind one uniform. At 0, every stock theme, they draw what they always drew; at 1 a face is lit from its own distance field (a shoulder, a cast shadow, a well's inner shadow); at 2 it also takes a rim, a gloss sweep and a specular. This page raises the tier on each control, whatever theme is showing, so the relief can be read against the flat page around it."}
         StoryNote{text: "The Controls tab carries the material bench's controls, in its groups: Light, Relief, Surface, Finish, Shadow and Colours, each folded away or back by a click on its heading, and a preset that sets them all to one of the bench's eleven materials. They write every control on this page at once. The page starts on the bench's neumorphic preset at tier 2; its inks were picked for a pale ground, so the Light theme or the Neumorphic sheet shows it as it was tuned."}
 
