@@ -115,6 +115,7 @@ pub mod popover;
 pub mod overlay_layers;
 pub mod value_input;
 pub mod ease_editor;
+pub mod curve_editor;
 pub mod sequencer;
 pub mod diagonal_text;
 pub mod fab_controls;
@@ -393,6 +394,7 @@ pub use crate::{
     slide_panel::*,
     number_field::*,
     ease_editor::*,
+    curve_editor::*,
     sequencer::*,
     range_slider::*,
     slider::*,
@@ -834,6 +836,7 @@ true
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::ease_editor::script_mod(vm);
+    crate::curve_editor::script_mod(vm);
     crate::tween_inspector::script_mod(vm);
     crate::sequencer::script_mod(vm);
     // Before the panel kit and the tables: all three turn a heading with the
@@ -1768,6 +1771,32 @@ mod line_menu_registration_tests {
         );
         assert!(line.contains("mod.widgets.LineMenuBase = #(LineMenu::register_widget(vm))"));
         assert_eq!(line.matches("set_type_default() do mod.widgets.LineMenuBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod curve_editor_registration_tests {
+    /// The curve editor registers directly after the ease editor it sits
+    /// beside, and after the view, button and badge it is built from and
+    /// measures its captions with, with one type default.
+    #[test]
+    fn test_curve_editor_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let editor = include_str!("curve_editor.rs");
+        assert!(lib.contains("\npub mod curve_editor;"));
+        assert!(lib.contains("\n    curve_editor::*,"));
+        crate::assert_registered_after(
+            "crate::curve_editor::script_mod(vm);",
+            &[
+                "crate::ease_editor::script_mod(vm);",
+                "crate::view::script_mod(vm);",
+                "crate::button::script_mod(vm);",
+                "crate::radio_button::script_mod(vm);",
+                "crate::badge::script_mod(vm);",
+            ],
+        );
+        assert!(editor.contains("mod.widgets.CurveEditorBase = #(CurveEditor::register_widget(vm))"));
+        assert_eq!(editor.matches("set_type_default() do mod.widgets.CurveEditorBase").count(), 1);
     }
 }
 

@@ -74,15 +74,18 @@ script_mod! {
         // Material. light: x, y, z, intensity; relief: bevel width and
         // curve, raise, specular; finish: occlusion, rim, gloss, roughness;
         // env: reflection, perspective, exposure (linear), roll-off;
-        // surf: metal, clear coat, its roughness, studio; shadow: strength,
-        // blur, falloff, contact; inner: inner shadow, its blur, lip, glow;
-        // tune: tier, sink, hairline, occlusion reach; knob: profile depth,
-        // mark finish, mark bevel, face gradient; env_ref: the flat face's
-        // reflection (luminance, clear coat rgb).
+        // surf: metal, clear coat, its roughness, studio; studio: the
+        // chrome studio's strip lights; shadow: strength, blur, falloff,
+        // contact; inner: inner shadow, its blur, lip, glow; tune: tier,
+        // sink, hairline, occlusion reach; knob: profile depth, mark finish,
+        // mark bevel, face gradient; env_ref: the flat face's reflection
+        // (luminance, clear coat rgb). Both draw shaders spread this, so
+        // both carry every one of these.
         m_light: uniform(vec4(-0.35, -0.55, 0.66, 0.7))
         m_relief: uniform(vec4(4.0, 0.7, 4.0, 0.0))
         m_finish: uniform(vec4(0.25, 0.4, 0.0, 0.85))
         m_surf: uniform(vec4(0.0, 0.0, 0.08, 0.0))
+        m_studio: uniform(vec4(3.0, 0.0, 0.0, 0.0))
         m_shadow: uniform(vec4(0.85, 12.0, 1.0, 0.25))
         m_inner: uniform(vec4(0.55, 10.0, 0.7, 0.0))
         m_tune: uniform(vec4(1.0, 4.0, 0.0, 1.2))
@@ -732,8 +735,9 @@ script_mod! {
         }
 
         // THE STUDIOS (the bench's envHDR2 at one roughness): 0 a softbox
-        // studio, 1 the chrome studio (ceiling panel, key box, three strips,
-        // a horizon line), 2 outdoors (sky, ground, a sun). `fp` is the
+        // studio, 1 the chrome studio (ceiling panel, key box, `m_studio.x`
+        // strips round the walls -- the bench's three, at right angles --
+        // and a horizon line), 2 outdoors (sky, ground, a sun). `fp` is the
         // reflection's footprint, which widens every edge it crosses.
         env_hdr: fn(rv: vec3, rgh: float, kvis: float, fp: float) -> vec3 {
             let kl = normalize(self.m_light.xyz)
@@ -760,11 +764,13 @@ script_mod! {
                 var ec = mix(floor_c, wall_c, smoothstep(-0.4 * w, 0.4 * w, rv.z))
                 ec = ec + vec3(1.1, 1.1, 1.1) * en * self.rect_cov(dt, wf)
                 ec = ec + vec3(3.5, 3.5, 3.5) * (li * en * kvis) * self.rect_cov(dk, wf)
+                // The strips: the first a turn over (lights + 1) round from
+                // the key light, the rest evenly after it.
                 let az0 = atan2(kl.y, kl.x)
                 var si = 0.0
                 loop {
-                    if si > 2.5 + self.knob_zero { break }
-                    let az = az0 + 1.5708 * (si + 1.0)
+                    if si > self.m_studio.x - 0.5 + self.knob_zero { break }
+                    let az = az0 + 6.2831853 * (si + 1.0) / (self.m_studio.x + 1.0)
                     let ds = self.rect_d(rv, normalize(vec3(cos(az), sin(az), 0.35)), vec2(0.05, 0.8), 0.02)
                     let sv = 5.0 * en * (0.05 + w) / (0.05 + wf) * self.rect_cov(ds, wf)
                     ec = ec + vec3(sv, sv, sv)
