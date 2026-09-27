@@ -175,6 +175,7 @@ script_mod! {
             let dist = length(p)
             let d = dist - R
             var col = self.m_ground.xyz
+            var cover = 0.0
             if level > 0.5 {
                 // The disc swept along the light to the knob's height and
                 // narrowing as it rises (a cone, where the sweep takes the
@@ -213,7 +214,8 @@ script_mod! {
                     let seam = 1.0 - smoothstep(0.0, 2.2 * px / max(R, 0.001), abs(rn - capr))
                     face = self.in_shadow(face, seam * 0.55)
                 }
-                col = mix(col, face, 1.0 - smoothstep(-px, px, d))
+                cover = 1.0 - smoothstep(-px, px, d)
+                col = mix(col, face, cover)
             }
             // The marks, in paint.
             let ptype = self.s_ptr.x
@@ -229,11 +231,15 @@ script_mod! {
                 let td = self.tick_d(p, R)
                 var under = 1.0
                 if ad < 2.0 * px || td.x < 40.0 { under = smoothstep(-px, px, d) }
-                col = mix(col, self.m_glow_ink.xyz, (1.0 - smoothstep(-px, px, ad)) * under)
-                col = mix(col, self.m_ptr_ink.xyz, (1.0 - smoothstep(-px, px, td.x)) * under)
-                col = mix(col, self.m_ptr_ink.xyz, 1.0 - smoothstep(-px, px, self.ptr_d(p, spin, R)))
+                let acov = (1.0 - smoothstep(-px, px, ad)) * under
+                let tcov = (1.0 - smoothstep(-px, px, td.x)) * under
+                let pcov = 1.0 - smoothstep(-px, px, self.ptr_d(p, spin, R))
+                col = mix(col, self.m_glow_ink.xyz, acov)
+                col = mix(col, self.m_ptr_ink.xyz, tcov)
+                col = mix(col, self.m_ptr_ink.xyz, pcov)
+                cover = max(cover, max(acov, max(tcov, pcov)))
             }
-            return vec4(self.hdr_out(mix(self.m_ground.xyz, col, qa)), 1.0)
+            return self.knob_out(self.hdr_out(mix(self.m_ground.xyz, col, qa)), cover * qa)
         }
     }
 
@@ -673,6 +679,7 @@ script_mod! {
 
             var col = self.m_ground.xyz
             var touched = 0.0
+            var cover = 0.0
             var turned_d = 1e9
             var spec_k = 1.0
 
@@ -948,7 +955,9 @@ script_mod! {
                         }
                         if lit > 0.5 { face = self.inner_glow(face, fd, vec2(fd, -1000.0)) }
                     }
-                    col = mix(col, face, 1.0 - smoothstep(-px, px, fd))
+                    let fcov = 1.0 - smoothstep(-px, px, fd)
+                    col = mix(col, face, fcov)
+                    cover = max(cover, fcov)
                 }
                 layer = layer + 1.0
             }
@@ -969,7 +978,9 @@ script_mod! {
                 let td = self.tick_d(p, R)
                 var under = 1.0
                 if ad < 2.0 * px || td.x < 40.0 { under = smoothstep(-px, px, turned_d) }
-                col = mix(col, self.m_glow_ink.xyz, (1.0 - smoothstep(-px, px, ad)) * under)
+                let acov = (1.0 - smoothstep(-px, px, ad)) * under
+                col = mix(col, self.m_glow_ink.xyz, acov)
+                cover = max(cover, acov)
                 let pd = self.ptr_d(p, spin, R)
                 var m = 0.0
                 loop {
@@ -988,12 +999,13 @@ script_mod! {
                     if md < 40.0 {
                         let mg = self.lod_mark_grad(p, m, R, spin, td.y)
                         col = mix(col, self.lod_mark_ink(col, md, mg, mw, ml, self.m_ptr_ink.xyz, px, spec_k), mk)
+                        cover = max(cover, (1.0 - smoothstep(-px, px, md)) * mk)
                     }
                     m = m + 1.0
                 }
             }
-            if touched < 0.5 { return vec4(self.hdr_out(self.m_ground.xyz), 1.0) }
-            return vec4(self.hdr_out(mix(self.m_ground.xyz, col, qa)), 1.0)
+            if touched < 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
+            return self.knob_out(self.hdr_out(mix(self.m_ground.xyz, col, qa)), cover * qa)
         }
     }
 

@@ -41,6 +41,7 @@ mod page {
             width: 200.
             height: 200.
             interactive: true
+            fill: 0.62
             draw_empty +: {
                 color: uniform(vec4(0.5, 0.5, 0.5, 0.6))
                 pixel: fn() {
@@ -60,6 +61,11 @@ mod page {
             width: Fill
             height: Fit
             flow: Flow.Right{wrap: true}
+            // A knob's light and shadow reach past its cell: nothing here
+            // clips them.
+            clip_x: false
+            clip_y: false
+            fill: 0.62
         }
 
         mod.storybook.KnobCostBase = #(KnobCost::register_widget(vm))
@@ -79,6 +85,8 @@ mod page {
             width: 260.
             height: Fit
             flow: Down
+            clip_x: false
+            clip_y: false
             spacing: 4.
             align: Align{x: 0.5 y: 0.0}
             slot := mod.storybook.KnobSlot{}
@@ -102,13 +110,17 @@ mod page {
         }
 
         // One version in the sweep's screenshot: its knob and its name.
+        // The knob smaller in its square than in the row, so its light and
+        // shadow fit in the square.
         let ShotCell = View{
             width: Fit
             height: Fit
             flow: Down
             spacing: 2.
             align: Align{x: 0.5 y: 0.0}
-            slot := mod.storybook.KnobSlot{interactive: false}
+            clip_x: false
+            clip_y: false
+            slot := mod.storybook.KnobSlot{interactive: false fill: 0.4}
             name := Label{
                 text: ""
                 draw_text +: {text_style: theme.font_bold{font_size: 10}}
@@ -172,6 +184,8 @@ mod page {
                 height: Fit
                 flow: Flow.Right{wrap: true}
                 spacing: 18.
+                clip_x: false
+                clip_y: false
                 v0 := VersionCell{}
                 v1 := VersionCell{}
                 v2 := VersionCell{}
@@ -188,6 +202,8 @@ mod page {
                 height: Fit
                 flow: Flow.Right{wrap: true}
                 spacing: 12.
+                clip_x: false
+                clip_y: false
                 s0 := ShotCell{}
                 s1 := ShotCell{}
                 s2 := ShotCell{}
@@ -203,6 +219,8 @@ mod page {
                 height: Fit
                 flow: Down
                 spacing: 6.
+                clip_x: false
+                clip_y: false
                 grid_note := Note{}
                 grid := mod.storybook.KnobGrid{}
             }
@@ -481,6 +499,9 @@ pub struct KnobCost {
     /// Where the last sweep wrote its results.
     #[rust]
     sweep_path: Option<String>,
+    /// The window's DPI factor, as the page last drew.
+    #[rust]
+    dpi: f64,
 }
 
 impl ScriptHook for KnobCost {
@@ -1092,6 +1113,9 @@ impl KnobCost {
             (!r.is_empty() && r != "unknown").then_some(r)
         };
         let finished = Cx::time_now();
+        let shot = self.view.widget(cx, &[Self::shot(0), live_id!(slot)]);
+        let shot_fill = shot.borrow::<KnobSlot>().map(|s| s.fill).unwrap_or(0.0);
+        let grid_fill = self.view.widget(cx, ids!(grid)).borrow::<KnobGrid>().map(|g| g.fill).unwrap_or(0.0);
         let report = SweepReport {
             backend: backend_name(),
             adapter: adapter.as_deref(),
@@ -1101,6 +1125,9 @@ impl KnobCost {
             grid_knobs: GRID_KNOBS,
             grid_size: self.grid_size,
             shot_size: self.shot_size,
+            dpi_factor: self.dpi,
+            shot_fill,
+            grid_fill,
             warm_seconds: WARM_SECONDS,
             compiles: &compiles,
             combos: &sw.records,
@@ -1380,8 +1407,8 @@ impl KnobCost {
                 let mut name = self.view.widget(cx, &[Self::shot(i), live_id!(name)]);
                 script_apply_eval!(cx, name, { draw_text +: {color: #(text)} });
             }
-            let notes = [live_id!(intro), live_id!(status), live_id!(sweep_note), live_id!(grid_note), live_id!(results)];
-            for id in notes {
+            let notes = [live_id!(intro), live_id!(status), live_id!(sweep_note), live_id!(grid_note)];
+            for id in notes.into_iter().chain([live_id!(results)]) {
                 let mut w = self.view.widget(cx, &[id]);
                 script_apply_eval!(cx, w, { draw_text +: {color: #(meta)} });
             }
@@ -1506,6 +1533,7 @@ impl Widget for KnobCost {
         if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<KnobGrid>() {
             grid.size = self.grid_size;
         }
+        self.dpi = cx.current_dpi_factor();
         let m = self.look.material();
         set_material_uniforms(cx, &mut self.view.draw_bg.draw_vars, &m);
         let step = self.view.draw_walk(cx, scope, walk);
@@ -1606,6 +1634,10 @@ pub struct KnobSlot {
     /// second slot showing the same knob (the sweep's screenshot) is not.
     #[live(true)]
     interactive: bool,
+    /// The knob's radius as a fraction of the slot, set on the knob before
+    /// it draws here (two slots show the same knob at different fills).
+    #[live(0.62)]
+    fill: f64,
 }
 
 impl KnobSlot {
@@ -1630,6 +1662,9 @@ impl Widget for KnobSlot {
         let walk = if self.size > 0.0 { Walk::fixed(self.size, self.size) } else { walk };
         match &self.knob {
             Some(knob) => {
+                if let Some(mut k) = knob.borrow_mut::<TurnedKnob>() {
+                    k.fill = self.fill;
+                }
                 let _ = knob.draw_walk(cx, scope, walk);
             }
             None => {
@@ -1666,12 +1701,18 @@ pub struct KnobGrid {
     count: usize,
     #[rust]
     size: f64,
+    /// The knobs' radius as a fraction of their cell.
+    #[live(0.62)]
+    fill: f64,
 }
 
 impl Widget for KnobGrid {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let size = if self.size > 0.0 { self.size } else { 96.0 };
         cx.begin_turtle(walk, self.layout);
+        if let Some(mut k) = self.knob.as_ref().and_then(|k| k.borrow_mut::<TurnedKnob>()) {
+            k.fill = self.fill;
+        }
         for _ in 0..self.count {
             let cell = Walk::fixed(size, size);
             match &self.knob {

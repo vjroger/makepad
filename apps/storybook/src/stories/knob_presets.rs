@@ -34,10 +34,14 @@ mod page {
         }
 
         // One gallery cell: a knob and its style's name under it.
+        // A knob's light and shadow reach past its cell; no view between it
+        // and the page clips them.
         let KnobCell = View{
             width: 136.
             height: Fit
             flow: Down
+            clip_x: false
+            clip_y: false
             align: Align{x: 0.5 y: 0.0}
             knob := TurnedKnob{width: 136. height: 128. fill: 0.5}
             name := Label{
@@ -70,6 +74,8 @@ mod page {
                 width: Fill
                 height: Fit
                 flow: Flow.Right{wrap: true}
+                clip_x: false
+                clip_y: false
                 spacing: 16.
                 align: Align{x: 0.0 y: 0.5}
                 view3d := KnobView3d{width: 403. height: 290.}
@@ -77,6 +83,8 @@ mod page {
                     width: 270.
                     height: Fit
                     flow: Down
+                    clip_x: false
+                    clip_y: false
                     spacing: 4.
                     align: Align{x: 0.5 y: 0.0}
                     big := TurnedKnob{width: 270. height: 270. fill: 0.62}
@@ -90,6 +98,8 @@ mod page {
                 width: Fill
                 height: Fit
                 flow: Flow.Right{wrap: true}
+                clip_x: false
+                clip_y: false
                 c0 := KnobCell{}
                 c1 := KnobCell{}
                 c2 := KnobCell{}
@@ -274,7 +284,7 @@ The Material Bench's knob engine, ported into the storybook: every one of its ni
 
 ## The engine
 
-`TurnedKnob` draws one knob in its own quad: the ground under it with the knob's cast shadow and contact ring, the wells some styles stand in, the knob's face and its marks -- the pointer, the dial ticks and the value arc. `KnobView3d` ray marches the same solid under an orbiting camera. Both live in the storybook (`apps/storybook/src/knob/`); nothing in the widget library depends on them.
+`TurnedKnob` draws one knob in one quad, grown past its layout rect as far as its light and shadow reach and composed over the page (transparent where it paints nothing), so no quad edge ever shows: the ground under it with the knob's cast shadow, ground lip and contact ring, the wells some styles stand in, the knob's face and its marks -- the pointer, the dial ticks and the value arc. `KnobView3d` ray marches the same solid under an orbiting camera. Both live in the storybook (`apps/storybook/src/knob/`); nothing in the widget library depends on them.
 
 A **style** is geometry: a revolve profile drawn as a Bezier curve, a grip (flutes, knurls, lobes), a wing -- a ridge added along the pointer or two cutters taken away -- a cut (a dimple, a slot, scallops, a ring), a flat, a cap, and the marks. A **material** is light and finish: the key light, the tier, the specular and roughness (GGX), metal, a clear coat, the studio it reflects (a softbox studio, a chrome studio, outdoors), exposure and highlight roll-off, the shadow, and seven inks. The two multiply: any style in any material.
 

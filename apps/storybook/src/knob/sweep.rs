@@ -94,6 +94,12 @@ pub struct SweepReport<'a> {
     pub grid_knobs: usize,
     pub grid_size: f64,
     pub shot_size: f64,
+    /// The window's DPI factor: pixels per layout point in the screenshots.
+    pub dpi_factor: f64,
+    /// The knob's radius as a fraction of its square, in the screenshot and
+    /// in the measuring grid.
+    pub shot_fill: f64,
+    pub grid_fill: f64,
     pub warm_seconds: f64,
     pub compiles: &'a [CompileRecord],
     pub combos: &'a [ComboRecord],
@@ -143,10 +149,13 @@ impl SweepReport<'_> {
         o.push_str(&format!("  \"adapter\": {},\n", self.adapter.map(json_str).unwrap_or_else(|| "null".into())));
         o.push_str(&format!("  \"salt\": {},\n", launch_salt()));
         o.push_str(&format!(
-            "  \"grid\": {{\"knobs\": {}, \"knob_size_pt\": {}, \"warm_seconds\": {}, \"run_seconds\": {}}},\n",
-            self.grid_knobs, self.grid_size, self.warm_seconds, RUN_SECONDS
+            "  \"grid\": {{\"knobs\": {}, \"knob_size_pt\": {}, \"fill\": {}, \"warm_seconds\": {}, \
+             \"run_seconds\": {}}},\n",
+            self.grid_knobs, self.grid_size, self.grid_fill, self.warm_seconds, RUN_SECONDS
         ));
         o.push_str(&format!("  \"shot_size_pt\": {},\n", self.shot_size));
+        o.push_str(&format!("  \"dpi_factor\": {},\n", self.dpi_factor));
+        o.push_str(&format!("  \"shot_fill\": {},\n", self.shot_fill));
         o.push_str(&format!("  \"hold_seconds\": {},\n", HOLD_SECONDS));
         o.push_str(&format!(
             "  \"notes\": {},\n",
