@@ -19,7 +19,7 @@ script_mod! {
 }
 
 /// The material a page opens on: the chrome, the bench's showpiece.
-pub const DEFAULT_MATERIAL: usize = 10;
+pub const DEFAULT_MATERIAL: usize = 11;
 /// And the style: the winged knob.
 pub const DEFAULT_STYLE: usize = 9;
 /// And the value.
@@ -309,6 +309,7 @@ pub const POINTER_INK: &str = "Pointer ink";
 
 pub const MATERIAL_NAMES: &[&str] = &[
     "Neumorphic",
+    "Neumorphic dark",
     "Moulded",
     "Glossy",
     "Milled",

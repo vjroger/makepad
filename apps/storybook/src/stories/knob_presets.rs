@@ -65,7 +65,7 @@ mod page {
             show_bg: true
             draw_bg +: {..mod.storybook.KnobGroundFill}
 
-            intro := PageNote{text: "The Material Bench's knob engine, ported: nineteen knob styles in eleven materials. Every knob here is live -- drag one to turn them all, tap one to pick its style. The large knob and the 3D view show the picked style; drag the 3D view to orbit it, ctrl-scroll to zoom, double-tap to put the camera back."}
+            intro := PageNote{text: "The Material Bench's knob engine, ported: nineteen knob styles in twelve materials. Every knob here is live -- drag one to turn them all, tap one to pick its style. The large knob and the 3D view show the picked style; drag the 3D view to orbit it, ctrl-scroll to zoom, double-tap to put the camera back."}
             stage := View{
                 width: Fill
                 height: Fit
@@ -270,7 +270,7 @@ pub const STORIES: &[Story] = &[Story {
     tags: &["material", "knob", "presets", "3d", "skeuomorph", "bench"],
     doc: "# Knob presets
 
-The Material Bench's knob engine, ported into the storybook: every one of its nineteen knob styles, live, in any of its eleven materials, on that material's ground. The picked style is shown large and in 3D beside the gallery.
+The Material Bench's knob engine, ported into the storybook: every one of its nineteen knob styles, live, in any of its eleven materials (and a dark neumorphic one), on that material's ground. The picked style is shown large and in 3D beside the gallery.
 
 ## The engine
 

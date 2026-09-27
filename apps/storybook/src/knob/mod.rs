@@ -6,14 +6,16 @@
 //! reflect, metal and clear coat, an analytic cast shadow and a baked
 //! self-shadow, and marks in four finishes. This module is that engine:
 //!
-//! * [`presets`]: its eleven materials and nineteen styles, as data;
+//! * [`presets`]: its eleven materials (and a dark neumorphic one) and
+//!   nineteen styles, as data;
 //! * [`bake`]: its JavaScript bakes -- the curves, the wing's constants, the
 //!   shadow's knots and the self-shadow table;
 //! * [`shader`]: its GLSL in the shader DSL, one set of solid and shading
 //!   functions spread into the 2D knob, the 3D view and the ground;
 //! * [`widgets`]: `TurnedKnob` and `KnobView3d`;
 //! * [`look`]: what a knob page's controls write, and the controls;
-//! * [`lod`]: the knob's detail levels, for the Knob cost page.
+//! * [`lod`]: the knob's detail levels, for the Knob cost page;
+//! * [`sweep`]: that page's unattended sweep, its data and its JSON.
 //!
 //! It lives in the storybook: nothing in `widgets/` or `draw/` depends on it.
 use crate::makepad_widgets::*;
@@ -23,6 +25,7 @@ pub mod lod;
 pub mod look;
 pub mod presets;
 pub mod shader;
+pub mod sweep;
 pub mod widgets;
 
 pub use presets::{KnobMaterial, KnobStyle, MATERIALS, STYLES};

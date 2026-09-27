@@ -13,7 +13,7 @@ script_mod! {
 
     mod.storybook.TurnedKnobBase = #(TurnedKnob::register_widget(vm))
     /** One knob of the bench's knob engine: `style` (0..18) in `material`
-     * (0..10), turned to `value`. A drag turns it; a tap raises `Tapped`. */
+     * (0..11), turned to `value`. A drag turns it; a tap raises `Tapped`. */
     mod.storybook.TurnedKnob = set_type_default() do mod.storybook.TurnedKnobBase{
         width: 160.
         height: 160.
@@ -240,7 +240,7 @@ pub struct TurnedKnob {
     /// The style, 0..18, in the order of `STYLES`.
     #[live]
     pub style: f64,
-    /// The material, 0..10, in the order of `MATERIALS`, unless the host
+    /// The material, 0..11, in the order of `MATERIALS`, unless the host
     /// has handed one over with `set_material`.
     #[live]
     pub material: f64,

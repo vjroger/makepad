@@ -1,5 +1,6 @@
-//! The knob presets as data: the bench's eleven materials and its nineteen
-//! styles, which multiply -- any style in any material.
+//! The knob presets as data: the bench's eleven materials (and Neumorphic
+//! dark, from the Knob cost explorer) and its nineteen styles, which
+//! multiply -- any style in any material.
 //!
 //! A material carries the light, the finish, the surface (metal, clear coat,
 //! the studio it reflects) and the inks; a style carries the geometry: the
@@ -172,7 +173,7 @@ pub fn style_index(name: &str) -> Option<usize> {
 // resolved, each shadow ink divided by its ground and the occlusion rescaled
 // to match (the bench's own post-pass), so these are the numbers its shader
 // receives. Generated from material-bench-v74.html.
-pub const MATERIALS: [KnobMaterial; 11] = [
+pub const MATERIALS: [KnobMaterial; 12] = [
     KnobMaterial {
         name: "Neumorphic",
         level: 1.0,
@@ -218,6 +219,59 @@ pub const MATERIALS: [KnobMaterial; 11] = [
         shadow_ink: 0x9CA3BAFF,
         glow_ink: 0x7C4DFFFF,
         ptr_ink: 0x7C4DFFFF,
+    },
+    // NEUMORPHIC DARK (the Knob cost explorer's `neudark`): Neumorphic on a
+    // mid-dark cool grey, the lit shoulder and lip a lighter grey, shadows
+    // near black, the violet accent lighter. Its explorer values are ground
+    // and body #2c2f36, light #525865, shadow #0c0d10, lip 0.6, blur 16,
+    // shadow 0.78, contact 0.3, occlusion 0.35, put through the ink pass
+    // above like every preset. Its label ink (#b9bfcc) has no field here:
+    // the pages ink their text from the ground's luminance.
+    KnobMaterial {
+        name: "Neumorphic dark",
+        level: 1.0,
+        lx: -0.35,
+        ly: -0.55,
+        lz: 0.66,
+        li: 0.7,
+        bw: 4.0,
+        bc: 0.7,
+        raise: 4.0,
+        sink: 4.0,
+        spec: 0.0,
+        rough: 0.85,
+        ao: 0.8838709677419352,
+        rim: 0.4,
+        gloss: 0.0,
+        glow: 0.0,
+        shadow: 0.78,
+        sblur: 16.0,
+        fall: 1.0,
+        oao: 0.7576036866359445,
+        inner: 0.55,
+        inner_r: 10.0,
+        lip: 0.6,
+        facegrad: 0.45,
+        hair: 0.0,
+        aoreach: 1.2,
+        pdepth: 0.55,
+        psmooth: 2.0,
+        pfin: 0.0,
+        mbev: 1.5,
+        env: 0.0,
+        metal: 0.0,
+        ev: 0.0,
+        roll: 0.0,
+        coat: 0.0,
+        coatr: 0.08,
+        envk: 0.0,
+        persp: 0.0,
+        ground: 0x2C2F36FF,
+        body_ink: 0x2C2F36FF,
+        light_ink: 0x525865FF,
+        shadow_ink: 0x46474CFF,
+        glow_ink: 0x9D7BFFFF,
+        ptr_ink: 0x9D7BFFFF,
     },
     KnobMaterial {
         name: "Moulded",

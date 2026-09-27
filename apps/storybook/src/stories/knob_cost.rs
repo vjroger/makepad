@@ -12,7 +12,8 @@
 use crate::controls::{ControlValue, StoryControlAction};
 use crate::knob::lod::{launch_salt, VERSIONS};
 use crate::knob::look::{KnobLook, VALUE};
-use crate::knob::presets::{KnobMaterial, STYLES};
+use crate::knob::presets::{KnobMaterial, MATERIALS, STYLES};
+use crate::knob::sweep::{self, ComboRecord, CompileRecord, RunRecord, SweepReport};
 use crate::knob::widgets::{set_material_uniforms, TurnedKnob, TurnedKnobAction};
 use crate::makepad_widgets::makepad_script::trap::NoTrap;
 use crate::makepad_widgets::*;
@@ -39,6 +40,7 @@ mod page {
         mod.storybook.KnobSlot = set_type_default() do mod.storybook.KnobSlotBase{
             width: 200.
             height: 200.
+            interactive: true
             draw_empty +: {
                 color: uniform(vec4(0.5, 0.5, 0.5, 0.6))
                 pixel: fn() {
@@ -99,6 +101,20 @@ mod page {
             }
         }
 
+        // One version in the sweep's screenshot: its knob and its name.
+        let ShotCell = View{
+            width: Fit
+            height: Fit
+            flow: Down
+            spacing: 2.
+            align: Align{x: 0.5 y: 0.0}
+            slot := mod.storybook.KnobSlot{interactive: false}
+            name := Label{
+                text: ""
+                draw_text +: {text_style: theme.font_bold{font_size: 10}}
+            }
+        }
+
         mod.stories.MaterialKnobCost = mod.storybook.KnobCost{
             flow: Down
             spacing: 14.
@@ -125,7 +141,7 @@ mod page {
 
             intro := P{
                 width: Fill
-                text: "The knob engine's detail levels, each its own shader. Compile builds a version's knob: the page times it from that moment until the backend has the shader ready, and every launch salts the shader text so no cache can answer (restart for a new cold number). Measure draws a grid of that version's knobs for about two seconds against the same grid empty. The Docs tab says what each version leaves out and what distorts the numbers."
+                text: "The knob engine's detail levels, each its own shader. Compile builds a version's knob: the page times it from that moment until the backend has the shader ready, and every launch salts the shader text so no cache can answer (restart for a new cold number). Measure draws a grid of that version's knobs for about two seconds against the same grid empty. Run everything does it all unattended: every compile, then six materials by six styles, each shown and measured, written to a JSON file. The Docs tab says what each version leaves out and what distorts the numbers."
             }
             toolbar := View{
                 width: Fill
@@ -143,10 +159,14 @@ mod page {
                     draw_bg +: {color: theme.color_bg_app border_radius: 6.}
                     compile_all := Button{text: "Compile all"}
                     measure_all := Button{text: "Measure all"}
+                    run_all := Button{text: "Run everything"}
+                    stop := Button{text: "Stop" visible: false}
                     copy_results := Button{text: "Copy results"}
                 }
                 status := Note{}
             }
+            // Where the last "Run everything" wrote its results.
+            sweep_note := Note{width: Fill visible: false}
             row := View{
                 width: Fill
                 height: Fit
@@ -160,6 +180,22 @@ mod page {
                 v5 := VersionCell{}
                 v6 := VersionCell{}
                 v7 := VersionCell{}
+            }
+            // The sweep's screenshot: every version side by side.
+            shots := View{
+                visible: false
+                width: Fill
+                height: Fit
+                flow: Flow.Right{wrap: true}
+                spacing: 12.
+                s0 := ShotCell{}
+                s1 := ShotCell{}
+                s2 := ShotCell{}
+                s3 := ShotCell{}
+                s4 := ShotCell{}
+                s5 := ShotCell{}
+                s6 := ShotCell{}
+                s7 := ShotCell{}
             }
             grid_box := View{
                 visible: false
@@ -345,7 +381,39 @@ struct Run {
     dropped_at_start: u64,
     index: usize,
     of: usize,
+    /// How long it measures.
+    seconds: f64,
 }
+
+/// Where the sweep is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SweepPhase {
+    /// Compiling every version, one after another.
+    Compiling,
+    /// The look is set; waiting for it to draw.
+    Settle { since: f64, frames: usize },
+    /// Holding still for the screenshot.
+    Hold { until: f64 },
+    /// Measuring every version on the look.
+    Measuring,
+}
+
+/// The sweep in flight.
+struct Sweep {
+    combos: Vec<(usize, usize)>,
+    step: usize,
+    phase: SweepPhase,
+    started: f64,
+    records: Vec<ComboRecord>,
+    /// The look before the sweep, put back after it.
+    prior: (KnobMaterial, f64, f64),
+}
+
+/// The sweep starts itself once per process (`MAKEPAD_KNOB_COST_SWEEP=1`).
+static AUTO_SWEEP_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Before it does, the page is open this long, so a page opened only on the
+/// way to another (a remembered last story) starts nothing.
+const AUTO_SWEEP_DELAY: f64 = 1.5;
 
 #[derive(Script, Widget)]
 pub struct KnobCost {
@@ -361,6 +429,9 @@ pub struct KnobCost {
     row_size: f64,
     #[live(96.0)]
     grid_size: f64,
+    /// The knobs' size in the sweep's screenshot.
+    #[live(200.0)]
+    shot_size: f64,
     /// Each version's knob, once built.
     #[rust]
     knobs: Vec<Option<WidgetRef>>,
@@ -402,6 +473,14 @@ pub struct KnobCost {
     cell_width: f64,
     #[rust]
     restored: bool,
+    #[rust]
+    sweep: Option<Sweep>,
+    /// When the sweep starts itself, if the environment asks it to.
+    #[rust]
+    sweep_armed: Option<f64>,
+    /// Where the last sweep wrote its results.
+    #[rust]
+    sweep_path: Option<String>,
 }
 
 impl ScriptHook for KnobCost {
@@ -419,6 +498,10 @@ impl KnobCost {
         LiveId::from_str(&format!("v{i}"))
     }
 
+    fn shot(i: usize) -> LiveId {
+        LiveId::from_str(&format!("s{i}"))
+    }
+
     fn sized(&mut self) {
         if self.knobs.len() != VERSIONS.len() {
             self.knobs.resize_with(VERSIONS.len(), || None);
@@ -427,7 +510,10 @@ impl KnobCost {
     }
 
     fn busy(&self) -> bool {
-        self.run.is_some() || self.compiling.iter().any(|c| c.is_some())
+        self.run.is_some()
+            || self.compiling.iter().any(|c| c.is_some())
+            || self.sweep.is_some()
+            || self.sweep_armed.is_some()
     }
 
     fn template(&self, cx: &mut Cx, i: usize) -> Option<ScriptValue> {
@@ -555,6 +641,7 @@ impl KnobCost {
             dropped_at_start,
             index,
             of: self.runs_total,
+            seconds: if self.sweep.is_some() { sweep::RUN_SECONDS } else { RUN_SECONDS },
         });
         let knob = match slot {
             Slot::Baseline => None,
@@ -645,12 +732,15 @@ impl KnobCost {
         if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<KnobGrid>() {
             grid.knob = None;
         }
-        self.view.view(cx, ids!(row)).set_visible(cx, true);
+        // In a sweep the next look puts up its own layout.
+        self.view.view(cx, ids!(row)).set_visible(cx, self.sweep.is_none());
         self.view.view(cx, ids!(grid_box)).set_visible(cx, false);
         self.runs_total = 0;
         self.settle_baseline(cx);
-        let table = self.table(cx);
-        log!("knob cost: measured\n{table}");
+        if self.sweep.is_none() {
+            let table = self.table(cx);
+            log!("knob cost: measured\n{table}");
+        }
         self.refresh_texts(cx);
         self.view.redraw(cx);
     }
@@ -734,7 +824,7 @@ impl KnobCost {
                         run.cpu.push((now - last) * 1000.0);
                     }
                     run.last_frame = Some(now);
-                    let long_enough = now - since >= RUN_SECONDS && run.cpu.len() >= RUN_FRAMES;
+                    let long_enough = now - since >= run.seconds && run.cpu.len() >= RUN_FRAMES;
                     if long_enough || now - run.start >= RUN_LIMIT_SECONDS {
                         run_over = true;
                     }
@@ -745,19 +835,337 @@ impl KnobCost {
             self.finish_run(cx);
             self.next_run(cx);
         }
+        // THE SWEEP.
+        self.step_sweep(cx, now);
         self.refresh_status(cx);
         self.refresh_texts(cx);
         if self.busy() {
             self.next_frame = cx.new_next_frame();
-            self.view.redraw(cx);
+            // Holding for a screenshot, or only waiting to start, the page
+            // keeps still.
+            let holding = matches!(self.sweep.as_ref().map(|s| s.phase), Some(SweepPhase::Hold { .. }));
+            let waiting = self.sweep.is_none() && self.sweep_armed.is_some() && self.run.is_none();
+            if !holding && !waiting {
+                self.view.redraw(cx);
+            }
         }
+    }
+
+    // ---- the sweep ("Run everything") ----
+
+    /// Start the sweep: every version compiled cold (those already built
+    /// this launch keep their numbers), then each look in turn.
+    fn start_sweep(&mut self, cx: &mut Cx) {
+        self.sized();
+        let measuring = self.run.is_some() || !self.measure_queue.is_empty() || !self.measure_waiting.is_empty();
+        if self.sweep.is_some() || measuring {
+            return;
+        }
+        let combos = sweep::combinations();
+        log!("KNOBCOST START steps={} versions={} backend={}", combos.len(), VERSIONS.len(), backend_name());
+        self.sweep = Some(Sweep {
+            combos,
+            step: 0,
+            phase: SweepPhase::Compiling,
+            started: Cx::time_now(),
+            records: Vec::new(),
+            prior: (self.look.material(), self.look.style, self.look.value),
+        });
+        self.sweep_path = None;
+        self.view.button(cx, ids!(stop)).set_visible(cx, true);
+        self.view.set_scroll_pos(cx, dvec2(0.0, 0.0));
+        let all: Vec<usize> = (0..VERSIONS.len()).collect();
+        self.queue_compiles(cx, &all);
+        self.next_frame = cx.new_next_frame();
+        self.view.redraw(cx);
+    }
+
+    /// Show the page as the sweep's screenshot wants it (every version side
+    /// by side), or as it normally is.
+    fn sweep_layout(&mut self, cx: &mut Cx, shots: bool) {
+        self.view.widget(cx, ids!(intro)).set_visible(cx, !shots);
+        self.view.widget(cx, ids!(results)).set_visible(cx, !shots);
+        self.view.view(cx, ids!(row)).set_visible(cx, !shots);
+        self.view.view(cx, ids!(shots)).set_visible(cx, shots);
+    }
+
+    /// Put up look `step`: its material and style, every version beside the
+    /// others, waiting for it to draw.
+    fn enter_combo(&mut self, cx: &mut Cx, now: f64) {
+        let Some(sw) = &mut self.sweep else {
+            return;
+        };
+        let (m, style) = sw.combos[sw.step];
+        sw.phase = SweepPhase::Settle { since: now, frames: 0 };
+        self.look.load(&MATERIALS[m]);
+        self.look.style = style as f64;
+        self.look.lit = false;
+        self.pushed = None;
+        self.sweep_layout(cx, true);
+        self.view.view(cx, ids!(grid_box)).set_visible(cx, false);
+        self.view.set_scroll_pos(cx, dvec2(0.0, 0.0));
+        self.view.redraw(cx);
+    }
+
+    /// Where each version's knob stands in the screenshot, window-local.
+    fn shot_rects(&mut self, cx: &mut Cx) -> Vec<Option<[f64; 4]>> {
+        (0..VERSIONS.len())
+            .map(|i| {
+                let slot = self.view.widget(cx, &[Self::shot(i), live_id!(slot)]);
+                let knob = slot.borrow::<KnobSlot>().and_then(|s| s.knob.clone())?;
+                let area = knob.area();
+                if !area.is_valid(cx) {
+                    return None;
+                }
+                let r = area.clipped_rect(cx);
+                (r.size.x > 0.0 && r.size.y > 0.0).then_some([r.pos.x, r.pos.y, r.size.x, r.size.y])
+            })
+            .collect()
+    }
+
+    fn step_sweep(&mut self, cx: &mut Cx, now: f64) {
+        if let Some(at) = self.sweep_armed {
+            if now >= at {
+                self.sweep_armed = None;
+                if !AUTO_SWEEP_STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    self.start_sweep(cx);
+                }
+            }
+        }
+        let Some(phase) = self.sweep.as_ref().map(|s| s.phase) else {
+            return;
+        };
+        match phase {
+            SweepPhase::Compiling => {
+                if !self.compiling.iter().any(|c| c.is_some()) && self.compile_queue.is_empty() {
+                    self.enter_combo(cx, now);
+                }
+            }
+            SweepPhase::Settle { since, frames } => {
+                let frames = frames + 1;
+                // A few frames and half a second: the bakes, the pipelines'
+                // first use and the layout have all happened.
+                if frames >= 4 && now - since >= 0.5 {
+                    let rects = self.shot_rects(cx);
+                    let Some(sw) = &mut self.sweep else {
+                        return;
+                    };
+                    let (m, style) = sw.combos[sw.step];
+                    let list: Vec<String> = rects
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| match r {
+                            Some(r) => format!("{}:{:.1},{:.1},{:.1},{:.1}", VERSIONS[i].key, r[0], r[1], r[2], r[3]),
+                            None => format!("{}:none", VERSIONS[i].key),
+                        })
+                        .collect();
+                    log!(
+                        "KNOBCOST READY step={}/{} material=\"{}\" style=\"{}\" hold={} rects={}",
+                        sw.step + 1,
+                        sw.combos.len(),
+                        sweep::material_name(m),
+                        sweep::style_name(style),
+                        sweep::HOLD_SECONDS,
+                        list.join(";")
+                    );
+                    sw.records.push(ComboRecord {
+                        step: sw.step + 1,
+                        material: m,
+                        style,
+                        rects,
+                        ..Default::default()
+                    });
+                    sw.phase = SweepPhase::Hold { until: now + sweep::HOLD_SECONDS };
+                } else if let Some(sw) = &mut self.sweep {
+                    sw.phase = SweepPhase::Settle { since, frames };
+                }
+            }
+            SweepPhase::Hold { until } => {
+                if now >= until {
+                    if let Some(sw) = &mut self.sweep {
+                        sw.phase = SweepPhase::Measuring;
+                    }
+                    self.sweep_layout(cx, false);
+                    self.view.view(cx, ids!(row)).set_visible(cx, false);
+                    let results = cx.global::<KnobCostResults>().sized();
+                    for m in results.measured.iter_mut() {
+                        *m = None;
+                    }
+                    let built: Vec<usize> = (0..VERSIONS.len()).filter(|&i| self.knobs[i].is_some()).collect();
+                    self.queue_measures(cx, &built);
+                }
+            }
+            SweepPhase::Measuring => {
+                if self.run.is_none() && self.measure_queue.is_empty() && self.measure_waiting.is_empty() {
+                    self.record_combo(cx);
+                    let more = match &mut self.sweep {
+                        Some(sw) => {
+                            sw.step += 1;
+                            sw.step < sw.combos.len()
+                        }
+                        None => false,
+                    };
+                    if more {
+                        self.enter_combo(cx, now);
+                    } else {
+                        self.finish_sweep(cx, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The look's numbers, from the batch that just finished.
+    fn record_combo(&mut self, cx: &mut Cx) {
+        let (baseline, baseline_runs, measured) = {
+            let r = cx.global::<KnobCostResults>().sized();
+            (r.baseline.clone(), r.baseline_runs.clone(), r.measured.clone())
+        };
+        let run = |m: &MeasureResult| RunRecord {
+            gpu_ms: m.gpu_ms,
+            gpu_samples: m.gpu_samples,
+            cpu_ms: m.cpu_ms,
+            frames: m.frames,
+        };
+        let Some(record) = self.sweep.as_mut().and_then(|sw| sw.records.last_mut()) else {
+            return;
+        };
+        record.baseline = baseline.as_ref().map(run).unwrap_or_default();
+        record.baseline_runs = baseline_runs;
+        record.versions = measured.iter().map(|m| m.as_ref().map(run)).collect();
+    }
+
+    /// Stop where the sweep is: what is measured so far is written.
+    fn stop_sweep(&mut self, cx: &mut Cx) {
+        if self.sweep.is_none() {
+            return;
+        }
+        self.run = None;
+        self.measure_queue.clear();
+        self.measure_waiting.clear();
+        self.batch_baselines.clear();
+        self.batch_versions.clear();
+        self.compile_queue.clear();
+        self.runs_total = 0;
+        if let Some(pass) = self.pass {
+            cx.passes[pass].set_gpu_timing_enabled(false);
+        }
+        if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<KnobGrid>() {
+            grid.knob = None;
+        }
+        self.view.view(cx, ids!(grid_box)).set_visible(cx, false);
+        self.finish_sweep(cx, true);
+    }
+
+    /// Write the results (file, clipboard, log), put the page and its look
+    /// back.
+    fn finish_sweep(&mut self, cx: &mut Cx, stopped: bool) {
+        let Some(sw) = self.sweep.take() else {
+            return;
+        };
+        let compiled = cx.global::<KnobCostResults>().sized().compiled.clone();
+        let compiles: Vec<CompileRecord> = compiled
+            .iter()
+            .map(|c| match c {
+                None => CompileRecord { state: "none", ..Default::default() },
+                Some(c) => CompileRecord {
+                    state: if c.failed {
+                        "failed"
+                    } else if c.timed_out {
+                        "timed_out"
+                    } else if c.warm {
+                        "warm"
+                    } else if c.total_ms.is_none() {
+                        "not_measured"
+                    } else {
+                        "cold"
+                    },
+                    total_ms: c.total_ms,
+                    codegen_ms: Some(c.codegen_ms),
+                    text_bytes: Some(c.text_bytes),
+                    text_fnv: Some(c.text_hash),
+                },
+            })
+            .collect();
+        let adapter = {
+            let r = cx.gpu_info().renderer.clone();
+            (!r.is_empty() && r != "unknown").then_some(r)
+        };
+        let finished = Cx::time_now();
+        let report = SweepReport {
+            backend: backend_name(),
+            adapter: adapter.as_deref(),
+            started: sw.started,
+            finished,
+            stopped,
+            grid_knobs: GRID_KNOBS,
+            grid_size: self.grid_size,
+            shot_size: self.shot_size,
+            warm_seconds: WARM_SECONDS,
+            compiles: &compiles,
+            combos: &sw.records,
+            steps: sw.combos.len(),
+        };
+        let json = report.to_json();
+        cx.copy_to_clipboard(&json);
+        let word = if stopped { "STOPPED" } else { "DONE" };
+        match sweep::write_results(&json, finished) {
+            Ok(path) => {
+                log!("KNOBCOST {word} path={path} steps={}/{}", sw.records.len(), sw.combos.len());
+                self.sweep_path = Some(path);
+            }
+            Err(e) => {
+                log!("KNOBCOST {word} path=none error=\"{e}\" (the JSON is on the clipboard)");
+                self.sweep_path = Some(format!("not written ({e}); the JSON is on the clipboard"));
+            }
+        }
+        // The look the page had before.
+        let (m, style, value) = sw.prior;
+        self.look.load(&m);
+        self.look.style = style;
+        self.look.value = value;
+        self.pushed = None;
+        self.sweep_layout(cx, false);
+        self.view.button(cx, ids!(stop)).set_visible(cx, false);
+        self.refresh_texts(cx);
+        self.refresh_status(cx);
+        self.view.redraw(cx);
     }
 
     /// The toolbar's line: what is in flight.
     fn refresh_status(&mut self, cx: &mut Cx) {
         let now = Cx::monotonic_now();
         let mut line = String::new();
-        if let Some(run) = &self.run {
+        if let Some(sw) = &self.sweep {
+            let look = sw.combos.get(sw.step).map(|&(m, style)| {
+                format!("{} in {}", sweep::style_name(style), sweep::material_name(m))
+            });
+            let step = format!("step {}/{}", (sw.step + 1).min(sw.combos.len()), sw.combos.len());
+            line = match sw.phase {
+                SweepPhase::Compiling => {
+                    let results = cx.global::<KnobCostResults>().sized();
+                    let done = results.compiled.iter().filter(|c| c.is_some()).count();
+                    match self.compiling.iter().position(|c| c.is_some()) {
+                        Some(i) => {
+                            let (name, of) = (VERSIONS[i].name, VERSIONS.len());
+                            format!("Run everything: compiling {name} ({} of {of})", done + 1)
+                        }
+                        None => "Run everything: compiling".to_string(),
+                    }
+                }
+                SweepPhase::Settle { .. } | SweepPhase::Hold { .. } => {
+                    format!("Run everything: {step}, {}: holding for the screenshot", look.unwrap_or_default())
+                }
+                SweepPhase::Measuring => {
+                    let what = match self.run.as_ref().map(|r| r.slot) {
+                        Some(Slot::Baseline) => "the empty grid".to_string(),
+                        Some(Slot::Version(i)) => VERSIONS[i].name.to_string(),
+                        None => "...".to_string(),
+                    };
+                    format!("Run everything: {step}, {}, measuring {what}", look.unwrap_or_default())
+                }
+            };
+        } else if let Some(run) = &self.run {
             let what = match run.slot {
                 Slot::Baseline => "the empty grid".to_string(),
                 Slot::Version(i) => VERSIONS[i].name.to_string(),
@@ -779,6 +1187,13 @@ impl KnobCost {
             line = format!("{backend}. Idle: nothing redraws until you press a button.");
         }
         self.view.label(cx, ids!(status)).set_text(cx, &line);
+        let note = match (&self.sweep_path, &self.sweep) {
+            (Some(path), None) => format!("Run everything wrote {path} (the JSON is on the clipboard too)."),
+            _ => String::new(),
+        };
+        let label = self.view.label(cx, ids!(sweep_note));
+        label.set_text(cx, &note);
+        label.set_visible(cx, !note.is_empty());
     }
 
     /// Every cell's text and the table.
@@ -961,7 +1376,12 @@ impl KnobCost {
             let text: Vec4f = if luma > 0.45 { vec4(0.14, 0.15, 0.18, 1.0) } else { vec4(0.86, 0.88, 0.91, 1.0) };
             let meta: Vec4f = if luma > 0.45 { vec4(0.30, 0.32, 0.37, 1.0) } else { vec4(0.62, 0.65, 0.70, 1.0) };
             let ring: Vec4f = if luma > 0.45 { vec4(0.2, 0.22, 0.26, 0.55) } else { vec4(0.8, 0.82, 0.86, 0.55) };
-            for id in [live_id!(intro), live_id!(status), live_id!(grid_note), live_id!(results)] {
+            for i in 0..VERSIONS.len() {
+                let mut name = self.view.widget(cx, &[Self::shot(i), live_id!(name)]);
+                script_apply_eval!(cx, name, { draw_text +: {color: #(text)} });
+            }
+            let notes = [live_id!(intro), live_id!(status), live_id!(sweep_note), live_id!(grid_note), live_id!(results)];
+            for id in notes {
                 let mut w = self.view.widget(cx, &[id]);
                 script_apply_eval!(cx, w, { draw_text +: {color: #(meta)} });
             }
@@ -997,8 +1417,15 @@ impl KnobCost {
             let slot = self.view.widget(cx, &[Self::cell(i), live_id!(slot)]);
             if let Some(mut s) = slot.borrow_mut::<KnobSlot>() {
                 s.size = self.row_size;
+                s.set_knob(cx, knob.clone());
+            };
+            // The sweep's screenshot shows the same knobs.
+            let shot = self.view.widget(cx, &[Self::shot(i), live_id!(slot)]);
+            if let Some(mut s) = shot.borrow_mut::<KnobSlot>() {
+                s.size = self.shot_size;
                 s.set_knob(cx, knob);
             };
+            self.view.label(cx, &[Self::shot(i), live_id!(name)]).set_text(cx, VERSIONS[i].name);
         }
     }
 
@@ -1063,6 +1490,17 @@ impl Widget for KnobCost {
         if !self.restored {
             self.restore(cx);
         }
+        // `MAKEPAD_KNOB_COST_SWEEP=1`: once the page has stayed open a
+        // moment, it runs everything by itself (once per process).
+        if self.sweep.is_none()
+            && self.sweep_armed.is_none()
+            && sweep::auto_sweep()
+            && !AUTO_SWEEP_STARTED.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.sweep_armed = Some(Cx::monotonic_now() + AUTO_SWEEP_DELAY);
+            log!("KNOBCOST ARMED in {AUTO_SWEEP_DELAY} s");
+            self.next_frame = cx.new_next_frame();
+        }
         self.push(cx);
         self.fill_slots(cx);
         if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<KnobGrid>() {
@@ -1089,7 +1527,14 @@ impl Widget for KnobCost {
             self.on_frame(cx);
         }
         let actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
-        let measuring = self.run.is_some() || !self.measure_waiting.is_empty();
+        let measuring = self.run.is_some() || !self.measure_waiting.is_empty() || self.sweep.is_some();
+        if self.view.button(cx, ids!(stop)).clicked(&actions) {
+            self.stop_sweep(cx);
+        }
+        if !measuring && self.view.button(cx, ids!(run_all)).clicked(&actions) {
+            self.sweep_armed = None;
+            self.start_sweep(cx);
+        }
         if !measuring {
             for i in 0..VERSIONS.len() {
                 if self.view.button(cx, &[Self::cell(i), live_id!(compile)]).clicked(&actions) {
@@ -1157,6 +1602,10 @@ pub struct KnobSlot {
     /// The knob's size, in points; the walk's when 0.
     #[rust]
     size: f64,
+    /// Whether the knob takes input here and is listed under this slot. A
+    /// second slot showing the same knob (the sweep's screenshot) is not.
+    #[live(true)]
+    interactive: bool,
 }
 
 impl KnobSlot {
@@ -1167,7 +1616,7 @@ impl KnobSlot {
             _ => false,
         };
         if !same {
-            if let Some(k) = &knob {
+            if let Some(k) = knob.as_ref().filter(|_| self.interactive) {
                 cx.widget_tree_insert_child(self.uid, live_id!(knob), k.clone());
             }
             self.knob = knob;
@@ -1191,7 +1640,7 @@ impl Widget for KnobSlot {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if let Some(knob) = &self.knob {
+        if let Some(knob) = self.knob.as_ref().filter(|_| self.interactive) {
             knob.handle_event(cx, event, scope);
         }
     }
@@ -1291,6 +1740,10 @@ The difference from the empty grid, per frame and per knob, is the knobs' cost. 
 - **First draws**: a pipeline's first use, the knob's bakes and texture uploads land in the first frames, which the warm-up throws away. A driver that finishes a shader's compile only at its first draw moves that cost out of the compile number into the first frame.
 - **The caches, on purpose**: a real launch after the first reads the DXBC or program cache and compiles far faster. The page bypasses them so the number is the worst case, the first launch after an update.
 - **Software rendering**: on a software rasteriser the GPU work runs on the CPU and shows up in the frame interval instead.
+
+## Run everything
+
+**Run everything** does all of it unattended: every version compiled once, cold, then six materials (Neumorphic dark, Neumorphic, Glossy, Milled, Chrome, Porcelain) by six styles (Classic, Knurled, Winged, Scalloped, Cutwing, Skirted). For each look it shows all eight versions side by side and holds still for 1.2 s -- a window for a screenshot, announced in the log as `KNOBCOST READY step=i/n material=... style=... rects=...` with each knob's window-local rectangle -- then measures every version on that look (1.5 s each, the empty grid before and after). The page says where it is and **Stop** ends it early. At the end the results go to `local/knob-cost/results-<unix time>.json` under the working directory when it has a `local/` directory, else the system's temp directory, and to the clipboard; the log says `KNOBCOST DONE path=...`. `MAKEPAD_KNOB_COST_SWEEP=1` starts it by itself once the page has been open a moment. On a software rasteriser it takes about a quarter of an hour.
 
 ## Copying the results
 
