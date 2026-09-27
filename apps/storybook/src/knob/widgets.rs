@@ -310,6 +310,12 @@ impl TurnedKnob {
             self.draw_knob.redraw(cx);
         }
     }
+
+    /// The draw shader this knob was built with: whether it is ready to
+    /// draw is the backend's to say (`Cx::is_draw_shader_window_ready`).
+    pub fn draw_shader_id(&self) -> Option<DrawShaderId> {
+        self.draw_knob.draw_vars.draw_shader_id
+    }
 }
 
 impl Widget for TurnedKnob {
@@ -403,6 +409,10 @@ impl TurnedKnobRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_lit(cx, lit);
         }
+    }
+
+    pub fn draw_shader_id(&self) -> Option<DrawShaderId> {
+        self.borrow().and_then(|inner| inner.draw_shader_id())
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<f64> {

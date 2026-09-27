@@ -11,12 +11,16 @@
 //!   shadow's knots and the self-shadow table;
 //! * [`shader`]: its GLSL in the shader DSL, one set of solid and shading
 //!   functions spread into the 2D knob, the 3D view and the ground;
-//! * [`widgets`]: `TurnedKnob` and `KnobView3d`.
+//! * [`widgets`]: `TurnedKnob` and `KnobView3d`;
+//! * [`look`]: what a knob page's controls write, and the controls;
+//! * [`lod`]: the knob's detail levels, for the Knob cost page.
 //!
 //! It lives in the storybook: nothing in `widgets/` or `draw/` depends on it.
 use crate::makepad_widgets::*;
 
 pub mod bake;
+pub mod lod;
+pub mod look;
 pub mod presets;
 pub mod shader;
 pub mod widgets;
@@ -29,4 +33,6 @@ pub use widgets::{KnobView3d, KnobView3dRef, TurnedKnob, TurnedKnobAction, Turne
 pub fn script_mod(vm: &mut ScriptVm) {
     shader::script_mod(vm);
     widgets::script_mod(vm);
+    look::script_mod(vm);
+    lod::script_mod(vm);
 }
