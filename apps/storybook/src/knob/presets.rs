@@ -73,8 +73,12 @@ pub struct KnobMaterial {
     pub persp: f64,
     /// How many strip lights hang round the chrome studio's walls: the
     /// first a turn over `lights + 1` round from the key light, the rest
-    /// evenly after it, so the bench's three stand at right angles.
+    /// evenly after it, so the bench's three stand at right angles. Past
+    /// three, every other one hangs high and short.
     pub lights: f64,
+    /// How many panes the chrome studio's ceiling panel is glazed in: one
+    /// is the bench's plain panel, more put a window in a flat face.
+    pub panes: f64,
     pub ground: u32,
     pub body_ink: u32,
     pub light_ink: u32,
@@ -363,6 +367,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0xEEF0F6FF,
         body_ink: 0xEEF0F6FF,
         light_ink: 0xFFFFFFFF,
@@ -410,6 +415,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0xD8DAD6FF,
         body_ink: 0xD8DAD6FF,
         light_ink: 0xF6F6F3FF,
@@ -457,6 +463,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x2B2F34FF,
         body_ink: 0x2B2F34FF,
         light_ink: 0xFFFFFFFF,
@@ -504,6 +511,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x15171BFF,
         body_ink: 0x15171BFF,
         light_ink: 0x9AA3ADFF,
@@ -551,6 +559,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0xE3E7EEFF,
         body_ink: 0xE3E7EEFF,
         light_ink: 0xFFFFFFFF,
@@ -598,6 +607,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0xE3E7EEFF,
         body_ink: 0x171618FF,
         light_ink: 0xFFF6EAFF,
@@ -645,6 +655,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x2B2F35FF,
         body_ink: 0x2B2F35FF,
         light_ink: 0xCFD5DCFF,
@@ -692,6 +703,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x2B2826FF,
         body_ink: 0x2B2826FF,
         light_ink: 0xF0E9E0FF,
@@ -739,6 +751,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x0E1013FF,
         body_ink: 0x0E1013FF,
         light_ink: 0x7C838CFF,
@@ -786,6 +799,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 0.0,
         persp: 0.0,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x8A8A8AFF,
         body_ink: 0x8A8A8AFF,
         light_ink: 0xF7F8FAFF,
@@ -833,6 +847,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 1.0,
         persp: 0.7,
         lights: 3.0,
+        panes: 1.0,
         ground: 0x1B1E23FF,
         body_ink: 0xB8BDC5FF,
         light_ink: 0xFFFFFFFF,
@@ -840,8 +855,9 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         glow_ink: 0x7FD4FFFF,
         ptr_ink: 0xE8ECF2FF,
     },
-    // Not the bench's: the chrome in a studio hung with seven strip lights,
-    // so its face shows more of the room than the bench's three put there.
+    // Not the bench's: the chrome in a studio hung with seven strip lights
+    // under a ceiling glazed in three panes, so its face shows more of the
+    // room than the bench's three strips and plain panel put there.
     KnobMaterial {
         name: "Showroom chrome",
         level: 2.0,
@@ -882,6 +898,7 @@ pub const MATERIALS: [KnobMaterial; 12] = [
         envk: 1.0,
         persp: 0.7,
         lights: 7.0,
+        panes: 3.0,
         ground: 0x1B1E23FF,
         body_ink: 0xB8BDC5FF,
         light_ink: 0xFFFFFFFF,
@@ -1843,10 +1860,10 @@ mod tests {
     fn the_showroom_is_the_chrome_under_more_lights() {
         let chrome = MATERIALS[material_index("chrome").unwrap()];
         let showroom = MATERIALS[material_index("showroom chrome").unwrap()];
-        assert_eq!(showroom.lights, 7.0);
-        assert_eq!(KnobMaterial { name: chrome.name, lights: chrome.lights, ..showroom }, chrome);
+        assert_eq!((showroom.lights, showroom.panes), (7.0, 3.0));
+        assert_eq!(KnobMaterial { name: chrome.name, lights: chrome.lights, panes: chrome.panes, ..showroom }, chrome);
         for m in MATERIALS.iter().filter(|m| m.name != showroom.name) {
-            assert_eq!(m.lights, 3.0, "{} is not hung like the bench's studio", m.name);
+            assert_eq!((m.lights, m.panes), (3.0, 1.0), "{} is not hung like the bench's studio", m.name);
         }
     }
 

@@ -167,7 +167,7 @@ pub fn set_material_uniforms(cx: &Cx, vars: &mut DrawVars, m: &KnobMaterial) {
     u4(cx, vars, live_id!(m_finish), [m.ao, m.rim, m.gloss, m.rough]);
     u4(cx, vars, live_id!(m_env), [m.env, m.persp, 2f64.powf(m.ev), m.roll]);
     u4(cx, vars, live_id!(m_surf), [m.metal, m.coat, m.coatr, m.envk]);
-    u4(cx, vars, live_id!(m_studio), [bake::studio_lights(m), 0.0, 0.0, 0.0]);
+    u4(cx, vars, live_id!(m_studio), [bake::studio_lights(m), bake::studio_panes(m), 0.0, 0.0]);
     u4(cx, vars, live_id!(m_shadow), [m.shadow, m.sblur, m.fall, m.oao]);
     u4(cx, vars, live_id!(m_inner), [m.inner, m.inner_r, m.lip, m.glow]);
     u4(cx, vars, live_id!(m_tune), [m.level, m.sink, m.hair, m.aoreach]);

@@ -209,6 +209,8 @@ pub struct KnobPresets {
     #[live]
     lights: f64,
     #[live]
+    panes: f64,
+    #[live]
     ground: Vec4f,
     #[live]
     body_ink: Vec4f,
@@ -386,6 +388,7 @@ impl KnobPresets {
         self.envk = m.envk;
         self.persp = m.persp;
         self.lights = m.lights;
+        self.panes = m.panes;
         self.ground = color_of(m.ground);
         self.body_ink = color_of(m.body_ink);
         self.light_ink = color_of(m.light_ink);
@@ -436,6 +439,7 @@ impl KnobPresets {
             envk: self.envk,
             persp: self.persp,
             lights: self.lights,
+            panes: self.panes,
             ground: ink_of(self.ground),
             body_ink: ink_of(self.body_ink),
             light_ink: ink_of(self.light_ink),
@@ -836,6 +840,7 @@ const COAT: &str = "Clear coat";
 const COAT_ROUGH: &str = "Coat roughness";
 const STUDIO: &str = "Studio (0 / 1 chrome / 2 outdoor)";
 const STUDIO_LIGHTS: &str = "Studio lights";
+const STUDIO_PANES: &str = "Ceiling panes";
 const REFLECTION: &str = "Reflection";
 const EXPOSURE: &str = "Exposure (EV)";
 const ROLL: &str = "Highlight roll-off";
@@ -969,6 +974,7 @@ fn material_preset(option: usize) -> Vec<(&'static str, ControlValue)> {
         (COAT_ROUGH, Number(m.coatr)),
         (STUDIO, Number(m.envk)),
         (STUDIO_LIGHTS, Number(m.lights)),
+        (STUDIO_PANES, Number(m.panes)),
         (REFLECTION, Number(m.env)),
         (EXPOSURE, Number(m.ev)),
         (ROLL, Number(m.roll)),
@@ -1238,6 +1244,7 @@ The Controls tab has the style and value; the shape's own numbers and curves in 
         section("Environment", false),
         number(STUDIO, "envk", 0., 2., 1., M.envk),
         number(STUDIO_LIGHTS, "lights", 0., 12., 1., M.lights),
+        number(STUDIO_PANES, "panes", 1., 6., 1., M.panes),
         number(REFLECTION, "env", 0., 1., 0.01, M.env),
         number(EXPOSURE, "ev", -2., 2., 0.05, M.ev),
         number(ROLL, "roll", 0., 1., 0.01, M.roll),

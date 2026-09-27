@@ -696,6 +696,60 @@ pub fn studio_lights(m: &KnobMaterial) -> f64 {
     m.lights.clamp(0.0, MAX_STUDIO_LIGHTS)
 }
 
+/// The panes across the chrome studio's ceiling panel: one is the plain
+/// panel the bench hangs.
+pub fn studio_panes(m: &KnobMaterial) -> f64 {
+    m.panes.clamp(1.0, 12.0)
+}
+
+/// Where a reflection along `rv` meets the plane of a rectangle light in
+/// direction `dir`, in the coordinates `rect_d` measures in; far off when
+/// the light is behind it. The shader's `rect_q`.
+fn rect_q(rv: [f64; 3], dir: [f64; 3]) -> [f64; 2] {
+    let rlu = norm3({
+        let c = cross3([0.0, 0.0, 1.0], dir);
+        [c[0] + 0.0001, c[1], c[2]]
+    });
+    let rlv = cross3(dir, rlu);
+    let rlc = dot3(rv, dir);
+    if rlc < 0.05 {
+        return [1000.0, 1000.0];
+    }
+    [dot3(rv, rlu) / rlc, dot3(rv, rlv) / rlc]
+}
+
+/// How much of a panel's light comes through at `q` when the panel (half
+/// size `half`) is glazed in `panes` panes each way: the shader's
+/// `glazing`, bars that blur with the footprint and fade as they do. An
+/// axis of one pane has no bar.
+fn glazing(q: [f64; 2], half: [f64; 2], panes: [f64; 2], wf: f64) -> f64 {
+    let mut near = 1000.0f64;
+    for i in 0..2 {
+        if panes[i] <= 1.5 {
+            continue;
+        }
+        let pitch = half[i] * 2.0 / panes[i].max(1.0);
+        let t = (q[i] + half[i]) / pitch + 0.5;
+        near = near.min(((t - t.floor()) - 0.5).abs() * pitch);
+    }
+    let bar = 1.0 - smoothstep(0.03 - wf, 0.03 + wf, near);
+    1.0 - bar * (0.12 / (0.03 + wf)).min(1.0)
+}
+
+/// The glazing of the chrome studio's ceiling panel and of its key softbox
+/// along `rv`: `panes` across each, the softbox in the rows that keep its
+/// panes square. One pane is the bench's plain panels.
+fn studio_glazing(rv: [f64; 3], kl: [f64; 3], panes: f64, wf: f64) -> (f64, f64) {
+    if panes <= 1.5 {
+        return (1.0, 1.0);
+    }
+    let rows = (panes * 0.62 + 0.5).floor().max(1.0);
+    (
+        glazing(rect_q(rv, [0.0, 0.0, 1.0]), [0.36, 0.36], [panes, panes], wf),
+        glazing(rect_q(rv, kl), [0.42, 0.26], [panes, rows], wf),
+    )
+}
+
 /// A rounded rectangle light in direction `dir` as a reflection along `rv`
 /// sees it: the signed distance to its edge, in the plane across `dir`.
 fn rect_d(rv: [f64; 3], dir: [f64; 3], hs: [f64; 2], rc: f64) -> f64 {
@@ -719,15 +773,18 @@ fn rect_cov(d: f64, w: f64) -> f64 {
 /// The chrome studio's strip lights along `rv`: `lights` tall strips round
 /// the walls, the first a turn over `lights + 1` round from the key light's
 /// azimuth `az0` and the rest evenly after it, so three stand at the
-/// bench's right angles. The loop is the shader's: it runs while the count
-/// is at least half a light more than the strips so far.
+/// bench's right angles. Past three, every other one hangs high and short.
+/// The loop is the shader's: it runs while the count is at least half a
+/// light more than the strips so far.
 fn studio_strips(rv: [f64; 3], az0: f64, lights: f64, w: f64, wf: f64, en: f64) -> f64 {
     let mut strips = 0.0;
     let mut si = 0.0;
     while si <= lights - 0.5 {
         let az = az0 + TAU * (si + 1.0) / (lights + 1.0);
-        let ds = rect_d(rv, norm3([az.cos(), az.sin(), 0.35]), [0.05, 0.8], 0.02);
-        strips += 5.0 * en * (0.05 + w) / (0.05 + wf) * rect_cov(ds, wf);
+        let high = lights > 3.5 && (si * 0.5).fract() > 0.25;
+        let (z, hs) = if high { (0.95, [0.035, 0.3]) } else { (0.35, [0.05, 0.8]) };
+        let ds = rect_d(rv, norm3([az.cos(), az.sin(), z]), hs, 0.02);
+        strips += 5.0 * en * (hs[0] + w) / (hs[0] + wf) * rect_cov(ds, wf);
         si += 1.0;
     }
     strips
@@ -772,7 +829,8 @@ fn env_hdr(m: &KnobMaterial, rv: [f64; 3], rgh: f64) -> [f64; 3] {
         let dt = rect_d(rv, [0.0, 0.0, 1.0], [0.36, 0.36], 0.36);
         let dk = rect_d(rv, kl, [0.42, 0.26], 0.08);
         let mut ec = mix3(floor_c, wall_c, smoothstep(-0.4 * w, 0.4 * w, rv[2]));
-        let add = 1.1 * en * rect_cov(dt, wf) + 3.5 * m.li * en * kvis * rect_cov(dk, wf);
+        let (pane, key_pane) = studio_glazing(rv, kl, studio_panes(m), wf);
+        let add = 1.1 * en * rect_cov(dt, wf) * pane + 3.5 * m.li * en * kvis * rect_cov(dk, wf) * key_pane;
         let strips = studio_strips(rv, kl[1].atan2(kl[0]), studio_lights(m), w, wf, en);
         let hz = (rv[2] - 0.12).abs();
         let lw = w * 0.6 + 0.01;
@@ -881,6 +939,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A glazed ceiling darkens a reflection that looks at a bar and leaves
+    /// one that looks through the middle of a pane, and one pane is the
+    /// bench's plain panel.
+    #[test]
+    fn the_ceiling_is_glazed_in_panes() {
+        let plain = chrome(3.0);
+        let glazed = KnobMaterial { panes: 3.0, ..plain };
+        let rgh = plain.rough;
+        // Three panes across 0.72: bars at 0.12 either side of the middle.
+        let at_a_bar = norm3([0.12, 0.0, 1.0]);
+        let through_a_pane = [0.0, 0.0, 1.0];
+        let (bar, open) = (env_hdr(&glazed, at_a_bar, rgh), env_hdr(&plain, at_a_bar, rgh));
+        assert!(open[0] - bar[0] > 0.2, "a bar {bar:?} against the plain panel {open:?}");
+        assert_eq!(env_hdr(&glazed, through_a_pane, rgh), env_hdr(&plain, through_a_pane, rgh));
+        assert_eq!(studio_glazing(at_a_bar, [0.0, 0.0, 1.0], 1.0, 0.05), (1.0, 1.0));
+        assert_eq!(studio_panes(&KnobMaterial { panes: 0.0, ..plain }), 1.0);
+    }
+
+    /// The key softbox is glazed with the ceiling: a reflection that looks
+    /// at one of its bars is darker than the plain softbox gives, and one
+    /// that looks through the middle of a pane is the same.
+    #[test]
+    fn the_key_softbox_is_glazed_too() {
+        let plain = chrome(3.0);
+        let glazed = KnobMaterial { panes: 3.0, ..plain };
+        let rgh = plain.rough;
+        let kl = norm3([plain.lx, plain.ly, plain.lz.max(0.02)]);
+        // The softbox's own axes, as rect_q lays them out.
+        let u = norm3({
+            let c = cross3([0.0, 0.0, 1.0], kl);
+            [c[0] + 0.0001, c[1], c[2]]
+        });
+        let v = cross3(kl, u);
+        let at = |qu: f64, qv: f64| norm3([kl[0] + u[0] * qu + v[0] * qv, kl[1] + u[1] * qu + v[1] * qv, kl[2] + u[2] * qu + v[2] * qv]);
+        // Three panes across 0.84: bars at 0.14 either side of the middle,
+        // and two rows: one bar along the middle.
+        let bar = at(0.14, 0.13);
+        assert!(env_hdr(&plain, bar, rgh)[0] - env_hdr(&glazed, bar, rgh)[0] > 0.5);
+        let open = at(0.0, 0.13);
+        assert_eq!(env_hdr(&glazed, open, rgh), env_hdr(&plain, open, rgh));
+    }
+
+    /// Past three lights every other strip hangs high: the second of seven
+    /// is found up the wall and not down it.
+    #[test]
+    fn past_three_every_other_strip_hangs_high() {
+        let m = chrome(7.0);
+        let rgh = m.rough;
+        let az = az0(&m) + TAU * 2.0 / 8.0;
+        let (up, down) = (norm3([az.cos(), az.sin(), 0.95]), norm3([az.cos(), az.sin(), 0.35]));
+        let bare = chrome(0.0);
+        assert!(env_hdr(&m, up, rgh)[0] - env_hdr(&bare, up, rgh)[0] > 1.0);
+        assert_eq!(env_hdr(&m, down, rgh), env_hdr(&bare, down, rgh));
     }
 
     /// The strips hang low on the walls and the reflection a flat face
