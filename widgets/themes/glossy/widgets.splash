@@ -31,7 +31,7 @@ let gl_seg = fn(p: vec2, a: vec2, b: vec2) -> float {
 // bottom inner rim. `lift` 1 casts the drop shadow, 0 seats the cap on the
 // ground with the contact shadow only. `rim` is the bottom inner rim's ink
 // (the LED's spill on a lit cap). Premultiplied.
-let gl_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, disabled: float, focus: float, lift: float, tint: vec3, rim: vec4) -> vec4 {
+let gl_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, disabled: float, focus: float, lift: float, tint: vec3, rim: vec4, gloss: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = (hi - lo) * 0.5
     let hh = hi.y - lo.y
@@ -88,7 +88,16 @@ let gl_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     // gone by the time the edge has turned 60 degrees down.
     // Under the hand the line brightens to #7a7c84 (+0.06) on a button,
     // #86888f on a small cap.
-    let hl = mix(vec3(0.416, 0.424, 0.455), mix(vec3(0.478, 0.486, 0.518), vec3(0.525, 0.533, 0.561), small), hover)
+    // Lacquer (`gloss` 1: buttons, thumbs, knob caps, the segmented caps;
+    // 0 keeps the matte cap): a soft sheen across the upper part of a raised
+    // face, +0.036 at the top, its lower edge rising a little toward the
+    // sides and gone by half the height. A held or disabled cap is matte.
+    let uv = clamp((p - lo) / max(hi - lo, vec2(1.0, 1.0)), vec2(0.0, 0.0), vec2(1.0, 1.0))
+    face = face + vec3(0.036, 0.036, 0.040) * Finish.sheen(uv, 0.0, 0.5, 0.2) * up * gloss
+    // The top line; with gloss a touch brighter (+0.03 at rest).
+    let hl0 = mix(vec3(0.416, 0.424, 0.455), mix(vec3(0.478, 0.486, 0.518), vec3(0.525, 0.533, 0.561), small), hover)
+    let hl1 = mix(vec3(0.447, 0.455, 0.486), mix(vec3(0.498, 0.506, 0.538), vec3(0.545, 0.553, 0.581), small), hover)
+    let hl = mix(hl0, hl1, gloss)
     face = mix(face, hl, inner * smoothstep(0.5, 0.97, -n.y) * up)
     // The sides take at most +0.03, over the top quarter only.
     let side = inner * smoothstep(0.7, 1.0, abs(n.x)) * (1.0 - smoothstep(0.0, 0.25 * hh, p.y - lo.y))
@@ -266,7 +275,7 @@ let gl_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
         if kind > 6.5 {
             // Flatter: nothing at rest.
             if hover + down + focus > 0.001 {
-                res = gl_cap(p, lo, hi, r, px, hover, down, disabled, 0.0, 0.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)) * clamp(max(hover, down), 0.0, 1.0)
+                res = gl_cap(p, lo, hi, r, px, hover, down, disabled, 0.0, 0.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0) * clamp(max(hover, down), 0.0, 1.0)
             }
         } else {
             var ring = Finish.band(d, 0.0, px, px)
@@ -279,7 +288,7 @@ let gl_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
             res = Finish.over(res, vec4(0.0, 0.0, 0.0, 1.0) * inner * 0.25)
             res = Finish.over(res, vec4(0.039, 0.039, 0.047, 1.0) * ring)
             if hover + down > 0.001 {
-                res = Finish.over(res, gl_cap(p, lo, hi, r, px, hover, down, disabled, 0.0, 0.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)) * clamp(max(hover, down), 0.0, 1.0) * 0.85)
+                res = Finish.over(res, gl_cap(p, lo, hi, r, px, hover, down, disabled, 0.0, 0.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0) * clamp(max(hover, down), 0.0, 1.0) * 0.85)
             }
         }
         let fr = Finish.ring_out(d, 0.0, px, px) * 0.9 + Finish.glow(d - px, 0.7) * 0.3 * (1.0 - Finish.cover(d, px))
@@ -308,7 +317,7 @@ let gl_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
         if kind < 0.5 {
             lift = 0.0
         }
-        res = Finish.over(res, gl_cap(p, lo, hi, r, px, hover, down, disabled, focus, lift, tint, rim))
+        res = Finish.over(res, gl_cap(p, lo, hi, r, px, hover, down, disabled, focus, lift, tint, rim, 1.0))
         if kind > 1.5 && kind < 3.5 || kind > 4.5 {
             // The lamp: the chosen segment's lamp (`gl_lamp`), its core two
             // device pixels whose middle stands 4 points above the bottom
@@ -473,7 +482,7 @@ mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
     let on = max(self.active, self.mixed)
     let held = max(max(self.down, self.pressed), on)
     let tint = vec3(-0.006, 0.030, 0.062) * on * (1.0 - self.disabled)
-    var res = gl_cap(p, lo, hi, r, px, self.hover, held, self.disabled, self.focus, 1.0, tint, vec4(0.196, 0.204, 0.227, 1.0))
+    var res = gl_cap(p, lo, hi, r, px, self.hover, held, self.disabled, self.focus, 1.0, tint, vec4(0.196, 0.204, 0.227, 1.0), 0.0)
     // The error: the outline turns the alt red.
     let d = Material.sd_box(p, c, (hi - lo) * 0.5, r)
     res = Finish.over(res, vec4(0.94, 0.32, 0.23, 1.0) * Finish.band(d, 0.0, px, px) * self.error)
@@ -514,7 +523,7 @@ mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
     let kx = gl_snap(x0 + (tw - tw * 0.5) * kt, o.x, px)
     let klo = vec2(kx, lo.y)
     let khi = vec2(kx + kw, hi.y)
-    let thumb = gl_cap(p, klo, khi, 2.5, px, self.hover, max(self.pressed, self.down), self.disabled, 0.0, 0.5,vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0))
+    let thumb = gl_cap(p, klo, khi, 2.5, px, self.hover, max(self.pressed, self.down), self.disabled, 0.0, 0.5,vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0)
     res = Finish.over(res, thumb)
     // The LED bar, 8 x 1.5 points, in the middle of the thumb.
     let lc = vec2((klo.x + khi.x) * 0.5, gl_snap((lo.y + hi.y) * 0.5, o.y, px))
@@ -546,7 +555,7 @@ mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
     let c = (lo + hi) * 0.5
     let on = self.active * (1.0 - self.disabled)
     let tint = vec3(-0.006, 0.030, 0.062) * on
-    var res = gl_cap(p, lo, hi, sz * 0.5, px, self.hover, max(self.down, on), self.disabled, self.focus, 1.0, tint, vec4(0.196, 0.204, 0.227, 1.0))
+    var res = gl_cap(p, lo, hi, sz * 0.5, px, self.hover, max(self.down, on), self.disabled, self.focus, 1.0, tint, vec4(0.196, 0.204, 0.227, 1.0), 0.0)
     // The dot: 4.5 points, one device pixel lower in the well when lit.
     let cd = c + vec2(0.0, px * 0.5 * on)
     res = gl_led(res, p, cd, vec2(2.25 - px, 2.25 - px), on, 0.8, px, vec3(0.88, 0.96, 1.0), vec3(0.31, 0.506, 0.702))
@@ -573,7 +582,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let hi = vec2(gl_snap(self.rect_size.x, o.x, px), gl_snap(self.rect_size.y, o.y, px))
     let sel = self.active
     let tint = vec3(-0.006, 0.030, 0.062) * sel
-    let res = gl_cap(p, lo, hi, 2.0, px, self.hover, max(self.down, sel), self.disabled, self.focus, 1.0, tint, vec4(0.196, 0.204, 0.227, 1.0))
+    let res = gl_cap(p, lo, hi, 2.0, px, self.hover, max(self.down, sel), self.disabled, self.focus, 1.0, tint, vec4(0.196, 0.204, 0.227, 1.0), 0.0)
     // The lamp, centred under the legend (which stands centred, 1.7 points
     // above the cap's middle): its core 6.5 points under the middle, so a
     // descender keeps two rows of well above its pale top row.
@@ -627,7 +636,7 @@ let gl_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, gx: vec2, px: float, di
 let gl_handle = fn(dst: vec4, p: vec2, c: vec2, rad: float, px: float, hover: float, held: float, disabled: float) -> vec4 {
     let lo = c - vec2(rad, rad)
     let hi = c + vec2(rad, rad)
-    var res = Finish.over(dst, gl_cap(p, lo, hi, rad, px, hover, 0.0, disabled, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)))
+    var res = Finish.over(dst, gl_cap(p, lo, hi, rad, px, hover, 0.0, disabled, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0))
     let d = Finish.sd_circle(p, c, 1.5)
     res = Finish.over(res, vec4(0.30, 0.31, 0.35, 1.0) * Finish.ring_out(d, 0.0, px, px) * step(c.y + 0.5, p.y) * (1.0 - held))
     res = Finish.over(res, vec4(0.102, 0.106, 0.125, 1.0) * Finish.cover(d, px) * (1.0 - held))
@@ -703,7 +712,7 @@ mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
     res = gl_fill(res, p, vec2(max(f0, lo.x + px), lo.y + px), vec2(min(f1, hi.x - px), hi.y - px), vec2(lo.x + px, hi.x - px), px, self.disabled)
     let hx = self.slide_pos * self.rect_size.x
     let show = max(self.hover, self.drag)
-    let cap = gl_cap(p, vec2(hx - 3.0, cy - 5.0), vec2(hx + 3.0, cy + 5.0), 1.5, px, 0.0, 0.0, self.disabled, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0))
+    let cap = gl_cap(p, vec2(hx - 3.0, cy - 5.0), vec2(hx + 3.0, cy + 5.0), 1.5, px, 0.0, 0.0, self.disabled, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0)
     return Finish.over(res, cap * show)
 }
 
@@ -792,7 +801,7 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let ch = mix(vec2(self.cap_px * 0.5, cw * 0.5), vec2(cw * 0.5, self.cap_px * 0.5), v)
     let clo = vec2(gl_snap(cc.x - ch.x, o.x, px), gl_snap(cc.y - ch.y, o.y, px))
     let chi = vec2(gl_snap(cc.x + ch.x, o.x, px), gl_snap(cc.y + ch.y, o.y, px))
-    res = Finish.over(res, gl_cap(p, clo, chi, 1.5, px, self.hover, 0.0, self.disabled, self.focus, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)))
+    res = Finish.over(res, gl_cap(p, clo, chi, 1.5, px, self.hover, 0.0, self.disabled, self.focus, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0))
     // Two grip grooves across the cap, dark over light, 3 dp apart; the
     // lower light line takes the accent while the cap is held.
     let ccs = (clo + chi) * 0.5
@@ -857,7 +866,13 @@ let gl_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     let acol = mix(mix(vec3(0.227, 0.655, 1.0), vec3(1.0, 1.0, 1.0), 0.72 * (1.0 - disabled)), ink, smoothstep(0.1, 0.7, da))
     res = Finish.over(res, vec4(acol, 1.0) * Finish.cover(da - 0.75, px) * live)
     // The cap.
-    res = Finish.over(res, gl_cap(p, c - vec2(rc, rc), c + vec2(rc, rc), rc, px, hover, 0.0, disabled, focus, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)))
+    res = Finish.over(res, gl_cap(p, c - vec2(rc, rc), c + vec2(rc, rc), rc, px, hover, 0.0, disabled, focus, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0))
+    // A hint of reflection on the lacquered cap: a soft pale spot up and to
+    // the left, inside the outline.
+    let sp = p - (c + vec2(-0.3 * rc, -0.42 * rc))
+    let rs = 0.3 * rc
+    let refl = exp(-dot(sp, sp) / max(2.0 * rs * rs, 0.001)) * 0.05 * Finish.cover(rl - rc + px * 2.0, px) * (1.0 - disabled)
+    res = Finish.over(res, vec4(0.80, 0.83, 0.88, 1.0) * refl)
     // The pointer: an LED bar 0.3D long from 0.12D inside the rim.
     let dir = vec2(-sin(ve), cos(ve))
     let per = vec2(-dir.y, dir.x)
@@ -1043,7 +1058,7 @@ mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(gl_snap(0.0, o.x, px), gl_snap(0.0, o.y, px))
     let hi = vec2(gl_snap(self.rect_size.x, o.x, px), gl_snap(self.rect_size.y, o.y, px))
-    var res = gl_cap(p, lo, hi, 2.0, px, self.hover, max(self.down, self.active), self.disabled, self.focus, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0))
+    var res = gl_cap(p, lo, hi, 2.0, px, self.hover, max(self.down, self.active), self.disabled, self.focus, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 0.0)
     return gl_chevron_zone(res, p, lo, hi, px, self.disabled)
 }
 
@@ -1117,7 +1132,7 @@ mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(gl_snap(0.0, o.x, px), gl_snap(0.0, o.y, px))
     let hi = vec2(gl_snap(self.rect_size.x, o.x, px), gl_snap(self.rect_size.y, o.y, px))
-    return gl_cap(p, lo, hi, 2.0, px, 0.0, 0.0, 0.0, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0))
+    return gl_cap(p, lo, hi, 2.0, px, 0.0, 0.0, 0.0, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 1.0)
 }
 // The sunk segment: no top line, a shade falling from the top, the face
 // tinted #2c3643, and a 1 dp tinted edge either side where it meets its
@@ -1132,29 +1147,95 @@ let gl_sunk = fn(p: vec2, lo: vec2, hi: vec2, px: float, hover: float) -> vec4 {
     let inside = step(lo.x, p.x) * step(p.x, hi.x) * step(lo.y, p.y) * step(p.y, hi.y)
     return vec4(col, 1.0) * inside
 }
-// The chosen segment also carries the lamp, centred under its word: the
-// widget centres the word by its advance, which sets the ink about a point
-// left of the segment's middle, so the lamp stands a point left of it too.
-// The core's top row 7.75 points under the segment's middle: two rows of
-// well between a descender and the lamp's pale top row, three rows of lit
-// well under the core before the strip's foot. The pill glides, and the
-// lamp with it.
+// The chosen answer is a push button pressed in: Day, Week and Month are
+// three caps and the chosen one is sunk deep between the others. Its well
+// runs from under the strip's top outline to its bottom outline, black
+// under the top edge and shaded along both walls, and the neighbours' ends
+// stand lit over it. The strip lays the answers 2 points in from its edge;
+// the quad grows so the well can reach the outline and the neighbours' ends.
+mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
+    let m = 9.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
+// On the column (its pill's `radius`, unused by this face, set to -1 as the
+// mark) the well keeps to its own segment's height -- the answers above and
+// below are the neighbours -- and reaches the strip's side outlines instead.
 mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
+    let m = 9.0
+    let v = 1.0 - step(0.0, self.radius)
+    let hz = 1.0 - v
     let px = gl_px(self.draw_pass.dpi_factor)
     let o = self.rect_pos
-    let p = self.pos * self.rect_size
-    let lo = vec2(gl_snap(0.0, o.x, px), gl_snap(0.0, o.y, px) + px)
-    let hi = vec2(gl_snap(self.rect_size.x, o.x, px), gl_snap(self.rect_size.y, o.y, px) - px)
-    let res = gl_sunk(p, lo, hi, px, 0.0)
-    let c = self.rect_size * 0.5 - vec2(1.0, 0.0)
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+    let lo = vec2(gl_snap(-2.0 * v, o.x, px) + px * v, gl_snap(-2.0 * hz, o.y, px) + px * hz)
+    let hi = vec2(gl_snap(self.rect_size.x + 2.0 * v, o.x, px) - px * v, gl_snap(self.rect_size.y + 2.0 * hz, o.y, px) - px * hz)
+    let hh = hi.y - lo.y
+    let t = clamp((p.y - lo.y) / max(hh, 1.0), 0.0, 1.0)
+    // The floor, dark and a little blue.
+    var col = mix(vec3(0.173, 0.212, 0.263), vec3(0.133, 0.157, 0.192), t)
+    // The inner shadow: black right under the top edge, gone in about
+    // seven rows; along each wall a shade gone in four; a darker last row.
+    let top = exp(-max(p.y - lo.y, 0.0) / (3.0 * px))
+    let wl = 0.75 * exp(-max(p.x - lo.x, 0.0) / (2.0 * px))
+    let wr = 0.75 * exp(-max(hi.x - px - p.x, 0.0) / (2.0 * px))
+    let foot = 0.35 * step(hi.y - px, p.y)
+    let dk = 1.0 - (1.0 - top) * (1.0 - wl) * (1.0 - wr) * (1.0 - foot)
+    col = mix(col, vec3(0.0, 0.0, 0.0), dk)
+    let inside = step(lo.x, p.x) * (1.0 - step(hi.x, p.x)) * step(lo.y, p.y) * (1.0 - step(hi.y, p.y))
+    // Pressed in, the chosen cap throws no shadow: under it the ground (with
+    // the window's grain) comes back a row under the outline, and only the
+    // neighbours' shadows reach in at the sides.
+    let below = step(hi.y + px, p.y) * step(lo.x, p.x) * (1.0 - step(hi.x, p.x))
+    let bx = smoothstep(0.0, 4.0 * px, p.x - lo.x) * smoothstep(0.0, 4.0 * px, hi.x - p.x)
+    let contact = 0.8 * exp(-max(p.y - hi.y - px, 0.0) / (0.9 * px))
+    // (The grain as `gl_grain` further down reads it, in window space.)
+    let gi = floor((p + o) / px)
+    let gj = gi + vec2(Finish.hash(gi) * 419.0, Finish.hash(gi + vec2(5.31, 9.17)) * 263.0)
+    let g = (Finish.hash(gj) - Finish.hash(gj + vec2(17.13, 3.71))) * 0.02
+    var res = vec4(mix(vec3(0.224, 0.231, 0.267) + vec3(g, g, g), vec3(0.0, 0.0, 0.0), contact), 1.0) * below * bx * hz
+    res = Finish.over(res, vec4(col, 1.0) * inside)
+    // The neighbours' ends standing over the well: a lit column on each,
+    // and a fainter one behind it on the left.
+    let ey = step(lo.y + px, p.y) * (1.0 - step(hi.y - px, p.y))
+    let el = step(lo.x - px, p.x) * (1.0 - step(lo.x, p.x))
+    let el2 = step(lo.x - px * 2.0, p.x) * (1.0 - step(lo.x - px, p.x))
+    let er = step(hi.x, p.x) * (1.0 - step(hi.x + px, p.x))
+    res = Finish.over(res, vec4(0.294, 0.310, 0.345, 1.0) * (el + er) * ey * hz)
+    res = Finish.over(res, vec4(0.259, 0.267, 0.314, 1.0) * el2 * ey * 0.6 * hz)
+    // On the column the answer below stands over the well's foot: its top
+    // line, between the side outlines.
+    let eb = step(hi.y, p.y) * (1.0 - step(hi.y + px, p.y)) * step(lo.x + px, p.x) * (1.0 - step(hi.x - px, p.x))
+    res = Finish.over(res, vec4(0.294, 0.310, 0.345, 1.0) * eb * v)
+    // The lamp, centred under the word: the widget centres the word by its
+    // advance, which sets the ink about a point left of the middle, so the
+    // lamp stands a point left of it too. The core's top row 8.4 points
+    // under the segment's middle: five rows of lit floor under it before the
+    // well's foot, three rows of well between a descender and the lamp's
+    // pale top row. Round it a broad soft pool on the floor.
+    let c = vec2((lo.x + hi.x) * 0.5 - 1.0, self.rect_size.y * 0.5)
+    let y0 = gl_snap(c.y + 8.4167, o.y, px)
+    let q = vec2((p.x - c.x) / max((hi.x - lo.x) * 0.3, 1.0), (p.y - (y0 + px)) / 3.2)
+    let pool = exp(-dot(q, q)) * 0.16 * inside
+    res = Finish.over(res, vec4(0.405, 0.593, 0.752, 1.0) * pool)
     let xs = vec2(gl_snap(c.x - 5.3333, o.x, px), gl_snap(c.x + 5.3333, o.x, px))
-    return gl_lamp(res, p, xs, gl_snap(c.y + 7.75, o.y, px), px, 1.0, 1.0, vec3(0.910, 0.918, 0.922), vec3(0.405, 0.593, 0.752))
+    let lamp = gl_lamp(res, p, xs, y0, px, 1.0, 1.0, vec3(0.910, 0.918, 0.922), vec3(0.405, 0.593, 0.752))
+    res = mix(res, lamp, inside)
+    // The light reaches the foot of the well and spills over its bottom
+    // edge: the last row of the floor, the outline and the row under it.
+    let ex = max(max(xs.x - p.x, p.x - xs.y), 0.0) / px
+    let gx = exp(-(ex * ex) / (2.0 * 7.0 * 7.0)) * step(lo.x, p.x) * (1.0 - step(hi.x, p.x))
+    let r0 = step(hi.y - px, p.y) * (1.0 - step(hi.y, p.y))
+    let r1 = step(hi.y, p.y) * (1.0 - step(hi.y + px, p.y))
+    let r2 = step(hi.y + px, p.y) * (1.0 - step(hi.y + px * 2.0, p.y))
+    let spill = (0.34 * r0 + (0.22 * r1 + 0.10 * r2) * hz) * gx
+    return Finish.over(res, vec4(0.56, 0.66, 0.76, 1.0) * spill)
 }
 // Cap labels at the family's 8 points, the chosen one included.
 mod.widgets.SegmentedControlFlat.draw_text.text_style.font_size = 8.0
 mod.widgets.SegmentedControlFlat.draw_text_selected.text_style.font_size = 8.0
 mod.widgets.SegmentedControlFlat.draw_text.color = #c4c7ce
 mod.widgets.SegmentedControlFlat.draw_text_selected.color = #fafafa
+mod.widgets.SegmentedControlVertical.draw_pill.radius = -1.0
 
 // Tabs: joined segments of one strip. Each quiet tab is a raised segment
 // whose joint with the next is engraved, dark then light; the tab in use
@@ -1169,7 +1250,7 @@ let gl_tab = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, active
     let lo = vec2(gl_snap(0.0, o.x, px), gl_snap(0.0, o.y, px))
     let hi = vec2(gl_snap(size.x, o.x, px), gl_snap(size.y, o.y, px))
     let inx = step(lo.x, p.x) * step(p.x, hi.x)
-    var res = gl_cap(p, lo - vec2(4.0, 0.0), hi + vec2(4.0, 0.0), 0.0, px, hover, active, 0.0, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)) * inx
+    var res = gl_cap(p, lo - vec2(4.0, 0.0), hi + vec2(4.0, 0.0), 0.0, px, hover, active, 0.0, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 0.0) * inx
     res = mix(res, Finish.over(res, gl_sunk(p, lo + vec2(0.0, px), hi - vec2(0.0, px), px, hover)), active)
     // The joint: the black outline on the left, just outside the box, and a
     // light line inside it; the dark line inside the right edge.
@@ -1349,7 +1430,7 @@ mod.widgets.ScrollBar.draw_bg.pixel = fn() {
     let thi = mix(vec2(t1, sz.y - 1.0), vec2(sz.x - 1.0, t1), v)
     let slo = vec2(gl_snap(tlo.x, o.x, px), gl_snap(tlo.y, o.y, px))
     let shi = vec2(gl_snap(thi.x, o.x, px), gl_snap(thi.y, o.y, px))
-    res = Finish.over(res, gl_cap(p, slo, shi, 1.5, px, max(self.hover, self.drag), 0.0, 0.0, 0.0, 0.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0)))
+    res = Finish.over(res, gl_cap(p, slo, shi, 1.5, px, max(self.hover, self.drag), 0.0, 0.0, 0.0, 0.0, vec3(0.0, 0.0, 0.0), vec4(0.196, 0.204, 0.227, 1.0), 0.0))
     return res * self.opacity
 }
 
@@ -1507,7 +1588,7 @@ mod.widgets.ChipFlat.draw_bg.pixel = fn() {
     let hi = vec2(gl_snap(self.rect_size.x, o.x, px), gl_snap(self.rect_size.y, o.y, px) - px)
     let l = Finish.lum(self.color.rgb)
     let tint = (self.color.rgb - vec3(l, l, l)) * 0.35 * self.color.a
-    var res = gl_cap(p, lo, hi, 2.0, px, self.hover, self.down, 0.0, 0.0, 0.0, tint, vec4(0.196, 0.204, 0.227, 1.0))
+    var res = gl_cap(p, lo, hi, 2.0, px, self.hover, self.down, 0.0, 0.0, 0.0, tint, vec4(0.196, 0.204, 0.227, 1.0), 0.0)
     if self.keyed > 0.0 {
         let d = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, 2.0)
         res = Finish.over(res, vec4(0.31, 0.506, 0.702, 1.0) * Finish.band(d, 0.0, px, px) * self.keyed)
