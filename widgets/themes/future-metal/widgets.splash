@@ -2259,29 +2259,45 @@ let fm_nb = fn(q: vec2, lo: vec2, hi: vec2, k: vec4) -> float {
     return Finish.sd_notch(q, (lo + hi) * 0.5, (hi - lo) * 0.5, k)
 }
 
-// The window cut into the hull, negative inside: a strip down the left edge
-// that widens part way down, one down the right edge that widens lower, and a
-// band along the foot whose top steps down right of the middle.
+// The window cut into the hull, negative inside: a narrow strip down the left
+// edge that widens part way down, one down the right edge that widens lower,
+// and a low band along the foot whose top steps down right of the middle. All
+// keep to the window's outer margin, where the least text lies.
 let fm_win_sd = fn(q: vec2, size: vec2) -> float {
     let m = 8.0
     let w = size.x
     let h = size.y
-    let lw = clamp(w * 0.10, 56.0, 170.0)
-    let rw = clamp(w * 0.09, 50.0, 150.0)
-    let bh = clamp(h * 0.15, 64.0, 160.0)
+    let lw = 32.0
+    let rw = 32.0
+    let bh = 50.0
     let yt = clamp(h * 0.14, 60.0, 140.0)
     let yl = mix(yt, h - bh, 0.40)
     let yr = mix(yt, h - bh, 0.64)
-    let l1 = fm_nb(q, vec2(m, yt), vec2(m + lw * 0.62, h - m), vec4(10.0, 7.0, 0.0, 12.0))
-    let l2 = fm_nb(q, vec2(m, yl), vec2(m + lw, h - m), vec4(0.0, 10.0, 0.0, 12.0))
-    let r1 = fm_nb(q, vec2(w - m - rw * 0.66, mix(yt, h - bh, 0.18)), vec2(w - m, h - m), vec4(7.0, 10.0, 12.0, 0.0))
-    let r2 = fm_nb(q, vec2(w - m - rw, yr), vec2(w - m, h - m), vec4(10.0, 0.0, 12.0, 0.0))
+    let l1 = fm_nb(q, vec2(m, yt), vec2(m + lw * 0.62, h - m), vec4(7.0, 5.0, 0.0, 12.0))
+    let l2 = fm_nb(q, vec2(m, yl), vec2(m + lw, h - m), vec4(0.0, 8.0, 0.0, 12.0))
+    let r1 = fm_nb(q, vec2(w - m - rw * 0.62, mix(yt, h - bh, 0.18)), vec2(w - m, h - m), vec4(5.0, 7.0, 12.0, 0.0))
+    let r2 = fm_nb(q, vec2(w - m - rw, yr), vec2(w - m, h - m), vec4(8.0, 0.0, 12.0, 0.0))
     let b1 = fm_nb(q, vec2(m, h - bh), vec2(w * 0.42, h - m), vec4(0.0, 0.0, 0.0, 12.0))
-    let b2 = fm_nb(q, vec2(w * 0.30, h - bh + 22.0), vec2(w - m, h - m), vec4(0.0, 0.0, 12.0, 0.0))
+    let b2 = fm_nb(q, vec2(w * 0.30, h - bh + 12.0), vec2(w - m, h - m), vec4(0.0, 0.0, 12.0, 0.0))
     let l = fm_uc(l1, l2, 12.0)
     let r = fm_uc(r1, r2, 12.0)
     let b = fm_uc(b1, b2, 18.0)
     return fm_uc(fm_uc(l, b, 16.0), r, 16.0)
+}
+
+// Relative luminance of a shader colour (gamma 2.2 decode).
+let fm_lum = fn(c: vec3) -> float {
+    return 0.2126 * pow(max(c.x, 0.0), 2.2) + 0.7152 * pow(max(c.y, 0.0), 2.2) + 0.0722 * pow(max(c.z, 0.0), 2.2)
+}
+
+// Smoked plastic: what shows through keeps its hue and its order of
+// brightness, but its luminance rolls off softly toward `lm` and never
+// passes it, so light text over the brightest trace keeps its contrast.
+let fm_smoke = fn(c: vec3, lm: float) -> vec3 {
+    let l = max(fm_lum(c), 0.00001)
+    let kn = lm * 0.55
+    let lo = min(l, kn + (lm - kn) * (1.0 - exp(-max(l - kn, 0.0) / (lm - kn))))
+    return c * pow(lo / l, 1.0 / 2.2)
 }
 
 let fm_hull = fn(q: vec2, size: vec2, px: float) -> vec3 {
@@ -2320,6 +2336,10 @@ let fm_hull = fn(q: vec2, size: vec2, px: float) -> vec3 {
     // the inner wall, 1.8..0 out, dark and shaded
     let wl = step(0.0, d) * step(d, 1.8)
     col = mix(col, mix(vec3(0.030, 0.040, 0.050), vec3(0.230, 0.270, 0.300), clamp(fw * 0.5 + 0.3, 0.0, 1.0)), wl)
+    // text runs over the frame as well: its lit chamfer, hairlines and slot
+    // are held to the steel's own brightness, except at the window's edge
+    let eo = min(min(q.x, size.x - q.x), size.y - q.y)
+    col = mix(col, fm_smoke(col, mix(0.30, 0.095, smoothstep(1.5, 3.0, eo))), step(0.0, d) * step(d, 16.0))
     if d < 0.0 {
         // the pane
         let refu = (q.x * 0.8 + q.y) / max(size.x * 0.8 + size.y, 1.0)
@@ -2329,24 +2349,36 @@ let fm_hull = fn(q: vec2, size: vec2, px: float) -> vec3 {
         let r4 = (refu - 0.80) / 0.05
         let r5 = (refu - 0.842) / 0.007
         let refl = exp(-r1 * r1) * 0.065 + exp(-r2 * r2) * 0.070 + exp(-r3 * r3) * 0.060 + exp(-r4 * r4) * 0.065 + exp(-r5 * r5) * 0.060
-        var pc = fm_pane(fm_board(q, px, 1.8, 0.0, 0.95), q, px, refl, 0.25)
+        // smoked plastic: the board seen crisp and dark, a faint grey-blue
+        // body to the pane and its reflections
+        let fz = Finish.noise(q / 70.0 + vec2(3.3, 8.1)) - 0.5
+        // (the smoke passes a little over half the light, so unlit traces sink
+        // toward the board and the lit ones stand out; their colour is kept
+        // rich so they still read as lit when the peak is held down below)
+        let bd = fm_board(q, px, 1.4, 0.0, 0.35) * 0.66
+        var pc = vec3(pow(max(bd.x, 0.0), 1.3), pow(max(bd.y, 0.0), 1.3), pow(max(bd.z, 0.0), 1.3)) * 1.25
+        pc = pc + vec3(0.026, 0.032, 0.038) * (1.0 + 0.5 * fz) + vec3(0.50, 0.56, 0.62) * refl
+        pc = max(mix(vec3(dot(pc, vec3(0.2126, 0.7152, 0.0722))), pc, 1.5), vec3(0.0))
+        pc = pc + g3(fm_grain(q / px + vec2(311.0, 97.0), 0.008))
         // the frame's shadow on the pane, from the walls toward the light
         let ds = fm_win_sd(q + fm_light() * 5.0, size)
         let sh = smoothstep(-9.0, 2.0, ds)
-        pc = pc * (1.0 - 0.70 * sh * sh)
+        pc = pc * (1.0 - 0.60 * sh * sh)
         pc = pc * (1.0 - 0.35 * (1.0 - smoothstep(0.0, 3.0, -d)))
-        // the pane's bevelled rim, bright where it faces the light
+        // the pane's bevelled rim, smoked too, lighter where it faces the light
         let fr = clamp(dot(n, fm_light()), -1.0, 1.0)
         let rim = step(-2.2, d)
-        let rc = mix(vec3(0.240, 0.300, 0.340), vec3(0.500, 0.590, 0.630), clamp(fr * 0.55 + 0.45, 0.0, 1.0))
+        let rc = mix(vec3(0.100, 0.125, 0.140), vec3(0.330, 0.390, 0.420), clamp(fr * 0.55 + 0.45, 0.0, 1.0))
         pc = mix(pc, rc, rim * 0.85)
         pc = mix(pc, vec3(0.93, 0.97, 1.0), fm_hl(d, -2.2 + px * 0.5, px, px) * 0.45)
         pc = mix(pc, vec3(0.93, 0.97, 1.0), fm_hl(d, -px * 1.5, px, px) * 0.75 * clamp(fr * 0.8 + 0.4, 0.0, 1.0))
         pc = mix(pc, fm_edge(), fm_hl(d, -px * 0.5, px, px) * 0.8)
-        // a moulded step in the pane six points in: a dark line over a light one
-        pc = mix(pc, pc * 0.7, fm_hl(d, -6.0 + px * 0.5, px, px) * 0.8)
-        pc = mix(pc, vec3(0.78, 0.87, 0.92), fm_hl(d, -6.0 - px * 0.5, px, px) * 0.35)
-        col = pc
+        // a moulded step in the pane four points in: a dark line over a light one
+        pc = mix(pc, pc * 0.6, fm_hl(d, -4.0 + px * 0.5, px, px) * 0.8)
+        pc = mix(pc, vec3(0.78, 0.87, 0.92), fm_hl(d, -4.0 - px * 0.5, px, px) * 0.25)
+        // the smoke holds every peak under text down; right at the window's
+        // own edge, where no text runs, the light may rise again
+        col = fm_smoke(pc, mix(0.30, 0.078, smoothstep(1.5, 3.0, eo)))
     }
     return col
 }
