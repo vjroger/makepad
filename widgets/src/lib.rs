@@ -131,6 +131,10 @@ pub mod loading_spinner;
 pub mod progress;
 pub mod playback_bar;
 pub mod level_meter;
+pub mod readout;
+pub mod lamp;
+pub mod needle_meter;
+pub mod screen_view;
 pub mod marquee;
 pub mod spinner;
 
@@ -381,6 +385,10 @@ pub use crate::{
     progress::*,
     playback_bar::*,
     level_meter::*,
+    readout::*,
+    lamp::*,
+    needle_meter::*,
+    screen_view::*,
     reorder_list::*,
     radio_button::*,
     reflect::*,
@@ -607,17 +615,11 @@ pub fn set_base_theme(cx: &mut Cx, theme: BaseTheme) {
     clear_theme_edits(cx);
 }
 
-pub fn theme_mod(vm: &mut ScriptVm) {
-    makepad_draw::script_mod(vm);
-    if !vm.is_reload() {
-        makepad_platform::ime::script_mod(vm);
-    }
-
-    vm.bx.heap.new_module(id!(prelude));
-    vm.bx.heap.new_module(id!(themes));
-    crate::animator::script_mod(vm);
-    // `mod.tween` (GSAP-style tweens from script), once per VM.
-    crate::tween_script::script_mod(vm);
+/// The three base themes, built fresh from their own source: every key of
+/// `mod.themes.dark`, `.light` and `.skeleton`, a person's edit to a global
+/// re-derived into its base, and the platform's fonts. `mod.theme` is not
+/// pointed anywhere here; `theme_mod` does that, and a sheet's first line.
+fn build_base_themes(vm: &mut ScriptVm) {
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
@@ -649,6 +651,21 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             values: vec![],
         });
     }
+    crate::font_policy::install_theme_fonts(vm);
+}
+
+pub fn theme_mod(vm: &mut ScriptVm) {
+    makepad_draw::script_mod(vm);
+    if !vm.is_reload() {
+        makepad_platform::ime::script_mod(vm);
+    }
+
+    vm.bx.heap.new_module(id!(prelude));
+    vm.bx.heap.new_module(id!(themes));
+    crate::animator::script_mod(vm);
+    // `mod.tween` (GSAP-style tweens from script), once per VM.
+    crate::tween_script::script_mod(vm);
+    build_base_themes(vm);
     #[cfg(not(target_arch = "wasm32"))]
     script_eval!(vm, {
         mod.helper = {
@@ -669,7 +686,6 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             }
         }
     });
-    crate::font_policy::install_theme_fonts(vm);
     script_eval!(vm, {
         mod.prelude.widgets_header = {
             ..mod.res,
@@ -733,7 +749,28 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 }
 
 pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
-    crate::desktop_style::apply_theme(vm);
+    // With a sheet installed the library is registered twice. First as it
+    // stands without the sheet, which is kept (`desktop_style::keep_stock`)
+    // for the chrome that must look and measure the same under every sheet;
+    // then the base themes are built again, because the sheet's token half
+    // writes into them and the kept library's theme must not change under
+    // it; then with the sheet, which is the library everything else gets.
+    if crate::desktop_style::current_name(vm).is_some() {
+        register_widgets(vm, host_io_only, false);
+        build_base_themes(vm);
+        register_widgets(vm, host_io_only, true);
+    } else {
+        register_widgets(vm, host_io_only, false);
+    }
+}
+
+/// One registration of every widget template, with the installed sheet's
+/// token half first when `with_sheet`, and otherwise kept as the stock
+/// library the chrome is built from.
+fn register_widgets(vm: &mut ScriptVm, host_io_only: bool, with_sheet: bool) {
+    if with_sheet {
+        crate::desktop_style::apply_theme(vm);
+    }
     // ...and the person's own edits over everything -- base, sheet or mix.
     // (A global has already rebuilt the base in `theme_mod`; its pin here
     // is the same value again, and the belt for a base that never named it.)
@@ -774,6 +811,12 @@ true
     });
 
     vm.bx.heap.new_module(id!(widgets));
+    // A registration without the sheet is the stock library, kept before
+    // anything is registered into it, so the chrome registered below already
+    // names its templates from it.
+    if !with_sheet {
+        crate::desktop_style::keep_stock(vm);
+    }
 
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
@@ -858,6 +901,12 @@ true
     crate::progress::script_mod(vm);
     crate::playback_bar::script_mod(vm);
     crate::level_meter::script_mod(vm);
+    // The instruments: the readout and the meter draw on a screen, and
+    // the screen holds them, so the view kit is all it needs above it.
+    crate::readout::script_mod(vm);
+    crate::lamp::script_mod(vm);
+    crate::needle_meter::script_mod(vm);
+    crate::screen_view::script_mod(vm);
     crate::breadcrumb::script_mod(vm);
     crate::pagination::script_mod(vm);
     crate::nav_list::script_mod(vm);
