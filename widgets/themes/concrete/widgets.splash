@@ -1737,69 +1737,160 @@ mod.widgets.Vr.draw_bg.pixel = fn() {
 }
 
 // ---------------------------------------------------------------------------
-// STAMPED WORDS. A word on a block is pressed into it: the ink with a light
-// line one device pixel under every glyph, read from the glyph one device
-// pixel above, so it costs one more sample and nothing else.
-mod.widgets.ButtonFlat.draw_text.pixel = fn() {
-    let main = self.sample_text_pixel()
-    if self.texture_index > 1.5 && self.texture_index < 2.5 {
-        let dxt = length(dFdx(self.t))
-        let dyt = length(dFdy(self.t))
+// STAMPED WORDS. Every word is pressed into the cast, as the lettering on the
+// slabs of the picture: the light comes from the upper left, so the wall of
+// the letter facing it lies in shade (a dark rim inside the stroke on its
+// upper left and a faint shade just outside it) and the far wall catches the
+// light (a pale line one and a half device pixels wide outside the stroke on
+// its lower right).
+// The glyph body keeps its ink, dark enough to read at 4.5:1 or more.
+// Two more samples of the glyph, one device pixel up-left and one down-right,
+// on the small (single channel) and the large (multi channel) atlas alike.
+// Pale ink (words in the dark pockets) keeps the shade and only a trace of
+// the light line, so the letters do not grow a halo.
+// The function is written once and handed to every label below.
+let cc_stamp = fn() {
+    if self.texture_index > 0.5 && self.texture_index < 1.5 {
+        return self.sample_text_pixel()
+    }
+    if self.texture_index > 2.5 {
+        return self.sample_text_pixel()
+    }
+    let c = self.get_color()
+    let dxt = length(dFdx(self.t))
+    let dyt = length(dFdy(self.t))
+    let d = dFdx(self.t.xy) + dFdy(self.t.xy)
+    var a0 = 0.0
+    var au = 0.0
+    var ad = 0.0
+    if self.texture_index < 0.5 {
+        let tex_size = self.grayscale_texture.size()
+        let scale = (dxt + dyt) * tex_size.x * 0.5
+        let ht = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        a0 = self.sdf(scale, clamp(self.t.xy, self.t_min + ht, self.t_max - ht), c)
+        au = self.sdf(scale, clamp(self.t.xy - 1.5 * d, self.t_min + ht, self.t_max - ht), c)
+        ad = self.sdf(scale, clamp(self.t.xy + d, self.t_min + ht, self.t_max - ht), c)
+    } else {
         let tex_size = self.msdf_texture.size()
         let scale = (dxt + dyt) * tex_size.x * 0.5
-        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
-        let c = self.get_color()
-        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0)) * 0.45 * c.a
-        return main + vec4(0.88 * s, 0.875 * s, 0.86 * s, s) * (1.0 - main.a)
+        let ht = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+        a0 = self.msdf(scale, clamp(self.t.xy, self.t_min + ht, self.t_max - ht), c)
+        au = self.msdf(scale, clamp(self.t.xy - 1.5 * d, self.t_min + ht, self.t_max - ht), c)
+        ad = self.msdf(scale, clamp(self.t.xy + d, self.t_min + ht, self.t_max - ht), c)
     }
-    return main
+    let pale = step(0.5, dot(c.rgb, vec3(0.299, 0.587, 0.114)))
+    let rim = a0 * (1.0 - au)
+    let lit = au * (1.0 - a0) * mix(0.75, 0.1, pale)
+    let shade = ad * (1.0 - a0) * (1.0 - au) * mix(0.38, 0.55, pale)
+    // On a cap the face is light enough to let the floor of the letter come
+    // up a little toward the stone (stamp_lift, set per template), while the
+    // rim facing the light stays at the ink: the pressed-in profile of the
+    // picture, a dark edge on the upper left and a lighter floor beside it.
+    // Only the rest ink lifts: the darker hover and held inks (#0e0e0d) and
+    // the faint disabled ink keep their own value, so a held cap, whose face
+    // is darker, still reads at 4.5:1.
+    let ink_l = dot(c.rgb, vec3(0.299, 0.587, 0.114))
+    let dark = smoothstep(0.066, 0.078, ink_l) * (1.0 - smoothstep(0.12, 0.3, ink_l))
+    let fl = vec3(1.0, 1.0, 0.97) * self.stamp_lift * dark * au
+    let body = (c.rgb + fl) * (1.0 - 0.55 * rim * (1.0 - pale))
+    let res = vec4(max(body, vec3(0.0, 0.0, 0.0)) * a0 * c.a, a0 * c.a)
+    let edge = vec4(vec3(0.93, 0.925, 0.9) * lit, lit + shade) * c.a
+    return res + edge * (1.0 - res.a)
 }
-mod.widgets.DropDownFlat.draw_text.pixel = fn() {
-    let main = self.sample_text_pixel()
-    if self.texture_index > 1.5 && self.texture_index < 2.5 {
-        let dxt = length(dFdx(self.t))
-        let dyt = length(dFdy(self.t))
-        let tex_size = self.msdf_texture.size()
-        let scale = (dxt + dyt) * tex_size.x * 0.5
-        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
-        let c = self.get_color()
-        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0)) * 0.45 * c.a
-        return main + vec4(0.88 * s, 0.875 * s, 0.86 * s, s) * (1.0 - main.a)
-    }
-    return main
-}
-mod.widgets.SegmentedControlFlat.draw_text.pixel = fn() {
-    let main = self.sample_text_pixel()
-    if self.texture_index > 1.5 && self.texture_index < 2.5 {
-        let dxt = length(dFdx(self.t))
-        let dyt = length(dFdy(self.t))
-        let tex_size = self.msdf_texture.size()
-        let scale = (dxt + dyt) * tex_size.x * 0.5
-        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
-        let c = self.get_color()
-        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0)) * 0.45 * c.a
-        return main + vec4(0.88 * s, 0.875 * s, 0.86 * s, s) * (1.0 - main.a)
-    }
-    return main
-}
-mod.widgets.Tabs.draw_text.pixel = fn() {
-    let main = self.sample_text_pixel()
-    if self.texture_index > 1.5 && self.texture_index < 2.5 {
-        let dxt = length(dFdx(self.t))
-        let dyt = length(dFdy(self.t))
-        let tex_size = self.msdf_texture.size()
-        let scale = (dxt + dyt) * tex_size.x * 0.5
-        let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
-        let ps = clamp(self.t.xy - dFdy(self.t.xy), self.t_min + half_texel, self.t_max - half_texel)
-        let c = self.get_color()
-        let s = self.msdf(scale, ps, vec4(0.0, 0.0, 0.0, 1.0)) * 0.45 * c.a
-        return main + vec4(0.88 * s, 0.875 * s, 0.86 * s, s) * (1.0 - main.a)
-    }
-    return main
-}
+mod.widgets.Label.draw_text.pixel = cc_stamp
+mod.widgets.Label.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.H1.draw_text.pixel = cc_stamp
+mod.widgets.H1.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.H2.draw_text.pixel = cc_stamp
+mod.widgets.H2.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.H3.draw_text.pixel = cc_stamp
+mod.widgets.H3.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.H4.draw_text.pixel = cc_stamp
+mod.widgets.H4.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.H5.draw_text.pixel = cc_stamp
+mod.widgets.H5.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.H6.draw_text.pixel = cc_stamp
+mod.widgets.H6.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.ButtonFlat.draw_text.pixel = cc_stamp
+mod.widgets.ButtonFlat.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.Button.draw_text.pixel = cc_stamp
+mod.widgets.Button.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonFlatter.draw_text.pixel = cc_stamp
+mod.widgets.ButtonFlatter.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonPrimary.draw_text.pixel = cc_stamp
+mod.widgets.ButtonPrimary.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonSecondary.draw_text.pixel = cc_stamp
+mod.widgets.ButtonSecondary.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonTertiary.draw_text.pixel = cc_stamp
+mod.widgets.ButtonTertiary.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonDanger.draw_text.pixel = cc_stamp
+mod.widgets.ButtonDanger.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonOutline.draw_text.pixel = cc_stamp
+mod.widgets.ButtonOutline.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonXs.draw_text.pixel = cc_stamp
+mod.widgets.ButtonXs.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonSm.draw_text.pixel = cc_stamp
+mod.widgets.ButtonSm.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.ButtonLg.draw_text.pixel = cc_stamp
+mod.widgets.ButtonLg.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.CheckBoxFlat.draw_text.pixel = cc_stamp
+mod.widgets.CheckBoxFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.CheckBox.draw_text.pixel = cc_stamp
+mod.widgets.CheckBox.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.ToggleFlat.draw_text.pixel = cc_stamp
+mod.widgets.ToggleFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.Toggle.draw_text.pixel = cc_stamp
+mod.widgets.Toggle.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.RadioButtonFlat.draw_text.pixel = cc_stamp
+mod.widgets.RadioButtonFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.RadioButton.draw_text.pixel = cc_stamp
+mod.widgets.RadioButton.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.RadioButtonTabFlat.draw_text.pixel = cc_stamp
+mod.widgets.RadioButtonTabFlat.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.RadioButtonTab.draw_text.pixel = cc_stamp
+mod.widgets.RadioButtonTab.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.SliderFlat.draw_text.pixel = cc_stamp
+mod.widgets.SliderFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.Slider.draw_text.pixel = cc_stamp
+mod.widgets.Slider.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.SliderMinimal.draw_text.pixel = cc_stamp
+mod.widgets.SliderMinimal.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.SliderMinimalFlat.draw_text.pixel = cc_stamp
+mod.widgets.SliderMinimalFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.SliderRoundFlat.draw_text.pixel = cc_stamp
+mod.widgets.SliderRoundFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.SliderRound.draw_text.pixel = cc_stamp
+mod.widgets.SliderRound.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.RotaryFlat.draw_text.pixel = cc_stamp
+mod.widgets.RotaryFlat.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.Rotary.draw_text.pixel = cc_stamp
+mod.widgets.Rotary.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.RotaryKnob.draw_text.pixel = cc_stamp
+mod.widgets.RotaryKnob.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.DropDownFlat.draw_text.pixel = cc_stamp
+mod.widgets.DropDownFlat.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.DropDown.draw_text.pixel = cc_stamp
+mod.widgets.DropDown.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.SegmentedControlFlat.draw_text.pixel = cc_stamp
+mod.widgets.SegmentedControlFlat.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.SegmentedControlFlat.draw_text_selected.pixel = cc_stamp
+mod.widgets.SegmentedControlFlat.draw_text_selected.stamp_lift = uniform(0.0)
+mod.widgets.SegmentedControl.draw_text.pixel = cc_stamp
+mod.widgets.SegmentedControl.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.SegmentedControl.draw_text_selected.pixel = cc_stamp
+mod.widgets.SegmentedControl.draw_text_selected.stamp_lift = uniform(0.0)
+mod.widgets.Tabs.draw_text.pixel = cc_stamp
+mod.widgets.Tabs.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.Tabs.draw_text_active.pixel = cc_stamp
+mod.widgets.Tabs.draw_text_active.stamp_lift = uniform(0.0)
+mod.widgets.ListItem.draw_text.pixel = cc_stamp
+mod.widgets.ListItem.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.ListItemOne.draw_text.pixel = cc_stamp
+mod.widgets.ListItemOne.draw_text.stamp_lift = uniform(0.0)
+mod.widgets.ChipFlat.draw_text.pixel = cc_stamp
+mod.widgets.ChipFlat.draw_text.stamp_lift = uniform(0.04)
+mod.widgets.Chip.draw_text.pixel = cc_stamp
+mod.widgets.Chip.draw_text.stamp_lift = uniform(0.04)
 
 // ---------------------------------------------------------------------------
 // STATES. Every held state is written as a plain value that cuts in at once:
