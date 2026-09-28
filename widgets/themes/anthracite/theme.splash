@@ -1,0 +1,83 @@
+mod.theme = mod.themes.dark
+
+// Glossy anthracite: dark blue-grey metal, raised caps and blue lamps.
+// A starter: a sober palette on the dark base, plain faces with one
+// hairline edge, so every control reads before the real look is written.
+// Every state of a family is spelled out, because the base derived its
+// states once, from its own colours.
+mod.theme.color_bg_app = #1d2126
+mod.theme.color_fg_app = #1d2126
+mod.theme.color_bg_container = #1d2126
+mod.theme.color_surface_container_lowest = #14171b
+
+// Raised faces: buttons, handles, tabs.
+mod.theme.color_outset = #2b3139
+mod.theme.color_outset_1 = #2b3139
+mod.theme.color_outset_2 = #2b3139
+mod.theme.color_outset_hover = #343b44
+mod.theme.color_outset_1_hover = #343b44
+mod.theme.color_outset_2_hover = #343b44
+mod.theme.color_outset_down = #252a31
+mod.theme.color_outset_1_down = #252a31
+mod.theme.color_outset_2_down = #252a31
+mod.theme.color_outset_disabled = #1d2126
+mod.theme.color_outset_1_disabled = #1d2126
+mod.theme.color_outset_2_disabled = #1d2126
+
+// Wells: fields, tracks, boxes.
+mod.theme.color_inset = #14171b
+mod.theme.color_inset_1 = #14171b
+mod.theme.color_inset_2 = #14171b
+mod.theme.color_inset_hover = #111317
+mod.theme.color_inset_1_hover = #111317
+mod.theme.color_inset_2_hover = #111317
+mod.theme.color_inset_focus = #111317
+mod.theme.color_inset_1_focus = #111317
+mod.theme.color_inset_2_focus = #111317
+mod.theme.color_inset_active = #111317
+mod.theme.color_inset_1_active = #111317
+mod.theme.color_inset_2_active = #111317
+mod.theme.color_inset_down = #111317
+mod.theme.color_inset_1_down = #111317
+mod.theme.color_inset_2_down = #111317
+mod.theme.color_inset_drag = #14171b
+mod.theme.color_inset_1_drag = #14171b
+mod.theme.color_inset_2_drag = #14171b
+mod.theme.color_inset_empty = #14171b
+mod.theme.color_inset_1_empty = #14171b
+mod.theme.color_inset_2_empty = #14171b
+mod.theme.color_inset_disabled = #1d2126
+mod.theme.color_inset_1_disabled = #1d2126
+mod.theme.color_inset_2_disabled = #1d2126
+
+// One hairline edge on every face and well.
+mod.theme.color_bevel = #424b56
+mod.theme.color_bevel_inset_1 = #424b56
+mod.theme.color_bevel_inset_2 = #424b56
+mod.theme.color_bevel_outset_1 = #424b56
+mod.theme.color_bevel_outset_2 = #424b56
+mod.theme.beveling = 0.5
+
+mod.theme.color_text = #e4e9ee
+mod.theme.color_label = #e4e9ee
+mod.theme.color_label_inner = #e4e9ee
+mod.theme.color_label_outer = #e4e9ee
+mod.theme.color_icon = #e4e9ee
+// The accent seed: the primary, secondary and tertiary families are grown
+// from `color_ctrl_selected`.
+mod.theme.color_ctrl_selected = #55a6ff
+mod.theme.color_focus = #55a6ff
+mod.theme.color_ctrl_active = #55a6ff
+mod.theme.color_val = #55a6ff
+
+mod.theme.color_terminal_bg = #14171b
+mod.theme.color_terminal_text = #e4e9ee
+
+mod.theme.space_factor = 6.0
+mod.theme.space_1 = 3.0
+mod.theme.space_2 = 6.0
+mod.theme.space_3 = 9.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 3.0 right: 3.0 bottom: 3.0 left: 3.0}
+mod.theme.corner_radius = 3.0
+mod.theme.container_corner_radius = 6.0
+true

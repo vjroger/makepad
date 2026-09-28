@@ -8725,12 +8725,13 @@ fn current_theme_preset(cx: &mut Cx) -> usize {
 
 /// The mix's weight rows, in the order the lab lists them.
 ///
-/// Sixteen, because the longest appearance group the library ships is
-/// fifteen themes (the dark one, since the reference sheets joined it) and
-/// the sidebar is one chunk evaluated once -- there is no making a row at
-/// the moment a group turns out to want it. A shorter group hides the tail
-/// and zeroes its uids, which shuts the route as well as the row.
-const EQ_ROW_IDS: [LiveId; 16] = [
+/// Twenty-two, because the longest appearance group the library ships is
+/// twenty-one themes (the dark one, since the second set of reference sheets
+/// joined it) and the sidebar is one chunk evaluated once -- there is no
+/// making a row at the moment a group turns out to want it. A shorter group
+/// hides the tail and zeroes its uids, which shuts the route as well as the
+/// row.
+const EQ_ROW_IDS: [LiveId; 22] = [
     live_id!(eq_row_0),
     live_id!(eq_row_1),
     live_id!(eq_row_2),
@@ -8747,6 +8748,12 @@ const EQ_ROW_IDS: [LiveId; 16] = [
     live_id!(eq_row_13),
     live_id!(eq_row_14),
     live_id!(eq_row_15),
+    live_id!(eq_row_16),
+    live_id!(eq_row_17),
+    live_id!(eq_row_18),
+    live_id!(eq_row_19),
+    live_id!(eq_row_20),
+    live_id!(eq_row_21),
 ];
 
 //// One setting of the theme builder, as a row on the screen.
@@ -10006,7 +10013,7 @@ pub struct Tweaker {
     eq_random_uid: u64,
     /// One per weight row on show, in the group's own order; the rest 0.
     #[rust]
-    eq_row_uids: [u64; 16],
+    eq_row_uids: [u64; 22],
     /// The builder: a whole theme grown from one favourite colour, and the
     /// part of that a panel would otherwise have to remember. Held here
     /// beside the lab and for the same reason -- the sidebar is dropped and
@@ -12163,6 +12170,12 @@ impl Tweaker {
                                 eq_row_13 := EqRowT {}
                                 eq_row_14 := EqRowT {}
                                 eq_row_15 := EqRowT {}
+                                eq_row_16 := EqRowT {}
+                                eq_row_17 := EqRowT {}
+                                eq_row_18 := EqRowT {}
+                                eq_row_19 := EqRowT {}
+                                eq_row_20 := EqRowT {}
+                                eq_row_21 := EqRowT {}
                             }
                             // How the mix reads. Two themes that were each
                             // readable can average into one that is not: both
@@ -19930,7 +19943,7 @@ impl Tweaker {
             self.eq_absolute_uid = 0;
             self.eq_relative_uid = 0;
             self.eq_random_uid = 0;
-            self.eq_row_uids = [0; 16];
+            self.eq_row_uids = [0; 22];
             return;
         }
         // Only where something is waiting on it. The settle is an interval
@@ -24182,6 +24195,12 @@ mod tests {
             ("eq_row_13", "EqRowT"),
             ("eq_row_14", "EqRowT"),
             ("eq_row_15", "EqRowT"),
+            ("eq_row_16", "EqRowT"),
+            ("eq_row_17", "EqRowT"),
+            ("eq_row_18", "EqRowT"),
+            ("eq_row_19", "EqRowT"),
+            ("eq_row_20", "EqRowT"),
+            ("eq_row_21", "EqRowT"),
             ("eq_weight", "FabSlider"),
             ("eq_absolute", "PanelButton"),
             ("eq_relative", "PanelButton"),

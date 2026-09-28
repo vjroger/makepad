@@ -53,25 +53,49 @@ pub enum DesktopStyle {
     Neon,
     /// Line frames of a head-up display over a dark ground.
     Hud,
+    /// Candy-red lacquer, deep and glossy, with chrome knobs.
+    Lacquer,
+    /// Worn safety-yellow painted steel, black rubber and screws.
+    Safety,
+    /// An olive-drab field radio: stencilled type, amber and red lamps.
+    FieldRadio,
+    /// Steampunk brass: polished fittings, gears and pipes, parchment text.
+    Brass,
+    /// Futuristic moulded plastic: smooth dark shells with light traced
+    /// through them.
+    FuturePlastic,
+    /// Futuristic brushed metal with lit circuit traces cut into it.
+    FutureMetal,
+    /// Glossy anthracite: dark blue-grey metal, raised caps, blue lamps.
+    Anthracite,
+    /// Cast concrete: grey, porous, controls stamped into it.
+    Concrete,
+    /// Pixel art: a pale green dot-matrix glass, controls framed in square
+    /// pixels.
+    Pixel,
 }
 
 impl DesktopStyle {
     /// How many styles there are, and so how many weights a table indexed by
     /// discriminant needs: every variant is in `ALL`.
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 30;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled,
         Self::Aluminium, Self::Frosted, Self::Liquid, Self::Luminous, Self::FieldKit,
         Self::Terminal, Self::Lcd, Self::Neon, Self::Hud,
+        Self::Lacquer, Self::Safety, Self::FieldRadio, Self::Brass, Self::FuturePlastic,
+        Self::FutureMetal, Self::Anthracite, Self::Concrete, Self::Pixel,
         Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android,
     ];
     /// The styles laid out as tiles rather than as floating windows, with no
     /// shelf and no title bar of their own: the tilers and every style built
     /// on the library's own surfaces rather than on somebody's desktop.
-    const TILING: [Self; 15] = [
+    const TILING: [Self; 24] = [
         Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled,
         Self::Aluminium, Self::Frosted, Self::Liquid, Self::Luminous, Self::FieldKit,
         Self::Terminal, Self::Lcd, Self::Neon, Self::Hud,
+        Self::Lacquer, Self::Safety, Self::FieldRadio, Self::Brass, Self::FuturePlastic,
+        Self::FutureMetal, Self::Anthracite, Self::Concrete, Self::Pixel,
     ];
     fn tiling(self) -> bool {
         Self::TILING.contains(&self)
@@ -93,6 +117,15 @@ impl DesktopStyle {
             Self::Lcd => "lcd",
             Self::Neon => "neon",
             Self::Hud => "hud",
+            Self::Lacquer => "lacquer",
+            Self::Safety => "safety",
+            Self::FieldRadio => "field-radio",
+            Self::Brass => "brass",
+            Self::FuturePlastic => "future-plastic",
+            Self::FutureMetal => "future-metal",
+            Self::Anthracite => "anthracite",
+            Self::Concrete => "concrete",
+            Self::Pixel => "pixel",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -118,6 +151,15 @@ impl DesktopStyle {
             Self::Lcd => "Segment display",
             Self::Neon => "Neon",
             Self::Hud => "Head-up display",
+            Self::Lacquer => "Lacquer red",
+            Self::Safety => "Safety yellow",
+            Self::FieldRadio => "Field radio",
+            Self::Brass => "Steampunk brass",
+            Self::FuturePlastic => "Futuristic plastic",
+            Self::FutureMetal => "Futuristic metal",
+            Self::Anthracite => "Glossy anthracite",
+            Self::Concrete => "Concrete",
+            Self::Pixel => "Pixel art",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -146,6 +188,8 @@ impl DesktopStyle {
             Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Glossy | Self::Milled => 0,
             Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0,
             Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0,
+            Self::Lacquer | Self::Safety | Self::FieldRadio | Self::Brass | Self::FuturePlastic => 0,
+            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel => 0,
             Self::Macos => 1,
             Self::Windows | Self::Molded => 2,
             Self::Windows2000 => 3,
@@ -167,6 +211,8 @@ impl DesktopStyle {
             Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
             Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0.0,
             Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0.0,
+            Self::Lacquer | Self::Safety | Self::FieldRadio | Self::Brass | Self::FuturePlastic => 0.0,
+            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -178,6 +224,8 @@ impl DesktopStyle {
             Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
             Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0.0,
             Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0.0,
+            Self::Lacquer | Self::Safety | Self::FieldRadio | Self::Brass | Self::FuturePlastic => 0.0,
+            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -282,6 +330,42 @@ impl StyleSheet {
             DesktopStyle::Hud => (
                 include_str!("../themes/hud/theme.splash"),
                 include_str!("../themes/hud/widgets.splash"),
+            ),
+            DesktopStyle::Lacquer => (
+                include_str!("../themes/lacquer/theme.splash"),
+                include_str!("../themes/lacquer/widgets.splash"),
+            ),
+            DesktopStyle::Safety => (
+                include_str!("../themes/safety/theme.splash"),
+                include_str!("../themes/safety/widgets.splash"),
+            ),
+            DesktopStyle::FieldRadio => (
+                include_str!("../themes/field-radio/theme.splash"),
+                include_str!("../themes/field-radio/widgets.splash"),
+            ),
+            DesktopStyle::Brass => (
+                include_str!("../themes/brass/theme.splash"),
+                include_str!("../themes/brass/widgets.splash"),
+            ),
+            DesktopStyle::FuturePlastic => (
+                include_str!("../themes/future-plastic/theme.splash"),
+                include_str!("../themes/future-plastic/widgets.splash"),
+            ),
+            DesktopStyle::FutureMetal => (
+                include_str!("../themes/future-metal/theme.splash"),
+                include_str!("../themes/future-metal/widgets.splash"),
+            ),
+            DesktopStyle::Anthracite => (
+                include_str!("../themes/anthracite/theme.splash"),
+                include_str!("../themes/anthracite/widgets.splash"),
+            ),
+            DesktopStyle::Concrete => (
+                include_str!("../themes/concrete/theme.splash"),
+                include_str!("../themes/concrete/widgets.splash"),
+            ),
+            DesktopStyle::Pixel => (
+                include_str!("../themes/pixel/theme.splash"),
+                include_str!("../themes/pixel/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -1042,6 +1126,10 @@ mod tests {
                         DesktopStyle::Liquid | DesktopStyle::Luminous => 3.0,
                         DesktopStyle::FieldKit => 2.5,
                         DesktopStyle::Lcd => 1.5,
+                        DesktopStyle::Lacquer | DesktopStyle::Brass | DesktopStyle::Anthracite => 3.0,
+                        DesktopStyle::Safety | DesktopStyle::FieldRadio | DesktopStyle::FutureMetal => 2.0,
+                        DesktopStyle::FuturePlastic => 6.0,
+                        DesktopStyle::Concrete => 1.0,
                         _ => 0.0,
                     }
                 );
