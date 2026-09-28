@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 pub mod welcome;
 pub mod slug;
+pub mod kitchen_sink;
 pub mod foundations;
 pub mod tween;
 pub mod ease_editor;
@@ -177,6 +178,7 @@ static FILES: &[StoryModule] = &[
     file(welcome::script_mod, welcome::STORIES),
     file(crate::coverage::script_mod, crate::coverage::STORIES),
     file(slug::script_mod, slug::STORIES),
+    file(kitchen_sink::script_mod, kitchen_sink::STORIES),
     // 1 Foundations
     file(foundations::script_mod, foundations::STORIES),
     file(tween::script_mod, tween::STORIES),

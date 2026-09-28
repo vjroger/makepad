@@ -1518,6 +1518,23 @@
    ]
   },
   {
+   "component": "Kitchen sink",
+   "aka": [
+    "all widgets",
+    "widget gallery",
+    "showcase",
+    "theme preview",
+    "style sheet preview",
+    "state matrix"
+   ],
+   "does": [
+    "every common control on one screen",
+    "controls held still in each state",
+    "hover pressed focus and disabled side by side",
+    "judge a style sheet in one grab"
+   ]
+  },
+  {
    "component": "Label",
    "aka": [
     "caption",
