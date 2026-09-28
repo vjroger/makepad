@@ -10,20 +10,21 @@ mod.theme.color_fg_app = #121a22
 mod.theme.color_bg_container = #1f2a35
 mod.theme.color_surface_container_lowest = #0d131a
 
-// Raised faces: blue-grey plastic, lighter at the head than at the foot.
-mod.theme.color_outset = #587285
-mod.theme.color_outset_1 = #6c879a
-mod.theme.color_outset_2 = #4b6475
-mod.theme.color_outset_hover = #5e798c
-mod.theme.color_outset_1_hover = #7390a3
-mod.theme.color_outset_2_hover = #516b7c
-mod.theme.color_outset_down = #465e6f
-mod.theme.color_outset_1_down = #4f687a
-mod.theme.color_outset_2_down = #425a6a
-mod.theme.color_outset_focus = #587285
-mod.theme.color_outset_1_focus = #6c879a
-mod.theme.color_outset_2_focus = #4b6475
-mod.theme.color_outset_active = #2f6f8c
+// Raised faces: pale frosted blue-grey plastic, lighter at the head than at
+// the foot; the ink on them is a deep blue-grey (label_inner below).
+mod.theme.color_outset = #8faabd
+mod.theme.color_outset_1 = #a3bccd
+mod.theme.color_outset_2 = #7d98ac
+mod.theme.color_outset_hover = #99b3c5
+mod.theme.color_outset_1_hover = #adc5d5
+mod.theme.color_outset_2_hover = #87a1b4
+mod.theme.color_outset_down = #7b95a8
+mod.theme.color_outset_1_down = #8aa3b5
+mod.theme.color_outset_2_down = #6f899c
+mod.theme.color_outset_focus = #8faabd
+mod.theme.color_outset_1_focus = #a3bccd
+mod.theme.color_outset_2_focus = #7d98ac
+mod.theme.color_outset_active = #8fd2e6
 mod.theme.color_outset_disabled = #26313b
 mod.theme.color_outset_1_disabled = #26313b
 mod.theme.color_outset_2_disabled = #26313b
@@ -71,8 +72,9 @@ mod.theme.color_bevel_outset_1_disabled = #33404c
 mod.theme.color_bevel_outset_2_disabled = #26313b
 mod.theme.beveling = 0.5
 
-// Ink: a cool near-white; white when lit or held; a blue-grey second voice;
-// a slate when off.
+// Ink: a cool near-white on the dark ground (the inner labels too: the
+// chrome writes them on dark surfaces); the pale plastic faces name their
+// own deep blue-grey ink in widgets.splash; a slate when off.
 mod.theme.color_text = #eef6fb
 mod.theme.color_text_hover = #ffffff
 mod.theme.color_text_focus = #eef6fb
@@ -196,7 +198,7 @@ mod.theme.color_surface_container = #1e2833
 mod.theme.color_surface_container_high = #26313d
 mod.theme.color_surface_container_highest = #2f3b48
 mod.theme.color_on_surface = #eef6fb
-mod.theme.color_on_surface_variant = #bfd0dc
+mod.theme.color_on_surface_variant = #e3edf4
 mod.theme.color_outline = #8198a9
 mod.theme.color_outline_variant = #3a4856
 mod.theme.color_inverse_surface = #eef6fb
