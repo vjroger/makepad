@@ -1419,7 +1419,7 @@ mod.widgets.SegmentedControlFlat.draw_text.color = #c3c9d1
 mod.widgets.SegmentedControlFlat.draw_text_selected.color = #fafafa
 mod.widgets.SegmentedControlVertical.draw_pill.radius = -1.0
 
-// Tabs: a row of separate caps. Each quiet tab is a raised cap; the tab in
+// Tabs: a row of round caps standing side by side. Each quiet tab is a raised cap; the tab in
 // use is pushed in and lit from within like the chosen segment, its word
 // lit and the lamp in its rim.
 mod.widgets.Tabs.height = 28.0
@@ -1431,13 +1431,15 @@ let an_tab = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, active
     let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(an_snap(0.0, o.x, px), an_snap(0.0, o.y, px))
     let hi = vec2(an_snap(size.x, o.x, px), an_snap(size.y, o.y, px))
-    // Each tab its own cap, 1.5 points in from either end of its box, so
-    // three points of ground stand between two tabs.
-    let clo = vec2(an_snap(1.5, o.x, px), lo.y)
-    let chi = vec2(an_snap(size.x - 1.5, o.x, px), hi.y)
+    // Each tab its own round cap filling its box, so two tabs share one
+    // outline along
+    // their sides and the ground shows only in the notches between their
+    // corners.
+    let clo = lo
+    let chi = hi + vec2(px, 0.0)
     let c = (clo + chi) * 0.5
-    let d = Material.sd_box(p, c, (chi - clo) * 0.5, 4.0)
-    var res = an_cap(p, clo, chi, 4.0, px, hover, active, 0.0, 0.0, 1.0, vec3(0.0, 0.0, 0.0), vec4(0.270, 0.298, 0.330, 1.0), 1.0)
+    let d = Material.sd_box(p, c, (chi - clo) * 0.5, 5.0)
+    var res = an_cap(p, clo, chi, 5.0, px, hover, active, 0.0, 0.0, 1.35, vec3(0.0, 0.0, 0.0), vec4(0.270, 0.298, 0.330, 1.0), 1.0)
     let well = an_sunk(p, clo + vec2(px, px), chi - vec2(px, px), px, hover) * Finish.cover(d + px, px)
     res = mix(res, Finish.over(res, well), active)
     // The tab in use carries the lamp in its bottom rim, spilling onto the
