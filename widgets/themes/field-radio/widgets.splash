@@ -178,9 +178,9 @@ let fr_scratch_in = fn(p: vec2, ci: vec2, px: float, cell: float, density: float
     // a scratch fades out toward both ends; a cell above the density has none
     let on = step(h0, density)
     let fade = sin(k * 3.14159) * (0.45 + 0.55 * h0 / max(density, 0.001)) * on
-    let br = (1.0 - smoothstep(0.25 * px, 0.9 * px, d)) * fade
+    let br = (1.0 - smoothstep(0.2 * px, 2.2 * px, d)) * fade
     let side = dot(e, vec2(-dir.y, dir.x))
-    let dk = (1.0 - smoothstep(0.3 * px, 1.0 * px, abs(side - 1.2 * px))) * fade * 0.6
+    let dk = (1.0 - smoothstep(0.3 * px, 2.0 * px, abs(side - 1.6 * px))) * fade * 0.35
     return vec2(br, dk)
 }
 let fr_scratch = fn(p: vec2, px: float, cell: float, density: float) -> vec2 {
@@ -213,7 +213,7 @@ let fr_camo = fn(q: vec2) -> vec3 {
     let n1 = Finish.fbm(q / 200.0 + vec2(3.3, 7.1) + ww)
     let n2 = Finish.fbm(q / 160.0 + vec2(11.9, 4.4) + vec2(ww.y, ww.x))
     let n3 = Finish.fbm(q / 120.0 + vec2(6.2, 13.8) - ww)
-    let e = 0.045
+    let e = 0.014
     var col = vec3(0.278, 0.286, 0.202)
     col = mix(col, vec3(0.235, 0.247, 0.157), smoothstep(0.52 - e, 0.52 + e, n1))
     col = mix(col, vec3(0.255, 0.238, 0.168), smoothstep(0.56 - e, 0.56 + e, n2))
@@ -2110,8 +2110,8 @@ let fr_plate = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, sunken: flo
     face = face * (1.0 + fr_paint(q * 1.7, px) * 2.2)
     face = face + g3(fr_grain(q / px, 0.018))
     let sc = fr_scratch(q + vec2(5.0, 11.0), px, 36.0, 0.45)
-    face = mix(face, face * 0.72, sc.y * 0.5)
-    face = mix(face, vec3(0.44, 0.445, 0.40), sc.x * 0.38)
+    face = mix(face, face * 0.80, sc.y * 0.4)
+    face = mix(face, vec3(0.44, 0.445, 0.40), sc.x * 0.17)
     // the pocket's shadow from its top wall
     let insh = Finish.inset(p, c, h, r, vec2(0.0, 2.0), 2.6)
     face = mix(face, vec3(0.020, 0.022, 0.014), clamp(insh, 0.0, 1.0) * 0.75 * sunken)
@@ -2425,10 +2425,10 @@ let fr_ground = fn(p: vec2, size: vec2, px: float) -> vec3 {
     // grain and scratches through to steel
     col = col + g3(fr_grain(p / px, 0.022))
     let sc = fr_scratch(p, px, 44.0, 0.42)
-    col = mix(col, col * 0.72, sc.y * 0.5)
-    col = mix(col, vec3(0.470, 0.475, 0.430), sc.x * 0.42)
+    col = mix(col, col * 0.80, sc.y * 0.4)
+    col = mix(col, vec3(0.470, 0.475, 0.430), sc.x * 0.19)
     let sc2 = fr_scratch(p + vec2(17.0, 29.0), px, 23.0, 0.18)
-    col = mix(col, vec3(0.420, 0.425, 0.385), sc2.x * 0.22)
+    col = mix(col, vec3(0.420, 0.425, 0.385), sc2.x * 0.10)
     // big slotted screws down the case's right edge: under the seam's end
     // and at the foot (the left edge is under the catalogue's list)
     let sy = fr_seam_y()
