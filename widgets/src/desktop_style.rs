@@ -464,6 +464,7 @@ pub const STOCK_FACES: &[&str] = &[
     "TextInput", "TextInputFlat", "ComboBox", "FieldWell", "TagField", "NumberField",
     "DropDown", "DropDownFlat", "PopupMenu", "PopupMenuItem",
     "Tab", "TabBar", "ProgressBar", "ScrollBar", "RoundedView", "PanelView",
+    "ToggleRocker", "ToggleSlide", "Readout", "Lamp", "NeedleMeter", "ScreenView",
 ];
 
 /// Keep every face in [`STOCK_FACES`] under `mod.stock_faces`, before a
@@ -952,6 +953,67 @@ mod tests {
             install(vm, StyleSheet::load(DesktopStyle::Macos));
             vm.with_reload(crate::script_mod);
             assert_eq!(shows(vm), Some(false), "the ground outlived its sheet");
+            uninstall(vm);
+        });
+    }
+
+    /// The instruments are restyled from a sheet exactly as the stock
+    /// controls are: a uniform written, a pixel function replaced, the
+    /// face's own helpers and instances read. This is the handbook's worked
+    /// example, held to evaluating and compiling.
+    #[test]
+    fn a_sheet_restyles_the_readout_and_the_lamp() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let sheet = StyleSheet {
+                name: "instruments".into(),
+                theme: "mod.theme = mod.themes.dark\nmod.theme.color_screen_ink = #ffb347\ntrue\n".into(),
+                widgets: "use mod.prelude.widgets_internal.*\n\
+                          mod.widgets.Readout.draw_bg.stroke = 0.15\n\
+                          mod.widgets.Readout.draw_bg.pixel = fn() {\n\
+                              let h = max(self.rect_size.y, 1.0)\n\
+                              let over = (self.rect_size.x - self.span) * 0.5\n\
+                              let p = (self.pos * self.rect_size - vec2(over, 0.0)) / h\n\
+                              let q = vec2(p.x + (p.y - 0.5) * self.slant, p.y)\n\
+                              let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5) / h\n\
+                              let x0 = (self.span / h - self.glyph_width) * 0.3\n\
+                              let dd = self.digit(q - vec2(x0, 0.0))\n\
+                              let a = max(Finish.cover(dd.x, px), Finish.cover(dd.y, px) * self.ghost) * self.opacity\n\
+                              return vec4(self.color.rgb * a, a)\n\
+                          }\n\
+                          mod.widgets.Lamp.draw_bg.pixel = fn() {\n\
+                              let p = self.pos * self.rect_size\n\
+                              let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)\n\
+                              let reach = clamp(self.reach, 0.0, 1.0)\n\
+                              let t = self.rect_size.y / (1.0 + 2.0 * reach)\n\
+                              let c = self.rect_size * 0.5\n\
+                              let hb = vec2(max((self.rect_size.x - 2.0 * t * reach) * 0.5, t * 0.5), t * 0.5)\n\
+                              let d = Finish.sd_chamfer(p, c, hb, t * 0.2)\n\
+                              let ink = self.intent_color()\n\
+                              let lit = clamp(self.lit, 0.0, 1.0)\n\
+                              let body = mix(self.color_off.rgb, ink.rgb, lit)\n\
+                              let a = Finish.cover(d, px)\n\
+                              let h = self.halo_at(d, t, px, self.halo * lit, reach)\n\
+                              return Finish.over(vec4(ink.rgb * h, h), vec4(body * a, a)) * self.opacity\n\
+                          }\n\
+                          true\n"
+                    .into(),
+                icons: Vec::new(),
+            };
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the example sheet does not evaluate: {errors:?}");
+            for (name, own, value) in [
+                ("Readout", "_digit(", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Readout.draw_bg, "hlsl", false)})),
+                ("Lamp", "_sd_chamfer(", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Lamp.draw_bg, "hlsl", false)})),
+            ] {
+                let text = vm.bx.heap.string_with(value, |_heap, text| text.to_string()).expect("source");
+                assert!(!text.starts_with("ERRORS"), "{name} does not compile under the example: {text}");
+                assert!(text.contains(own), "{name} does not draw the sheet's face");
+            }
             uninstall(vm);
         });
     }
