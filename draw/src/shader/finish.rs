@@ -4,7 +4,8 @@
 //! halos and neon tubes, bevel light and a gel sheen, procedural textures
 //! (noise, grain, brushed and turned metal, weave, perforation, stripes),
 //! screen patterns (scanlines, seven-segment digits, a pixel matrix) and a
-//! few colour helpers, so that each sheet does not write its own.
+//! few colour helpers, among them the two that lay a texture on a
+//! translucent colour, so that each sheet does not write its own.
 //!
 //! The conventions are `Material`'s: screen space with y DOWN, distances in
 //! points and negative inside. `px` is one device pixel in points
@@ -424,6 +425,27 @@ script_mod! {
             let tc = min(max(t, vec3(0.0, 0.0, 0.0)), vec3(1.0, 1.0, 1.0))
             return mix(c, tc, clamp(amount, 0.0, 1.0))
         }
+
+        // `c`, premultiplied, made to show `k` times as bright over whatever
+        // it is laid on: its own light and the share of the ground it lets
+        // through both scale. A factor on the colour alone does nothing
+        // where the colour is a translucent shade of black, as a dark
+        // theme's containers are; this scales what the eye sees.
+        scale: fn(c: vec4, k: float) -> vec4 {
+            let kk = max(k, 0.0)
+            return vec4(c.rgb * kk, clamp(1.0 - (1.0 - c.a) * kk, 0.0, 1.0))
+        }
+
+        // `c`, premultiplied, made to show `s` lighter (or darker, below
+        // zero) in luminance over `ground`: exactly `s` there, and the same
+        // share of the brightness over any other ground. Grain, streaks and
+        // a long fall are measured as such offsets, and this lays them on a
+        // translucent panel as surely as on an opaque one.
+        shade: fn(c: vec4, s: float, ground: vec3) -> vec4 {
+            let shows = c.rgb + ground * (1.0 - c.a)
+            let kk = max(1.0 + s / max(f_lum(shows), 0.02), 0.0)
+            return vec4(c.rgb * kk, clamp(1.0 - (1.0 - c.a) * kk, 0.0, 1.0))
+        }
     }
 }
 
@@ -463,19 +485,20 @@ mod tests {
                     a = a + Finish.seg7(self.pos, 8.0, px / self.rect_size.y) + Finish.seg7_ghost(self.pos, px / self.rect_size.y)
                     var col = Finish.tint(Finish.lift(vec3(a, a, a) * 0.1, 0.2), vec3(1.0, 0.5, 0.0), 0.5)
                     col = col * Finish.lum(col)
-                    return Finish.over(vec4(0.0, 0.0, 0.0, 1.0), vec4(col.x, col.y, col.z, 1.0) * 0.5)
+                    let under = Finish.shade(Finish.scale(vec4(0.0, 0.0, 0.0, 0.3), 1.2), 0.01, vec3(0.3, 0.3, 0.3))
+                    return Finish.over(under, vec4(col.x, col.y, col.z, 1.0) * 0.5)
                 }
             }
         });
     }
 
-    const FUNCTIONS: [&str; 33] = [
+    const FUNCTIONS: [&str; 35] = [
         "sd_chamfer", "sd_notch", "sd_pill", "sd_circle", "sd_ring",
         "cover", "band", "ring_out", "over", "snap",
         "drop", "inset", "glow", "tube", "bevel", "sheen",
         "hash", "noise", "fbm", "grain", "brushed", "spun", "weave", "perforated", "stripes",
         "scan", "seg7", "seg7_ghost", "dotgrid",
-        "lum", "lift", "tint", "box_cov",
+        "lum", "lift", "tint", "scale", "shade", "box_cov",
     ];
 
     fn compiled(vm: &mut ScriptVm, value: ScriptValue) -> String {

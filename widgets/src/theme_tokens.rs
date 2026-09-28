@@ -289,6 +289,13 @@ pub static THEME_TOKENS: &[TokenSpec] = &[
     color("color_material_light", TokenGroup::Material, "The ink a lit shoulder is tinted toward.", ALL),
     color("color_material_shadow", TokenGroup::Material, "The ink a shaded shoulder and the contact occlusion are tinted toward.", ALL),
     color("color_material_glow", TokenGroup::Material, "The emissive ink of a lit surface, its halo and its ink.", ALL),
+    // Instruments: the readout, the display window, the lamp and the meter.
+    color("color_screen", TokenGroup::ColorSurface, "The face of a display: the glass behind a readout and the dial of a needle meter.", ALL),
+    color("color_screen_ink", TokenGroup::ColorSurface, "What a display lights: segment digits, a meter's scale and its needle.", ALL),
+    spec("screen_ghost", TokenGroup::State, TokenKind::Opacity, "How much of an unlit segment shows behind the lit ones, as a share of the lit ink.", 0.0, 0.3, 0.01, ALL),
+    color("color_lamp_off", TokenGroup::ColorStatus, "An indicator lamp that is out: the dark lens it shows instead of a hole.", ALL),
+    color("color_lamp_plain", TokenGroup::ColorStatus, "An indicator lamp with no intent of its own, lit.", ALL),
+    spec("lamp_halo", TokenGroup::Material, TokenKind::Opacity, "The halo one device pixel outside a lit lamp, as a share of the lamp's own light; a lamp holds it at 0.45 or under.", 0.0, 0.45, 0.01, ALL),
     // Motion.
     seconds("motion_short_1", "Fifty milliseconds; a state layer appearing."),
     seconds("motion_short_2", "A tenth of a second; a hover or press."),
@@ -4021,7 +4028,7 @@ mod equalizer_tests {
         assert!(!is_categorical("color_surface"));
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 592, "the theme files have grown or shrunk");
+        assert_eq!(keys.len(), 598, "the theme files have grown or shrunk");
         assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 

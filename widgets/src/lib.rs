@@ -131,6 +131,10 @@ pub mod loading_spinner;
 pub mod progress;
 pub mod playback_bar;
 pub mod level_meter;
+pub mod readout;
+pub mod lamp;
+pub mod needle_meter;
+pub mod screen_view;
 pub mod marquee;
 pub mod spinner;
 
@@ -381,6 +385,10 @@ pub use crate::{
     progress::*,
     playback_bar::*,
     level_meter::*,
+    readout::*,
+    lamp::*,
+    needle_meter::*,
+    screen_view::*,
     reorder_list::*,
     radio_button::*,
     reflect::*,
@@ -893,6 +901,12 @@ true
     crate::progress::script_mod(vm);
     crate::playback_bar::script_mod(vm);
     crate::level_meter::script_mod(vm);
+    // The instruments: the readout and the meter draw on a screen, and
+    // the screen holds them, so the view kit is all it needs above it.
+    crate::readout::script_mod(vm);
+    crate::lamp::script_mod(vm);
+    crate::needle_meter::script_mod(vm);
+    crate::screen_view::script_mod(vm);
     crate::breadcrumb::script_mod(vm);
     crate::pagination::script_mod(vm);
     crate::nav_list::script_mod(vm);
