@@ -197,39 +197,10 @@ mod.theme.radius_s = 2.0
 mod.theme.radius_m = 2.0
 mod.theme.radius_l = 4.0
 
-// TYPE. The library's own neutral grotesque. Cap and field labels at 8
-// points, so the cap height is a third of the 24 point cap (12 dp); the
+// TYPE. The library's own neutral grotesque, labels at 11 points; the
 // group captions and a lit legend use its bold.
-mod.theme.font_size_p = 8.0
-mod.theme.font_size_base = 8.0
-// The whole ladder, restated: the base theme froze its rungs from its own
-// 10 point base, so "small" came out larger than a cap label and panel text
-// larger than both. Small 7.5, body 8, titles 9 to 11.
-mod.theme.type_label_l_size = 8.0
-mod.theme.type_label_m_size = 7.5
-mod.theme.type_label_s_size = 7.0
-mod.theme.type_body_l_size = 8.5
-mod.theme.type_body_m_size = 8.0
-mod.theme.type_body_s_size = 7.5
-mod.theme.type_title_s_size = 9.0
-mod.theme.type_title_m_size = 10.0
-mod.theme.type_title_l_size = 11.0
-// The heading rung a card title takes (H4), on the same ladder.
-mod.theme.font_size_4 = 10.0
-// The styles built from those rungs, and the two plain faces a label takes
-// when it names no size (the base draws them at 10). Only the size changes;
-// each keeps the base theme's family with all its members.
-mod.theme.font_regular = mod.theme.font_regular{font_size: 8.0}
-mod.theme.font_bold = mod.theme.font_bold{font_size: 8.5}
-mod.theme.font_title_l = mod.theme.font_bold{font_size: 11.0 line_spacing: 1.2}
-mod.theme.font_title_m = mod.theme.font_bold{font_size: 10.0 line_spacing: 1.2}
-mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.0 line_spacing: 1.2}
-mod.theme.font_body_l = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
-mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.0 line_spacing: 1.35}
-mod.theme.font_body_s = mod.theme.font_regular{font_size: 7.5 line_spacing: 1.35}
-mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.0 line_spacing: 1.2}
-mod.theme.font_label_m = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
-mod.theme.font_label_s = mod.theme.font_bold{font_size: 7.0 line_spacing: 1.2}
+mod.theme.font_size_p = 11.0
+mod.theme.font_size_base = 11.0
 
 // No surface material: every face that matters is drawn by the sheet, and
 // the rest stay flat rather than take a relief that is not this family's.
