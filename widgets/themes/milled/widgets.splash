@@ -1348,33 +1348,98 @@ mod.widgets.ComboBox.draw_bg.pixel = fn() {
 }
 
 // ---------------------------------------------------------------------------
-// SEGMENTS AND TABS. The segmented control is one machined bar in a dark
-// tray; the chosen segment is lit. The tab strip is a row of machined
-// segments on a tray; the tab in use keeps its face and takes a two device
-// pixel accent line along its foot.
-let ml_tray = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
+// SEGMENTS AND TABS. The segmented control is a row of machined push
+// buttons: the strip is raised in the buttons' own material (bezel, top
+// line, foot line, a short shadow), and the chosen answer is pushed in deep
+// between its neighbours. The tab strip is a row of machined segments on a
+// tray; the tab in use keeps its face and takes a two device pixel accent
+// line along its foot.
+let ml_strip = fn(pos: vec2, size: vec2, o: vec2, px: float, m: float) -> vec4 {
+    let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(Finish.snap(o.x, px), Finish.snap(o.y, px)) - o
     let hi = vec2(Finish.snap(o.x + size.x, px), Finish.snap(o.y + size.y, px)) - o
     let h = (hi - lo) * 0.5
     let c = lo + h
-    let d = ml_rbox(p, c, h, r)
+    // the short shadow, held within the six points to the next row
     let ink = ml_shadow_ink()
-    var out = vec4(0.0, 0.0, 0.0, 0.0)
-    let soft = Finish.drop(p, c, h, r, vec2(0.4, 1.7), 1.9) * 0.35
-    out = Finish.over(out, vec4(ink * soft, soft))
-    // the tray floor, its bezel, and a bar face two device pixels in
-    var col = vec3(0.039, 0.039, 0.047)
-    let fd = ml_rbox(p, c, h - vec2(2.0 * px, 2.0 * px), max(r - 1.0, 0.5))
-    let t = clamp((p.y - lo.y) / max(2.0 * h.y, 1.0), 0.0, 1.0)
-    var face = mix(vec3(0.165, 0.161, 0.184), vec3(0.098, 0.094, 0.118), t)
-    face = face + g3(ml_grain((p + o) / px, 0.010))
-    let up = 1.0 - smoothstep(-0.5, 0.5, p.y - c.y)
-    face = mix(face, vec3(0.204, 0.200, 0.224), Finish.band(fd, 0.0, px, px) * up)
-    face = mix(face, vec3(0.031, 0.031, 0.039), Finish.band(fd, 0.0, px, px) * (1.0 - up))
-    col = mix(col, face, Finish.cover(fd, px))
-    col = mix(col, vec3(0.031, 0.027, 0.051), Finish.band(d, 0.0, 2.0 * px, px))
-    let a = Finish.cover(d, px)
-    return Finish.over(out, vec4(col * a, a))
+    let soft = Finish.drop(p, c, h, 2.0, vec2(0.5, 2.0), 2.0) * 0.40
+    var face = ml_button(pos, size, o, px, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, m)
+    // Down a column every answer is a cap of its own: each keeps the face's
+    // fall from top to foot, and where two meet the upper one's foot line,
+    // a bezel row and the lower one's top line. The answers are 26 points
+    // tall under this sheet (its size_control_m) and start two points in;
+    // a strip one answer tall has no join, and draws as above.
+    let sh = 26.0
+    let n = floor((size.y - 4.0) / sh + 0.5)
+    let col = step(abs(size.y - 4.0 - n * sh), 0.5) * step(1.5, n)
+    let kc = clamp(floor((p.y - 2.0) / sh), 0.0, max(n - 1.0, 0.0))
+    let t0 = clamp((p.y - lo.y) / max(2.0 * h.y, 1.0), 0.0, 1.0)
+    let tc = clamp((p.y - kc * sh) / (sh + 4.0), 0.0, 1.0)
+    let bez = 2.0 * px
+    let inx = step(lo.x + bez, p.x) * (1.0 - step(hi.x - bez, p.x))
+    let iny = step(lo.y + bez, p.y) * (1.0 - step(hi.y - bez, p.y))
+    let fall = (ml_face(tc) - ml_face(t0)) * inx * iny * col * face.a
+    face = vec4(face.rgb + fall, face.a)
+    let kb = floor((p.y - 2.0) / sh + 0.5)
+    let yb = Finish.snap(o.y + 2.0 + kb * sh, px) - o.y
+    let join = inx * step(0.5, kb) * step(kb, n - 0.5) * col
+    let r_foot = step(yb - px, p.y) * (1.0 - step(yb, p.y)) * join
+    let r_bez = step(yb, p.y) * (1.0 - step(yb + px, p.y)) * join
+    let r_top = step(yb + px, p.y) * (1.0 - step(yb + 2.0 * px, p.y)) * join
+    face = Finish.over(face, vec4(vec3(0.031, 0.031, 0.039) * r_foot, r_foot))
+    face = Finish.over(face, vec4(ml_bezel() * r_bez, r_bez))
+    face = Finish.over(face, vec4(vec3(0.231, 0.227, 0.251) * r_top, r_top))
+    return Finish.over(vec4(ink * soft, soft), face)
+}
+
+// The chosen answer, pushed in: a well the segment's width that runs from
+// under the strip's top bezel to above its bottom bezel (the strip lays its
+// answers two points in), black under the top edge and shaded along both
+// walls, with the neighbours' ends standing lit over it. Under the label a
+// small lamp in the accent, the milled LED dash, its light pooling on the
+// floor and reaching the well's foot.
+let ml_push_well = fn(p: vec2, size: vec2, o: vec2, px: float) -> vec4 {
+    let x0 = Finish.snap(o.x, px) - o.x
+    let x1 = Finish.snap(o.x + size.x, px) - o.x
+    let y0 = Finish.snap(o.y - 2.0, px) - o.y + 2.0 * px
+    let y1 = Finish.snap(o.y + size.y + 2.0, px) - o.y - 2.0 * px
+    let inside = step(x0, p.x) * (1.0 - step(x1, p.x)) * step(y0, p.y) * (1.0 - step(y1, p.y))
+    let t = clamp((p.y - y0) / max(y1 - y0, 1.0), 0.0, 1.0)
+    // the floor
+    var col = mix(vec3(0.118, 0.122, 0.141), vec3(0.098, 0.102, 0.118), t)
+    col = col + g3(ml_grain((p + o) / px, 0.008))
+    // the shade: black under the top edge, gone in about six rows; along
+    // each wall a shade gone in four; a darker last row at the foot
+    let top = exp(-max(p.y - y0, 0.0) / (2.2 * px))
+    let wl = 0.8 * exp(-max(p.x - x0, 0.0) / (1.4 * px))
+    let wr = 0.8 * exp(-max(x1 - px - p.x, 0.0) / (1.4 * px))
+    let foot = 0.45 * step(y1 - px, p.y)
+    let dk = 1.0 - (1.0 - top) * (1.0 - wl) * (1.0 - wr) * (1.0 - foot)
+    col = mix(col, vec3(0.012, 0.012, 0.020), clamp(dk, 0.0, 1.0))
+    // the lamp's light on the floor: a broad soft pool round the lamp
+    let k = ml_acc()
+    let lc = vec2(Finish.snap(o.x + (x0 + x1) * 0.5, px) - o.x, Finish.snap(o.y + size.y, px) - o.y - 6.0 * px)
+    let q = vec2((p.x - lc.x) / max((x1 - x0) * 0.26, 1.0), (p.y - lc.y) / 3.4)
+    let pool = exp(-dot(q, q)) * 0.26 * (1.0 - 0.6 * top)
+    col = mix(col, k * 0.85, pool)
+    var res = vec4(col, 1.0) * inside
+    // the neighbours' ends over the well: one lit column each, down to the
+    // strip's foot line
+    let ey = step(y0, p.y) * (1.0 - step(y1 - px, p.y))
+    let el = step(x0 - px, p.x) * (1.0 - step(x0, p.x))
+    let er = step(x1, p.x) * (1.0 - step(x1 + px, p.x))
+    let lit = mix(vec3(0.263, 0.259, 0.282), vec3(0.176, 0.173, 0.196), t)
+    res = Finish.over(res, vec4(lit, 1.0) * (el + er) * ey)
+    // the lamp: two device pixel rows sixteen long, the top row white-hot,
+    // the lower one the accent, in a tight halo on the floor
+    let ld = ml_rbox(p, lc, vec2(8.0 * px, px), px)
+    let la = Finish.cover(ld, px)
+    let hot = mix(mix(k, vec3(1.0, 1.0, 1.0), 0.70), mix(k, vec3(1.0, 1.0, 1.0), 0.25), step(lc.y, p.y))
+    let near = 0.42 * exp(-max(ld, 0.0) / (1.1 * px)) + 0.14 * exp(-max(ld, 0.0) / (3.0 * px))
+    let ha = clamp(near, 0.0, 1.0) * (1.0 - la) * step(0.0, ld)
+    res = Finish.over(res, vec4(k * ha, ha) * inside)
+    res = Finish.over(res, vec4(hot * la, la) * inside)
+    return res
 }
 
 mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
@@ -1383,23 +1448,21 @@ mod.widgets.SegmentedControlFlat.draw_bg.vertex = fn() {
 }
 mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let m = 6.0
-    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
-    return ml_tray(p, self.rect_size, self.rect_pos, px, 2.0)
+    return ml_strip(self.pos, self.rect_size, self.rect_pos, px, 6.0)
 }
 mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
-    let g = grow_vertex(self.rect_pos, self.rect_size, 4.0)
+    let g = grow_vertex(self.rect_pos, self.rect_size, 6.0)
     self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
 }
 mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let m = 4.0
+    let m = 6.0
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
-    return ml_segment(p, self.rect_size, self.rect_pos, px, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    return ml_push_well(p, self.rect_size, self.rect_pos, px)
 }
 mod.widgets.SegmentedControlFlat.draw_text.color = #9a9aa0
-mod.widgets.SegmentedControlFlat.draw_text_selected.color = #0b2a33
-mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #0b2a33
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #eceef2
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #eceef2
 
 // The tab strip.
 mod.widgets.Tabs.height = 26.0
