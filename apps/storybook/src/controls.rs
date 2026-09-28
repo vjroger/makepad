@@ -15,17 +15,12 @@ use crate::registry::{Control, ControlKind, Story};
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-
-    // The panel's controls keep the library's own faces under every sheet: a
-    // sheet may replace `draw_bg.vertex` and `draw_bg.pixel` on any stock
-    // template, and the faces kept from before it ran (`mod.stock_faces`) are
-    // spread into each control here, so the panel that edits a story stays
-    // the same panel whichever sheet the story is shown under.
-    let PanelField = TextInput{
-        scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
-        draw_bg +: {..mod.stock_faces.TextInput}
-    }
-    let PanelCheck = CheckBox{draw_bg +: {..mod.stock_faces.CheckBox}}
+    // The panel that edits a story stays the same panel whichever sheet the
+    // story is shown under: its templates and its theme are the library's
+    // as it stands without a sheet (`desktop_style::keep_stock`), which no
+    // sheet's tokens or writes reach (`nothing_a_sheet_sets_reaches_the_controls_panel`).
+    use mod.prelude.stock_internal.*
+    use mod.stock_widgets.*
 
     let ControlRow = View{
         width: Fill
@@ -47,47 +42,32 @@ script_mod! {
         list := PortalList{
             width: Fill
             height: Fill
-            scroll_bar: ScrollBar{draw_bg +: {..mod.stock_faces.ScrollBar}}
+            scroll_bar: ScrollBar{}
             RowBool := ControlRow{
-                value := PanelCheck{text: ""}
+                value := CheckBox{text: ""}
             }
             RowNumber := ControlRow{
-                value := Slider{
-                    width: 200.
-                    draw_bg +: {..mod.stock_faces.Slider}
-                    text_input +: {
-                        scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
-                        draw_bg +: {..mod.stock_faces.TextInput}
-                    }
-                }
+                value := Slider{width: 200.}
             }
             RowChoice := ControlRow{
                 // The list as wide as the button, so an option that fits the
                 // button is not cut short in the list.
-                value := DropDown{
-                    width: 200.
-                    draw_bg +: {..mod.stock_faces.DropDown}
-                    popup_menu +: {
-                        width: 200.
-                        draw_bg +: {..mod.stock_faces.PopupMenu}
-                        menu_item +: {draw_bg +: {..mod.stock_faces.PopupMenuItem}}
-                    }
-                }
+                value := DropDown{width: 200. popup_menu +: {width: 200.}}
             }
             RowText := ControlRow{
-                value := PanelField{width: 200.}
+                value := TextInput{width: 200.}
             }
             RowColor := ControlRow{
-                value := PanelField{width: 110.}
+                value := TextInput{width: 110.}
                 swatch := RoundedView{
                     width: 22.
                     height: 22.
                     show_bg: true
-                    draw_bg +: {..mod.stock_faces.RoundedView color: #x888888FF}
+                    draw_bg +: {color: #x888888FF}
                 }
             }
             RowDisabled := ControlRow{
-                value := PanelCheck{text: "disabled"}
+                value := CheckBox{text: "disabled"}
             }
             // A curve wants the panel's width, so its name goes over it
             // rather than beside it.
@@ -100,17 +80,7 @@ script_mod! {
                 name := Label{text: ""}
                 // The editor is Fit tall round its canvas and toolbar, so the
                 // canvas is what takes the height.
-                value := CurveEditor{
-                    width: Fill
-                    canvas +: {height: 150.}
-                    tools +: {
-                        smooth +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
-                        corner +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
-                        horizontal +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
-                        point +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
-                        delete +: {draw_bg +: {..mod.stock_faces.Button}}
-                    }
-                }
+                value := CurveEditor{width: Fill canvas +: {height: 150.}}
             }
             // A section heading. The whole row is the click target, and the
             // arrow points right while folded and down while open.
@@ -800,32 +770,40 @@ mod tests {
         })
     }
 
-    /// No face a sheet gives a stock template reaches the panel: under a
-    /// sheet that replaces the vertex and pixel of every stock face, the
-    /// whole panel as it resolves -- every row template and every part the
-    /// rows' controls hold or inherit -- draws with faces of its own.
+    /// Nothing a sheet sets reaches the panel: under a sheet that sets
+    /// everything a sheet may on every stock template -- every token, and
+    /// every number, colour, switch, inset, text style and face -- the whole
+    /// panel as it resolves, every row template and every part the rows'
+    /// controls hold or inherit, reads line for line as it does with no
+    /// sheet: the same boxes, faces, fonts and timings.
     #[test]
-    fn no_sheet_face_reaches_the_controls_panel() {
-        use crate::makepad_widgets::desktop_style::{faces_reaching, install, marker_sheet, uninstall};
+    fn nothing_a_sheet_sets_reaches_the_controls_panel() {
+        use crate::makepad_widgets::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
+        use crate::makepad_widgets::makepad_script::trap::NoTrap;
+        let read = |vm: &mut ScriptVm| {
+            let storybook = vm.module(id!(storybook));
+            let value = vm.bx.heap.value(storybook, id!(ControlsPanel).into(), NoTrap);
+            resolution(vm, value, "ControlsPanel")
+        };
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            install(vm, marker_sheet());
-            vm.bx.captured_errors = Some(Vec::new());
             crate::theme::widgets_script_mod(vm);
             crate::shell::script_mod(vm);
             super::script_mod(vm);
+            let plain = read(vm);
+            assert!(plain.len() > 1_000, "only {} lines were read off the panel", plain.len());
+            let sheet = everything_sheet(vm, &|_| false);
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(|vm| {
+                crate::theme::widgets_script_mod(vm);
+                crate::shell::script_mod(vm);
+                super::script_mod(vm);
+            });
             let errors = vm.take_errors();
-            assert!(errors.is_empty(), "the panel does not evaluate under the marker sheet: {errors:?}");
-            let storybook = vm.module(id!(storybook));
-            let value = vm.bx.heap.value(
-                storybook,
-                id!(ControlsPanel).into(),
-                crate::makepad_widgets::makepad_script::trap::NoTrap,
-            );
-            let leaks = faces_reaching(vm, value, "ControlsPanel");
-            assert!(leaks.is_empty(), "a sheet's face reaches the controls panel at:
-{}", leaks.join("
-"));
+            assert!(errors.is_empty(), "the panel does not evaluate under the sheet: {errors:?}");
+            let moved = resolution_diff(&plain, &read(vm), 20);
+            assert!(moved.is_empty(), "a sheet reaches the controls panel at:\n{}", moved.join("\n"));
             uninstall(vm);
         });
     }

@@ -10620,7 +10620,13 @@ impl Tweaker {
             script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.prelude.fab_internal.*
-                use mod.widgets.*
+                // Every template the panel is built from, and the theme, as
+                // the library stands without a sheet
+                // (`desktop_style::keep_stock`): a sheet's tokens and its
+                // writes onto `mod.widgets` reach none of the panel
+                // (`nothing_a_sheet_sets_reaches_the_panel`).
+                use mod.prelude.stock_internal.*
+                use mod.stock_widgets.*
 
                 // The panel's own ink. Its chrome is the fab palette whatever
                 // the app's theme, so every word on it has to be too: a stock
@@ -10629,12 +10635,8 @@ impl Tweaker {
                 // The dim grades are the panel's, not fab's: see
                 // `mod.tweak_panel`.
                 let panel = mod.tweak_panel
-                // The panel's plates, chips and grips: a RoundedView with the
-                // stock face kept from before any sheet, so a sheet that replaces
-                // `RoundedView`'s vertex or pixel does not repaint them.
-                let PanelRoundedView = RoundedView {
-                    draw_bg +: {..mod.stock_faces.RoundedView}
-                }
+                // The panel's plates, chips and grips.
+                let PanelRoundedView = RoundedView {}
                 // The panel's command button, and the same trap
                 // `PanelDropDown` below exists to dodge -- these three now
                 // sit in the Theme tab beside it, where the control that
@@ -10671,11 +10673,6 @@ impl Tweaker {
                     margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
                     spacing: 6
                     draw_bg +: {
-                        // The stock vertex and pixel kept from before the sheet
-                        // (`desktop_style::STOCK_FACES`), the pixel then replaced
-                        // by the panel's own below: a sheet that replaces either
-                        // function on `Button` replaces nothing this button uses.
-                        ..mod.stock_faces.Button
                         border_size: 1.0
                         border_radius: 2.0
                         color_dither: 0.0
@@ -10789,10 +10786,7 @@ impl Tweaker {
                     min_height: 0
                     padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
                     margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
-                    // A multi-line field scrolls with the stock bar's own face.
-                    scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                     draw_bg +: {
-                        ..mod.stock_faces.TextInput
                         border_size: 1.0
                         border_radius: 2.0
                         color_dither: 0.0
@@ -10888,9 +10882,7 @@ impl Tweaker {
                 // (43,43,43) box on the panel's (48,48,48) ground.
                 let PanelCheckBox = CheckBox {
                     draw_bg +: {
-                        // The stock face, kept from before any sheet, and flat:
-                        // a material sheet raises `material` on every check box.
-                        ..mod.stock_faces.CheckBox
+                        // Flat, whatever material the app's theme raises.
                         material: 0.0
                         color: fab.color_input
                         color_hover: fab.color_input_hover
@@ -10967,7 +10959,6 @@ impl Tweaker {
                     }
                     draw_icon +: { color: fab.color_text }
                     draw_bg +: {
-                        ..mod.stock_faces.PopupMenuItem
                         border_size: 0.0
                         border_radius: 2.0
                         color: fab.color_popover
@@ -11008,7 +10999,6 @@ impl Tweaker {
                     padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
                     menu_item: PanelMenuItem{}
                     draw_bg +: {
-                        ..mod.stock_faces.PopupMenu
                         border_size: 1.0
                         border_radius: 3.0
                         color: fab.color_popover
@@ -11052,7 +11042,6 @@ impl Tweaker {
                     }
                     draw_icon +: { color: fab.color_text }
                     draw_bg +: {
-                        ..mod.stock_faces.DropDown
                         border_size: 1.0
                         border_radius: 2.0
                         color_dither: 0.0
@@ -12672,7 +12661,6 @@ impl Tweaker {
                         }
                     }
                     shader_col := ScrollYView {
-                        scroll_bars +: {scroll_bar_x +: {draw_bg +: {..mod.stock_faces.ScrollBar}} scroll_bar_y +: {draw_bg +: {..mod.stock_faces.ScrollBar}}}
                         width: Fill
                         height: Fill
                         flow: Down
@@ -12729,7 +12717,6 @@ impl Tweaker {
                             height: Fit
                             visible: false
                         shader_rows := PortalList {
-                            scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                             width: Fill
                             height: 320
                             margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
@@ -12963,7 +12950,6 @@ impl Tweaker {
                             }
                         }
                         tree := FileTree {
-                            scroll_bars +: {scroll_bar_x +: {draw_bg +: {..mod.stock_faces.ScrollBar}} scroll_bar_y +: {draw_bg +: {..mod.stock_faces.ScrollBar}}}
                             file_node: PanelTreeNode {
                                 is_folder: false
                                 draw_bg +: {is_folder: 0.0}
@@ -13061,7 +13047,6 @@ impl Tweaker {
                             palette_starred := PanelButton { width: Fit height: 22 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "\u{2605}" draw_text +: { text_style +: { font_size: 9.0 } } }
                         }
                         palette := PortalList {
-                            scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                             width: Fill
                             height: Fill
                             margin: Inset{left: 8 right: 8 top: 0 bottom: 0}
@@ -13114,7 +13099,6 @@ impl Tweaker {
                         height: Fill
                         flow: Down
                         props := PortalList {
-                        scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                         width: Fill
                         height: Fill
                         margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
@@ -24344,135 +24328,6 @@ mod tests {
         );
     }
 
-    /// The one property a style sheet is known to take off a `DropDown` is
-    /// its shader, and the panel's own dropdown must therefore carry one.
-    /// Read off the shipped sheets rather than named here, so a sheet that
-    /// starts overriding `DropDown` later is caught by this test rather than
-    /// by somebody finding an unreadable picker.
-    #[test]
-    fn the_panels_dropdown_answers_what_the_sheets_override() {
-        let kit = panel_source()
-            .split("let PanelDropDown = DropDown {")
-            .nth(1)
-            .expect("the panel declares its own dropdown");
-        for sheet in ["windows-2000", "nextstep"] {
-            let text = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("themes")
-                    .join(sheet)
-                    .join("widgets.splash"),
-            )
-            .expect("the sheet is in the tree");
-            for line in text.lines() {
-                let Some(prop) = line
-                    .trim()
-                    .strip_prefix("mod.widgets.DropDown.")
-                    .and_then(|rest| rest.split([' ', '=']).next())
-                else {
-                    continue;
-                };
-                // `draw_bg.pixel` is answered by declaring `pixel:` inside
-                // this template's own `draw_bg`.
-                let leaf = prop.rsplit('.').next().unwrap_or(prop);
-                assert!(
-                    declares(kit, leaf),
-                    "the sheets override `{prop}` on a DropDown and the panel's own does not declare `{leaf}`"
-                );
-            }
-        }
-    }
-
-    /// The same question of the other two templates the Theme tab is built
-    /// from, and of EVERY sheet rather than the two that replace a shader.
-    ///
-    /// `PanelButton` and `PanelInput` were left open when `PanelDropDown`
-    /// was hardened: `windows-2000` and `nextstep` replace
-    /// `Button.draw_bg.pixel` and `TextInput.draw_bg.pixel` outright with a
-    /// hard-coded Win95 palette, and `android` and `ios` set a 44-48px
-    /// `min_height` and their own padding, which a walk applies whatever
-    /// height the instance asked for. Read off the sheets, so a sheet that
-    /// starts overriding something else is caught here rather than by
-    /// somebody finding the save row twice its height with a white slab on it.
-    #[test]
-    fn the_panels_button_and_input_answer_what_the_sheets_override() {
-        let src = panel_source();
-        // The template's own text, and not the next one's: every `let
-        // Panel...` after it is a different widget.
-        let slice = |open: &str, next: &str| -> &'static str {
-            let rest = src.split(open).nth(1).unwrap_or_else(|| panic!("the panel declares `{open}`"));
-            let end = rest.find(next).unwrap_or_else(|| panic!("`{open}` is not followed by `{next}`"));
-            &rest[..end]
-        };
-        let button = slice("let PanelButton = Button {", "let PanelInput = TextInput {");
-        let input = slice("let PanelInput = TextInput {", "let PanelTreeNode = FileTreeNode {");
-        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
-        let mut seen = 0usize;
-        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
-            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
-            let Ok(text) = std::fs::read_to_string(&sheet) else {
-                continue;
-            };
-            for line in text.lines() {
-                for (widget, kit) in [("Button", button), ("TextInput", input)] {
-                    let Some(prop) = line
-                        .trim()
-                        .strip_prefix(&format!("mod.widgets.{widget}."))
-                        .and_then(|rest| rest.split([' ', '=']).next())
-                    else {
-                        continue;
-                    };
-                    // `draw_bg.pixel` is answered by declaring `pixel:`
-                    // inside this template's own `draw_bg`, and so on down.
-                    let leaf = prop.rsplit('.').next().unwrap_or(prop);
-                    assert!(
-                        declares(kit, leaf),
-                        "{} overrides `{prop}` on a {widget} and PanelButton/PanelInput does not declare `{leaf}`",
-                        sheet.display()
-                    );
-                    seen += 1;
-                }
-            }
-        }
-        assert!(seen > 20, "only {seen} overrides were read -- the sheets did not load");
-        // The two that a sheet reaches through a THEME token rather than
-        // through `widgets.splash`: the stock templates take them from
-        // `theme.mspace_1` and `theme.mspace_v_1`, which every sheet moves.
-        for kit in [button, input] {
-            assert!(declares(kit, "padding"), "the padding is not written out");
-            assert!(declares(kit, "margin"), "the margin is not written out");
-            assert!(declares(kit, "min_height"), "the min height is not written out");
-        }
-        // The matcher itself, because the hole this guard had was in the
-        // matcher and not in the templates: an unanchored search finds
-        // `color:` inside `border_color:` and passes a template that declares
-        // no colour at all.
-        assert!(declares("draw_bg +: { color: #x161616 }", "color"));
-        assert!(!declares("draw_bg +: { border_color: #x161616 }", "color"));
-        assert!(!declares("margin: Inset{left: 0}", "in"));
-        assert!(declares("padding: Inset{left: 0}", "left"));
-    }
-
-    /// Whether a template declares a property of its own under this name.
-    ///
-    /// Anchored at the front, because an unanchored search is answered by the
-    /// wrong property: `"color:"` is found inside `border_color:`, and a
-    /// template declaring nothing but a border colour would pass for a sheet
-    /// that overrides `draw_bg.color`. A name begins where the character
-    /// before it is not one a name can be made of.
-    fn declares(kit: &str, leaf: &str) -> bool {
-        let needle = format!("{leaf}:");
-        let mut from = 0;
-        while let Some(found) = kit[from..].find(&needle) {
-            let at = from + found;
-            let before = kit[..at].chars().next_back();
-            if !before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                return true;
-            }
-            from = at + 1;
-        }
-        false
-    }
-
     /// Everything about the mix's weight row that a sheet could move if the
     /// kit ever took one of its tokens off `theme.` instead of off `fab.`:
     /// the colour of each of its two words, and the height of the row they
@@ -24504,6 +24359,48 @@ mod tests {
         })
     }
 
+    /// Nothing a sheet sets reaches the panel.
+    ///
+    /// The panel is built from stock templates -- buttons, fields, check
+    /// boxes, the picker and its list, scroll bars, lists and trees -- and a
+    /// sheet moves every one of those: its token half before they register
+    /// (the spacing rungs, the fonts, the corners), its widget half onto them
+    /// afterwards (a face, a padding, an animator state). So the panel is
+    /// built from the library as it stands without a sheet
+    /// (`desktop_style::keep_stock`), and this holds it there: under a sheet
+    /// that sets everything a sheet may on every stock template
+    /// (`desktop_style::everything_sheet`), the whole sidebar as it resolves
+    /// -- every template, control, draw object and nested part it holds or
+    /// inherits, the lists' row templates and the pickers' popups with them
+    /// -- reads line for line as it does with no sheet.
+    ///
+    /// It stands where three narrower guards stood, which read the leaves the
+    /// shipped sheets set on `Button`, `TextInput` and `DropDown` and asked
+    /// `PanelButton`, `PanelInput` and `PanelDropDown` to declare each, and a
+    /// fourth that walked the faces alone. None of them said anything about
+    /// the next sheet.
+    #[test]
+    fn nothing_a_sheet_sets_reaches_the_panel() {
+        use crate::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let sidebar = Tweaker::sidebar_value(vm);
+            let plain = resolution(vm, sidebar, "sidebar");
+            assert!(plain.len() > 10_000, "only {} lines were read off the sidebar", plain.len());
+            let sheet = everything_sheet(vm, &|_| false);
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let sidebar = Tweaker::sidebar_value(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the sidebar does not evaluate under the sheet: {errors:?}");
+            let moved = resolution_diff(&plain, &resolution(vm, sidebar, "sidebar"), 20);
+            assert!(moved.is_empty(), "a sheet reaches the panel at:\n{}", moved.join("\n"));
+            uninstall(vm);
+        });
+    }
+
     /// The mix's weight row is the one control in the Theme tab that is not
     /// one of the panel's own hardened templates, and the splash CLAIMS its
     /// immunity rather than showing it: "its face is drawn from `mod.fab`
@@ -24514,35 +24411,6 @@ mod tests {
     /// re-pointed at `theme.` anywhere in the chain -- the row, either of its
     /// two words, or the palette entry either of them names -- is caught by
     /// the value moving, however it is spelled.
-    /// No face a sheet gives a stock template reaches the panel.
-    ///
-    /// The tests above read the sheets in the tree and ask the panel to
-    /// declare what THEY override, which says nothing about the next sheet:
-    /// the reference sheets replace `draw_bg.vertex` and `draw_bg.pixel` on
-    /// every family the panel is built from. So this installs a sheet that
-    /// replaces both on every stock face (`desktop_style::marker_sheet`) and
-    /// walks the whole sidebar as it resolves -- every template, every
-    /// control, every draw object and nested part it holds or inherits, the
-    /// lists' row templates and the pickers' popups with them -- for a face
-    /// that is the sheet's.
-    #[test]
-    fn no_sheet_face_reaches_the_panel() {
-        use crate::desktop_style::{faces_reaching, install, marker_sheet, uninstall};
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            install(vm, marker_sheet());
-            vm.bx.captured_errors = Some(Vec::new());
-            vm.with_reload(crate::script_mod);
-            let sidebar = Tweaker::sidebar_value(vm);
-            let errors = vm.take_errors();
-            assert!(errors.is_empty(), "the sidebar does not evaluate under the marker sheet: {errors:?}");
-            let leaks = faces_reaching(vm, sidebar, "sidebar");
-            assert!(leaks.is_empty(), "a sheet's face reaches the panel at:\n{}", leaks.join("\n"));
-            uninstall(vm);
-        });
-    }
-
     #[test]
     fn no_sheet_moves_the_mixs_weight_row() {
         use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
