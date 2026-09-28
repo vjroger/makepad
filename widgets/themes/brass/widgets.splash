@@ -2122,16 +2122,214 @@ mod.widgets.Vr.draw_bg.pixel = fn() {
     return Finish.over(vec4(0.0, 0.0, 0.0, dk), vec4(lt, lt * 0.95, lt * 0.85, lt))
 }
 
+
 // ---------------------------------------------------------------------------
 // THE GROUND under everything: brushed dark brown-grey metal, lighter in
 // the middle and darkening toward the corners, with a slow weathered
-// mottle, fine horizontal streaks and grain.
+// mottle, fine horizontal streaks and grain. On it the machine room: an
+// engraved frame with rivets, engraved scrollwork in the corners and along
+// the foot, copper pipes along the top, down the right edge and along the
+// foot, and brass gear wheels half hidden at the corners and edges. Every
+// piece is placed from the window's edges; the middle stays quiet.
+
+// A brass gear wheel lying on the ground, premultiplied with its cast
+// shadow: `teeth` teeth, `spokes` spokes with open windows between them,
+// a bossed hub. `rot` turns it (radians).
+let bzg_gear = fn(p: vec2, c: vec2, rad: float, teeth: float, spokes: float, rot: float, px: float) -> vec4 {
+    let q = p - c
+    let r = length(q)
+    let cast = Finish.drop(p, c, vec2(rad, rad), rad, vec2(2.5, 5.0), 4.0) * 0.62
+    var out = vec4(bz_shadow_ink() * cast, cast)
+    let ang = atan2(q.y, q.x) + rot
+    let toothh = max(rad * 0.08, 2.2)
+    let root = rad - toothh
+    let f = fract(ang / (2.0 * PI) * teeth)
+    let tw = smoothstep(0.06, 0.20, f) * (1.0 - smoothstep(0.56, 0.70, f))
+    let d = r - mix(root, rad, tw)
+    let n = q / max(r, 0.001)
+    let lt = vec2(-0.38, -0.92)
+    let facing = dot(n, lt)
+    let rimw = max(rad * 0.11, 2.4)
+    let inner_r = root - rimw
+    let hub_r = max(rad * 0.20, 4.0)
+    let boss_r = hub_r * 1.45
+    // the rim: a rounded bead lit from the top left
+    let rt = clamp((r - inner_r) / max(root - inner_r, 0.001), 0.0, 1.0)
+    var l = 0.31 + 0.17 * facing * (2.0 * rt - 1.0) + 0.05 * facing
+    let s0 = (rt - 0.55) / 0.2
+    l = l + 0.12 * exp(-s0 * s0) * max(facing, 0.0)
+    // the teeth: their flanks catch the light, their tops are flat
+    let tooth = smoothstep(root - 0.3, root + 0.3, r)
+    l = mix(l, 0.30 + 0.12 * facing, tooth)
+    // the spokes: round bars from the boss to the rim
+    let ns = max(spokes, 1.0)
+    let da = (fract(ang / (2.0 * PI) * ns + 0.5) - 0.5) * 2.0 * PI / ns
+    let across = r * sin(da)
+    let sw = max(rad * 0.05, 1.3)
+    let sd = abs(across) - sw
+    let tn = vec2(-n.y, n.x) * sign(across)
+    let sl = 0.34 + 0.20 * dot(tn, lt) * clamp(abs(across) / sw, 0.0, 1.0) + 0.05
+    let inweb = 1.0 - smoothstep(inner_r - 0.3, inner_r + 0.3, r)
+    l = mix(l, sl, inweb)
+    // the boss and the axle: a turned dome with a dark bore
+    let bq = q / max(boss_r, 0.001)
+    let dome = 0.36 - 0.14 * bq.y - 0.06 * bq.x + 0.24 * exp(-dot(bq + vec2(0.35, 0.45), bq + vec2(0.35, 0.45)) * 4.0)
+    let inboss = 1.0 - smoothstep(boss_r - 0.3, boss_r + 0.3, r)
+    l = mix(l, dome, inboss)
+    // wear: a slow mottle over the metal
+    l = l + (Finish.noise(p * 0.21 + c) - 0.5) * 0.10
+    var col = bz_brass(l)
+    // edges: the outline, the rim's inner edge, the boss and the bore
+    col = mix(col, bz_edge(), Finish.band(d, 0.0, px * 1.5, px) * 0.75)
+    col = mix(col, bz_edge(), Finish.band(r - inner_r, -px, 0.0, px) * 0.55)
+    col = mix(col, bz_edge(), Finish.band(r - boss_r, 0.0, px, px) * 0.6)
+    col = mix(col, bz_edge(), Finish.band(r - hub_r * 0.95, -px, 0.0, px) * 0.45)
+    let bolt = 1.0 - smoothstep(hub_r * 0.42 - 0.4, hub_r * 0.42 + 0.4, r)
+    let bl = 0.40 - 0.35 * (q.y + 0.4 * q.x) / max(hub_r * 0.42, 0.001)
+    col = mix(col, bz_iron(bl + 0.1), bolt)
+    col = mix(col, bz_edge(), Finish.band(r - hub_r * 0.42, 0.0, px, px) * 0.8)
+    // the windows between the spokes are open: the ground shows through
+    let win = inweb * (1.0 - inboss) * smoothstep(-0.4, 0.4, sd)
+    col = mix(col, bz_shadow_ink(), win)
+    let a = Finish.cover(d, px) * (1.0 - win * 0.45)
+    // a shade in the windows' edge so the web reads as thickness
+    let lip = Finish.band(sd, -px * 1.5, 0.0, px) * inweb * (1.0 - inboss)
+    col = mix(col, bz_edge(), lip * 0.5)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// The light on a round pipe at `q`, the vector from its axis, radius
+// `rad`: a cylinder lit from the top left, a hot line off the middle.
+let bzg_tube = fn(q: vec2, rad: float) -> float {
+    let u = q / max(rad, 0.001)
+    let nz = sqrt(max(1.0 - min(dot(u, u), 1.0), 0.0))
+    let nrm = vec3(u.x, u.y, nz)
+    let dif = max(dot(nrm, vec3(-0.26, -0.62, 0.74)), 0.0)
+    return 0.08 + 0.46 * dif + 0.46 * pow(dif, 28.0)
+}
+
+// The nearest-axis vectors of pipe parts: a straight run and a quarter bend
+// (centre `ec`, radius `R`, the quarter where x - ec.x has the sign of sx
+// and y - ec.y the sign of sy).
+let bzg_run = fn(p: vec2, a: vec2, b: vec2) -> vec2 {
+    let pa = p - a
+    let ba = b - a
+    let k = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    return pa - ba * k
+}
+let bzg_bend = fn(p: vec2, ec: vec2, R: float, sx: float, sy: float) -> vec2 {
+    let v = p - ec
+    let inq = step(0.0, v.x * sx) * step(0.0, v.y * sy)
+    let lv = max(length(v), 0.001)
+    return mix(vec2(1000.0, 1000.0), v - v / lv * R, inq)
+}
+let bzg_near = fn(q1: vec2, q2: vec2) -> vec2 {
+    return mix(q1, q2, step(length(q2), length(q1)))
+}
+
+// A copper pipe from its nearest-axis vector, with its shadow on the plate,
+// premultiplied.
+let bzg_pipe = fn(q: vec2, rad: float, px: float) -> vec4 {
+    let dq = length(q) - rad
+    let sq = length(q - vec2(2.0, 4.5)) - rad
+    let cast = (1.0 - smoothstep(-3.0, 5.0, sq)) * 0.6
+    var out = vec4(bz_shadow_ink() * cast, cast)
+    var col = bz_copper(bzg_tube(q, rad))
+    col = mix(col, bz_edge(), Finish.band(dq, 0.0, px, px) * 0.6)
+    let a = Finish.cover(dq, px)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// A brass collar round a pipe: `along` is the distance along the pipe from
+// the collar's middle, `q` the vector from the axis.
+let bzg_collar = fn(q: vec2, along: float, rad: float, px: float) -> vec4 {
+    let cr = rad + 2.2
+    let dq = max(length(q) - cr, abs(along) - 3.4)
+    let sq = max(length(q - vec2(2.0, 4.5)) - cr, abs(along) - 3.4)
+    let cast = (1.0 - smoothstep(-2.0, 4.0, sq)) * 0.35
+    var out = vec4(bz_shadow_ink() * cast, cast)
+    var l = bzg_tube(q, cr) * 0.9 + 0.03
+    l = l * (1.0 - 0.4 * smoothstep(2.0, 3.4, abs(along))) * (1.0 - 0.5 * (1.0 - smoothstep(0.2, 0.2 + px, abs(abs(along) - 1.1))))
+    var col = bz_brass(l)
+    col = mix(col, bz_edge(), Finish.band(dq, 0.0, px, px) * 0.7)
+    let a = Finish.cover(dq, px)
+    return Finish.over(out, vec4(col * a, a))
+}
+
+// An engraved spiral: signed distance across its stroke, faded out of the
+// ring r0..r1. Returns (groove, lit wall).
+let bzg_curl = fn(p: vec2, c: vec2, pitch: float, r0: float, r1: float, flip: float, px: float) -> vec2 {
+    let q = p - c
+    let r = length(q)
+    let ang = atan2(q.y * flip, q.x)
+    let e = (fract(r / pitch - ang / (2.0 * PI) + 0.5) - 0.5) * pitch
+    let w = smoothstep(r0, r0 + 1.5, r) * (1.0 - smoothstep(r1 - 2.5, r1, r))
+    let dk = 1.0 - smoothstep(0.30, 0.30 + px, abs(e + 0.2))
+    let li = 1.0 - smoothstep(0.30, 0.30 + px, abs(e - 0.55))
+    return vec2(dk, li) * w
+}
+// An engraved arc of radius R about c between the angles a0..a1 (radians,
+// atan2 of y, x): (groove, lit wall).
+let bzg_arc = fn(p: vec2, c: vec2, R: float, a0: float, a1: float, px: float) -> vec2 {
+    let q = p - c
+    let e = length(q) - R
+    let ang = atan2(q.y, q.x)
+    let w = smoothstep(a0, a0 + 0.12, ang) * (1.0 - smoothstep(a1 - 0.12, a1, ang))
+    let dk = 1.0 - smoothstep(0.30, 0.30 + px, abs(e + 0.2))
+    let li = 1.0 - smoothstep(0.30, 0.30 + px, abs(e - 0.55))
+    return vec2(dk, li) * w
+}
+
+// An engraved stroke from its signed distance across: (groove, lit wall).
+let bzg_line = fn(e: float, px: float) -> vec2 {
+    return vec2(1.0 - smoothstep(0.30, 0.30 + px, abs(e + 0.2)), 1.0 - smoothstep(0.30, 0.30 + px, abs(e - 0.55)))
+}
+// An engraved leaf: a lens `2 R` round and `wid` deep, its axis at `ang`,
+// with a vein down the middle.
+let bzg_leaf = fn(m: vec2, c: vec2, ang: float, R: float, wid: float, px: float) -> vec2 {
+    let ax = vec2(cos(ang), sin(ang))
+    let n = vec2(-ax.y, ax.x) * (R - wid)
+    let e = max(length(m - c - n) - R, length(m - c + n) - R)
+    let hl = sqrt(max(R * R - (R - wid) * (R - wid), 0.0)) * 0.8
+    let vein = bz_seg(m, c - ax * hl, c + ax * hl)
+    return max(bzg_line(e, px), bzg_line(vein, px) * 0.7)
+}
+// A vine along an edge: a wave `A + B sin` in from it, with a curl hanging
+// in from every crest and a leaf from every trough, fading out by 178.
+let bzg_vine = fn(m: vec2, x0: float, px: float) -> vec2 {
+    let wv = 2.0 * PI / 44.0
+    let sv = sin(m.x * wv)
+    let cv = cos(m.x * wv)
+    let e = (m.y - (12.0 + 5.0 * sv)) / sqrt(1.0 + 0.51 * cv * cv)
+    var g = bzg_line(e, px) * smoothstep(x0, x0 + 4.0, m.x) * (1.0 - smoothstep(172.0, 178.0, m.x))
+    if m.y > 2.0 && m.y < 40.0 {
+        g = max(g, bzg_curl(m, vec2(55.0, 26.5), 4.6, 1.0, 11.5, 1.0, px))
+        g = max(g, bzg_curl(m, vec2(99.0, 25.0), 3.8, 1.0, 9.5, 1.0, px))
+        g = max(g, bzg_curl(m, vec2(143.0, 23.5), 3.0, 0.8, 7.5, 1.0, px))
+        // the leaf of the nearest trough (at 33, 77, 121)
+        let lx = clamp(floor((m.x - 33.0) / 44.0 + 0.5), 0.0, 2.0) * 44.0 + 33.0
+        g = max(g, bzg_leaf(m, vec2(lx + 5.0, 16.0), 1.05, 16.0, 3.2, px))
+    }
+    return g
+}
+// The scrollwork of one corner, in corner space folded about its diagonal
+// (m.x along the edge, m.y in from it): the vine, a volute in the corner and
+// a sweep round it.
+let bzg_scroll = fn(m: vec2, px: float) -> vec2 {
+    var g = bzg_vine(m, 30.0, px)
+    g = max(g, bzg_curl(m, vec2(24.0, 24.0), 5.0, 0.8, 15.5, 1.0, px))
+    g = max(g, bzg_arc(m, vec2(0.0, 0.0), 52.0, 0.25, 0.8, px))
+    return g
+}
+
 mod.widgets.Window.show_bg = true
 mod.widgets.Window.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
     let p = self.pos * self.rect_size
     let size = self.rect_size
-    let t = clamp(p.y / max(size.y, 1.0), 0.0, 1.0)
+    let W = size.x
+    let H = size.y
+    let t = clamp(p.y / max(H, 1.0), 0.0, 1.0)
     var col = mix(vec3(0.290, 0.259, 0.220), vec3(0.212, 0.184, 0.157), t)
     let v = (p / max(size, vec2(1.0, 1.0)) - vec2(0.5, 0.40)) * vec2(1.0, 1.1)
     col = col * (1.0 - 0.34 * smoothstep(0.22, 0.95, length(v)))
@@ -2140,7 +2338,110 @@ mod.widgets.Window.draw_bg.pixel = fn() {
     let br = Finish.brushed(p, vec2(1.0, 0.0), px * 1.4) - 0.5
     let br2 = Finish.noise(vec2(p.x * 0.004, p.y / px * 0.7)) - 0.5
     col = col * (1.0 + br * 0.07 + br2 * 0.04)
+
+    // the quiet middle: decoration at full strength near the edges and the
+    // foot, fading to a fifth toward the middle of the window
+    let edge = min(min(p.x, W - p.x), min(p.y, (H - p.y) * 0.75))
+    let k = 1.0 - 0.8 * smoothstep(70.0, 140.0, edge)
+
+    // the engraved frame, 16 points in
+    let fd = bz_rbox(p, size * 0.5, size * 0.5 - vec2(16.0, 16.0), 10.0)
+    var eng = vec2(1.0 - smoothstep(0.30, 0.30 + px, abs(fd + 0.2)), 1.0 - smoothstep(0.30, 0.30 + px, abs(fd - 0.55)))
+    // a second, finer line 4 points inside it
+    eng = max(eng, vec2(1.0 - smoothstep(0.25, 0.25 + px, abs(fd + 4.2)), 1.0 - smoothstep(0.25, 0.25 + px, abs(fd + 3.45))) * 0.7)
+
+    // scrollwork in the four corners, 20 points in from the edges
+    let cx = min(p.x, W - p.x) - 20.0
+    let cy = min(p.y, H - p.y) - 20.0
+    if cx < 175.0 && cy < 175.0 {
+        let m = vec2(max(cx, cy), min(cx, cy))
+        eng = max(eng, bzg_scroll(m, px))
+    }
+    // and a band of scrollwork above the foot's pipes, folded about its
+    // middle both ways, drawn at one and a half times the corners' size
+    let fx = abs(p.x - W * 0.6) / 1.5
+    let fy = abs(p.y - (H - 88.0)) / 1.5 + 3.0
+    if fx < 180.0 && fy < 42.0 {
+        var g = bzg_vine(vec2(fx + 22.0, fy), 22.0, px / 1.5)
+        g = max(g, bzg_curl(vec2(fx, fy), vec2(0.0, 3.0), 4.2, 0.8, 16.0, 1.0, px / 1.5))
+        eng = max(eng, g)
+    }
+    let ek = mix(0.55, 1.0, k)
+    col = col * (1.0 - 0.45 * eng.x * ek) + vec3(0.115, 0.100, 0.078) * eng.y * ek
+
     col = col + g3(bz_grain(p / px, 0.020))
+
+    // THE MACHINERY, premultiplied, back to front
+    var dec = vec4(0.0, 0.0, 0.0, 0.0)
+    // rivets on the frame's outside, along the top and the foot, and screws
+    // in the four corners
+    let rp = 48.0
+    let rxx = (fract((p.x - 8.0) / rp + 0.5) - 0.5) * rp
+    let ryy = mix(p.y - 8.0, p.y - (H - 8.0), step(H * 0.5, p.y))
+    if abs(ryy) < 5.0 && p.x > 30.0 && p.x < W - 30.0 {
+        let rq = vec2(rxx, ryy)
+        dec = Finish.over(dec, bz_rivet(rq, vec2(0.0, 0.0), 2.0, px, 2.0, 0.0))
+    }
+    let sq = vec2(min(p.x, W - p.x), min(p.y, H - p.y)) - vec2(9.0, 9.0)
+    if length(sq) < 8.0 {
+        let sv = vec2(mix(p.x - 9.0, p.x - (W - 9.0), step(W * 0.5, p.x)), mix(p.y - 9.0, p.y - (H - 9.0), step(H * 0.5, p.y)))
+        dec = Finish.over(dec, bz_rivet(sv, vec2(0.0, 0.0), 4.0, px, 0.0, -0.05))
+        let slot = (1.0 - smoothstep(0.45, 0.45 + px, abs(sq.x + sq.y) * 0.7071)) * (1.0 - step(3.2, length(sq)))
+        dec = Finish.over(dec, vec4(bz_edge() * slot * 0.85, slot * 0.85))
+    }
+    let bx = floor(W * 0.2) + 60.0
+    let xe = floor(W * 0.55)
+    // the foot: two pipes from behind the left gears, bending down into the
+    // edge
+    if p.y > H - 70.0 && p.x > bx && p.x < xe + 40.0 {
+        let y1 = H - 52.0
+        let y2 = H - 30.0
+        let q1 = bzg_near(bzg_near(bzg_run(p, vec2(bx + 60.0, y1), vec2(xe, y1)), bzg_bend(p, vec2(xe, y1 + 16.0), 16.0, 1.0, -1.0)), bzg_run(p, vec2(xe + 16.0, y1 + 16.0), vec2(xe + 16.0, H + 20.0)))
+        let q2 = bzg_near(bzg_near(bzg_run(p, vec2(bx + 60.0, y2), vec2(xe - 10.0, y2)), bzg_bend(p, vec2(xe - 10.0, y2 + 8.0), 8.0, 1.0, -1.0)), bzg_run(p, vec2(xe - 2.0, y2 + 8.0), vec2(xe - 2.0, H + 20.0)))
+        dec = Finish.over(dec, bzg_pipe(q2, 6.0, px))
+        dec = Finish.over(dec, bzg_collar(q2, p.x - (bx + 130.0), 6.0, px))
+        dec = Finish.over(dec, bzg_collar(q2, p.x - (xe - 44.0), 6.0, px))
+        dec = Finish.over(dec, bzg_pipe(q1, 6.5, px))
+        dec = Finish.over(dec, bzg_collar(q1, p.x - (bx + 130.0), 6.5, px))
+        dec = Finish.over(dec, bzg_collar(q1, p.x - (xe - 44.0), 6.5, px))
+    }
+    // the top and the right edge: one pipe along the top that bends down
+    // the right edge
+    let xt = floor(W * 0.64)
+    if p.y < 36.0 && p.x > xt - 10.0 {
+        let qt = bzg_near(bzg_run(p, vec2(xt, 6.0), vec2(W - 26.0, 6.0)), bzg_bend(p, vec2(W - 26.0, 24.0), 18.0, 1.0, -1.0))
+        // a gear behind the bend
+        dec = Finish.over(dec, bzg_gear(p, vec2(W - 44.0, 30.0), 17.0, 12.0, 5.0, 0.3, px))
+        dec = Finish.over(dec, bzg_pipe(qt, 4.5, px))
+        dec = Finish.over(dec, bzg_collar(qt, p.x - xt - 2.0, 4.5, px))
+        dec = Finish.over(dec, bzg_collar(qt, p.x - (W - 120.0), 4.5, px))
+    }
+    if p.x > W - 20.0 && p.y > 20.0 {
+        let qr = bzg_near(bzg_run(p, vec2(W - 8.0, 24.0), vec2(W - 8.0, H - 40.0)), bzg_bend(p, vec2(W - 26.0, 24.0), 18.0, 1.0, -1.0))
+        dec = Finish.over(dec, bzg_pipe(qr, 4.5, px))
+        dec = Finish.over(dec, bzg_collar(qr, p.y - floor(H * 0.3), 4.5, px))
+        dec = Finish.over(dec, bzg_collar(qr, p.y - floor(H * 0.8), 4.5, px))
+    }
+    // gears: the left cluster at the foot
+    if p.y > H - 110.0 && p.x > bx - 100.0 && p.x < bx + 140.0 {
+        dec = Finish.over(dec, bzg_gear(p, vec2(bx - 52.0, H - 50.0), 26.0, 18.0, 5.0, 0.2, px))
+        dec = Finish.over(dec, bzg_gear(p, vec2(bx, H + 6.0), 58.0, 38.0, 6.0, 0.0, px))
+        dec = Finish.over(dec, bzg_gear(p, vec2(bx + 76.0, H - 42.0), 36.0, 24.0, 6.0, 0.12, px))
+    }
+    // the right cluster at the foot, and the corner
+    let rx = floor(W * 0.72) - 24.0
+    if p.y > H - 80.0 && p.x > rx - 90.0 {
+        dec = Finish.over(dec, bzg_gear(p, vec2(rx, H + 6.0), 42.0, 28.0, 6.0, 0.1, px))
+        dec = Finish.over(dec, bzg_gear(p, vec2(rx - 52.0, H - 26.0), 21.0, 15.0, 5.0, 0.25, px))
+        dec = Finish.over(dec, bzg_gear(p, vec2(W - 24.0, H + 10.0), 54.0, 36.0, 6.0, 0.05, px))
+    }
+    // the right edge, half way down
+    let ry = floor(H * 0.52)
+    if p.x > W - 60.0 && p.y > ry - 60.0 && p.y < ry + 100.0 {
+        dec = Finish.over(dec, bzg_gear(p, vec2(W + 12.0, ry), 46.0, 30.0, 6.0, 0.0, px))
+        dec = Finish.over(dec, bzg_gear(p, vec2(W - 10.0, ry + 58.0), 24.0, 16.0, 5.0, 0.2, px))
+    }
+    col = col * (1.0 - dec.a * k) + dec.rgb * k
     return vec4(col, 1.0)
 }
 true
