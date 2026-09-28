@@ -197,26 +197,27 @@ let fr_scratch = fn(p: vec2, px: float, cell: float, density: float) -> vec2 {
     return s
 }
 
-// The case: olive drab paint, a top-lit fall and a darkening toward the
-// far corners, the paint mottled over a hand's width, one grain value per
-// device pixel, scratches through to steel and a rare paint chip.
+// The paint's own mottle over a hand's width, for the case (see THE CASE
+// near the end) and the plates.
 let fr_paint = fn(p: vec2, px: float) -> float {
     // the mottle: two octaves of smooth noise, about 140 and 45 points
     let m = Finish.noise(p / 140.0 + vec2(3.1, 7.7)) * 0.65 + Finish.noise(p / 45.0 + vec2(11.3, 2.9)) * 0.35
     return (m - 0.5) * 0.045
 }
-let fr_ground = fn(p: vec2, size: vec2, px: float) -> vec3 {
-    let t = clamp(p.y / max(size.y, 1.0), 0.0, 1.0)
-    var col = mix(vec3(0.290, 0.306, 0.231), vec3(0.216, 0.227, 0.169), t)
-    let q = (p / max(size, vec2(1.0, 1.0)) - vec2(0.5, 0.36)) * vec2(1.0, 1.15)
-    col = col * (1.0 - 0.30 * smoothstep(0.25, 0.95, length(q)))
-    col = col * (1.0 + fr_paint(p, px) * 2.0)
-    col = col + g3(fr_grain(p / px, 0.022))
-    let sc = fr_scratch(p, px, 44.0, 0.42)
-    col = mix(col, col * 0.72, sc.y * 0.5)
-    col = mix(col, vec3(0.470, 0.475, 0.430), sc.x * 0.42)
-    let sc2 = fr_scratch(p + vec2(17.0, 29.0), px, 23.0, 0.18)
-    col = mix(col, vec3(0.420, 0.425, 0.385), sc2.x * 0.22)
+
+// The camouflage the case is painted in (see THE CASE near the end).
+let fr_camo = fn(q: vec2) -> vec3 {
+    let w = vec2(Finish.fbm(q / 260.0 + vec2(1.7, 9.2)), Finish.fbm(q / 260.0 + vec2(8.3, 2.8))) - vec2(0.5, 0.5)
+    let wf = vec2(Finish.noise(q / 31.0 + vec2(4.1, 0.7)), Finish.noise(q / 29.0 + vec2(9.3, 5.5))) - vec2(0.5, 0.5)
+    let ww = w * 1.9 + wf * 0.16
+    let n1 = Finish.fbm(q / 200.0 + vec2(3.3, 7.1) + ww)
+    let n2 = Finish.fbm(q / 160.0 + vec2(11.9, 4.4) + vec2(ww.y, ww.x))
+    let n3 = Finish.fbm(q / 120.0 + vec2(6.2, 13.8) - ww)
+    let e = 0.014
+    var col = vec3(0.278, 0.286, 0.202)
+    col = mix(col, vec3(0.235, 0.247, 0.157), smoothstep(0.52 - e, 0.52 + e, n1))
+    col = mix(col, vec3(0.255, 0.238, 0.168), smoothstep(0.56 - e, 0.56 + e, n2))
+    col = mix(col, vec3(0.180, 0.186, 0.136), smoothstep(0.63 - e, 0.63 + e, n3))
     return col
 }
 
@@ -1006,50 +1007,72 @@ mod.widgets.RadioButtonTabFlat.draw_text.color_active = #f4ead0
 mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #6e6c58
 
 // ---------------------------------------------------------------------------
-// SLIDERS. A black groove five device pixels deep cut into the case; the
-// value is an amber filament in it, hot at its core, glowing onto the case
-// above and below; printed ticks every tenth above and below the groove,
-// amber where the value has passed; a ribbed steel thumb block rides on it.
+// SLIDERS. A slot seven device pixels deep cut into the case, a bright lip
+// under it; the value is an amber filament lying in the slot, a pale hot
+// core in an amber body, its light spilling onto the case above and below;
+// printed ticks cross the slot every tenth, amber where the value has
+// passed. The bar sliders' thumb is a heavy block of ribbed dark steel:
+// deep vertical ribs with lit crests, three polished lands, a bright bevel
+// along its top, a dark foot and a long shadow on the case. The minimal
+// and round sliders carry a smaller domed steel thumb.
+// The minimal slider grows its quad 9 points for its thumb's shadow; the
+// templates made from it that keep to 6 say so themselves.
 mod.widgets.SliderMinimal.draw_bg.vertex = fn() {
+    let g = grow_vertex(self.rect_pos, self.rect_size, 9.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
+    let g = grow_vertex(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
+    let g = grow_vertex(self.rect_pos, self.rect_size, 6.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
+mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
     let g = grow_vertex(self.rect_pos, self.rect_size, 6.0)
     self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
 }
 mod.widgets.SliderMinimal.clip_x = false
 mod.widgets.SliderMinimal.clip_y = false
 
-// The groove and its filament; `lo` its top left, `w` its length, `fx`
+// Steel by its luminance, a cold olive cast.
+let fr_steel_tone = fn(l: float) -> vec3 {
+    return vec3(l * 0.985, l, l * 0.93)
+}
+
+// The slot and its filament; `lo` its top left, `w` its length, `fx`
 // where the value ends.
-let fr_track = fn(p: vec2, lo: vec2, w: float, px: float, fx: float, dis: float, hot: float) -> vec4 {
-    let th = 5.0 * px
+let fr_slot = fn(p: vec2, lo: vec2, w: float, px: float, fx: float, dis: float, hot: float) -> vec4 {
+    let th = 7.0 * px
     let h = vec2(w * 0.5, th * 0.5)
     let c = lo + h
     let r = h.y
     let d = fr_rbox(p, c, h, r)
-    var col = fr_well(p, c, h, r, px, mix(vec3(0.035, 0.037, 0.027), vec3(0.090, 0.094, 0.075), dis), 1.4)
-    // the filament: rows 2 and 3 of the five, from the start to fx
+    var col = fr_well(p, c, h, r, px, mix(vec3(0.028, 0.029, 0.020), vec3(0.090, 0.094, 0.075), dis), 2.0)
+    // the filament: a pale core row, an amber row each side, a deep rim
     let row = floor((p.y - lo.y) / px)
-    let inx = step(lo.x + px, p.x) * step(p.x, fx)
-    let r2 = step(1.5, row) * step(row, 2.5)
-    let r3 = step(2.5, row) * step(row, 3.5)
-    var lit = fr_rim_hi() * r2 + fr_fill() * r3
-    lit = lit * (1.0 + 0.10 * hot)
-    lit = mix(lit, fr_off() * (1.0 + 0.2 * r2), dis)
-    col = mix(col, lit, inx * (r2 + r3))
-    // the filament's dim ends inside the groove
-    col = mix(col, fr_rim_lo(), inx * (step(0.5, row) * step(row, 1.5) + step(3.5, row) * step(row, 4.5)) * 0.8 * (1.0 - dis))
+    let inx = step(lo.x + 1.5 * px, p.x) * step(p.x, fx)
+    let core = step(2.5, row) * step(row, 3.5)
+    let body = step(1.5, row) * step(row, 2.5) + step(3.5, row) * step(row, 4.5)
+    let rim = step(0.5, row) * step(row, 1.5) + step(4.5, row) * step(row, 5.5)
+    var lit = mix(fr_rim_hi(), vec3(1.0, 0.95, 0.84), 0.4) * core + fr_fill() * body + fr_rim_lo() * 0.6 * rim
+    lit = lit * (1.0 + 0.12 * hot)
+    col = mix(col, lit, inx * (core + body + rim) * (1.0 - dis))
+    col = mix(col, fr_off() * (1.0 + 0.25 * core), inx * (core + body) * dis)
     let a = Finish.cover(d, px)
-    var out = fr_lip(p, c, h, r, px, 0.08)
-    // its glow on the case, above and below the groove
-    let gx = step(lo.x, p.x) * smoothstep(fx + 1.0, fx - 2.0, p.x)
+    // the slot's bright lower lip on the case
+    var out = fr_lip(p, c, h, r, px, 0.26)
+    // the filament's light on the case, above and below the slot
+    let gx = step(lo.x, p.x) * smoothstep(fx + 1.5, fx - 3.0, p.x)
     let gd = abs(p.y - c.y) - h.y
-    let ga = (0.42 * exp(-max(gd, 0.0) / 1.4) + 0.10 * exp(-max(gd, 0.0) / 4.0)) * gx * (1.0 - dis) * (1.0 - a) * step(0.0, gd)
-    let k = fr_fill()
-    out = Finish.over(out, vec4(k * ga, ga))
+    let ga = (0.30 * exp(-max(gd, 0.0) / 1.5) + 0.16 * exp(-max(gd, 0.0) / 6.0)) * (1.0 + 0.25 * hot) * gx * (1.0 - dis) * (1.0 - a) * step(0.0, gd)
+    out = Finish.over(out, vec4(fr_fill() * ga, ga))
     return Finish.over(out, vec4(col * a, a))
 }
 
 // Printed ticks: every tenth of the travel from `x0` over `w`, a device
-// pixel wide, `len` long, `gap` clear of the groove's middle `cy`, on both
+// pixel wide, `len` long, `gap` clear of the slot's middle `cy`, on both
 // sides; khaki, amber where the value has passed.
 let fr_ticks = fn(p: vec2, x0: float, w: float, cy: float, gap: float, len: float, px: float, fx: float, dis: float) -> vec4 {
     let f = (p.x - x0) / max(w, 1.0) * 10.0
@@ -1059,96 +1082,152 @@ let fr_ticks = fn(p: vec2, x0: float, w: float, cy: float, gap: float, len: floa
     let dx = abs(p.x - tx)
     let tw = 1.0 - smoothstep(px * 0.5 - 0.01, px * 0.5 + 0.01, dx)
     let major = 1.0 - step(0.3, abs(fract(fi / 5.0 + 0.5) - 0.5))
-    let ln = len * mix(1.0, 1.5, major)
+    let ln = len * mix(1.0, 1.4, major)
     let dy = abs(p.y - cy)
     let ty = step(gap, dy) * step(dy, gap + ln)
     let passed = step(tx, fx) * (1.0 - dis)
-    let col = mix(vec3(0.62, 0.58, 0.44), fr_fill(), passed)
-    let a = tw * ty * in_rng * mix(0.42, 0.85, passed) * mix(1.0, 0.5, dis)
+    let col = mix(vec3(0.66, 0.62, 0.47), fr_fill(), passed)
+    let a = tw * ty * in_rng * mix(0.50, 0.90, passed) * mix(1.0, 0.5, dis)
     return vec4(col * a, a)
 }
 
-// The thumb: a ribbed steel block, half size `hh`, lit from above: a bright
-// chamfer on its top, smooth end caps, the ribs across its middle, a black
-// edge and a shadow on the case.
-let fr_block = fn(p: vec2, c: vec2, hh: vec2, px: float, hover: float, press: float, dis: float) -> vec4 {
+// The bar thumb: a block of ribbed dark steel, half size `hh`. Deep ribs
+// 2.3 points apart, each crest catching a bright line; three polished
+// lands, the middle one and one near each end; the ends past them round
+// away; a bright bevel along the top, a dark foot, a near-black rim, a
+// tight contact shadow and a long soft one down and to the right.
+let fr_slab = fn(p: vec2, c: vec2, hh: vec2, px: float, hover: float, press: float, dis: float) -> vec4 {
     let ink = fr_shadow_ink()
     var out = vec4(0.0, 0.0, 0.0, 0.0)
-    let sh = Finish.drop(p, c, hh, 1.5, vec2(0.6, 1.8), 1.6) * 0.65 * mix(1.0, 0.4, dis) * (1.0 - 0.4 * press)
+    let lift = mix(1.0, 0.45, dis) * (1.0 - 0.45 * press)
+    let sh = Finish.drop(p, c, hh, 2.5, vec2(1.0, 5.0), 2.2) * 0.95 * lift
     out = Finish.over(out, vec4(ink * sh, sh))
-    let d = fr_rbox(p, c, hh, 1.5)
-    let v = clamp((p.y - (c.y - hh.y)) / max(2.0 * hh.y, 1.0), 0.0, 1.0)
-    let u = (p.x - c.x) / max(hh.x, 1.0)
-    // across its height: a bright chamfer, a lit upper face, a dark foot
-    var face = mix(vec3(0.50, 0.50, 0.47), vec3(0.24, 0.24, 0.22), smoothstep(0.15, 0.95, v))
-    face = mix(face, vec3(0.76, 0.76, 0.72), 1.0 - smoothstep(0.0, 0.18, v))
-    face = mix(face, vec3(0.10, 0.10, 0.09), smoothstep(0.86, 1.0, v))
-    // the ribs over the middle 60 %, 2.2 points apart, each a lit crest and
-    // a dark groove
-    let mid = 1.0 - smoothstep(0.55, 0.62, abs(u))
-    let rb = fract((p.x - c.x) / 2.2 + 0.5)
-    let crest = smoothstep(0.15, 0.45, rb) * (1.0 - smoothstep(0.55, 0.85, rb))
-    face = face * mix(1.0, mix(0.55, 1.18, crest), mid * smoothstep(0.1, 0.25, v) * (1.0 - smoothstep(0.85, 0.95, v)))
-    // the dividing grooves where the end caps meet the ribs
-    let gv = 1.0 - smoothstep(px * 0.5, px * 1.2, abs(abs(u) - 0.62) * hh.x)
-    face = mix(face, vec3(0.06, 0.06, 0.05), gv * 0.8)
-    face = face + g3(0.06 * hover - 0.06 * press)
+    let con = Finish.drop(p, c, hh, 2.5, vec2(0.0, 1.0), 0.9) * 0.75
+    out = Finish.over(out, vec4(ink * con, con))
+    let d = fr_rbox(p, c, hh, 2.5)
+    let ty = p.y - (c.y - hh.y)
+    let v = clamp(ty / max(2.0 * hh.y, 1.0), 0.0, 1.0)
+    let x = p.x - c.x
+    let ax = abs(x)
+    // the body in section: lit high, falling to the foot
+    let l = mix(0.40, 0.20, smoothstep(0.05, 1.0, v))
+    // the ribs, phase locked to the middle land: narrow lit crests on dark
+    // steel, each with a hot line
+    let rib = 0.5 + 0.5 * cos(6.28318 * x / 2.6)
+    var rl = l * (0.42 + 0.72 * pow(rib, 1.6)) + 0.34 * pow(rib, 12.0) * (1.0 - 0.5 * v)
+    // the lands
+    let land_x = 0.84 * hh.x
+    let ld = min(ax, abs(ax - land_x))
+    let land = 1.0 - smoothstep(1.5, 1.5 + px, ld)
+    rl = mix(rl, mix(0.78, 0.46, smoothstep(0.0, 1.0, v)), land)
+    // a dark cut each side of a land
+    rl = mix(rl, 0.08, (1.0 - smoothstep(0.0, px, abs(ld - 1.5 - 0.5 * px))) * 0.5)
+    // past the outer lands the block's ends turn away, the left end lit
+    let endz = smoothstep(land_x + 1.4, land_x + 1.4 + px, ax)
+    let turn = clamp((ax - land_x - 1.4) / max(hh.x - land_x - 1.4, 0.5), 0.0, 1.0)
+    let el = mix(0.34, 0.10, turn) * mix(1.0, 0.70, v) + 0.06 * step(x, 0.0) * (1.0 - turn)
+    rl = mix(rl, el, endz)
+    // the bevel along the top, the foot
+    let topb = step(px, ty) * (1.0 - smoothstep(2.0 * px, 3.0 * px, ty)) * step(ax, hh.x - 1.5)
+    rl = mix(rl, 0.92, topb * 0.9)
+    let foot = smoothstep(2.0 * hh.y - 3.0 * px, 2.0 * hh.y - px, ty)
+    rl = mix(rl, 0.10, foot * 0.8)
+    rl = rl + 0.07 * hover - 0.07 * press
+    var face = fr_steel_tone(rl) + g3(fr_grain(p / px, 0.012))
     face = mix(face, mix(g3(0.24), face * 0.5, 0.5), dis)
     face = mix(face, fr_bezel(), Finish.band(d, 0.0, px, px) * 0.9)
     let a = Finish.cover(d, px)
     return Finish.over(out, vec4(face * a, a))
 }
 
+// The small thumb: a domed steel button. The room's light above, the dark
+// case reflected below with a lit crescent at its foot, a hot highlight up
+// and to the left, turned rings, a dark rim and a cast shadow.
+let fr_ball = fn(p: vec2, c: vec2, rad: float, px: float, hover: float, press: float, dis: float) -> vec4 {
+    let ink = fr_shadow_ink()
+    var out = vec4(0.0, 0.0, 0.0, 0.0)
+    let lift = mix(1.0, 0.45, dis) * (1.0 - 0.45 * press)
+    let sh = Finish.drop(p, c, vec2(rad, rad), rad, vec2(0.6, 1.6), 1.4) * 0.80 * lift
+    out = Finish.over(out, vec4(ink * sh, sh))
+    let q = p - c
+    let d = length(q) - rad
+    let con = Finish.ring_out(d, 0.0, 1.5 * px, px) * 0.75
+    out = Finish.over(out, vec4(ink * con, con))
+    let u = q / max(rad, 0.5)
+    let r2 = min(dot(u, u), 1.0)
+    let rr = sqrt(r2)
+    let n = vec3(u.x, u.y, sqrt(1.0 - r2))
+    let lgt = normalize(vec3(-0.35, -0.8, 0.5))
+    let dif = clamp(dot(n, lgt), 0.0, 1.0)
+    var l = mix(0.70, 0.20, smoothstep(-0.35, 0.30, u.y))
+    l = l * (0.55 + 0.45 * dif)
+    let cres = smoothstep(0.50, 0.90, u.y) * (1.0 - smoothstep(0.90, 0.99, rr))
+    l = l + 0.28 * cres
+    let hv = normalize(lgt + vec3(0.0, 0.0, 1.0))
+    l = l + 0.75 * pow(clamp(dot(n, hv), 0.0, 1.0), 60.0)
+    l = l + (Finish.noise(vec2(length(q) / px, 0.37)) - 0.5) * 0.03
+    l = l + 0.07 * hover - 0.07 * press
+    var face = fr_steel_tone(l)
+    face = mix(face, mix(g3(0.24), face * 0.5, 0.5), dis)
+    face = mix(face, face * 0.45, smoothstep(0.82, 1.0, rr) * (1.0 - 0.6 * cres))
+    face = mix(face, fr_bezel(), Finish.band(d, 0.0, px, px) * 0.85)
+    let a = Finish.cover(d, px)
+    return Finish.over(out, vec4(face * a, a))
+}
+
 mod.widgets.SliderFlat.height = 38.0
+mod.widgets.SliderFlat.draw_bg.vertex = fn() {
+    let g = grow_vertex(self.rect_pos, self.rect_size, 12.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
 mod.widgets.SliderFlat.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let m = 6.0
+    let m = 12.0
     let size = self.rect_size
     let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let o = self.rect_pos
     let live = 1.0 - self.disabled
-    let bw = 13.0
-    let bh = 8.0
-    let cy = Finish.snap(o.y + size.y - bh - 1.5, px) - o.y
-    let top = cy - 2.0 * px
+    let bw = 18.0
+    let bh = 10.5
+    let cy = Finish.snap(o.y + size.y - 9.5, px) - o.y
+    let top = cy - 3.0 * px
     let x0 = Finish.snap(o.x + 1.0, px) - o.x
     let w = Finish.snap(o.x + size.x - 1.0, px) - o.x - x0
     let kx = x0 + bw + self.slide_pos * (w - 2.0 * bw)
     let hot = max(self.hover, self.drag) * live
-    var out = fr_ticks(p, x0 + bw, w - 2.0 * bw, cy + 0.5 * px, 3.5, 2.5, px, kx, self.disabled)
-    out = Finish.over(out, fr_track(p, vec2(x0, top), w, px, kx, self.disabled, hot))
+    var out = fr_ticks(p, x0 + bw, w - 2.0 * bw, cy + 0.5 * px, 4.0, 3.5, px, kx, self.disabled)
+    out = Finish.over(out, fr_slot(p, vec2(x0, top), w, px, kx, self.disabled, hot))
     let bc = vec2(Finish.snap(o.x + kx, px) - o.x, cy + 0.5 * px)
-    out = Finish.over(out, fr_block(p, bc, vec2(bw, bh), px, self.hover * live, self.drag * live, self.disabled))
-    // held or focused, a thin amber line lights along the block's crest
-    let ln = step(abs(p.x - bc.x), bw - 3.0) * step(bc.y - bh + px, p.y) * step(p.y, bc.y - bh + 2.0 * px) * max(self.focus, self.drag) * live
+    out = Finish.over(out, fr_slab(p, bc, vec2(bw, bh), px, self.hover * live, self.drag * live, self.disabled))
+    // held or focused, an amber line lights under the block's top bevel
+    let ln = step(abs(p.x - bc.x), bw - 3.0) * step(bc.y - bh + 3.0 * px, p.y) * step(p.y, bc.y - bh + 4.0 * px) * max(self.focus, self.drag) * live
     out = Finish.over(out, vec4(fr_acc() * ln, ln))
-    return Finish.over(out, fr_focus(fr_rbox(p, bc, vec2(bw, bh), 1.5), px, self.focus * live))
+    return Finish.over(out, fr_focus(fr_rbox(p, bc, vec2(bw, bh), 2.5), px, self.focus * live))
 }
 
-// The minimal slider: the groove and filament alone, a smaller block.
+// The minimal slider: the slot and filament alone, the domed thumb.
 mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let m = 6.0
+    let m = 9.0
     let size = self.rect_size
     let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let o = self.rect_pos
     let live = 1.0 - self.disabled
-    let bw = 8.0
-    let bh = 5.0
-    let cy = Finish.snap(o.y + size.y - 5.0, px) - o.y
+    let rad = 7.0
+    let cy = Finish.snap(o.y + size.y - 4.5, px) - o.y
     let x0 = Finish.snap(o.x, px) - o.x
     let w = Finish.snap(o.x + size.x, px) - o.x - x0
-    let kx = x0 + bw + self.slide_pos * (w - 2.0 * bw)
+    let kx = x0 + rad + self.slide_pos * (w - 2.0 * rad)
     let hot = max(self.hover, self.drag) * live
-    var out = fr_track(p, vec2(x0, cy - 2.0 * px), w, px, kx, self.disabled, hot)
+    var out = fr_slot(p, vec2(x0, cy - 3.0 * px), w, px, kx, self.disabled, hot)
     let bc = vec2(Finish.snap(o.x + kx, px) - o.x, cy + 0.5 * px)
-    out = Finish.over(out, fr_block(p, bc, vec2(bw, bh), px, self.hover * live, self.drag * live, self.disabled))
-    return Finish.over(out, fr_focus(fr_rbox(p, bc, vec2(bw, bh), 1.5), px, self.focus * live))
+    out = Finish.over(out, fr_ball(p, bc, rad, px, self.hover * live, self.drag * live, self.disabled))
+    return Finish.over(out, fr_focus(length(p - bc) - rad, px, self.focus * live))
 }
 mod.widgets.SliderMinimal.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 7.5}
 
 // The round slider: a pill well beside its label, the filament inside it
-// and a small block riding in the well; the value reads on the well.
+// and the domed thumb riding in the well; the value reads on the well.
 mod.widgets.SliderRoundFlat.height = 16.0
 mod.widgets.SliderRoundFlat.text_input.margin = mod.turtle.Inset{left: 0.0 right: 8.0 top: 0.0 bottom: 0.0}
 mod.widgets.SliderRoundFlat.text_input.min_height = 0.0
@@ -1173,20 +1252,20 @@ mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
     let edge = rw + px
     let hin = h - vec2(edge, edge)
     var col = fr_well(p, c, hin, hin.y, px, vec3(0.035, 0.037, 0.027) + g3(0.018 * self.hover * live), 2.0)
-    let bw = 7.0
-    let bh = hin.y - px
-    let kx = x0 + edge + bw + self.slide_pos * (2.0 * hin.x - 2.0 * bw)
-    // the filament, two device pixels at the well's middle
+    let rad = hin.y + 1.0
+    let kx = x0 + edge + rad + self.slide_pos * (2.0 * hin.x - 2.0 * rad)
+    // the filament, a pale core row between two amber rows, deep rims
     let mid = Finish.snap(o.y + c.y, px) - o.y
     let row = floor((p.y - mid) / px + 1.0)
     let inx = step(x0 + edge + 2.0 * px, p.x) * step(p.x, kx)
+    let r1 = step(-1.5, row) * step(row, -0.5) + step(1.5, row) * step(row, 2.5)
     let r2 = step(-0.5, row) * step(row, 0.5)
     let r3 = step(0.5, row) * step(row, 1.5)
-    var lit = fr_rim_hi() * r2 + fr_fill() * r3
+    var lit = mix(fr_rim_hi(), vec3(1.0, 0.95, 0.84), 0.4) * r2 + fr_fill() * r3 + fr_rim_lo() * r1
     lit = mix(lit, fr_off(), self.disabled)
-    col = mix(col, lit, inx * (r2 + r3))
+    col = mix(col, lit, inx * (r1 + r2 + r3))
     // its glow in the well
-    let gl = inx * exp(-abs(p.y - mid) / 1.6) * 0.35 * live * (1.0 - r2 - r3)
+    let gl = inx * exp(-abs(p.y - mid) / 1.6) * 0.35 * live * (1.0 - r1 - r2 - r3)
     col = mix(col, fr_fill(), gl)
     col = mix(col, fr_bezel(), Finish.band(d, rw, edge, px))
     var steel = fr_ring_steel(p, c, h, r, px, rw, q)
@@ -1199,7 +1278,7 @@ mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
     out = Finish.over(out, vec4(ink * sh, sh))
     out = Finish.over(out, vec4(col * a, a))
     let bc = vec2(Finish.snap(o.x + kx, px) - o.x, c.y)
-    out = Finish.over(out, fr_block(p, bc, vec2(bw, bh), px, self.hover * live, self.drag * live, self.disabled))
+    out = Finish.over(out, fr_ball(p, bc, rad, px, self.hover * live, self.drag * live, self.disabled))
     return Finish.over(out, fr_focus(d, px, self.focus * live))
 }
 
@@ -1363,15 +1442,21 @@ mod.widgets.RotaryKnob.draw_text.text_style = mod.theme.font_bold{font_size: 7.0
 mod.widgets.RotaryKnob.draw_text.color = #d2c8a5
 
 // ---------------------------------------------------------------------------
-// FADERS. A black slot three points wide with a lighter wall, printed ticks
+// FADERS. A black slot four points wide with a lighter wall, printed ticks
 // on one side and a row of lamp dots on the other, lit amber below the
-// value; the cap is a ribbed steel block with a centre line that lights
-// amber while it is held.
-mod.widgets.SliderFader.cap_size = 12.0
-mod.widgets.SliderFader.draw_bg.cap_cross = 0.6
+// value; the cap is a tall block of ribbed dark steel: ribs across the
+// travel with lit crests, a polished land across its middle split by an
+// index line that lights amber while it is held, a bright bevel on top, a
+// dark foot and a long shadow on the case.
+mod.widgets.SliderFader.cap_size = 32.0
+mod.widgets.SliderFader.draw_bg.cap_cross = 0.8
+mod.widgets.SliderFader.draw_bg.vertex = fn() {
+    let g = grow_vertex(self.rect_pos, self.rect_size, 10.0)
+    self.vertex_pos = self.clip_and_transform_vertex(g.xy, g.zw)
+}
 mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
-    let m = 6.0
+    let m = 10.0
     let size = self.rect_size
     let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let live = 1.0 - self.disabled
@@ -1385,14 +1470,14 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let foot = self.inset_px + self.cap_px * 0.5
     let mid = floor(across * 0.5 * 1.5) / 1.5
     let q = vec2(a, b)
-    // the slot: a three point channel, a black centre point wide
-    let sw = 3.0
+    // the slot: a four point channel, a black centre two points wide
+    let sw = 4.0
     let sh = vec2((along - self.inset_px * 2.0) * 0.5, sw * 0.5)
     let sc = vec2(self.inset_px + sh.x, mid)
     let sd = fr_rbox(q, sc, sh, sh.y)
-    let cd0 = fr_rbox(q, sc, vec2(sh.x - 0.5, 0.5), 0.5)
+    let cd0 = fr_rbox(q, sc, vec2(sh.x - 1.0, 1.0), 1.0)
     var col = mix(vec3(0.100, 0.105, 0.085), vec3(0.140, 0.145, 0.120), self.disabled)
-    col = mix(col, vec3(0.016, 0.016, 0.024), Finish.cover(cd0, px))
+    col = mix(col, vec3(0.012, 0.012, 0.018), Finish.cover(cd0, px))
     let sa = Finish.cover(sd, px)
     var out = vec4(col * sa, sa)
     // ticks on the far side: every tenth, a long one at each quarter
@@ -1419,32 +1504,46 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let da2 = Finish.cover(dd, px) * in_d
     out = Finish.over(out, vec4(dcol * da2, da2))
     // the cap
-    let cap_w = min(max(across * self.cap_cross, 4.0), across)
+    let cap_w = min(max(across * self.cap_cross, 4.0), min(across, 20.0))
     let ch = vec2(self.cap_px * 0.5, cap_w * 0.5)
     let cc = vec2(at, mid)
-    let cd = fr_rbox(q, cc, ch, 1.5)
-    let down_y = mix(vec2(0.0, 1.0), vec2(-1.0, 0.0), vert)
+    let cd = fr_rbox(q, cc, ch, 2.5)
+    // window down and window right, in track space
+    let down_w = mix(vec2(0.0, 1.0), vec2(-1.0, 0.0), vert)
+    let right_w = mix(vec2(1.0, 0.0), vec2(0.0, 1.0), vert)
     let ink = fr_shadow_ink()
-    let amb = Finish.drop(q, cc, ch, 1.5, down_y * 1.2 + vec2(0.3, 0.0), 1.4) * 0.45 * mix(1.0, 0.3, self.disabled)
+    let lift = mix(1.0, 0.45, self.disabled) * (1.0 - 0.45 * self.drag * live)
+    let amb = Finish.drop(q, cc, ch, 2.5, down_w * 4.0 + right_w * 1.2, 3.0) * 0.90 * lift
     out = Finish.over(out, vec4(ink * amb, amb))
-    let con = Finish.drop(q, cc, ch, 1.5, down_y * px, px) * 0.6
+    let con = Finish.drop(q, cc, ch, 2.5, down_w * 1.0, 0.9) * 0.75
     out = Finish.over(out, vec4(ink * con, con))
-    // the cap's face in window terms: ribbed steel lit from above, each rib
-    // a lit crest over a dark groove, across the travel
+    // the cap in window terms: `wy` down from its middle, `wh` its half height
     let wy = mix(q.y - cc.y, cc.x - q.x, vert)
     let wh = mix(ch.y, ch.x, vert)
-    let tt = clamp(wy / max(2.0 * wh, 1.0) + 0.5, 0.0, 1.0)
-    var face = mix(vec3(0.64, 0.64, 0.60), vec3(0.20, 0.20, 0.18), smoothstep(0.1, 1.0, tt))
-    let rib = fract((a - at) / 1.8 + 0.5)
-    let crest = smoothstep(0.15, 0.45, rib) * (1.0 - smoothstep(0.55, 0.85, rib))
-    face = face * mix(0.58, 1.15, crest)
-    face = face + g3(0.05 * max(self.hover, self.focus) * live - 0.05 * self.drag * live)
-    face = mix(face, g3(0.22), self.disabled * 0.7)
-    // the centre line: dark at rest, amber while held
-    let cl = 1.0 - smoothstep(px * 0.5 - 0.01, px * 0.5 + 0.01, abs(a - at))
+    let ty = wy + wh
+    let v = clamp(ty / max(2.0 * wh, 1.0), 0.0, 1.0)
+    // ribs across the travel, 2.6 points apart, phase locked to the land
+    let s = q.x - cc.x
+    let rib = 0.5 + 0.5 * cos(6.28318 * s / 3.0)
+    let l = mix(0.44, 0.22, smoothstep(0.05, 1.0, v))
+    var rl = l * (0.32 + 0.90 * rib) + 0.34 * pow(rib, 8.0) * (1.0 - 0.4 * v)
+    let land = 1.0 - smoothstep(1.8, 1.8 + px, abs(s))
+    rl = mix(rl, mix(0.70, 0.46, v), land)
+    // a smooth chamfer and a bright bevel along the top, a dark foot
+    let chamf = 1.0 - smoothstep(2.4, 3.4, ty)
+    rl = mix(rl, mix(0.64, 0.50, clamp(ty / 3.4, 0.0, 1.0)), chamf * 0.85)
+    let topb = step(px, ty) * (1.0 - smoothstep(2.0 * px, 3.0 * px, ty))
+    rl = mix(rl, 0.93, topb * 0.9)
+    let footb = smoothstep(2.0 * wh - 3.0, 2.0 * wh - 0.8, ty)
+    rl = mix(rl, 0.12, footb * 0.85)
+    rl = rl + 0.07 * max(self.hover, self.focus) * live - 0.07 * self.drag * live
+    var face = fr_steel_tone(rl) + g3(fr_grain(p / px, 0.012))
+    face = mix(face, mix(g3(0.24), face * 0.5, 0.5), self.disabled)
+    // the index line: dark at rest, amber while held
+    let cl = 1.0 - smoothstep(px * 0.5 - 0.01, px * 0.5 + 0.01, abs(s))
     let line = mix(g3(0.08), fr_acc(), self.drag * live)
-    face = mix(face, line, cl * step(abs(b - mid), ch.y - 1.0))
-    face = mix(face, fr_bezel(), Finish.band(cd, 0.0, px, px))
+    face = mix(face, line, cl * step(abs(q.y - mid), ch.y - 1.5))
+    face = mix(face, fr_bezel(), Finish.band(cd, 0.0, px, px) * 0.9)
     let ca = Finish.cover(cd, px)
     out = Finish.over(out, vec4(face * ca, ca))
     return Finish.over(out, fr_focus(cd, px, self.focus * live))
@@ -2006,8 +2105,8 @@ let fr_plate = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, sunken: flo
     let t = clamp((p.y - lo.y) / max(2.0 * h.y, 1.0), 0.0, 1.0)
     let q = p + o
     // the plate: darker olive paint, mottled, grained and scratched
-    var face = mix(vec3(0.165, 0.176, 0.129), vec3(0.137, 0.145, 0.106), t)
-    face = mix(face, mix(vec3(0.125, 0.133, 0.098), vec3(0.110, 0.118, 0.086), t), sunken)
+    // the case's camouflage, a shade darker on the plate, darker again in a pocket
+    var face = fr_camo(q) * mix(mix(0.60, 0.50, t), mix(0.45, 0.40, t), sunken)
     face = face * (1.0 + fr_paint(q * 1.7, px) * 2.2)
     face = face + g3(fr_grain(q / px, 0.018))
     let sc = fr_scratch(q + vec2(5.0, 11.0), px, 36.0, 0.45)
@@ -2272,7 +2371,75 @@ mod.widgets.Vr.draw_bg.pixel = fn() {
 }
 
 // ---------------------------------------------------------------------------
-// THE PLATE under everything: the window's own ground.
+// THE CASE under everything: the window's own ground. Olive paint over
+// steel in a woodland camouflage of four close tones -- field olive, olive
+// drab, brown-green and a little near-black -- in blotches of 80 to 200
+// points whose edges are bent by a slow warp and roughened by a quick one,
+// soft over two or three points. Over the paint: a top-lit fall, a lit band
+// along the top edge, one heavy seam across the case held by big slotted
+// screws, water stains with a tide line, scuffs where the paint wears to a
+// paler coat, scratches through to steel and grain. Everything is laid in
+// window points, so nothing swims, and no lattice repeats within a window.
+
+// Where the seam crosses the case, in window points: in the gap under the
+// catalogue's toolbar, which stays put whatever page is shown, so the seam
+// never runs through a page's text and the lit band stands above it.
+let fr_seam_y = fn() -> float {
+    return 73.0
+}
+
+let fr_ground = fn(p: vec2, size: vec2, px: float) -> vec3 {
+    let t = clamp(p.y / max(size.y, 1.0), 0.0, 1.0)
+    var col = fr_camo(p)
+    // the paint's own mottle inside each tone
+    col = col * (1.0 + fr_paint(p, px) * 1.2)
+    // stains: slow patches soaked a little darker, a darker tide line round them
+    let st = Finish.fbm(p / 90.0 + vec2(21.3, 5.9) + vec2(Finish.noise(p / 23.0) * 0.4, 0.0))
+    let stain = smoothstep(0.64, 0.70, st)
+    let tide = smoothstep(0.62, 0.645, st) * (1.0 - smoothstep(0.655, 0.68, st))
+    col = col * (1.0 - 0.07 * stain - 0.06 * tide)
+    // scuffs: drifts where the paint is rubbed thin to a paler coat
+    let sd = Finish.fbm(p / 70.0 + vec2(2.2, 31.7))
+    let fine = Finish.noise(p / 2.2 + vec2(7.1, 3.3))
+    let scuff = smoothstep(0.66, 0.74, sd) * smoothstep(0.55, 0.80, fine)
+    col = mix(col, vec3(0.40, 0.40, 0.33), scuff * 0.25)
+    // the fall from the top light, the far corners darker
+    col = col * mix(1.0, 0.82, t)
+    let vg = (p / max(size, vec2(1.0, 1.0)) - vec2(0.5, 0.36)) * vec2(1.0, 1.15)
+    col = col * (1.0 - 0.22 * smoothstep(0.30, 0.95, length(vg)))
+    // the lit band along the top edge and its bright arris
+    col = col * (1.0 + 0.20 * exp(-p.y / 14.0))
+    col = mix(col, vec3(0.56, 0.57, 0.48), step(px, p.y) * step(p.y, 2.0 * px) * 0.7)
+    // the seam: the upper plate's edge rolls away into a black gap, the
+    // lower plate's lit chamfer stands under it, worn to steel in places,
+    // and the upper edge is chipped
+    let dy = p.y - fr_seam_y()
+    col = col * (1.0 - 0.45 * smoothstep(-3.0, -0.3, dy) * step(dy, 0.0))
+    let chip = smoothstep(0.62, 0.78, Finish.noise(p / 2.6 + vec2(3.3, 8.1))) * exp(-abs(dy + 3.5) / 2.5) * smoothstep(0.35, 0.7, Finish.noise(vec2(p.x / 40.0, 1.3)))
+    col = mix(col, vec3(0.42, 0.43, 0.36), chip * 0.5)
+    col = mix(col, vec3(0.030, 0.032, 0.022), step(0.0, dy) * step(dy, 1.5))
+    let chf = step(1.5, dy) * (1.0 - smoothstep(3.0, 4.2, dy))
+    let wear = smoothstep(0.45, 0.75, Finish.noise(vec2(p.x / 6.0, 3.7)) * 0.6 + Finish.noise(vec2(p.x / 1.7, 9.1)) * 0.4)
+    col = mix(col, mix(vec3(0.44, 0.45, 0.36), vec3(0.66, 0.67, 0.60), wear), chf * 0.85)
+    col = col * (1.0 - 0.10 * exp(-max(dy - 4.2, 0.0) / 3.0) * step(4.2, dy))
+    // grain and scratches through to steel
+    col = col + g3(fr_grain(p / px, 0.022))
+    let sc = fr_scratch(p, px, 44.0, 0.42)
+    col = mix(col, col * 0.72, sc.y * 0.5)
+    col = mix(col, vec3(0.470, 0.475, 0.430), sc.x * 0.42)
+    let sc2 = fr_scratch(p + vec2(17.0, 29.0), px, 23.0, 0.18)
+    col = mix(col, vec3(0.420, 0.425, 0.385), sc2.x * 0.22)
+    // big slotted screws down the case's right edge: under the seam's end
+    // and at the foot (the left edge is under the catalogue's list)
+    let sy = fr_seam_y()
+    let ins = 20.0
+    let low = step((sy + size.y) * 0.5, p.y)
+    let sc_y = mix(sy + 17.0, size.y - ins, low)
+    let s = fr_screw(p, vec2(size.x - ins, sc_y), 7.0, px, mix(2.2, 0.4, low)) * step(sy, p.y)
+    col = col * (1.0 - s.w) + s.xyz
+    return col
+}
+
 mod.widgets.Window.show_bg = true
 mod.widgets.Window.draw_bg.pixel = fn() {
     let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
