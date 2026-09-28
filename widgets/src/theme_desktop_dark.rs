@@ -497,6 +497,15 @@ script_mod! {
         color_material_light: #xFFFFFFFF
         color_material_shadow: #x000000FF
         color_material_glow: #x4DD0E1FF
+        // INSTRUMENTS
+        // A near-black glass lit in a pale cool ink, a dark lens for a lamp
+        // that is out, and a halo well under the ceiling a lamp holds.
+        color_screen: #x0E1114FF
+        color_screen_ink: #xC4DCF0FF
+        screen_ghost: 0.1
+        color_lamp_off: #x1A1D22FF
+        color_lamp_plain: #xEEF2F6FF
+        lamp_halo: 0.25
         // Surface and outline roles on the opaque ladder.
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app
