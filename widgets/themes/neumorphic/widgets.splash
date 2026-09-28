@@ -269,7 +269,7 @@ mod.widgets.ButtonFlat.draw_bg.loading_color = #4a7cf6
 // Label inks. The primary family speaks through its label: accent ink at a
 // medium weight on the primary, the page's slate on the others, the error
 // ink on the destructive one.
-let nm_medium = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
+let nm_medium = mod.theme.font_regular{font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
 mod.widgets.ButtonPrimary.draw_text.color = #3860d6
 mod.widgets.ButtonPrimary.draw_text.color_hover = #2f55c8
 mod.widgets.ButtonPrimary.draw_text.color_down = #2f55c8
@@ -1359,8 +1359,8 @@ mod.widgets.BadgeFlat.palette.neutral = #e4e8ee
 mod.widgets.BadgeFlat.palette.on_neutral = #636a7a
 mod.widgets.Badge.palette.neutral = #e4e8ee
 mod.widgets.Badge.palette.on_neutral = #636a7a
-mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_regular{font_size: 9.0 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
-mod.widgets.Badge.draw_text.text_style = mod.theme.font_regular{font_size: 9.0 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_regular{font_size: 9.0 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.Badge.draw_text.text_style = mod.theme.font_regular{font_size: 9.0 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 540.0 asc: 0.0 desc: 0.0}}}
 
 // THE OPEN LIST. A raised panel with an 8 point corner; the row under the
 // pointer is a shallow well, the chosen row carries its label in the accent

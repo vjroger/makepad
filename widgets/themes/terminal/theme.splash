@@ -194,11 +194,11 @@ mod.theme.font_size_base = 9.5
 mod.theme.font_size_p = 9.5
 mod.theme.font_size_code = 9.5
 mod.theme.font_size_contrast = 2.0
-mod.theme.font_regular = mod.theme.font_regular{font_family: mod.theme.font_code.font_family}
-mod.theme.font_label = mod.theme.font_label{font_family: mod.theme.font_code.font_family}
-mod.theme.font_bold = mod.theme.font_bold{font_family: mod.theme.font_code.font_family}
-mod.theme.font_italic = mod.theme.font_italic{font_family: mod.theme.font_code.font_family}
-mod.theme.font_bold_italic = mod.theme.font_bold_italic{font_family: mod.theme.font_code.font_family}
+mod.theme.font_regular = mod.theme.font_regular{font_family: mod.theme.font_regular.font_family{ibm_plex_text := mod.theme.font_code.font_family.liberation_mono}}
+mod.theme.font_label = mod.theme.font_label{font_family: mod.theme.font_label.font_family{ibm_plex_text := mod.theme.font_code.font_family.liberation_mono}}
+mod.theme.font_bold = mod.theme.font_bold{font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := mod.theme.font_code.font_family.liberation_mono}}
+mod.theme.font_italic = mod.theme.font_italic{font_family: mod.theme.font_italic.font_family{ibm_plex_italic := mod.theme.font_code.font_family.liberation_mono}}
+mod.theme.font_bold_italic = mod.theme.font_bold_italic{font_family: mod.theme.font_bold_italic.font_family{ibm_plex_bold_italic := mod.theme.font_code.font_family.liberation_mono}}
 mod.theme.font_code = mod.theme.font_code{font_size: 9.5}
 
 // The type scale the base theme froze from its own face and sizes, stated

@@ -161,7 +161,7 @@ mod.theme.textselection_corner_radius = 2.0
 // only place the semibold goes.
 use mod.res.*
 use mod.text.*
-mod.theme.font_regular = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_label = mod.theme.font_label{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_bold = mod.theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_regular = mod.theme.font_regular{font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 true
