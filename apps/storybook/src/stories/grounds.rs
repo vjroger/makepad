@@ -12,9 +12,14 @@ script_mod! {
     // its template: the same body, on an instance so the page can show
     // several side by side. Every texture is laid in the panel's own
     // coordinates, `self.pos * self.rect_size`, so it is anchored to the
-    // panel; the grain is hashed on the panel's own device pixels. The
-    // panel's colour can be translucent (the dark theme's container is a
-    // shade laid over the ground), so its alpha is kept.
+    // panel; the grain is hashed on the panel's own device pixels.
+    //
+    // A panel's colour can be translucent: the dark theme's container is a
+    // shade of black laid over the ground, the light theme's a veil of
+    // white. A factor on that colour scales nothing the eye sees, so the
+    // texture is an offset in luminance laid on what shows
+    // (`Finish.shade`, which needs the ground the panel stands on, here the
+    // theme's), and the rim a factor on what shows (`Finish.scale`).
 
     let GroundCaption = Label{
         draw_text +: {text_style: theme.font_bold{} color: theme.color_on_surface_variant}
@@ -26,28 +31,33 @@ script_mod! {
         flow: Down
         padding: theme.mspace_3
         spacing: theme.space_1
+        draw_bg +: {
+            /** the ground the panel stands on, for a translucent panel's texture */
+            ground: uniform(theme.color_bg_app)
+        }
     }
 
     mod.stories.GroundsOverview = StoryPage{
-        StoryNote{text: "A sheet replaces the pixel function of PanelView, InsetPanelView and RoundedView like any stock face, and the window's own ground as well. These panels wear the recipes the reference briefs measured, each written the way a sheet writes it. The texture is laid in the panel's own coordinates, so it moves with the panel: scroll the page and the grain rides along instead of swimming under it."}
+        StoryNote{text: "A sheet replaces the pixel function of PanelView, InsetPanelView and RoundedView like any stock face, and the window's own ground as well. These panels wear the recipes the reference briefs measured, each written the way a sheet writes it. The texture is laid in the panel's own coordinates, so it moves with the panel: scroll the page and the grain rides along instead of swimming under it. It is an offset laid on what shows, so it reads on the dark theme's translucent panels as well as on opaque ones."}
         StoryHeading{text: "Panel recipes"}
         StoryRow{
             subject := GroundPanel{
                 draw_bg +: {
-                    /** grain strength, as a share of full scale per device pixel 0..0.03 step 0.001 */
-                    grain: uniform(0.009)
+                    /** grain strength: the largest step either way, per device pixel; the spread is a 2.45th of it 0..0.05 step 0.001 */
+                    grain: uniform(0.02)
                     pixel: fn() {
                         let p = self.pos * self.rect_size
                         let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
                         let c = self.rect_size * 0.5
                         let d = Material.sd_box(p, c, c, 6.0)
+                        var out = vec4(self.color.rgb * self.color.a, self.color.a)
                         // A long fall of two percent top to bottom, and
                         // monochrome grain, one value per device pixel.
-                        var col = self.color.rgb * (1.01 - 0.02 * self.pos.y)
-                        col = col + vec3(1.0, 1.0, 1.0) * Finish.grain(p / px, self.grain)
-                        col = mix(col, col * 0.6, Finish.band(d, 0.0, px, px))
-                        let a = Finish.cover(d, px) * self.color.a
-                        return vec4(col * a, a)
+                        let s = 0.01 - 0.02 * self.pos.y + Finish.grain(p / px, self.grain)
+                        out = Finish.shade(out, s, self.ground.rgb)
+                        // A device pixel of rim, 40 percent darker.
+                        out = Finish.scale(out, 1.0 - 0.4 * Finish.band(d, 0.0, px, px))
+                        return out * Finish.cover(d, px)
                     }
                 }
                 GroundCaption{text: "Grain"}
@@ -60,11 +70,11 @@ script_mod! {
                         let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
                         let c = self.rect_size * 0.5
                         let d = Material.sd_box(p, c, c, 6.0)
-                        var col = self.color.rgb * (0.965 + 0.07 * Finish.brushed(p, vec2(1.0, 0.0), 0.7))
-                        col = col + vec3(1.0, 1.0, 1.0) * Finish.grain(p / px, 0.006)
-                        col = mix(col, col * 0.6, Finish.band(d, 0.0, px, px))
-                        let a = Finish.cover(d, px) * self.color.a
-                        return vec4(col * a, a)
+                        var out = vec4(self.color.rgb * self.color.a, self.color.a)
+                        let s = (Finish.brushed(p, vec2(1.0, 0.0), 0.7) - 0.5) * 0.025 + Finish.grain(p / px, 0.008)
+                        out = Finish.shade(out, s, self.ground.rgb)
+                        out = Finish.scale(out, 1.0 - 0.4 * Finish.band(d, 0.0, px, px))
+                        return out * Finish.cover(d, px)
                     }
                 }
                 GroundCaption{text: "Brushed"}
@@ -77,13 +87,13 @@ script_mod! {
                         let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
                         let c = self.rect_size * 0.5
                         let d = Material.sd_box(p, c, c, 6.0)
-                        var col = self.color.rgb * (0.95 + 0.1 * Finish.weave(p, 3.0))
-                        // A vignette of a point and a half percent.
+                        var out = vec4(self.color.rgb * self.color.a, self.color.a)
+                        // A twill, and a vignette of a point and a half.
                         let v = length((self.pos - vec2(0.5, 0.4)) * vec2(1.0, 0.8))
-                        col = col * (1.015 - 0.03 * smoothstep(0.1, 0.75, v))
-                        col = mix(col, col * 0.6, Finish.band(d, 0.0, px, px))
-                        let a = Finish.cover(d, px) * self.color.a
-                        return vec4(col * a, a)
+                        let s = (Finish.weave(p, 3.0) - 0.5) * 0.02 + 0.0075 - 0.015 * smoothstep(0.1, 0.75, v)
+                        out = Finish.shade(out, s, self.ground.rgb)
+                        out = Finish.scale(out, 1.0 - 0.4 * Finish.band(d, 0.0, px, px))
+                        return out * Finish.cover(d, px)
                     }
                 }
                 GroundCaption{text: "Weave"}
@@ -107,9 +117,8 @@ script_mod! {
                         let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
                         let c = self.rect_size * 0.5
                         let d = Material.sd_box(p, c, c, 6.0)
-                        var col = self.color.rgb + vec3(1.0, 1.0, 1.0) * Finish.grain(p / px, 0.03)
-                        let a = Finish.cover(d, px) * self.color.a
-                        return vec4(col * a, a)
+                        let out = vec4(self.color.rgb * self.color.a, self.color.a)
+                        return Finish.shade(out, Finish.grain(p / px, 0.03), self.ground.rgb) * Finish.cover(d, px)
                     }
                 }
                 GroundCaption{text: "Coarse grain"}
@@ -132,11 +141,11 @@ pub const STORIES: &[Story] = &[
         dsl: "GroundsOverview",
         added: "2026-09-28",
         tags: &["texture", "grain", "brushed", "weave", "style sheet review", "new"],
-        doc: "# Grounds\n\nWhat a sheet writes to texture a panel or the window.\n\n- A panel: `mod.widgets.PanelView.draw_bg.pixel = fn() { ... }` (and `RoundedView`, `InsetPanelView` inherits PanelView's). Lay the texture in `self.pos * self.rect_size`, the panel's own points, and hash grain on `p / px`, the panel's own device pixels: the texture then moves with the panel and never swims under it.\n- The window: `mod.widgets.Window.show_bg = true` and `mod.widgets.Window.draw_bg.pixel = fn() { ... }`. The window's `draw_bg.color` is the theme's `color_bg_app`, and with `show_bg` off, as every shipped sheet leaves it, the window only clears as it always did.\n\nThe recipes here follow the measured briefs: grain at 0.6 to 1.2 percent per device pixel, streaks and weaves at half that, a long fall of a couple of percent at most, and no spotlight.",
+        doc: "# Grounds\n\nWhat a sheet writes to texture a panel or the window.\n\n- A panel: `mod.widgets.PanelView.draw_bg.pixel = fn() { ... }` (and `RoundedView`, `InsetPanelView` inherits PanelView's). Lay the texture in `self.pos * self.rect_size`, the panel's own points, and hash grain on `p / px`, the panel's own device pixels: the texture then moves with the panel and never swims under it.\n- The window: `mod.widgets.Window.show_bg = true` and `mod.widgets.Window.draw_bg.pixel = fn() { ... }`. The window's `draw_bg.color` is the theme's `color_bg_app`, and with `show_bg` off, as every shipped sheet leaves it, the window only clears as it always did.\n\nThe texture is an offset in luminance laid on what shows, `Finish.shade(colour, offset, ground)`, and the rim a factor on what shows, `Finish.scale(colour, factor)`: a factor on the panel colour itself does nothing where the colour is a translucent shade, as the dark theme's containers are. The recipes here follow the measured briefs: grain of spread 0.006 to 0.012 per device pixel (`Finish.grain` with 2.45 times that), streaks and weaves at half that, a long fall of a couple of percent at most, and no spotlight.",
         subject: "subject",
         feature: None,
         controls: &[
-            Control { label: "Grain", target: "subject", kind: ControlKind::Number { prop: "draw_bg.grain", min: 0., max: 0.03, step: 0.001, default: 0.009 } },
+            Control { label: "Grain", target: "subject", kind: ControlKind::Number { prop: "draw_bg.grain", min: 0., max: 0.05, step: 0.001, default: 0.02 } },
         ],
         on_actions: None,
     },

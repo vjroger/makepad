@@ -245,6 +245,12 @@ script_mod! {
         align: Align{x: 0. y: 1.}
     }
 
+    // Each lamp in a cell of its own size, so the grid is the same under a
+    // sheet that draws a halo and one that draws none (and so takes no room
+    // for one).
+    let SinkLamp = Lamp{width: 24. height: 24.}
+    let SinkBar = LampBar{width: 40. height: 24.}
+
     let LampColumn = View{
         width: Fit
         height: Fit
@@ -284,12 +290,12 @@ script_mod! {
                     GroupCaption{text: "Lamps"}
                     Line{
                         align: Align{x: 0. y: 0.}
-                        LampColumn{Lamp{intent: LampIntent.Accent lit: 1.0} Lamp{intent: LampIntent.Accent lit: 0.5} Lamp{intent: LampIntent.Accent}}
-                        LampColumn{Lamp{intent: LampIntent.Success lit: 1.0} Lamp{intent: LampIntent.Success lit: 0.5} Lamp{intent: LampIntent.Success}}
-                        LampColumn{Lamp{intent: LampIntent.Warning lit: 1.0} Lamp{intent: LampIntent.Warning lit: 0.5} Lamp{intent: LampIntent.Warning}}
-                        LampColumn{Lamp{intent: LampIntent.Error lit: 1.0} Lamp{intent: LampIntent.Error lit: 0.5} Lamp{intent: LampIntent.Error}}
-                        LampColumn{Lamp{intent: LampIntent.Plain lit: 1.0} Lamp{intent: LampIntent.Plain lit: 0.5} Lamp{intent: LampIntent.Plain}}
-                        LampColumn{LampBar{intent: LampIntent.Success lit: 1.0} LampBar{intent: LampIntent.Warning lit: 0.5} LampBar{intent: LampIntent.Error}}
+                        LampColumn{SinkLamp{intent: LampIntent.Accent lit: 1.0} SinkLamp{intent: LampIntent.Accent lit: 0.5} SinkLamp{intent: LampIntent.Accent}}
+                        LampColumn{SinkLamp{intent: LampIntent.Success lit: 1.0} SinkLamp{intent: LampIntent.Success lit: 0.5} SinkLamp{intent: LampIntent.Success}}
+                        LampColumn{SinkLamp{intent: LampIntent.Warning lit: 1.0} SinkLamp{intent: LampIntent.Warning lit: 0.5} SinkLamp{intent: LampIntent.Warning}}
+                        LampColumn{SinkLamp{intent: LampIntent.Error lit: 1.0} SinkLamp{intent: LampIntent.Error lit: 0.5} SinkLamp{intent: LampIntent.Error}}
+                        LampColumn{SinkLamp{intent: LampIntent.Plain lit: 1.0} SinkLamp{intent: LampIntent.Plain lit: 0.5} SinkLamp{intent: LampIntent.Plain}}
+                        LampColumn{SinkBar{intent: LampIntent.Success lit: 1.0} SinkBar{intent: LampIntent.Warning lit: 0.5} SinkBar{intent: LampIntent.Error}}
                     }
                 }
                 Group{
@@ -565,7 +571,7 @@ pub const STORIES: &[Story] = &[
         also: &[],
         name: "Instruments",
         dsl: "KitchenSinkInstruments",
-        added: "2025-06-01",
+        added: "2026-09-28",
         tags: &["style sheet review", "displays and meters"],
         doc: "# Instruments\n\nThe displays, lamps, meters and hardware controls on one screen, each under its stock name and dressed by nothing but the style sheet: readouts of a time, a level and a frequency, a screen holding a readout and a level ladder, lamps lit, half lit and out in every intent, a needle meter, rocker and slide switches on and off, a bank of four faders, a range slider, a number field, a segmented group, a list with a selected row, and three surfaces standing on the window's ground.",
         subject: "",

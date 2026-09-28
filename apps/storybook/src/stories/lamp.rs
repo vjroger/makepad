@@ -12,7 +12,7 @@ script_mod! {
         width: 64.
         height: Fit
         flow: Down
-        spacing: theme.space_1
+        spacing: theme.space_2
         align: Align{x: 0.5}
     }
 
@@ -21,7 +21,7 @@ script_mod! {
     }
 
     mod.stories.LampOverview = StoryPage{
-        StoryNote{text: "A lamp says that something is on. Off, it still shows its lens, dark and faintly the colour it would light: an empty hole reads as a missing part. Lit, it has a pale core, and a halo that is part of the lamp's light rather than a glow around it."}
+        StoryNote{text: "A lamp says that something is on. Off, it still shows its lens, dark and faintly the colour it would light: an empty hole reads as a missing part. Lit, it shows its plain colour, and a halo that is light added to the ground, part of the lamp's light rather than a glow around it. On a pale ground the light theme draws none: added light there only bleaches the ground."}
         StoryHeading{text: "One lamp, under the controls"}
         StoryRow{
             subject := Lamp{lit: 1.0 size: 12.}
@@ -89,7 +89,7 @@ pub const STORIES: &[Story] = &[
         dsl: "LampOverview",
         added: "2026-09-28",
         tags: &["instruments", "new"],
-        doc: "# Lamp\n\nAn indicator lamp, round or a bar, lit by an amount from 0 to 1 that eases.\n\n- `intent` (`Accent`, `Success`, `Warning`, `Error`, `Plain`) takes the colour of the theme role of the same name; `Accent` is the primary colour.\n- `lit` is how far lit; `set_lit(cx, amount)` eases there over `ease_secs`, and the lamp stops asking for frames when it arrives.\n- Off is a dark lens (`color_lamp_off`) faintly tinted by the intent, with its rim: never an empty hole. Lit has a pale core.\n- `shape` is `Round` or `Bar` (`LampBar`); `size` is the diameter or the bar's thickness, `length` a bar's length.\n- `halo` is the halo one device pixel out, as a share of the lamp's light, and `halo_reach` how far it goes in lamp thicknesses. Their ranges end at the measured ceiling, 0.45 and one thickness; the widget and the shader both clamp them, so nothing can make a lamp glow louder than that. The halo halves at 0.4 of its reach and is gone at the reach. `halo` defaults to the theme's `lamp_halo`.\n\nThe layout box holds the lens and the halo's room. The face, `draw_bg`, reads `lit`, `intent`, `bar`, `halo`, `reach` and `opacity`, and offers `intent_color()` and `halo_at(...)` to a sheet that redraws it. Lamps of every intent batch into one draw call.",
+        doc: "# Lamp\n\nAn indicator lamp, round or a bar, lit by an amount from 0 to 1 that eases.\n\n- `intent` (`Accent`, `Success`, `Warning`, `Error`, `Plain`) takes the colour of the theme role of the same name; `Accent` is the primary colour.\n- `lit` is how far lit; `set_lit(cx, amount)` eases there over `ease_secs`, and the lamp stops asking for frames when it arrives.\n- Off is a dark lens (`color_lamp_off`) faintly tinted by the intent, with its rim: never an empty hole. Lit is the plain colour; `draw_bg.core` pales the middle toward white for a sheet that wants a hot centre, and is 0 by default.\n- `shape` is `Round` or `Bar` (`LampBar`); `size` is the diameter or the bar's thickness, `length` a bar's length.\n- `halo` is the halo one device pixel out, as a share of the lamp's light, and `halo_reach` how far it goes in lamp thicknesses. Their ranges end at the measured ceiling, 0.45 and one thickness; the widget and the shader both clamp them, so nothing can make a lamp glow louder than that. The halo halves at 0.4 of its reach and is gone at the reach. The halo is light added to the ground, so it never darkens it. `halo` defaults to the theme's `lamp_halo`, which the light bases set to 0; a disabled lamp draws none.\n\nThe layout box holds the lens and, when `halo` is above 0, the halo's room. The face, `draw_bg`, reads `lit`, `intent`, `bar`, `halo`, `reach` and `opacity`, and offers `intent_color()` and `halo_at(...)` to a sheet that redraws it. Lamps of every intent batch into one draw call.",
         subject: "subject",
         feature: None,
         controls: &[
@@ -99,7 +99,7 @@ pub const STORIES: &[Story] = &[
             Control { label: "Size", target: "subject", kind: ControlKind::Number { prop: "size", min: 3., max: 32., step: 0.5, default: 12. } },
             Control { label: "Halo", target: "subject", kind: ControlKind::Number { prop: "halo", min: 0., max: 0.45, step: 0.01, default: 0.25 } },
             Control { label: "Halo reach", target: "subject", kind: ControlKind::Number { prop: "halo_reach", min: 0., max: 1., step: 0.05, default: 1. } },
-            Control { label: "Pale core", target: "subject", kind: ControlKind::Number { prop: "draw_bg.core", min: 0., max: 1., step: 0.05, default: 0.55 } },
+            Control { label: "Pale core", target: "subject", kind: ControlKind::Number { prop: "draw_bg.core", min: 0., max: 1., step: 0.05, default: 0. } },
         ],
         on_actions: Some(lamp_actions),
     },
