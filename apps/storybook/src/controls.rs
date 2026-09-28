@@ -16,6 +16,17 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    // The panel's controls keep the library's own faces under every sheet: a
+    // sheet may replace `draw_bg.vertex` and `draw_bg.pixel` on any stock
+    // template, and the faces kept from before it ran (`mod.stock_faces`) are
+    // spread into each control here, so the panel that edits a story stays
+    // the same panel whichever sheet the story is shown under.
+    let PanelField = TextInput{
+        scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
+        draw_bg +: {..mod.stock_faces.TextInput}
+    }
+    let PanelCheck = CheckBox{draw_bg +: {..mod.stock_faces.CheckBox}}
+
     let ControlRow = View{
         width: Fill
         height: Fit
@@ -36,32 +47,47 @@ script_mod! {
         list := PortalList{
             width: Fill
             height: Fill
-            scroll_bar: ScrollBar{}
+            scroll_bar: ScrollBar{draw_bg +: {..mod.stock_faces.ScrollBar}}
             RowBool := ControlRow{
-                value := CheckBox{text: ""}
+                value := PanelCheck{text: ""}
             }
             RowNumber := ControlRow{
-                value := Slider{width: 200.}
+                value := Slider{
+                    width: 200.
+                    draw_bg +: {..mod.stock_faces.Slider}
+                    text_input +: {
+                        scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
+                        draw_bg +: {..mod.stock_faces.TextInput}
+                    }
+                }
             }
             RowChoice := ControlRow{
                 // The list as wide as the button, so an option that fits the
                 // button is not cut short in the list.
-                value := DropDown{width: 200. popup_menu +: {width: 200.}}
+                value := DropDown{
+                    width: 200.
+                    draw_bg +: {..mod.stock_faces.DropDown}
+                    popup_menu +: {
+                        width: 200.
+                        draw_bg +: {..mod.stock_faces.PopupMenu}
+                        menu_item +: {draw_bg +: {..mod.stock_faces.PopupMenuItem}}
+                    }
+                }
             }
             RowText := ControlRow{
-                value := TextInput{width: 200.}
+                value := PanelField{width: 200.}
             }
             RowColor := ControlRow{
-                value := TextInput{width: 110.}
+                value := PanelField{width: 110.}
                 swatch := RoundedView{
                     width: 22.
                     height: 22.
                     show_bg: true
-                    draw_bg +: {color: #x888888FF}
+                    draw_bg +: {..mod.stock_faces.RoundedView color: #x888888FF}
                 }
             }
             RowDisabled := ControlRow{
-                value := CheckBox{text: "disabled"}
+                value := PanelCheck{text: "disabled"}
             }
             // A curve wants the panel's width, so its name goes over it
             // rather than beside it.
@@ -74,7 +100,17 @@ script_mod! {
                 name := Label{text: ""}
                 // The editor is Fit tall round its canvas and toolbar, so the
                 // canvas is what takes the height.
-                value := CurveEditor{width: Fill canvas +: {height: 150.}}
+                value := CurveEditor{
+                    width: Fill
+                    canvas +: {height: 150.}
+                    tools +: {
+                        smooth +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
+                        corner +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
+                        horizontal +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
+                        point +: {draw_bg +: {..mod.stock_faces.RadioButtonTab}}
+                        delete +: {draw_bg +: {..mod.stock_faces.Button}}
+                    }
+                }
             }
             // A section heading. The whole row is the click target, and the
             // arrow points right while folded and down while open.
@@ -762,6 +798,36 @@ mod tests {
             assert!(value.as_object().is_some(), "no ControlsPanel template");
             WidgetRef::script_from_value(vm, value)
         })
+    }
+
+    /// No face a sheet gives a stock template reaches the panel: under a
+    /// sheet that replaces the vertex and pixel of every stock face, the
+    /// whole panel as it resolves -- every row template and every part the
+    /// rows' controls hold or inherit -- draws with faces of its own.
+    #[test]
+    fn no_sheet_face_reaches_the_controls_panel() {
+        use crate::makepad_widgets::desktop_style::{faces_reaching, install, marker_sheet, uninstall};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            install(vm, marker_sheet());
+            vm.bx.captured_errors = Some(Vec::new());
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            super::script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the panel does not evaluate under the marker sheet: {errors:?}");
+            let storybook = vm.module(id!(storybook));
+            let value = vm.bx.heap.value(
+                storybook,
+                id!(ControlsPanel).into(),
+                crate::makepad_widgets::makepad_script::trap::NoTrap,
+            );
+            let leaks = faces_reaching(vm, value, "ControlsPanel");
+            assert!(leaks.is_empty(), "a sheet's face reaches the controls panel at:
+{}", leaks.join("
+"));
+            uninstall(vm);
+        });
     }
 
     /// A curve row builds from its template with no error, and filling it

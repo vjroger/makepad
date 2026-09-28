@@ -1027,6 +1027,10 @@ true
         );
     }
 
+    // The stock faces, kept before a sheet's widget half replaces them, for
+    // the chrome that must keep its own (`desktop_style::STOCK_FACES`).
+    crate::desktop_style::keep_stock_faces(vm);
+
     script_eval!(vm, {
         mod.prelude.widgets = {
             ..mod.prelude.widgets_header,

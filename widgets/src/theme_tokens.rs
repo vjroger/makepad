@@ -2145,9 +2145,19 @@ const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
     (DesktopStyle::Omarchy, false, Scheme::Dark),
     (DesktopStyle::BlackOrange, false, Scheme::Dark),
     (DesktopStyle::Neumorphic, false, Scheme::Light),
+    (DesktopStyle::Neumorphic, true, Scheme::Dark),
     (DesktopStyle::Molded, false, Scheme::Light),
     (DesktopStyle::Glossy, false, Scheme::Dark),
     (DesktopStyle::Milled, false, Scheme::Dark),
+    (DesktopStyle::Aluminium, false, Scheme::Light),
+    (DesktopStyle::Frosted, false, Scheme::Dark),
+    (DesktopStyle::Liquid, false, Scheme::Light),
+    (DesktopStyle::Luminous, false, Scheme::Dark),
+    (DesktopStyle::FieldKit, false, Scheme::Light),
+    (DesktopStyle::Terminal, false, Scheme::Dark),
+    (DesktopStyle::Lcd, false, Scheme::Light),
+    (DesktopStyle::Neon, false, Scheme::Dark),
+    (DesktopStyle::Hud, false, Scheme::Dark),
     (DesktopStyle::Macos, false, Scheme::Light),
     (DesktopStyle::Macos, true, Scheme::Dark),
     (DesktopStyle::Windows, false, Scheme::Light),
@@ -3466,25 +3476,14 @@ mod sheet_contrast_tests {
     use crate::makepad_platform::*;
     use crate::script_eval;
 
-    /// Every sheet the library ships, in both appearances it offers.
-    pub(super) const SHEETS: &[(DesktopStyle, bool)] = &[
-        (DesktopStyle::Omarchy, false),
-        (DesktopStyle::BlackOrange, false),
-        (DesktopStyle::Neumorphic, false),
-        (DesktopStyle::Molded, false),
-        (DesktopStyle::Glossy, false),
-        (DesktopStyle::Milled, false),
-        (DesktopStyle::Macos, false),
-        (DesktopStyle::Macos, true),
-        (DesktopStyle::Windows, false),
-        (DesktopStyle::Windows, true),
-        (DesktopStyle::Windows2000, false),
-        (DesktopStyle::NextStep, false),
-        (DesktopStyle::Ios, false),
-        (DesktopStyle::Ios, true),
-        (DesktopStyle::Android, false),
-        (DesktopStyle::Android, true),
-    ];
+    /// Every sheet the library ships, in both appearances it offers. Read off
+    /// `SHEET_BASE`, which `the_sheet_table_is_what_the_sheets_say` holds to
+    /// `DesktopStyle::ALL`: a list of its own here was one more place a new
+    /// sheet had to be written into, and forgetting it skipped the contrast
+    /// checks without a word.
+    pub(super) fn sheets() -> Vec<(DesktopStyle, bool)> {
+        SHEET_BASE.iter().map(|(style, dark, _)| (*style, *dark)).collect()
+    }
 
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let theme = vm.module(id!(theme));
@@ -3581,12 +3580,12 @@ mod sheet_contrast_tests {
                 mod.theme = mod.themes.skeleton
             });
             check(vm, "skeleton");
-            for (style, dark) in SHEETS {
-                install(vm, StyleSheet::load_with_appearance(*style, *dark));
+            for (style, dark) in sheets() {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
                 vm.bx.captured_errors = Some(Vec::new());
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
-                let label = StyleSheet::load_with_appearance(*style, *dark).name;
+                let label = StyleSheet::load_with_appearance(style, dark).name;
                 assert!(errors.is_empty(), "{label}: {errors:?}");
                 check(vm, &label);
             }
@@ -3617,9 +3616,12 @@ mod sheet_contrast_tests {
         let script = sheet_roles_script("mod.theme = mod.themes.light
 ", &mut |_| Some(0x808080FF));
         assert_eq!(script.lines().last(), Some("true"), "{script}");
-        for (style, dark) in SHEETS {
-            let sheet = StyleSheet::load_with_appearance(*style, *dark);
+        for (style, dark) in sheets() {
+            let sheet = StyleSheet::load_with_appearance(style, dark);
             assert_eq!(sheet.theme.lines().last().map(str::trim), Some("true"), "{}", sheet.name);
+            // The widget half as well: two sheets once put their panel frame
+            // after the `true`, and the last of those lines never ran.
+            assert_eq!(sheet.widgets.lines().last().map(str::trim), Some("true"), "{} widgets", sheet.name);
         }
     }
 
@@ -3894,8 +3896,8 @@ mod equalizer_tests {
         let pale = BlendTheme::group(Appearance::Light);
         assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
         assert!(dark.iter().all(|t| !pale.contains(t)));
-        assert_eq!(dark.len(), 9, "{dark:?}");
-        assert_eq!(pale.len(), 10, "{pale:?}");
+        assert_eq!(dark.len(), 15, "{dark:?}");
+        assert_eq!(pale.len(), 14, "{pale:?}");
     }
 
     /// The weights of a relative mix are a hundred parts shared out, so

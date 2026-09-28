@@ -5,9 +5,12 @@ use makepad_widgets::*;
 /// Seconds of a theme switch.
 const STYLE_SECS: f64 = 0.65;
 
+/// One weight per style, indexed by discriminant.
+type Weights = [f64; DesktopStyle::COUNT];
+
 /// Weight 1 on `style`, 0 elsewhere.
-fn one_hot(style: usize) -> [f64; 8] {
-    let mut w = [0.0; 8];
+fn one_hot(style: usize) -> Weights {
+    let mut w = [0.0; DesktopStyle::COUNT];
     if let Some(x) = w.get_mut(style) {
         *x = 1.0;
     }
@@ -21,8 +24,8 @@ fn one_hot(style: usize) -> [f64; 8] {
 pub struct StyleTween {
     pub target: DesktopStyle,
     pub dark: bool,
-    pub weights: [f64; 8],
-    q: QuickTo<[f64; 8]>,
+    pub weights: Weights,
+    q: QuickTo<Weights>,
 }
 impl Default for StyleTween {
     fn default() -> Self {

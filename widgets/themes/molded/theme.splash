@@ -65,6 +65,9 @@ mod.theme.color_icon = #2c3033
 mod.theme.color_focus = #d24b3a
 mod.theme.color_ctrl_active = #d24b3a
 mod.theme.color_val = #d24b3a
+// The accent seed: the primary, secondary and tertiary families are
+// grown from it, and nothing else in this file reaches them.
+mod.theme.color_ctrl_selected = #d24b3a
 
 mod.theme.space_factor = 8.0
 mod.theme.space_1 = 4.0

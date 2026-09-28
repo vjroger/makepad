@@ -33,10 +33,49 @@ pub enum DesktopStyle {
     /// Milled near-black metal lit from inside in orange: flat machined
     /// faces, a hard hairline on every edge, everything that is on glows.
     Milled,
+    /// Turned and brushed aluminium on a pale housing, chrome where a
+    /// control is held.
+    Aluminium,
+    /// Frosted glass cards over a dark ground.
+    Frosted,
+    /// Clear glass on a light ground: thin bright rims, the ground seen
+    /// through every face.
+    Liquid,
+    /// Porcelain faces on a dark ground, lit from underneath.
+    Luminous,
+    /// Minimal instrument hardware: a pale case, hairlines, few colours.
+    FieldKit,
+    /// A text interface: one face, one ink, drawn in character cells.
+    Terminal,
+    /// A segment display on a pale glass, unlit segments still faintly there.
+    Lcd,
+    /// Tubes of light on a near-black ground.
+    Neon,
+    /// Line frames of a head-up display over a dark ground.
+    Hud,
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 12] = [Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    /// How many styles there are, and so how many weights a table indexed by
+    /// discriminant needs: every variant is in `ALL`.
+    pub const COUNT: usize = 21;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled,
+        Self::Aluminium, Self::Frosted, Self::Liquid, Self::Luminous, Self::FieldKit,
+        Self::Terminal, Self::Lcd, Self::Neon, Self::Hud,
+        Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android,
+    ];
+    /// The styles laid out as tiles rather than as floating windows, with no
+    /// shelf and no title bar of their own: the tilers and every style built
+    /// on the library's own surfaces rather than on somebody's desktop.
+    const TILING: [Self; 15] = [
+        Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled,
+        Self::Aluminium, Self::Frosted, Self::Liquid, Self::Luminous, Self::FieldKit,
+        Self::Terminal, Self::Lcd, Self::Neon, Self::Hud,
+    ];
+    fn tiling(self) -> bool {
+        Self::TILING.contains(&self)
+    }
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
@@ -45,6 +84,15 @@ impl DesktopStyle {
             Self::Molded => "molded",
             Self::Glossy => "glossy",
             Self::Milled => "milled",
+            Self::Aluminium => "aluminium",
+            Self::Frosted => "frosted",
+            Self::Liquid => "liquid",
+            Self::Luminous => "luminous",
+            Self::FieldKit => "field-kit",
+            Self::Terminal => "terminal",
+            Self::Lcd => "lcd",
+            Self::Neon => "neon",
+            Self::Hud => "hud",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -61,6 +109,15 @@ impl DesktopStyle {
             Self::Molded => "Molded",
             Self::Glossy => "Glossy",
             Self::Milled => "Milled",
+            Self::Aluminium => "Aluminium",
+            Self::Frosted => "Frosted glass",
+            Self::Liquid => "Liquid glass",
+            Self::Luminous => "Luminous",
+            Self::FieldKit => "Field kit",
+            Self::Terminal => "Terminal",
+            Self::Lcd => "Segment display",
+            Self::Neon => "Neon",
+            Self::Hud => "Head-up display",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -73,7 +130,11 @@ impl DesktopStyle {
         let s = s.strip_suffix("-dark").unwrap_or(s);
         Self::ALL.into_iter().find(|v| v.id() == s)
     }
-    pub fn supports_dark(self) -> bool { matches!(self, Self::Macos | Self::Windows | Self::Ios | Self::Android) }
+    /// Neumorphic's dark appearance is a soft dark ground of the same
+    /// moulding, so it is that style's other appearance, `neumorphic-dark`,
+    /// and not a style of its own: `parse` reads a `-dark` suffix as the
+    /// appearance, which a style named so could never get past.
+    pub fn supports_dark(self) -> bool { matches!(self, Self::Neumorphic | Self::Macos | Self::Windows | Self::Ios | Self::Android) }
     pub fn mobile(self) -> bool { matches!(self, Self::Ios | Self::Android) }
     /// Which set of app artwork this style draws, as an index into the icon
     /// table. A style is free to borrow another's drawings rather than have
@@ -83,6 +144,8 @@ impl DesktopStyle {
     pub fn icon_set(self) -> usize {
         match self {
             Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Glossy | Self::Milled => 0,
+            Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0,
+            Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0,
             Self::Macos => 1,
             Self::Windows | Self::Molded => 2,
             Self::Windows2000 => 3,
@@ -97,11 +160,13 @@ impl DesktopStyle {
         Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        !matches!(self, Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled) && !self.mobile()
+        !self.tiling() && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
             Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
+            Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0.0,
+            Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -111,6 +176,8 @@ impl DesktopStyle {
     pub fn title_height(self) -> f64 {
         match self {
             Self::Omarchy | Self::BlackOrange | Self::Neumorphic | Self::Molded | Self::Glossy | Self::Milled => 0.0,
+            Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0.0,
+            Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -144,6 +211,7 @@ impl StyleSheet {
     }
     pub fn load_with_appearance(style: DesktopStyle, dark: bool) -> Self {
         let name = match (style, dark) {
+            (DesktopStyle::Neumorphic, true) => "neumorphic-dark",
             (DesktopStyle::Macos, true) => "macos-dark",
             (DesktopStyle::Windows, true) => "windows-dark",
             (DesktopStyle::Ios, true) => "ios-dark",
@@ -158,6 +226,10 @@ impl StyleSheet {
             DesktopStyle::BlackOrange => (
                 include_str!("../themes/black-orange/theme.splash"),
                 include_str!("../themes/black-orange/widgets.splash"),
+            ),
+            DesktopStyle::Neumorphic if dark => (
+                include_str!("../themes/neumorphic-dark/theme.splash"),
+                include_str!("../themes/neumorphic-dark/widgets.splash"),
             ),
             DesktopStyle::Neumorphic => (
                 include_str!("../themes/neumorphic/theme.splash"),
@@ -174,6 +246,42 @@ impl StyleSheet {
             DesktopStyle::Milled => (
                 include_str!("../themes/milled/theme.splash"),
                 include_str!("../themes/milled/widgets.splash"),
+            ),
+            DesktopStyle::Aluminium => (
+                include_str!("../themes/aluminium/theme.splash"),
+                include_str!("../themes/aluminium/widgets.splash"),
+            ),
+            DesktopStyle::Frosted => (
+                include_str!("../themes/frosted/theme.splash"),
+                include_str!("../themes/frosted/widgets.splash"),
+            ),
+            DesktopStyle::Liquid => (
+                include_str!("../themes/liquid/theme.splash"),
+                include_str!("../themes/liquid/widgets.splash"),
+            ),
+            DesktopStyle::Luminous => (
+                include_str!("../themes/luminous/theme.splash"),
+                include_str!("../themes/luminous/widgets.splash"),
+            ),
+            DesktopStyle::FieldKit => (
+                include_str!("../themes/field-kit/theme.splash"),
+                include_str!("../themes/field-kit/widgets.splash"),
+            ),
+            DesktopStyle::Terminal => (
+                include_str!("../themes/terminal/theme.splash"),
+                include_str!("../themes/terminal/widgets.splash"),
+            ),
+            DesktopStyle::Lcd => (
+                include_str!("../themes/lcd/theme.splash"),
+                include_str!("../themes/lcd/widgets.splash"),
+            ),
+            DesktopStyle::Neon => (
+                include_str!("../themes/neon/theme.splash"),
+                include_str!("../themes/neon/widgets.splash"),
+            ),
+            DesktopStyle::Hud => (
+                include_str!("../themes/hud/theme.splash"),
+                include_str!("../themes/hud/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -336,6 +444,180 @@ pub fn apply_widgets(vm: &mut ScriptVm) {
         evaluate(vm, &sheet, "widgets", sheet.widgets.clone());
     }
 }
+/// The stock templates whose face a sheet may replace -- `draw_bg.vertex`
+/// and `draw_bg.pixel` -- and whose own face the library's chrome keeps.
+///
+/// A sheet's second half runs after every template registered and writes
+/// straight onto these objects, so everything derived from one of them
+/// that does not declare the two functions itself takes the sheet's. The
+/// developer panel, the fab controls and a host's own tool panels are built
+/// from these same templates and must keep their look under every sheet, so
+/// before the sheet runs each face is kept under `mod.stock_faces.<name>`
+/// as `{vertex pixel}`, and chrome spreads it into its own draw object:
+/// `draw_bg +: {..mod.stock_faces.CheckBox}`.
+pub const STOCK_FACES: &[&str] = &[
+    "Button", "ButtonFlat", "ButtonFlatter", "ButtonPrimary", "ButtonSecondary", "ButtonTertiary",
+    "ButtonOutline", "ButtonDashed", "ButtonDanger", "ButtonIcon", "ButtonFlatIcon", "ButtonFlatterIcon",
+    "CheckBox", "CheckBoxFlat", "Toggle", "ToggleFlat",
+    "RadioButton", "RadioButtonFlat", "RadioButtonTab", "RadioButtonTabFlat",
+    "Slider", "SliderFlat", "SliderMinimal", "SliderRound", "Rotary", "RotaryKnob",
+    "TextInput", "TextInputFlat", "ComboBox", "FieldWell", "TagField", "NumberField",
+    "DropDown", "DropDownFlat", "PopupMenu", "PopupMenuItem",
+    "Tab", "TabBar", "ProgressBar", "ScrollBar", "RoundedView", "PanelView",
+];
+
+/// Keep every face in [`STOCK_FACES`] under `mod.stock_faces`, before a
+/// sheet's widget half can replace it. Called at the end of the module run's
+/// widget registration, so the kept face is the library's own even while a
+/// sheet is installed.
+pub(crate) fn keep_stock_faces(vm: &mut ScriptVm) {
+    let mut code = String::from("mod.stock_faces = {\n");
+    for name in STOCK_FACES {
+        code.push_str(&format!(
+            "    {name}: {{vertex: mod.widgets.{name}.draw_bg.vertex pixel: mod.widgets.{name}.draw_bg.pixel}}\n"
+        ));
+    }
+    // The last statement of an evaluated script is swallowed.
+    code.push_str("}\ntrue\n");
+    vm.eval(ScriptMod {
+        cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+        module_path: "desktop_style_stock_faces".into(),
+        file: "desktop_style/stock_faces".into(),
+        line: 0,
+        column: 0,
+        code,
+        values: vec![],
+    });
+}
+
+/// A sheet that gives every stock face a vertex and a pixel function of its
+/// own and changes nothing else: what a host's tests install to prove its
+/// chrome keeps its own face under any sheet. See [`faces_reaching`].
+#[doc(hidden)]
+pub fn marker_sheet() -> StyleSheet {
+    let mut widgets = String::from("use mod.prelude.widgets_internal.*\n");
+    for name in STOCK_FACES {
+        widgets.push_str(&format!("mod.widgets.{name}.draw_bg.pixel = fn() {{ return #ff00ffff }}\n"));
+        widgets.push_str(&format!(
+            "mod.widgets.{name}.draw_bg.vertex = fn() {{ self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size) }}\n"
+        ));
+    }
+    widgets.push_str("true\n");
+    StyleSheet {
+        name: "marker".into(),
+        theme: "mod.theme = mod.themes.dark\ntrue\n".into(),
+        widgets,
+        icons: Vec::new(),
+    }
+}
+
+/// Every place under `root` where a face the installed sheet gave a stock
+/// template is what would be drawn, as a readable path from `what`.
+///
+/// Walks the object and everything it holds or inherits -- its own keys,
+/// the keys of its prototypes, and its children -- because a draw object a
+/// template never wrote out is its prototype's, and that is the object a
+/// sheet wrote into. Meant to be run with [`marker_sheet`] installed and the
+/// module reloaded, so that every face a sheet can reach is a marker.
+#[doc(hidden)]
+pub fn faces_reaching(vm: &mut ScriptVm, root: ScriptValue, what: &str) -> Vec<String> {
+    use std::collections::HashMap;
+    let widgets = vm.module(id!(widgets));
+    let mut marks = Vec::new();
+    for name in STOCK_FACES {
+        for face in [id!(pixel), id!(vertex)] {
+            marks.push(vm.bx.heap.value_path(widgets, &[LiveId::from_str(name), id!(draw_bg), face], NoTrap));
+        }
+    }
+    let heap = &vm.bx.heap;
+    // What an object holds or inherits, as (name, value): its own keys and
+    // its prototypes', resolved on the object, and its children -- its own,
+    // or, where it was made without a copy of them, the nearest prototype's.
+    let entries = |obj: ScriptObject| -> Vec<(String, ScriptValue)> {
+        let mut keys: Vec<ScriptValue> = Vec::new();
+        let mut at = Some(obj);
+        while let Some(o) = at {
+            for (key, _) in heap.map_ref(o).iter() {
+                if !keys.contains(key) {
+                    keys.push(*key);
+                }
+            }
+            at = heap.proto(o).as_object();
+        }
+        let name = |key: ScriptValue| key.as_id().map(|id| id.to_string()).unwrap_or_else(|| "_".into());
+        let mut out: Vec<(String, ScriptValue)> = keys.into_iter().map(|key| (name(key), heap.value(obj, key, NoTrap))).collect();
+        let mut at = Some(obj);
+        while let Some(o) = at {
+            let vec = heap.vec_ref(o);
+            if !vec.is_empty() {
+                out.extend(vec.iter().map(|entry| (name(entry.key), entry.value)));
+                break;
+            }
+            at = heap.proto(o).as_object();
+        }
+        out
+    };
+    let is_mark = |name: &str, value: ScriptValue| (name == "pixel" || name == "vertex") && marks.contains(&value);
+    // First which objects lead to a marker at all, each object once; then
+    // every path to one, so a part shared by many controls is named at each
+    // of them rather than at whichever the walk happened to reach first.
+    fn leads(
+        obj: ScriptObject,
+        depth: usize,
+        entries: &dyn Fn(ScriptObject) -> Vec<(String, ScriptValue)>,
+        is_mark: &dyn Fn(&str, ScriptValue) -> bool,
+        is_fn: &dyn Fn(ScriptObject) -> bool,
+        memo: &mut HashMap<ScriptObject, bool>,
+    ) -> bool {
+        if let Some(known) = memo.get(&obj) {
+            return *known;
+        }
+        memo.insert(obj, false);
+        if depth > 48 {
+            return false;
+        }
+        let mut found = false;
+        for (name, value) in entries(obj) {
+            let Some(child) = value.as_object() else { continue };
+            if is_fn(child) {
+                found |= is_mark(&name, value);
+            } else {
+                found |= leads(child, depth + 1, entries, is_mark, is_fn, memo);
+            }
+        }
+        memo.insert(obj, found);
+        found
+    }
+    let is_fn = |obj: ScriptObject| heap.is_fn(obj);
+    let mut memo = HashMap::new();
+    let mut out = Vec::new();
+    let Some(root) = root.as_object() else { return out };
+    if !leads(root, 0, &entries, &is_mark, &is_fn, &mut memo) {
+        return out;
+    }
+    let mut stack = vec![(root, what.to_string(), vec![root])];
+    while let Some((obj, path, trail)) = stack.pop() {
+        if out.len() >= 400 {
+            break;
+        }
+        for (name, value) in entries(obj) {
+            let Some(child) = value.as_object() else { continue };
+            if heap.is_fn(child) {
+                if is_mark(&name, value) {
+                    out.push(format!("{path}.{name}"));
+                }
+            } else if memo.get(&child) == Some(&true) && !trail.contains(&child) {
+                let mut trail = trail.clone();
+                trail.push(child);
+                stack.push((child, format!("{path}.{name}"), trail));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Window provides the common receive path, including apps with no WM API dependency.
 pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Event::Custom(json) = event else {
@@ -525,6 +807,10 @@ mod tests {
                         DesktopStyle::Molded => 5.0,
                         DesktopStyle::Glossy => 6.0,
                         DesktopStyle::Milled => 3.0,
+                        DesktopStyle::Aluminium => 2.0,
+                        DesktopStyle::Frosted | DesktopStyle::Liquid | DesktopStyle::Luminous => 3.0,
+                        DesktopStyle::FieldKit => 1.5,
+                        DesktopStyle::Neon => 2.0,
                         _ => 0.0,
                     }
                 );
@@ -599,6 +885,58 @@ mod tests {
             assert!(!panel.visible, "Explicit visibility edits must still apply");
         });
     }
+    /// A table indexed by discriminant is `COUNT` long, and every variant
+    /// is in `ALL` exactly once, so no style falls off the end of one.
+    #[test]
+    fn every_style_is_listed_once_and_fits_the_count() {
+        for (at, style) in DesktopStyle::ALL.into_iter().enumerate() {
+            assert!((style as usize) < DesktopStyle::COUNT, "{style:?}");
+            assert_eq!(DesktopStyle::ALL.iter().position(|s| *s == style), Some(at), "{style:?} twice");
+            assert_eq!(DesktopStyle::parse(style.id()), Some(style));
+        }
+        // The styles built on the library's own surfaces tile, as the
+        // tilers do; only the desktops modelled on somebody else's float.
+        for style in DesktopStyle::TILING {
+            assert!(!style.floating(), "{style:?} floats");
+            assert_eq!(style.shelf_height(), 0.0);
+            assert_eq!(style.title_height(), 0.0);
+        }
+    }
+
+    /// The faces the library keeps for its own chrome are the stock ones
+    /// under any sheet, and a template that spreads one in is out of a
+    /// sheet's reach while one that does not is not.
+    #[test]
+    fn the_kept_faces_are_the_librarys_own_under_any_sheet() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            install(vm, marker_sheet());
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the marker sheet does not evaluate: {errors:?}");
+            let widgets = vm.module(id!(widgets));
+            let kept = vm.module(id!(stock_faces));
+            for name in STOCK_FACES {
+                for face in [id!(pixel), id!(vertex)] {
+                    let sheet = vm.bx.heap.value_path(widgets, &[LiveId::from_str(name), id!(draw_bg), face], NoTrap);
+                    let own = vm.bx.heap.value_path(kept, &[LiveId::from_str(name), face], NoTrap);
+                    assert!(sheet.as_object().is_some() && own.as_object().is_some(), "{name}.{face} did not resolve");
+                    assert_ne!(sheet, own, "the face kept for {name}.{face} is the sheet's");
+                }
+            }
+            // The walk itself sees a face the sheet reached, or its silence
+            // below would mean nothing.
+            let plain = script_eval!(vm, {mod.widgets.CheckBox{}});
+            assert!(!faces_reaching(vm, plain, "CheckBox").is_empty(), "the walk is blind");
+            let own = script_eval!(vm, {mod.widgets.CheckBox{draw_bg +: {..mod.stock_faces.CheckBox}}});
+            let leaks = faces_reaching(vm, own, "CheckBox");
+            assert!(leaks.is_empty(), "{leaks:?}");
+            uninstall(vm);
+        });
+    }
+
     #[test]
     fn stylesheet_wire_preserves_both_splash_phases() {
         let sheet = StyleSheet::load(DesktopStyle::Windows2000);

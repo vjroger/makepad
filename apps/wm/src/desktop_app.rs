@@ -83,10 +83,22 @@ impl App {
             // The twelfth sheet: near-black grounds, so the desktop behind it
             // is the same flat dark the style itself draws.
             DesktopStyle::BlackOrange => (shell::rgb(20, 23, 28), shell::rgb(16, 19, 23)),
+            DesktopStyle::Neumorphic if dark => (shell::rgb(42, 45, 51), shell::rgb(31, 34, 38)),
             DesktopStyle::Neumorphic => (shell::rgb(238, 240, 246), shell::rgb(222, 226, 238)),
             DesktopStyle::Molded => (shell::rgb(216, 218, 214), shell::rgb(196, 199, 194)),
             DesktopStyle::Glossy => (shell::rgb(43, 47, 52), shell::rgb(30, 33, 37)),
             DesktopStyle::Milled => (shell::rgb(21, 23, 27), shell::rgb(12, 13, 16)),
+            // The reference sheets: each desktop is its own ground, a shade
+            // darker at the foot, so a tiled app sits on what it draws.
+            DesktopStyle::Aluminium => (shell::rgb(217, 219, 222), shell::rgb(195, 199, 204)),
+            DesktopStyle::Frosted => (shell::rgb(29, 36, 48), shell::rgb(20, 26, 35)),
+            DesktopStyle::Liquid => (shell::rgb(238, 242, 246), shell::rgb(221, 227, 234)),
+            DesktopStyle::Luminous => (shell::rgb(22, 24, 29), shell::rgb(13, 15, 18)),
+            DesktopStyle::FieldKit => (shell::rgb(232, 230, 225), shell::rgb(214, 211, 203)),
+            DesktopStyle::Terminal => (shell::rgb(12, 15, 12), shell::rgb(6, 8, 6)),
+            DesktopStyle::Lcd => (shell::rgb(201, 211, 184), shell::rgb(182, 193, 162)),
+            DesktopStyle::Neon => (shell::rgb(11, 11, 18), shell::rgb(5, 5, 9)),
+            DesktopStyle::Hud => (shell::rgb(7, 17, 20), shell::rgb(3, 9, 10)),
             DesktopStyle::Macos if dark => (shell::rgb(12, 15, 36), shell::rgb(65, 36, 69)),
             DesktopStyle::Macos => (shell::rgb(39, 43, 87), shell::rgb(171, 109, 131)),
             DesktopStyle::Windows if dark => (shell::rgb(10, 19, 34), shell::rgb(21, 49, 72)),

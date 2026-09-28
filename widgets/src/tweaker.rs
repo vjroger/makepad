@@ -8725,12 +8725,12 @@ fn current_theme_preset(cx: &mut Cx) -> usize {
 
 /// The mix's weight rows, in the order the lab lists them.
 ///
-/// Twelve, because the longest appearance group the library ships is ten
-/// themes (the light one, since the material sheets joined it) and the
-/// sidebar is one chunk evaluated once -- there is no making a row at the
-/// moment a group turns out to want it. A shorter group hides the tail and
-/// zeroes its uids, which shuts the route as well as the row.
-const EQ_ROW_IDS: [LiveId; 12] = [
+/// Sixteen, because the longest appearance group the library ships is
+/// fifteen themes (the dark one, since the reference sheets joined it) and
+/// the sidebar is one chunk evaluated once -- there is no making a row at
+/// the moment a group turns out to want it. A shorter group hides the tail
+/// and zeroes its uids, which shuts the route as well as the row.
+const EQ_ROW_IDS: [LiveId; 16] = [
     live_id!(eq_row_0),
     live_id!(eq_row_1),
     live_id!(eq_row_2),
@@ -8743,6 +8743,10 @@ const EQ_ROW_IDS: [LiveId; 12] = [
     live_id!(eq_row_9),
     live_id!(eq_row_10),
     live_id!(eq_row_11),
+    live_id!(eq_row_12),
+    live_id!(eq_row_13),
+    live_id!(eq_row_14),
+    live_id!(eq_row_15),
 ];
 
 //// One setting of the theme builder, as a row on the screen.
@@ -10002,7 +10006,7 @@ pub struct Tweaker {
     eq_random_uid: u64,
     /// One per weight row on show, in the group's own order; the rest 0.
     #[rust]
-    eq_row_uids: [u64; 12],
+    eq_row_uids: [u64; 16],
     /// The builder: a whole theme grown from one favourite colour, and the
     /// part of that a panel would otherwise have to remember. Held here
     /// beside the lab and for the same reason -- the sidebar is dropped and
@@ -10609,59 +10613,11 @@ impl Tweaker {
         }
     }
 
-    /// Build the sidebar widget from a runtime splash chunk, once (every
-    /// widget type — the fab controls included — is registered by then).
-    fn ensure_sidebar(&mut self, cx: &mut Cx) {
-        let palette = fab_palette_stamp(cx);
-        if self.sidebar.is_some() {
-            if self.sidebar_palette == palette {
-                return;
-            }
-            // The chrome moved underneath it: something re-pointed one of
-            // the panel's own palette entries. The chunk below is where
-            // every fab colour lands, and it is evaluated
-            // here and nowhere else, so the only way to repaint the panel is
-            // to build it again. Everything the panel REMEMBERS is on this
-            // struct rather than in those widgets, so what is lost is what
-            // was typed into the panel's own boxes, which is the price of
-            // changing its skin on purpose.
-            //
-            // Two of those boxes are MIRRORED on this struct, though, and a
-            // box that comes back empty beside a mirror that did not would
-            // leave the panel filtering by a word nobody can see and
-            // offering to save under a name nobody typed. The name is
-            // re-seeded through the channel that already exists for it; the
-            // filter is dropped, because its mirror is lower-cased and
-            // putting that back would change what the person wrote.
-            if !self.theme_name.is_empty() {
-                self.theme_name_seed = Some(self.theme_name.clone());
-            }
-            self.filter.clear();
-            // The property list is a NEW, empty list; the rows are refilled
-            // only when this says they are stale. The reload that changed
-            // the palette bumps the apply generation and would do it anyway,
-            // but a rebuild asked for any other way would leave the panel
-            // showing an empty tab.
-            self.rows_uid = 0;
-            self.sidebar = None;
-        }
-        if self.theme_colors.is_empty() {
-            self.theme_colors = theme_palette(cx);
-            self.palette_gen = session().lock().unwrap().apply_gen;
-            log!("TWEAK theme palette: {} colours", self.theme_colors.len());
-        }
-        self.sidebar_palette = palette;
-        // What the app is already running under, before the picker offers
-        // to change it: a sheet installed at startup is the selected row.
-        self.theme_preset = current_theme_preset(cx);
-        self.refresh_saved_themes();
-        // The shader source view is a plain multiline TextInput, on purpose:
-        // the real code editor as a sidebar child would put a CodeView in
-        // the main window's widget tree for every app the tweaker rides in.
-        // Live-coding needs only text-in/text-out — Ctrl+Enter and the
-        // settle timer read `.text()` by path, whatever widget holds it.
-        let sidebar = cx.with_vm(|vm| {
-            let value = script_eval!(vm, {
+    /// The sidebar's whole splash, evaluated: every template the panel is
+    /// built from and the tree of controls made of them. Its own function
+    /// so a test can walk what it resolves to under a sheet.
+    fn sidebar_value(vm: &mut ScriptVm) -> ScriptValue {
+            script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.prelude.fab_internal.*
                 use mod.widgets.*
@@ -10673,6 +10629,12 @@ impl Tweaker {
                 // The dim grades are the panel's, not fab's: see
                 // `mod.tweak_panel`.
                 let panel = mod.tweak_panel
+                // The panel's plates, chips and grips: a RoundedView with the
+                // stock face kept from before any sheet, so a sheet that replaces
+                // `RoundedView`'s vertex or pixel does not repaint them.
+                let PanelRoundedView = RoundedView {
+                    draw_bg +: {..mod.stock_faces.RoundedView}
+                }
                 // The panel's command button, and the same trap
                 // `PanelDropDown` below exists to dodge -- these three now
                 // sit in the Theme tab beside it, where the control that
@@ -10709,6 +10671,11 @@ impl Tweaker {
                     margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
                     spacing: 6
                     draw_bg +: {
+                        // The stock vertex and pixel kept from before the sheet
+                        // (`desktop_style::STOCK_FACES`), the pixel then replaced
+                        // by the panel's own below: a sheet that replaces either
+                        // function on `Button` replaces nothing this button uses.
+                        ..mod.stock_faces.Button
                         border_size: 1.0
                         border_radius: 2.0
                         color_dither: 0.0
@@ -10822,7 +10789,10 @@ impl Tweaker {
                     min_height: 0
                     padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
                     margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
+                    // A multi-line field scrolls with the stock bar's own face.
+                    scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                     draw_bg +: {
+                        ..mod.stock_faces.TextInput
                         border_size: 1.0
                         border_radius: 2.0
                         color_dither: 0.0
@@ -10918,6 +10888,10 @@ impl Tweaker {
                 // (43,43,43) box on the panel's (48,48,48) ground.
                 let PanelCheckBox = CheckBox {
                     draw_bg +: {
+                        // The stock face, kept from before any sheet, and flat:
+                        // a material sheet raises `material` on every check box.
+                        ..mod.stock_faces.CheckBox
+                        material: 0.0
                         color: fab.color_input
                         color_hover: fab.color_input_hover
                         color_down: fab.color_input_active
@@ -10993,6 +10967,7 @@ impl Tweaker {
                     }
                     draw_icon +: { color: fab.color_text }
                     draw_bg +: {
+                        ..mod.stock_faces.PopupMenuItem
                         border_size: 0.0
                         border_radius: 2.0
                         color: fab.color_popover
@@ -11033,6 +11008,7 @@ impl Tweaker {
                     padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
                     menu_item: PanelMenuItem{}
                     draw_bg +: {
+                        ..mod.stock_faces.PopupMenu
                         border_size: 1.0
                         border_radius: 3.0
                         color: fab.color_popover
@@ -11076,6 +11052,7 @@ impl Tweaker {
                     }
                     draw_icon +: { color: fab.color_text }
                     draw_bg +: {
+                        ..mod.stock_faces.DropDown
                         border_size: 1.0
                         border_radius: 2.0
                         color_dither: 0.0
@@ -11181,7 +11158,7 @@ impl Tweaker {
                         ic_native := View { width: Fit height: Fit visible: false
                             i := Icon { icon_walk: Walk{width: 12 height: Fit} draw_icon +: { color: #xbbbbbb svg: crate_resource("self:resources/icons/icon_layout.svg") } }
                         }
-                        chip := RoundedView {
+                        chip := PanelRoundedView {
                             width: Fit height: Fit
                             padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
                             draw_bg +: { color: #x555555 radius: 3. }
@@ -12193,6 +12170,10 @@ impl Tweaker {
                                 eq_row_9 := EqRowT {}
                                 eq_row_10 := EqRowT {}
                                 eq_row_11 := EqRowT {}
+                                eq_row_12 := EqRowT {}
+                                eq_row_13 := EqRowT {}
+                                eq_row_14 := EqRowT {}
+                                eq_row_15 := EqRowT {}
                             }
                             // How the mix reads. Two themes that were each
                             // readable can average into one that is not: both
@@ -12691,6 +12672,7 @@ impl Tweaker {
                         }
                     }
                     shader_col := ScrollYView {
+                        scroll_bars +: {scroll_bar_x +: {draw_bg +: {..mod.stock_faces.ScrollBar}} scroll_bar_y +: {draw_bg +: {..mod.stock_faces.ScrollBar}}}
                         width: Fill
                         height: Fill
                         flow: Down
@@ -12747,6 +12729,7 @@ impl Tweaker {
                             height: Fit
                             visible: false
                         shader_rows := PortalList {
+                            scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                             width: Fill
                             height: 320
                             margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
@@ -12806,7 +12789,7 @@ impl Tweaker {
                             height: 0
                             clip_x: false
                             clip_y: false
-                            content := RoundedView {
+                            content := PanelRoundedView {
                                 width: Fit
                                 height: Fit
                                 padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
@@ -12884,7 +12867,7 @@ impl Tweaker {
                                 width: Fill
                                 text: "rules"
                             }
-                            grip := RoundedView {
+                            grip := PanelRoundedView {
                                 width: 28
                                 height: 3
                                 margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
@@ -12917,7 +12900,7 @@ impl Tweaker {
                                 width: Fill
                                 text: "app rules"
                             }
-                            grip := RoundedView {
+                            grip := PanelRoundedView {
                                 width: 28
                                 height: 3
                                 margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
@@ -12980,6 +12963,7 @@ impl Tweaker {
                             }
                         }
                         tree := FileTree {
+                            scroll_bars +: {scroll_bar_x +: {draw_bg +: {..mod.stock_faces.ScrollBar}} scroll_bar_y +: {draw_bg +: {..mod.stock_faces.ScrollBar}}}
                             file_node: PanelTreeNode {
                                 is_folder: false
                                 draw_bg +: {is_folder: 0.0}
@@ -13077,6 +13061,7 @@ impl Tweaker {
                             palette_starred := PanelButton { width: Fit height: 22 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "\u{2605}" draw_text +: { text_style +: { font_size: 9.0 } } }
                         }
                         palette := PortalList {
+                            scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                             width: Fill
                             height: Fill
                             margin: Inset{left: 8 right: 8 top: 0 bottom: 0}
@@ -13129,6 +13114,7 @@ impl Tweaker {
                         height: Fill
                         flow: Down
                         props := PortalList {
+                        scroll_bar +: {draw_bg +: {..mod.stock_faces.ScrollBar}}
                         width: Fill
                         height: Fill
                         margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
@@ -13170,7 +13156,7 @@ impl Tweaker {
                             // A plain View's draw_bg is a bare DrawQuad whose
                             // default pixel fn returns #0000, so show_bg plus a
                             // colour paints nothing. RoundedView has a pixel fn.
-                            bar := RoundedView {
+                            bar := PanelRoundedView {
                                 width: 28
                                 height: 3
                                 draw_bg +: { color: #x5c5c68 radius: 1.5 }
@@ -13296,7 +13282,7 @@ impl Tweaker {
                                 height: 0
                                 clip_x: false
                                 clip_y: false
-                                content := RoundedView {
+                                content := PanelRoundedView {
                                     width: Fit
                                     height: Fit
                                     padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
@@ -13326,7 +13312,62 @@ impl Tweaker {
                         }
                     }
                 }
-            });
+            })
+    }
+
+    /// Build the sidebar widget from a runtime splash chunk, once (every
+    /// widget type — the fab controls included — is registered by then).
+    fn ensure_sidebar(&mut self, cx: &mut Cx) {
+        let palette = fab_palette_stamp(cx);
+        if self.sidebar.is_some() {
+            if self.sidebar_palette == palette {
+                return;
+            }
+            // The chrome moved underneath it: something re-pointed one of
+            // the panel's own palette entries. The chunk below is where
+            // every fab colour lands, and it is evaluated
+            // here and nowhere else, so the only way to repaint the panel is
+            // to build it again. Everything the panel REMEMBERS is on this
+            // struct rather than in those widgets, so what is lost is what
+            // was typed into the panel's own boxes, which is the price of
+            // changing its skin on purpose.
+            //
+            // Two of those boxes are MIRRORED on this struct, though, and a
+            // box that comes back empty beside a mirror that did not would
+            // leave the panel filtering by a word nobody can see and
+            // offering to save under a name nobody typed. The name is
+            // re-seeded through the channel that already exists for it; the
+            // filter is dropped, because its mirror is lower-cased and
+            // putting that back would change what the person wrote.
+            if !self.theme_name.is_empty() {
+                self.theme_name_seed = Some(self.theme_name.clone());
+            }
+            self.filter.clear();
+            // The property list is a NEW, empty list; the rows are refilled
+            // only when this says they are stale. The reload that changed
+            // the palette bumps the apply generation and would do it anyway,
+            // but a rebuild asked for any other way would leave the panel
+            // showing an empty tab.
+            self.rows_uid = 0;
+            self.sidebar = None;
+        }
+        if self.theme_colors.is_empty() {
+            self.theme_colors = theme_palette(cx);
+            self.palette_gen = session().lock().unwrap().apply_gen;
+            log!("TWEAK theme palette: {} colours", self.theme_colors.len());
+        }
+        self.sidebar_palette = palette;
+        // What the app is already running under, before the picker offers
+        // to change it: a sheet installed at startup is the selected row.
+        self.theme_preset = current_theme_preset(cx);
+        self.refresh_saved_themes();
+        // The shader source view is a plain multiline TextInput, on purpose:
+        // the real code editor as a sidebar child would put a CodeView in
+        // the main window's widget tree for every app the tweaker rides in.
+        // Live-coding needs only text-in/text-out — Ctrl+Enter and the
+        // settle timer read `.text()` by path, whatever widget holds it.
+        let sidebar = cx.with_vm(|vm| {
+            let value = Self::sidebar_value(vm);
             WidgetRef::script_from_value(vm, value)
         });
         // Make the sidebar part of the widget tree (under this tweaker):
@@ -19905,7 +19946,7 @@ impl Tweaker {
             self.eq_absolute_uid = 0;
             self.eq_relative_uid = 0;
             self.eq_random_uid = 0;
-            self.eq_row_uids = [0; 12];
+            self.eq_row_uids = [0; 16];
             return;
         }
         // Only where something is waiting on it. The settle is an interval
@@ -24153,6 +24194,10 @@ mod tests {
             ("eq_row_9", "EqRowT"),
             ("eq_row_10", "EqRowT"),
             ("eq_row_11", "EqRowT"),
+            ("eq_row_12", "EqRowT"),
+            ("eq_row_13", "EqRowT"),
+            ("eq_row_14", "EqRowT"),
+            ("eq_row_15", "EqRowT"),
             ("eq_weight", "FabSlider"),
             ("eq_absolute", "PanelButton"),
             ("eq_relative", "PanelButton"),
@@ -24469,6 +24514,35 @@ mod tests {
     /// re-pointed at `theme.` anywhere in the chain -- the row, either of its
     /// two words, or the palette entry either of them names -- is caught by
     /// the value moving, however it is spelled.
+    /// No face a sheet gives a stock template reaches the panel.
+    ///
+    /// The tests above read the sheets in the tree and ask the panel to
+    /// declare what THEY override, which says nothing about the next sheet:
+    /// the reference sheets replace `draw_bg.vertex` and `draw_bg.pixel` on
+    /// every family the panel is built from. So this installs a sheet that
+    /// replaces both on every stock face (`desktop_style::marker_sheet`) and
+    /// walks the whole sidebar as it resolves -- every template, every
+    /// control, every draw object and nested part it holds or inherits, the
+    /// lists' row templates and the pickers' popups with them -- for a face
+    /// that is the sheet's.
+    #[test]
+    fn no_sheet_face_reaches_the_panel() {
+        use crate::desktop_style::{faces_reaching, install, marker_sheet, uninstall};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            install(vm, marker_sheet());
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let sidebar = Tweaker::sidebar_value(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the sidebar does not evaluate under the marker sheet: {errors:?}");
+            let leaks = faces_reaching(vm, sidebar, "sidebar");
+            assert!(leaks.is_empty(), "a sheet's face reaches the panel at:\n{}", leaks.join("\n"));
+            uninstall(vm);
+        });
+    }
+
     #[test]
     fn no_sheet_moves_the_mixs_weight_row() {
         use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};

@@ -194,6 +194,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
         use mod.prelude.fab_internal.*
         use mod.widgets.*
 
+        // The stock faces as they stand now, before any sheet's widget half
+        // runs. A sheet may replace `draw_bg.vertex` and `draw_bg.pixel` on
+        // the stock field, scroll bar and button, and every copy nested here
+        // that does not declare the two itself would take the sheet's; so
+        // each one spreads these in (`no_sheet_face_reaches_a_fab_control`).
+        let StockFieldFace = {vertex: mod.widgets.TextInput.draw_bg.vertex pixel: mod.widgets.TextInput.draw_bg.pixel}
+        let StockBarFace = {vertex: mod.widgets.ScrollBar.draw_bg.vertex pixel: mod.widgets.ScrollBar.draw_bg.pixel}
+        let StockButtonFace = {vertex: mod.widgets.Button.draw_bg.vertex pixel: mod.widgets.Button.draw_bg.pixel}
+
         set_type_default() do #(DrawDragNum::script_shader(vm)){
             ..mod.draw.DrawQuad
 
@@ -314,7 +323,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
                 margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
                 label_align: Align{x: 1.0 y: 0.5}
+                scroll_bar +: {draw_bg +: {..StockBarFace}}
                 draw_bg +: {
+                    ..StockFieldFace
                     color: vec4(0.0, 0.0, 0.0, 0.0)
                     border_radius: 0.0
                 }
@@ -818,7 +829,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
                 margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
                 empty_text: "Filter"
+                scroll_bar +: {draw_bg +: {..StockBarFace}}
                 draw_bg +: {
+                    ..StockFieldFace
                     color: vec4(0.0, 0.0, 0.0, 0.0)
                     color_hover: vec4(0.0, 0.0, 0.0, 0.0)
                     color_focus: vec4(0.0, 0.0, 0.0, 0.0)
@@ -1048,13 +1061,16 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         min_height: 0
                         padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
                         text: "pick"
+                        draw_bg +: {..StockButtonFace}
                     }
                     hex := TextInput{
                         width: Fill
                         height: Fill
                         min_height: 0
                         empty_text: ""
+                        scroll_bar +: {draw_bg +: {..StockBarFace}}
                         draw_bg +: {
+                            ..StockFieldFace
                             color: fab.color_input
                             border_radius: fab.radius
                         }
@@ -7131,6 +7147,50 @@ mod tests {
             }
         }
         found
+    }
+
+    /// No face a sheet gives a stock template reaches a fab control.
+    ///
+    /// The kit nests stock fields, and a sheet that replaces
+    /// `draw_bg.vertex` or `draw_bg.pixel` on one reaches every nested copy
+    /// that does not declare its own. Every `mod.widgets.Fab*` the file
+    /// registers is walked, read off the source so a control added later is
+    /// walked too, under a sheet that replaces both functions on every stock
+    /// face (`desktop_style::marker_sheet`).
+    #[test]
+    fn no_sheet_face_reaches_a_fab_control() {
+        use crate::desktop_style::{faces_reaching, install, marker_sheet, uninstall};
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let mut names: Vec<&str> = src
+            .split("mod.widgets.")
+            .skip(1)
+            .filter_map(|rest| rest.split_once(" = ").map(|(name, _)| name))
+            .filter(|name| name.starts_with("Fab") && name.chars().all(|c| c.is_ascii_alphanumeric()))
+            .collect();
+        names.sort();
+        names.dedup();
+        assert!(names.len() > 10, "only {} fab controls were read off the file", names.len());
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            install(vm, marker_sheet());
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the marker sheet does not evaluate: {errors:?}");
+            let widgets = vm.module(id!(widgets));
+            let mut leaks = Vec::new();
+            for name in &names {
+                let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+                assert!(value.as_object().is_some(), "`{name}` did not resolve");
+                leaks.extend(faces_reaching(vm, value, name));
+            }
+            assert!(leaks.is_empty(), "a sheet's face reaches the fab controls at:\n{}", leaks.join("\n"));
+            uninstall(vm);
+        });
     }
 
     #[test]

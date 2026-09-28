@@ -56,6 +56,9 @@ mod.theme.color_icon = #3a4052
 mod.theme.color_focus = #7c4dff
 mod.theme.color_ctrl_active = #7c4dff
 mod.theme.color_val = #7c4dff
+// The accent seed: the primary, secondary and tertiary families are
+// grown from it, and nothing else in this file reaches them.
+mod.theme.color_ctrl_selected = #7c4dff
 
 // Shadows need somewhere to fall. A neumorphic control sits in whitespace,
 // and the relief is drawn INSIDE the control's own rect, so the spacing
