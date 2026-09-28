@@ -86,6 +86,9 @@ script_mod! {
                 height: Fit
                 flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
                 spacing: theme.space_2
+                // A wrapped row stands as far under the row above as its
+                // buttons stand apart, so no shadow lands on a neighbour.
+                wrap_spacing: theme.space_2
                 Button{text: "Default"}
                 ButtonPrimary{text: "Primary"}
                 ButtonSecondary{text: "Secondary"}
