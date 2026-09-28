@@ -745,29 +745,42 @@ pub fn theme_mod(vm: &mut ScriptVm) {
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
     let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_host_io(vm, host_io_only);
+    widgets_mod_with_io(vm, host_io_only, true);
 }
 
+/// The widgets for a Splash isolate being built: `host_io_only` is the
+/// restriction it will run under (its std is restricted only after this).
 pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
+    widgets_mod_with_io(vm, host_io_only, false);
+}
+
+/// `stock_apart` keeps the stock library apart from the sheet's; an isolate
+/// passes false, see below.
+fn widgets_mod_with_io(vm: &mut ScriptVm, host_io_only: bool, stock_apart: bool) {
     // With a sheet installed the library is registered twice. First as it
     // stands without the sheet, which is kept (`desktop_style::keep_stock`)
     // for the chrome that must look and measure the same under every sheet;
     // then the base themes are built again, because the sheet's token half
     // writes into them and the kept library's theme must not change under
     // it; then with the sheet, which is the library everything else gets.
-    if crate::desktop_style::current_name(vm).is_some() {
-        register_widgets(vm, host_io_only, false);
+    //
+    // A Splash isolate registers once: it carries none of the host's chrome,
+    // and it is built inside the isolate's time budget, which a second pass
+    // would spend. Its stock names are the sheet's library.
+    let sheet = crate::desktop_style::current_name(vm).is_some();
+    if sheet && stock_apart {
+        register_widgets(vm, host_io_only, false, true);
         build_base_themes(vm);
-        register_widgets(vm, host_io_only, true);
+        register_widgets(vm, host_io_only, true, false);
     } else {
-        register_widgets(vm, host_io_only, false);
+        register_widgets(vm, host_io_only, sheet, true);
     }
 }
 
 /// One registration of every widget template, with the installed sheet's
-/// token half first when `with_sheet`, and otherwise kept as the stock
-/// library the chrome is built from.
-fn register_widgets(vm: &mut ScriptVm, host_io_only: bool, with_sheet: bool) {
+/// token half first when `with_sheet`, and kept as the stock library the
+/// chrome is built from when `keep`.
+fn register_widgets(vm: &mut ScriptVm, host_io_only: bool, with_sheet: bool, keep: bool) {
     if with_sheet {
         crate::desktop_style::apply_theme(vm);
     }
@@ -811,10 +824,10 @@ true
     });
 
     vm.bx.heap.new_module(id!(widgets));
-    // A registration without the sheet is the stock library, kept before
-    // anything is registered into it, so the chrome registered below already
-    // names its templates from it.
-    if !with_sheet {
+    // The registration kept as the stock library is kept before anything is
+    // registered into it, so the chrome registered below already names its
+    // templates from it.
+    if keep {
         crate::desktop_style::keep_stock(vm);
     }
 
