@@ -322,7 +322,7 @@ mod.widgets.RadioButtonTabFlat.animator.hover.down.apply.draw_bg.down = 1.0
 
 // Label inks: the working grey, a step brighter on the primary, the
 // accent on the tertiary and the outline, coral on the destructive one.
-let nd_medium = mod.theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+let nd_medium = mod.theme.font_regular{font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
 mod.widgets.ButtonFlat.draw_text.text_style = nd_medium
 mod.widgets.ButtonPrimary.draw_text.color = #d7dde6
 mod.widgets.ButtonPrimary.draw_text.color_hover = #eef2f7
@@ -1539,8 +1539,8 @@ mod.widgets.BadgeFlat.palette.neutral = #2c2f36
 mod.widgets.BadgeFlat.palette.on_neutral = #d7dde6
 mod.widgets.Badge.palette.neutral = #2c2f36
 mod.widgets.Badge.palette.on_neutral = #d7dde6
-mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_regular{font_size: 7.5 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
-mod.widgets.Badge.draw_text.text_style = mod.theme.font_regular{font_size: 7.5 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.BadgeFlat.draw_text.text_style = mod.theme.font_regular{font_size: 7.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.Badge.draw_text.text_style = mod.theme.font_regular{font_size: 7.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
 
 // THE OPEN LIST. A raised panel with a 6 point corner; the row under the
 // pointer lifts a little, the chosen row is a sunken strip with a lit bar
