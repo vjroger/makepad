@@ -1038,11 +1038,10 @@ mod tests {
                         DesktopStyle::Neumorphic => 8.0,
                         DesktopStyle::Molded => 5.0,
                         DesktopStyle::Glossy => 1.0,
-                        DesktopStyle::Milled => 3.0,
-                        DesktopStyle::Aluminium => 2.0,
-                        DesktopStyle::Frosted | DesktopStyle::Liquid | DesktopStyle::Luminous => 3.0,
-                        DesktopStyle::FieldKit => 1.5,
-                        DesktopStyle::Neon => 2.0,
+                        DesktopStyle::Milled | DesktopStyle::Aluminium | DesktopStyle::Frosted | DesktopStyle::Neon => 2.0,
+                        DesktopStyle::Liquid | DesktopStyle::Luminous => 3.0,
+                        DesktopStyle::FieldKit => 2.5,
+                        DesktopStyle::Lcd => 1.5,
                         _ => 0.0,
                     }
                 );
@@ -1140,7 +1139,7 @@ mod tests {
     /// it always did. Read off a window made from the template the way an
     /// app makes one, since that is where the sheet's writes have to land.
     #[test]
-    fn a_sheet_lays_the_window_ground_and_no_shipped_sheet_does() {
+    fn a_sheet_lays_the_window_ground_and_only_a_sheet_that_asks_for_one() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
@@ -1151,9 +1150,11 @@ mod tests {
             };
             assert_eq!(shows(vm), Some(false), "the stock window draws no ground");
             for style in DesktopStyle::ALL {
-                install(vm, StyleSheet::load(style));
+                let sheet = StyleSheet::load(style);
+                let asks = sheet.widgets.contains("mod.widgets.Window.show_bg = true");
+                install(vm, sheet);
                 vm.with_reload(crate::script_mod);
-                assert_eq!(shows(vm), Some(false), "{} lays a ground", style.id());
+                assert_eq!(shows(vm), Some(asks), "{}: the window's ground", style.id());
             }
             let ground = StyleSheet {
                 name: "ground".into(),
