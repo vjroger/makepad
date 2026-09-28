@@ -300,92 +300,192 @@ let fm_hl = fn(v: float, at: float, wd: float, px: float) -> float {
     return clamp((wd * 0.5 - abs(v - at)) / px + 0.5, 0.0, 1.0)
 }
 
-// A stepped line: `base` with the part between x0 and x1 lifted by `rise`,
-// reached by 45 degree ramps. Returns (y, 1 on a ramp).
-let fm_step_y = fn(x: float, base: float, x0: float, x1: float, rise: float) -> vec2 {
-    let ar = max(abs(rise), 0.001)
-    let r = clamp((x - x0) / ar, 0.0, 1.0) * clamp((x1 - x) / ar, 0.0, 1.0)
-    let on_ramp = step(0.001, r) * step(r, 0.999)
-    return vec2(base - rise * r, on_ramp)
+// ---------------------------------------------------------------------------
+// THE CIRCUIT. A dark teal-black board with traces on it, built from cell
+// grids at three scales. Every edge between two cells hashes whether a trace
+// crosses it and where along it, so both cells agree and a trace runs on
+// unbroken; inside a cell the traces meet at a hub, arriving straight and
+// turning at 45 degrees. A slow density field makes busy clusters and quiet
+// ground, a slow direction field lays them in bundles running mostly one way.
+// A trace that ends stops in a ring via; an empty cell may hold a chip or a
+// small part. Some traces are lit where a slow field says so, brightening and
+// fading along their length.
+
+// The port on one cell edge: `e` the edge's middle in cell units, `horiz` 1
+// for an edge a horizontal trace crosses. Returns (1 if there is one, its
+// place along the edge in points).
+let fm_port = fn(e: vec2, horiz: float, s: float, seed: float, dens: float) -> vec2 {
+    let dn = Finish.noise(e / 4.3 + vec2(seed * 7.13, seed * 3.31))
+    let dir = Finish.noise(e / 7.1 + vec2(seed * 2.91 + 40.0, seed * 5.77 + 11.0))
+    let busy = smoothstep(0.40 - dens, 0.56 - dens, dn)
+    let pref = smoothstep(0.35, 0.65, mix(1.0 - dir, dir, horiz))
+    let pr = busy * mix(0.05, 0.96, pref)
+    // on or off by runs of about three edges along the trace, the runs of
+    // neighbouring rows staggered, with a rare single break
+    let along = mix(e.y, e.x, horiz)
+    let across = mix(e.x, e.y, horiz)
+    let rk = floor((along + Finish.hash(vec2(across * 1.37 + seed, horiz * 5.1 + 2.0)) * 3.0) / 3.0)
+    let h1 = Finish.hash(vec2(rk * 1.731 + seed * 13.1 + horiz * 71.3, across * 2.117 + seed * 5.9 + 0.7)) * step(0.05, Finish.hash(e * vec2(2.71, 1.61) + vec2(seed * 2.3, horiz * 9.7)))
+    let h2 = Finish.hash(e * vec2(3.173, 1.291) + vec2(seed * 3.7 + horiz * 19.1, 8.3))
+    let t = 0.5 + (h2 - 0.5) * 0.46
+    return vec2(step(1.0 - pr, h1), t * s)
 }
 
-// A lit trace laid on `col` from its centre-line distance `dt` and a pad
-// distance `dp`; `amt` dims it.
-let fm_trace = fn(col: vec3, dt: float, dp: float, w: float, px: float, amt: float) -> vec3 {
-    var c = col
-    let dpr = abs(dp - 1.7) - 0.55
-    let d = min(dt - w * 0.5, dpr)
-    c = c + fm_cyan() * Finish.glow(max(d, 0.0), 1.6) * step(0.0, d) * 0.55 * amt
-    let t = Finish.tube(min(dt, dpr + w * 0.5), w, px)
-    let body = mix(c, fm_cyan() * (0.8 + 0.2 * amt), t.y * amt)
-    c = mix(body, mix(fm_core(), vec3(1.0, 1.0, 1.0), 0.35), t.x * amt)
-    // the pad's hole
-    c = mix(c, vec3(0.05, 0.08, 0.10), Finish.cover(dp - 0.8, px) * amt)
+// One cell of a layer: `l` the point in the cell (0..s). Returns (distance to
+// the trace centre lines, distance to the centre of a via, signed distance
+// to a part, kind of part: 0 none, 1 chip with pins, 2 small part; plus
+// 0.5 where a chip's pin is).
+let fm_cell = fn(l: vec2, cell: vec2, s: float, seed: float, dens: float) -> vec4 {
+    let pl = fm_port(vec2(cell.x, cell.y + 0.5), 1.0, s, seed, dens)
+    let pr = fm_port(vec2(cell.x + 1.0, cell.y + 0.5), 1.0, s, seed, dens)
+    let pt = fm_port(vec2(cell.x + 0.5, cell.y), 0.0, s, seed, dens)
+    let pb = fm_port(vec2(cell.x + 0.5, cell.y + 1.0), 0.0, s, seed, dens)
+    let n = pl.x + pr.x + pt.x + pb.x
+    let hc = Finish.hash(cell * vec2(1.93, 2.71) + vec2(seed * 9.1, 4.4))
+    let hd = Finish.hash(cell * vec2(2.37, 1.13) + vec2(seed * 3.3, 7.9))
+    let nv = pt.x + pb.x
+    let nh = pl.x + pr.x
+    // the hub: on the line of the ports, moved in toward the odd one so a
+    // corner is cut at 45 degrees
+    let k = s * (0.07 + 0.07 * hc)
+    let hx = mix(s * (0.3 + 0.4 * hc), (pt.x * pt.y + pb.x * pb.y) / max(nv, 1.0), step(0.5, nv)) + k * (pr.x - pl.x)
+    let hy = mix(s * (0.3 + 0.4 * hd), (pl.x * pl.y + pr.x * pr.y) / max(nh, 1.0), step(0.5, nh)) + k * (pb.x - pt.x)
+    let hub = vec2(hx, hy)
+    let big = 1000.0
+    let al = vec2(clamp(hx - abs(hy - pl.y), 0.0, s), pl.y)
+    let ar = vec2(clamp(hx + abs(hy - pr.y), 0.0, s), pr.y)
+    let at = vec2(pt.y, clamp(hy - abs(hx - pt.y), 0.0, s))
+    let ab = vec2(pb.y, clamp(hy + abs(hx - pb.y), 0.0, s))
+    var d = big
+    d = min(d, mix(big, min(fm_seg(l, vec2(0.0, pl.y), al), fm_seg(l, al, hub)), pl.x))
+    d = min(d, mix(big, min(fm_seg(l, vec2(s, pr.y), ar), fm_seg(l, ar, hub)), pr.x))
+    d = min(d, mix(big, min(fm_seg(l, vec2(pt.y, 0.0), at), fm_seg(l, at, hub)), pt.x))
+    d = min(d, mix(big, min(fm_seg(l, vec2(pb.y, s), ab), fm_seg(l, ab, hub)), pb.x))
+    // a via where a trace ends, now and then where traces meet
+    let viaon = max(step(0.5, n) * step(n, 1.5) * step(0.35, hd), step(2.5, n) * step(0.55, hd))
+    let dp = mix(big, length(l - hub), viaon)
+    // an empty cell may hold a chip (pins along two sides) or a small part
+    var dc = big
+    var kind = 0.0
+    if n < 0.5 {
+        let hk = Finish.hash(cell * vec2(3.71, 2.93) + vec2(seed * 1.7, 2.2))
+        let hr = step(0.5, Finish.hash(cell * vec2(1.17, 3.39) + vec2(seed * 4.1, 6.6)))
+        let cc = vec2(s * (0.42 + 0.16 * hc), s * (0.42 + 0.16 * hd))
+        let rel = l - cc
+        let rl = mix(rel, vec2(rel.y, rel.x), hr)
+        if hk > 0.45 {
+            let hh = vec2(s * 0.20, s * 0.11)
+            dc = fm_rbox(rl, vec2(0.0, 0.0), hh, s * 0.02)
+            kind = 1.0
+            let pitch = s * 0.065
+            let pin = step(hh.y, abs(rl.y)) * step(abs(rl.y), hh.y + s * 0.045) * step(abs(rl.x), hh.x - s * 0.03) * step(fract(rl.x / pitch + 0.25), 0.5)
+            kind = kind + 0.5 * pin
+        }
+        if hk > 0.15 && hk < 0.45 {
+            dc = fm_rbox(rl, vec2(0.0, 0.0), vec2(s * 0.08, s * 0.04), s * 0.01)
+            kind = 2.0 + 0.5 * step(s * 0.05, abs(rl.x))
+        }
+    }
+    return vec4(d, dp, dc, kind)
+}
+
+// A layer at cell size `s`: the cell under the point in full, and the
+// traces and vias of the three neighbours toward it, so a glow runs on
+// across a cell's edge.
+let fm_layer = fn(q: vec2, s: float, seed: float, dens: float) -> vec4 {
+    let cell = floor(q / s)
+    let f = q / s - cell
+    let ox = mix(-1.0, 1.0, step(0.5, f.x))
+    let oy = mix(-1.0, 1.0, step(0.5, f.y))
+    let r = fm_cell(q - cell * s, cell, s, seed, dens)
+    let c1 = cell + vec2(ox, 0.0)
+    let c2 = cell + vec2(0.0, oy)
+    let c3 = cell + vec2(ox, oy)
+    let a = fm_cell(q - c1 * s, c1, s, seed, dens)
+    let b = fm_cell(q - c2 * s, c2, s, seed, dens)
+    let c = fm_cell(q - c3 * s, c3, s, seed, dens)
+    return vec4(min(r.x, min(a.x, min(b.x, c.x))), min(r.y, min(a.y, min(b.y, c.y))), r.z, r.w)
+}
+
+// How lit the traces of a layer are at q: a slow field, so a lit trace
+// brightens and fades along its length; most of the board stays dim.
+let fm_lit = fn(q: vec2, sc: float, seed: float, lo: float) -> float {
+    let v = Finish.noise(q / sc + vec2(seed * 17.3, seed * 9.1)) * 0.7 + Finish.noise(q / (sc * 0.37) + vec2(seed * 3.9, 21.0)) * 0.3
+    return smoothstep(lo, lo + 0.1, v)
+}
+
+// The board at q (points, anchored where the caller anchors it). `soft`
+// widens every edge (the frost of the pane in front); `calm` 0..1 dims the
+// lit traces (under text).
+let fm_board = fn(q: vec2, px: float, soft: float, calm: float, frost: float) -> vec3 {
+    let aa = px * soft
+    // behind frost a lit trace spreads: a softer, wider glow, a paler core
+    let hot = 1.0 - 0.8 * frost
+    let bodyk = 1.0 - 0.45 * frost
+    let spread = 1.0 + 0.6 * frost
+    let gk = 1.0 - 0.3 * frost
+    let cl = Finish.noise(q / 110.0) * 0.6 + Finish.noise(q / 31.0 + vec2(7.0, 3.0)) * 0.4
+    var col = mix(vec3(0.031, 0.071, 0.094), vec3(0.071, 0.118, 0.141), cl)
+    col = col + g3(fm_grain(q / px, 0.012))
+    let quiet = 1.0 - calm
+    // the fine signal lines: many, thin, never lit
+    let qa = q + vec2(3.1, 5.7)
+    let la = fm_cell(qa - floor(qa / 5.5) * 5.5, floor(qa / 5.5), 5.5, 1.0, -0.04)
+    col = mix(col, vec3(0.106, 0.200, 0.235), Finish.cover(la.x - 0.33, aa) * 0.8)
+    // the wide flat buses: a pale fill in a brighter outline
+    let qc = q + vec2(17.3, 11.9)
+    let lc = fm_layer(qc, 46.0, 3.0, 0.16)
+    let litc = fm_lit(q, 240.0, 3.0, 0.52) * quiet * (1.0 - 0.3 * frost)
+    let wc = 7.0
+    let cfill = mix(vec3(0.120, 0.225, 0.262), vec3(0.110, 0.300, 0.350), litc * bodyk)
+    col = mix(col, cfill, Finish.cover(lc.x - wc * 0.5, aa) * 0.9)
+    col = col + fm_cyan() * Finish.glow(max(lc.x - wc * 0.5, 0.0), 4.0 * spread) * step(wc * 0.5, lc.x) * 0.40 * litc * gk
+    let crim = Finish.cover(abs(lc.x - wc * 0.5 + 0.5) - 0.5, aa)
+    col = mix(col, mix(vec3(0.380, 0.540, 0.590), mix(fm_cyan(), fm_core(), 0.55 * hot), litc * bodyk), crim * 0.95)
+    // a part in an empty bus cell: a chip with its pins, a small part
+    let kind = floor(lc.w)
+    let pin = step(0.25, fract(lc.w))
+    let body = Finish.cover(lc.z, aa)
+    col = mix(col, vec3(0.200, 0.260, 0.285), pin * step(0.5, kind) * step(kind, 1.5))
+    let chip = mix(vec3(0.028, 0.040, 0.048), vec3(0.070, 0.090, 0.100), smoothstep(-6.0, 0.0, lc.z))
+    col = mix(col, mix(chip, vec3(0.200, 0.290, 0.320), Finish.cover(abs(lc.z + 0.6) - 0.4, aa) * 0.7), body * step(0.5, kind) * step(kind, 1.5))
+    let smd = mix(vec3(0.060, 0.080, 0.090), vec3(0.330, 0.390, 0.410), step(0.25, fract(lc.w)))
+    col = mix(col, smd, body * step(1.5, kind))
+    // the signal bus: mid traces, some lit
+    let qb = q + vec2(7.7, 2.3)
+    let lb = fm_layer(qb, 19.0, 5.0, 0.0)
+    let litb = fm_lit(q, 150.0, 5.0, 0.54) * quiet * (1.0 - 0.2 * frost)
+    let wb = 2.4
+    col = col + fm_cyan() * Finish.glow(max(lb.x - wb * 0.5, 0.0), 3.2 * spread) * step(wb * 0.5, lb.x) * 0.55 * litb * gk
+    let tb = Finish.tube(lb.x, wb, aa)
+    col = mix(col, mix(vec3(0.190, 0.320, 0.370), fm_cyan(), litb * bodyk), Finish.cover(lb.x - wb * 0.5, aa))
+    col = mix(col, mix(fm_core(), vec3(1.0, 1.0, 1.0), 0.45), tb.x * litb * hot)
+    // ring vias of both layers
+    let rv = abs(lb.y - 2.5) - 0.8
+    col = mix(col, mix(vec3(0.300, 0.430, 0.470), mix(fm_cyan(), fm_core(), 0.6 * hot), litb * bodyk), Finish.cover(rv, aa))
+    col = mix(col, vec3(0.012, 0.024, 0.031), Finish.cover(lb.y - 1.6, aa))
+    let rc = abs(lc.y - 5.6) - 1.6
+    col = mix(col, mix(vec3(0.270, 0.390, 0.430), mix(fm_cyan(), fm_core(), 0.5 * hot), litc * bodyk), Finish.cover(rc, aa))
+    col = mix(col, vec3(0.012, 0.024, 0.031), Finish.cover(lc.y - 3.8, aa))
+    return col
+}
+
+// A pane of frosted blue-white plastic lying on the board: it lightens and
+// softens what is behind it, tints it pale blue, and carries a soft diagonal
+// reflection (`refl` 0..1 at this point).
+let fm_pane = fn(board: vec3, q: vec2, px: float, refl: float, tint: float) -> vec3 {
+    // the frost is a little uneven, as a moulded pane is
+    let fz = Finish.noise(q / 70.0 + vec2(3.3, 8.1)) - 0.5
+    var c = board * 0.82 + vec3(0.420, 0.540, 0.600) * (tint + 0.06 * fz)
+    c = c + vec3(0.85, 0.93, 1.0) * refl
+    c = c + g3(fm_grain(q / px + vec2(311.0, 97.0), 0.010))
     return c
 }
 
-// A recessed channel across the plate: `v` the distance from its centre
-// line (positive below), `w` its half width. The upper plate's lower cut is
-// in shade under a bright corner; the floor is dark steel shaded under its
-// top wall; the lower plate's upper cut faces the light.
-let fm_channel = fn(col: vec3, v: float, w: float, px: float, q: vec2) -> vec3 {
-    var c = col
-    let bev = 2.5
-    let up_cut = step(-w - bev, v) * step(v, -w)
-    c = mix(c, c * mix(0.62, 0.36, clamp((v + w + bev) / bev, 0.0, 1.0)), up_cut)
-    c = mix(c, vec3(0.86, 0.91, 0.94), fm_hl(v, -w - bev + px * 0.5, px, px) * 0.75)
-    let fl = step(-w, v) * step(v, w)
-    var floor = vec3(0.110, 0.137, 0.161) + g3(fm_brush(q, px) * 0.02)
-    floor = mix(floor, fm_edge(), exp(-max(v + w, 0.0) / 2.2) * 0.7)
-    c = mix(c, floor, fl)
-    let lo_cut = step(w, v) * step(v, w + bev)
-    c = mix(c, mix(vec3(0.56, 0.63, 0.68), vec3(0.80, 0.86, 0.90), clamp((v - w) / bev, 0.0, 1.0)), lo_cut)
-    c = mix(c, fm_edge(), max(fm_hl(v, -w, px, px), fm_hl(v, w, px, px)) * 0.85)
-    c = mix(c, vec3(0.97, 0.99, 1.0), fm_hl(v, w + bev - px * 0.5, px, px) * 0.8)
-    // the plate's top catches a little of the light under the cut
-    c = c + g3(0.03 * exp(-max(v - w - bev, 0.0) / 4.0) * step(w + bev, v))
-    return c
+// Union of two distances with the inner corner cut at 45 degrees, `r` deep.
+let fm_uc = fn(a: float, b: float, r: float) -> float {
+    return min(min(a, b), (a + b - r) * 0.7071)
 }
-
-// The bus in the bay: one lane of it, cell j. Returns (distance to the
-// trace, distance to its pads).
-let fm_ex = fn(l: float, j: float) -> float {
-    return step(0.6, Finish.hash(vec2(l * 7.13 + 1.7, j * 3.71 + 9.2)))
-}
-let fm_jog = fn(l: float, j: float) -> float {
-    return fm_ex(l, j) * step(0.58, Finish.hash(vec2(l * 5.31 + 2.1, j * 1.93 + 4.4))) * (1.0 - fm_ex(l + 1.0, j))
-}
-let fm_lane = fn(p: vec2, l: float, j: float, y0: float, s: float, cw: float) -> vec2 {
-    let ex = fm_ex(l, j)
-    let jg = fm_jog(l, j)
-    let sc = max(fm_ex(l, j - 1.0) * (1.0 - fm_jog(l, j - 1.0)), fm_jog(l - 1.0, j - 1.0))
-    let ec = fm_ex(l, j + 1.0)
-    let jc = fm_ex(l + 1.0, j + 1.0)
-    let y = y0 + (l + 0.5) * s
-    let xa = j * cw + (1.0 - sc) * 9.0
-    let xe = (j + 1.0) * cw
-    let xb = mix(xe - (1.0 - ec) * 9.0, xe - s, jg)
-    var dt = fm_seg(p, vec2(xa, y), vec2(xb, y))
-    dt = mix(dt, min(dt, fm_seg(p, vec2(xb, y), vec2(xe, y + s))), jg)
-    var dp = 1000.0
-    dp = mix(dp, min(dp, length(p - vec2(xa, y))), 1.0 - sc)
-    let pe = mix(vec2(xb, y), vec2(xe, y + s), jg)
-    let has_pe = mix(1.0 - ec, 1.0 - jc, jg)
-    dp = mix(dp, min(dp, length(p - pe)), has_pe)
-    return mix(vec2(1000.0, 1000.0), vec2(dt, dp), ex)
-}
-let fm_bus = fn(p: vec2, y0: float) -> vec2 {
-    let s = 9.0
-    let cw = 60.0
-    let i = floor((p.y - y0) / s)
-    let j = floor(p.x / cw)
-    let a = fm_lane(p, i, j, y0, s, cw)
-    let b = fm_lane(p, i - 1.0, j, y0, s, cw)
-    let c = fm_lane(p, i, j - 1.0, y0, s, cw)
-    let d = fm_lane(p, i - 1.0, j - 1.0, y0, s, cw)
-    return min(min(a, b), min(c, d))
-}
-
 
 // ---------------------------------------------------------------------------
 // BUTTONS. One face for the family; `kind` picks the dressing:
@@ -1844,11 +1944,18 @@ let fm_plate = fn(p: vec2, size: vec2, o: vec2, px: float, cut: float, sunken: f
     var fl = mix(vec3(0.071, 0.090, 0.106), vec3(0.094, 0.118, 0.137), t)
     fl = fl + g3(fm_brush(q, px) * 0.012 + fm_grain(q / px, 0.008))
     if sunken > 0.5 {
-        let bq = p - lo + vec2(0.0, 1.0)
-        let bus = fm_bus(bq, 4.0)
-        let quiet = max(smoothstep(60.0, 66.0, yi), smoothstep(0.60, 0.70, xi))
-        let inside = step(d, -5.0)
-        fl = fm_trace(fl, bus.x, bus.y, 1.0, px, 0.55 * quiet * inside)
+        // a circuit seen through a pane, anchored to the panel itself; its
+        // lit traces calm under the caption and body at the top left
+        let bq = p - lo
+        let calm = 1.0 - max(smoothstep(58.0, 70.0, yi), smoothstep(0.58, 0.72, xi))
+        let ru = (xi * 0.8 + t) / 1.8
+        let r1 = (ru - 0.62) / 0.05
+        let r2 = (ru - 0.70) / 0.012
+        var b = fm_board(bq + vec2(41.0, 23.0), px, 2.2, calm * 0.85, 0.3)
+        b = fm_pane(b, q, px, exp(-r1 * r1) * 0.040 + exp(-r2 * r2) * 0.030, 0.30)
+        fl = mix(b, b * 0.72, calm * 0.6)
+        // the pane's rim, three points in, bright along its top
+        fl = mix(fl, vec3(0.80, 0.88, 0.92), Finish.band(d, 3.0, 3.0 + px, px) * (0.2 + 0.5 * clamp(-n.y, 0.0, 1.0)))
     }
     let insh = Finish.inset(p, c, h, 3.0, vec2(0.0, 2.5), 3.0)
     fl = mix(fl, vec3(0.012, 0.016, 0.024), clamp(insh, 0.0, 1.0) * 0.85)
@@ -2126,16 +2233,16 @@ mod.widgets.Vr.draw_bg.pixel = fn() {
 }
 
 // ---------------------------------------------------------------------------
-// THE HULL under everything: the window's own ground, in window points, so
-// nothing in it moves with a page. Bright brushed steel plates, their edges
-// stepped with 45 degree cuts: a recessed channel under the title strip and
-// another under the first row, each with a lit trace in its floor; engraved
-// seams between the columns; the lower part of the window a recessed bay of
-// dark steel where a bus of lit traces runs, jogging at 45 degrees and
-// ending in pads. The traces leave the top of the bay quiet for its caption.
+// THE HULL under everything: the window's own ground, in window points and
+// anchored to the window's edges only, so it fits any page. The middle is calm
+// brushed steel. Along the left edge, the foot and the right edge a window is
+// cut into the steel, stepped out at 45 degrees where it widens: a seam round
+// it, a lit chamfer stepping down to a ledge, a dark wall, then a pane of
+// frosted blue-white plastic with a bright bevelled rim, lying in the frame's
+// shadow; through it the circuit board glows.
 
-// The plate's own steel at window point q: a top-lit fall within its deck
-// (top..bot), a tone of its own, brushed streaks and grain.
+// The plate's own steel at window point q: a top-lit fall down the window,
+// brushed streaks and grain.
 let fm_plate_steel = fn(q: vec2, top: float, bot: float, tone: float, px: float) -> vec3 {
     let t = clamp((q.y - top) / max(bot - top, 1.0), 0.0, 1.0)
     var col = mix(vec3(0.352, 0.402, 0.440), vec3(0.318, 0.364, 0.398), t)
@@ -2147,133 +2254,99 @@ let fm_plate_steel = fn(q: vec2, top: float, bot: float, tone: float, px: float)
     return col
 }
 
+// A box lo..hi with its corners cut (tl, tr, br, bl).
+let fm_nb = fn(q: vec2, lo: vec2, hi: vec2, k: vec4) -> float {
+    return Finish.sd_notch(q, (lo + hi) * 0.5, (hi - lo) * 0.5, k)
+}
+
+// The window cut into the hull, negative inside: a strip down the left edge
+// that widens part way down, one down the right edge that widens lower, and a
+// band along the foot whose top steps down right of the middle.
+let fm_win_sd = fn(q: vec2, size: vec2) -> float {
+    let m = 8.0
+    let w = size.x
+    let h = size.y
+    let lw = clamp(w * 0.10, 56.0, 170.0)
+    let rw = clamp(w * 0.09, 50.0, 150.0)
+    let bh = clamp(h * 0.15, 64.0, 160.0)
+    let yt = clamp(h * 0.14, 60.0, 140.0)
+    let yl = mix(yt, h - bh, 0.40)
+    let yr = mix(yt, h - bh, 0.64)
+    let l1 = fm_nb(q, vec2(m, yt), vec2(m + lw * 0.62, h - m), vec4(10.0, 7.0, 0.0, 12.0))
+    let l2 = fm_nb(q, vec2(m, yl), vec2(m + lw, h - m), vec4(0.0, 10.0, 0.0, 12.0))
+    let r1 = fm_nb(q, vec2(w - m - rw * 0.66, mix(yt, h - bh, 0.18)), vec2(w - m, h - m), vec4(7.0, 10.0, 12.0, 0.0))
+    let r2 = fm_nb(q, vec2(w - m - rw, yr), vec2(w - m, h - m), vec4(10.0, 0.0, 12.0, 0.0))
+    let b1 = fm_nb(q, vec2(m, h - bh), vec2(w * 0.42, h - m), vec4(0.0, 0.0, 0.0, 12.0))
+    let b2 = fm_nb(q, vec2(w * 0.30, h - bh + 22.0), vec2(w - m, h - m), vec4(0.0, 0.0, 12.0, 0.0))
+    let l = fm_uc(l1, l2, 12.0)
+    let r = fm_uc(r1, r2, 12.0)
+    let b = fm_uc(b1, b2, 18.0)
+    return fm_uc(fm_uc(l, b, 16.0), r, 16.0)
+}
+
 let fm_hull = fn(q: vec2, size: vec2, px: float) -> vec3 {
-    // the lines of the hull, in window points
-    let c1 = 70.0
-    let c2s = fm_step_y(q.x, 196.0, 362.0, 1015.0, 6.0)
-    let bays = fm_step_y(q.x, 604.0, 522.0, 752.0, 30.0)
-    let c2 = c2s.x
-    let bay = bays.x
-    // which deck, and its plate
-    var top = 0.0
-    var bot = c1
-    if q.y > c1 {
-        top = c1
-        bot = c2
+    var col = fm_plate_steel(q, 0.0, size.y, 0.0, px)
+    let d = fm_win_sd(q, size)
+    if d > 24.0 {
+        return col
     }
-    if q.y > c2 {
-        top = c2
-        bot = bay
-    }
-    let tone = (Finish.hash(vec2(floor(top), 3.7)) - 0.5) * 0.02
-    var col = fm_plate_steel(q, top, bot, tone, px)
-    // the upper deck, clear of text but for its caption at the left, takes
-    // a broad bright reflection
-    if top > c1 - 0.5 && top < c1 + 0.5 {
-        let sx = smoothstep(330.0, 560.0, q.x) * (1.0 - smoothstep(930.0, 1010.0, q.x))
-        let ww = (q.x - 620.0) / 360.0 + (q.y - 120.0) / 110.0
-        // and a hard bright band low on the plate, under the first row
-        let bq = (q.y - 156.0 - (q.x - 600.0) * 0.008) / 6.5
-        let band = exp(-bq * bq) * (0.6 + 0.4 * exp(-((q.x - 640.0) / 260.0) * ((q.x - 640.0) / 260.0)))
-        let sheen = exp(-ww * ww * 1.6) * 0.30 * sx * (1.0 - smoothstep(740.0, 795.0, q.x)) * smoothstep(104.0, 118.0, q.y) * (1.0 - smoothstep(146.0, 162.0, q.y)) + band * 0.45 * smoothstep(340.0, 420.0, q.x) * (1.0 - smoothstep(960.0, 1010.0, q.x))
-        col = col + vec3(0.92, 0.96, 1.0) * sheen + g3(fm_brush(q * 1.3, px) * 0.06 * sheen / 0.3)
-    }
-    // engraved seams between the columns of the middle deck
-    let sx1 = 519.5
-    let sx2 = 766.0
-    // a stepped panel line across the middle deck: the plate below it
-    // stands a hair proud and catches the light on its edge
-    let sy = mix(383.0, 428.0, step(643.0, q.x))
-    let sv = q.y - sy
-    let seam_on = step(c2 + 8.0, q.y) * step(q.y, bay - 8.0)
-    col = mix(col, col * 0.8, smoothstep(-4.0, 0.0, sv) * step(sv, 0.0) * seam_on)
-    col = mix(col, fm_edge(), fm_hl(sv, -px * 0.5, px, px) * 0.8 * seam_on)
-    col = mix(col, vec3(0.84, 0.90, 0.93), fm_hl(sv, px * 0.5, px, px) * 0.8 * seam_on)
-    col = col + g3(0.04 * exp(-max(sv, 0.0) / 2.5) * step(0.0, sv) * seam_on)
-    // the middle column is a recessed bay of blue glass-steel with a quiet
-    // bus of traces in its floor, cut in with a bevel all round
-    let rlo = vec2(sx1 + 1.0, c2 + 12.0)
-    let rhi = vec2(sx2 - 1.0, bay - 10.0)
-    let rc = (rlo + rhi) * 0.5
-    let rh = (rhi - rlo) * 0.5
-    let rd = Finish.sd_notch(q, rc, rh, vec4(10.0, 4.0, 10.0, 4.0))
-    if rd < 3.0 {
-        let rt = clamp((q.y - rlo.y) / max(rhi.y - rlo.y, 1.0), 0.0, 1.0)
-        var rf = mix(vec3(0.225, 0.300, 0.330), vec3(0.180, 0.245, 0.275), rt)
-        rf = rf + g3(fm_brush(q, px) * 0.025 + fm_grain(q / px, 0.010))
-        let rbus = fm_bus(vec2(q.y, q.x), rlo.x + 2.0)
-        rf = fm_trace(rf, rbus.x, rbus.y, 1.0, px, 0.42 * step(rd, -3.0))
-        let rsh = Finish.inset(q, rc, rh, 4.0, vec2(0.0, 2.5), 3.0)
-        rf = mix(rf, fm_edge(), clamp(rsh, 0.0, 1.0) * 0.75)
-        rf = mix(rf, fm_edge(), Finish.band(rd, 0.0, px, px) * 0.9)
-        // the lip: the plate's cut round the recess, lit where it faces up
-        let e2 = 0.35
-        let rgx = Finish.sd_notch(q + vec2(e2, 0.0), rc, rh, vec4(10.0, 4.0, 10.0, 4.0)) - Finish.sd_notch(q - vec2(e2, 0.0), rc, rh, vec4(10.0, 4.0, 10.0, 4.0))
-        let rgy = Finish.sd_notch(q + vec2(0.0, e2), rc, rh, vec4(10.0, 4.0, 10.0, 4.0)) - Finish.sd_notch(q - vec2(0.0, e2), rc, rh, vec4(10.0, 4.0, 10.0, 4.0))
-        let rn = vec2(rgx, rgy) / max(length(vec2(rgx, rgy)), 0.0001)
-        let lip = clamp(dot(-rn, fm_light()), -1.0, 1.0)
-        let lipc = mix(col * 0.55, vec3(0.80, 0.86, 0.90), clamp(lip * 0.5 + 0.5, 0.0, 1.0))
-        let ring = step(0.0, rd) * step(rd, 2.5)
-        col = mix(col, lipc, ring)
-        col = mix(col, rf, Finish.cover(rd, px))
-    }
-    // the two channels
-    let w = 5.0
-    let v1 = q.y - c1
-    let v2 = (q.y - c2) * mix(1.0, 0.7071, c2s.y)
-    col = fm_channel(col, v1, w, px, q)
-    col = fm_channel(col, v2, w, px, q)
-    // their traces, with a pad every so often
-    let pc = 150.0
-    let pj = floor(q.x / pc)
-    let pxc = (pj + 0.5) * pc + (Finish.hash(vec2(pj, 5.1)) - 0.5) * 60.0
-    let pad_on = step(0.45, Finish.hash(vec2(pj, 8.3)))
-    let dp1 = mix(1000.0, length(vec2(q.x - pxc, v1)), pad_on)
-    let dp2 = mix(1000.0, length(vec2(q.x - pxc - 40.0, v2)), pad_on)
-    col = fm_trace(col, abs(v1), dp1, 1.2, px, 0.9 * step(abs(v1), w))
-    col = fm_trace(col, abs(v2), dp2, 1.2, px, 0.55 * step(abs(v2), w))
-    // the bay
-    let vb = (q.y - bay) * mix(1.0, 0.7071, bays.y)
-    let bev = 5.0
-    // a thick rim: a lit band on the plate's edge, then its cut in shade
-    let rim = step(-bev - 3.0, vb) * step(vb, -bev)
-    col = mix(col, mix(vec3(0.74, 0.80, 0.85), vec3(0.55, 0.62, 0.67), clamp((vb + bev + 3.0) / 3.0, 0.0, 1.0)), rim)
-    col = mix(col, vec3(0.97, 0.99, 1.0), fm_hl(vb, -bev - 3.0 + px * 0.5, px, px) * 0.8)
-    col = mix(col, col * mix(0.55, 0.30, clamp((vb + bev) / bev, 0.0, 1.0)), step(-bev, vb) * step(vb, 0.0))
-    if vb > 0.0 {
-        let tb = clamp((q.y - bay) / max(size.y - bay, 1.0), 0.0, 1.0)
-        var fl = mix(vec3(0.200, 0.240, 0.275), vec3(0.150, 0.184, 0.212), tb)
-        fl = fl + g3(fm_brush(q, px) * 0.03 + fm_grain(q / px, 0.010))
-        fl = mix(fl, fm_edge(), exp(-vb / 5.0) * 0.75)
-        fl = mix(fl, fm_edge(), fm_hl(vb, px * 0.5, px, px) * 0.8)
-        // the bus, quiet for the bay's first 34 points
-        let y0 = bay + 34.0
-        let bus = fm_bus(q, y0)
-        let quiet = smoothstep(y0 - 6.0, y0 + 8.0, q.y)
-        fl = fm_trace(fl, bus.x, bus.y, 1.0, px, 0.45 * quiet)
-        // a raised steel rail across the bay, stepped, with a lit slot
-        let rs = fm_step_y(q.x, bay + 190.0, 300.0, 760.0, 22.0)
-        let rv = (q.y - rs.x) * mix(1.0, 0.7071, rs.y)
-        let rw = 9.0
-        let rsh = exp(-max(rv - rw, 0.0) / 3.0) * step(rw, rv) * 0.7
-        fl = mix(fl, fm_edge(), rsh)
-        if abs(rv) < rw {
-            let rt = (rv + rw) / (2.0 * rw)
-            var rc = mix(vec3(0.400, 0.452, 0.490), vec3(0.300, 0.345, 0.378), rt)
-            rc = rc + g3(fm_brush(q, px) * 0.05 + fm_grain(q / px, 0.010))
-            rc = mix(rc, vec3(0.84, 0.90, 0.93), (1.0 - smoothstep(0.0, 2.5, rv + rw)) * 0.8)
-            rc = mix(rc, rc * 0.45, smoothstep(rw - 2.5, rw, rv))
-            rc = mix(rc, vec3(0.98, 1.0, 1.0), fm_hl(rv, -rw + px * 0.5, px, px) * 0.8)
-            // the slot, and its light where a hashed stretch of it is lit
-            let sl = step(abs(rv - 0.5), 1.4)
-            let seg = floor(q.x / 170.0)
-            let lit = step(0.35, Finish.hash(vec2(seg, 2.9))) * step(20.0, q.x - seg * 170.0) * step(q.x - seg * 170.0, 120.0)
-            rc = mix(rc, mix(vec3(0.04, 0.06, 0.08), mix(fm_cyan(), fm_core(), 0.5 * step(abs(rv - 0.5), 0.5)), lit), sl)
-            rc = rc + fm_cyan() * lit * exp(-max(abs(rv - 0.5) - 1.4, 0.0) / 1.5) * 0.35 * (1.0 - sl)
-            rc = mix(rc, fm_edge(), max(fm_hl(rv, rw - px * 0.5, px, px), fm_hl(rv, -rw + px * 1.5, px, px) * 0.0))
-            fl = rc
-        }
-        col = fl
+    let e = 0.5
+    let gx = fm_win_sd(q + vec2(e, 0.0), size) - fm_win_sd(q - vec2(e, 0.0), size)
+    let gy = fm_win_sd(q + vec2(0.0, e), size) - fm_win_sd(q - vec2(0.0, e), size)
+    let n = vec2(gx, gy) / max(length(vec2(gx, gy)), 0.0001)
+    // light on a wall that falls toward the pane: the lower walls face it
+    let fw = clamp(dot(-n, fm_light()), -1.0, 1.0)
+    // an engraved seam 16 points out; the plate inside it sits a hair lower
+    col = mix(col, col * 0.93, step(d, 16.0))
+    col = mix(col, fm_edge(), fm_hl(d, 16.0 - px * 0.5, px, px) * 0.7)
+    col = mix(col, vec3(0.80, 0.86, 0.90), fm_hl(d, 16.0 + px * 0.5, px, px) * 0.45)
+    // the outer chamfer, 8..4 points out, lit where it faces the light
+    let ch = step(4.0, d) * step(d, 8.0)
+    // held at the steel's own brightness, so text crossing it keeps its
+    // contrast; the light is in the hairline along its lip
+    let chc = mix(vec3(0.150, 0.180, 0.200), vec3(0.470, 0.530, 0.570), clamp(fw * 0.6 + 0.45, 0.0, 1.0))
+    col = mix(col, chc + g3(fm_brush(q, px) * 0.03), ch)
+    col = mix(col, vec3(0.95, 0.98, 1.0), fm_hl(d, 8.0 - px * 0.5, px, px) * 0.6)
+    // the ledge, 4..1.8 out, darker steel, with a lit slot along stretches
+    let le = step(1.8, d) * step(d, 4.0)
+    col = mix(col, vec3(0.170, 0.205, 0.230) + g3(fm_brush(q, px) * 0.03), le)
+    let along = mix(q.y, q.x, step(0.7071, abs(n.y)))
+    let sg = floor(along / 150.0)
+    let sl = along - sg * 150.0
+    let lit = step(0.45, Finish.hash(vec2(sg, 7.7 + step(0.7071, abs(n.y)) * 3.0))) * step(24.0, sl) * step(sl, 104.0)
+    let slot = step(2.4, d) * step(d, 3.4)
+    col = col + fm_cyan() * Finish.glow(max(abs(d - 2.9) - 0.5, 0.0), 0.9) * lit * 0.45 * step(1.8, d) * step(d, 4.0) * (1.0 - slot)
+    col = mix(col, mix(vec3(0.020, 0.030, 0.040), mix(fm_cyan(), fm_core(), 0.6 * fm_hl(d, 2.9, 0.5, px)), lit), slot)
+    // the inner wall, 1.8..0 out, dark and shaded
+    let wl = step(0.0, d) * step(d, 1.8)
+    col = mix(col, mix(vec3(0.030, 0.040, 0.050), vec3(0.230, 0.270, 0.300), clamp(fw * 0.5 + 0.3, 0.0, 1.0)), wl)
+    if d < 0.0 {
+        // the pane
+        let refu = (q.x * 0.8 + q.y) / max(size.x * 0.8 + size.y, 1.0)
+        let r1 = (refu - 0.30) / 0.06
+        let r2 = (refu - 0.52) / 0.05
+        let r3 = (refu - 0.565) / 0.008
+        let r4 = (refu - 0.80) / 0.05
+        let r5 = (refu - 0.842) / 0.007
+        let refl = exp(-r1 * r1) * 0.065 + exp(-r2 * r2) * 0.070 + exp(-r3 * r3) * 0.060 + exp(-r4 * r4) * 0.065 + exp(-r5 * r5) * 0.060
+        var pc = fm_pane(fm_board(q, px, 1.8, 0.0, 0.95), q, px, refl, 0.25)
+        // the frame's shadow on the pane, from the walls toward the light
+        let ds = fm_win_sd(q + fm_light() * 5.0, size)
+        let sh = smoothstep(-9.0, 2.0, ds)
+        pc = pc * (1.0 - 0.70 * sh * sh)
+        pc = pc * (1.0 - 0.35 * (1.0 - smoothstep(0.0, 3.0, -d)))
+        // the pane's bevelled rim, bright where it faces the light
+        let fr = clamp(dot(n, fm_light()), -1.0, 1.0)
+        let rim = step(-2.2, d)
+        let rc = mix(vec3(0.240, 0.300, 0.340), vec3(0.500, 0.590, 0.630), clamp(fr * 0.55 + 0.45, 0.0, 1.0))
+        pc = mix(pc, rc, rim * 0.85)
+        pc = mix(pc, vec3(0.93, 0.97, 1.0), fm_hl(d, -2.2 + px * 0.5, px, px) * 0.45)
+        pc = mix(pc, vec3(0.93, 0.97, 1.0), fm_hl(d, -px * 1.5, px, px) * 0.75 * clamp(fr * 0.8 + 0.4, 0.0, 1.0))
+        pc = mix(pc, fm_edge(), fm_hl(d, -px * 0.5, px, px) * 0.8)
+        // a moulded step in the pane six points in: a dark line over a light one
+        pc = mix(pc, pc * 0.7, fm_hl(d, -6.0 + px * 0.5, px, px) * 0.8)
+        pc = mix(pc, vec3(0.78, 0.87, 0.92), fm_hl(d, -6.0 - px * 0.5, px, px) * 0.35)
+        col = pc
     }
     return col
 }
