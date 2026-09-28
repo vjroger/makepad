@@ -289,22 +289,15 @@ let lm_under = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, s
 }
 
 // 2b. THE LIT CELL: the chosen cell, the tab in use and the chosen radio
-// tab are the same dark glass as their neighbours, lit from within. The
-// glow fills the cell: yellow-hot along a line a little under its middle,
-// saturated orange round that, deep red-brown in the last points before the
-// edge. A thin bright line runs just inside the edge, brightest along the
-// foot, over a one-pixel dark red rim; a faint gloss lies over the upper
-// part. Outside, the light spills softly on what lies round the cell, a
-// little farther along its row than above and below it, and is gone within
-// about 7 points. `s` 1 is lit, more under the hand, less held.
-let lm_heat = fn(t: float) -> vec3 {
-    var col = mix(vec3(0.15, 0.035, 0.016), vec3(0.47, 0.095, 0.022), smoothstep(0.0, 0.3, t))
-    col = mix(col, vec3(0.86, 0.25, 0.055), smoothstep(0.24, 0.55, t))
-    col = mix(col, vec3(1.0, 0.45, 0.13), smoothstep(0.5, 0.78, t))
-    col = mix(col, vec3(1.0, 0.64, 0.28), smoothstep(0.76, 0.94, t))
-    col = mix(col, vec3(1.0, 0.82, 0.5), smoothstep(0.92, 1.06, t))
-    return col
-}
+// tab. The face stays DARK: a deep red-brown glass (#3c140b), darkest in
+// its upper middle. The light is a thin line just inside the edge, 1.15
+// points on top and sides, 1.6 along the foot, orange with a pale hot core
+// that is brightest along the foot. From the line a red glow bleeds inward:
+// a point or so under the top, about 3 at the sides, and from the foot a
+// deep red that rises over the lower third. A faint gloss lies over the
+// upper part. Outward the light spills red on the bezel and the track for a
+// few points, a little more under the foot. The label is lit orange on it.
+// `s` 1 is lit, more under the hand, less held.
 let lm_lit = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, s: float, dis: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = (hi - lo) * 0.5
@@ -314,34 +307,46 @@ let lm_lit = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, s: 
     let od = max(d, 0.0)
     let live = 1.0 - dis
     let sv = clamp(s, 0.0, 1.3) * live
-    // The spill round the cell.
-    let dx = max(abs(p.x - c.x) - h.x, 0.0)
-    let dy = max(abs(p.y - c.y) - h.y, 0.0)
-    let near = 0.3 * exp(-od / 1.0) + 0.2 * exp(-(od * od) / (2.0 * 2.6 * 2.6))
-    let side = 0.34 * exp(-dx / 3.5) * (1.0 - smoothstep(0.0, 2.5, dy))
-    let g = (near + side) * (1.0 - a) * sv * (1.0 - smoothstep(5.5, 8.5, od))
-    let gc = mix(lm_glowc(), vec3(0.62, 0.12, 0.03), smoothstep(0.5, 4.0, od))
-    var res = Finish.over(dst, vec4(gc * g, g * 0.3))
-    // The glow inside.
-    let hw = max(h.x - 0.9 * h.y, 0.0)
-    let yc = c.y + 0.1 * h.y
-    let e = lm_seg(p, vec2(c.x - hw, yc), vec2(c.x + hw, yc)) / max(h.y, 1.0)
-    let core = exp(-e * e * 1.2)
-    let f = 1.0 - exp(-max(x - 0.5 * px, 0.0) / 1.5)
-    let heat = f * (0.56 + 0.4 * core) * clamp(s, 0.0, 1.3)
-    var col = lm_heat(heat)
-    // The glass is not quite even: a fine grain in the light.
+    // Where p lies: -1 at the top edge, 1 at the foot. The weights are
+    // taken from position, not from the outline's normal, so no seam runs
+    // in from a corner.
+    let vy = (p.y - c.y) / max(h.y, 0.5)
+    let foot = smoothstep(0.25, 0.95, vy)
+    // The spill outside: red, strongest against the line, gone by 7.
+    let near = 0.5 * exp(-od / 0.7) + 0.36 * exp(-(od * od) / (2.0 * 2.8 * 2.8))
+    let g = near * (0.75 + 0.6 * foot) * (1.0 - a) * sv * (1.0 - smoothstep(5.0, 8.0, od))
+    let gc = mix(vec3(0.8, 0.2, 0.05), vec3(0.42, 0.05, 0.015), smoothstep(0.3, 3.0, od))
+    var res = Finish.over(dst, vec4(gc * g, g * 0.55))
+    // The face: dark maroon glass.
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    let lv = min(sv, 1.0)
+    var col = vec3(0.235, 0.078, 0.042)
+    // The deep red rising from the foot over the lower part.
+    let rise = smoothstep(0.3, 1.0, t)
+    col = mix(col, vec3(0.64, 0.05, 0.0), rise * rise * 0.88 * lv)
+    // The glow the line bleeds inward from each edge: short under the
+    // top, longer from the sides, strong over the foot.
+    let lwt = 1.15
+    let lwb = 1.6
+    let dtop = max(p.y - lo.y - lwt, 0.0)
+    let dbot = max(hi.y - p.y - lwb, 0.0)
+    let dsid = max(min(p.x - lo.x, hi.x - p.x) - lwt, 0.0)
+    let gt = 0.5 * exp(-dtop / 1.1)
+    let gs = 0.5 * exp(-dsid / 2.2)
+    let gb = 0.85 * exp(-dbot / 1.8)
+    let ig = (1.0 - (1.0 - gt) * (1.0 - gs) * (1.0 - gb)) * lv
+    col = mix(col, vec3(0.86, 0.2, 0.02), ig)
+    // A faint gloss over the upper part.
+    let gl = (1.0 - smoothstep(0.12, 0.5, t)) * smoothstep(0.8, 2.6, x)
+    col = col + vec3(0.035, 0.022, 0.018) * gl
     col = col * (1.0 + Finish.grain(p / px, 0.02))
-    // The yellow-hot gloss over the upper part: a band from just under
-    // the top edge to a little above the middle, soft at its lower edge.
-    let gy = (p.y - lo.y) / max(hi.y - lo.y, 1.0)
-    let gl = smoothstep(0.02, 0.14, gy) * (1.0 - smoothstep(0.3, 0.5, gy)) * smoothstep(0.6, 3.0, x)
-    col = mix(col, vec3(1.0, 0.86, 0.58), gl * 0.5 * min(s, 1.0))
-    // The bright line just inside the edge, hottest at the foot.
-    let n = lm_normal(p, c, h, r)
-    let foot = smoothstep(-0.2, 0.8, n.y)
-    let line = Finish.band(d, 0.0, mix(px, 1.6 * px, foot), px) * mix(0.5, 1.0, foot) * min(s, 1.15)
-    col = mix(col, mix(vec3(1.0, 0.6, 0.26), vec3(1.0, 0.84, 0.58), foot), clamp(line, 0.0, 1.0))
+    // The line, orange; its pale core brightest along the foot.
+    let lw = mix(lwt, lwb, foot)
+    let inl = Finish.band(d, 0.0, lw, px) * min(sv, 1.15)
+    let lc = mix(vec3(0.88, 0.48, 0.3), vec3(1.0, 0.56, 0.24), foot)
+    col = mix(col, lc, clamp(inl, 0.0, 1.0))
+    let core = Finish.band(d, lw * 0.3, lw * 0.72, px) * mix(0.18, 1.0, foot) * min(sv, 1.15)
+    col = mix(col, vec3(1.0, 0.87, 0.64), clamp(core, 0.0, 1.0))
     col = mix(col, vec3(0.2, 0.2, 0.215), 0.75 * dis)
     return Finish.over(res, vec4(col * a, a))
 }
@@ -774,7 +779,7 @@ mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
 }
 
 // The radio tab: a raised key in its bezel; chosen, the face is lit from
-// within, its word dark on the light.
+// within, dark glass behind a lit line, its word lit orange.
 mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
     let m = 5.0
     let mb = 12.0
@@ -820,7 +825,7 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
 }
 mod.widgets.RadioButtonTabFlat.draw_text.color = #aab2bc
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #e4e8ec
-mod.widgets.RadioButtonTabFlat.draw_text.color_active = #1d130d
+mod.widgets.RadioButtonTabFlat.draw_text.color_active = #ffb47c
 mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #5b636d
 
 // ---------------------------------------------------------------- sliders
@@ -1437,34 +1442,34 @@ mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
     let o = self.rect_pos
     let size = self.rect_size
     let p = self.pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
-    let clo = vec2(lm_snap(0.5, o.x, px), lm_snap(0.0, o.y, px))
-    let chi = vec2(lm_snap(size.x - 0.5, o.x, px), lm_snap(size.y, o.y, px))
+    let clo = vec2(lm_snap(1.5, o.x, px), lm_snap(1.5, o.y, px))
+    let chi = vec2(lm_snap(size.x - 1.5, o.x, px), lm_snap(size.y - 1.5, o.y, px))
     let res = lm_lit(vec4(0.0, 0.0, 0.0, 0.0), p, clo, chi, 4.5, px, 1.0, 0.0)
     return res * lm_fade(self.pos, size, m)
 }
 mod.widgets.SegmentedControlFlat.draw_text.text_style.font_size = 9.0
 mod.widgets.SegmentedControlFlat.draw_text_selected.text_style.font_size = 9.0
 mod.widgets.SegmentedControlFlat.draw_text.color = #aab2bc
-mod.widgets.SegmentedControlFlat.draw_text_selected.color = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_primary_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_secondary_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_primary_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_neutral_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_secondary_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_tertiary_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_error_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_warning_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_success_container = #1d130d
-mod.widgets.SegmentedControlFlat.palette.on_info_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_tertiary_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_error_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_warning_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_success_container = #1d130d
-mod.widgets.SegmentedControl.palette.on_info_container = #1d130d
+mod.widgets.SegmentedControlFlat.draw_text_selected.color = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_primary_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_neutral_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_secondary_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_primary_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_neutral_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_secondary_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_tertiary_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_error_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_warning_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_success_container = #ffb47c
+mod.widgets.SegmentedControlFlat.palette.on_info_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_tertiary_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_error_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_warning_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_success_container = #ffb47c
+mod.widgets.SegmentedControl.palette.on_info_container = #ffb47c
 
 // Tabs: the strip is one bezel; each quiet tab a raised face in it, the
-// tab in use lit from within, its word dark on the light.
+// tab in use lit from within, its word lit orange on the dark glass.
 mod.widgets.Tabs.height = 28.0
 mod.widgets.Tabs.clip_x = false
 mod.widgets.Tabs.clip_y = false
@@ -1509,7 +1514,7 @@ let lm_tab = fn(p: vec2, size: vec2, o: vec2, dpi: float, hover: float, active: 
         // The tab in use: its face lit from within, the light spilling on
         // the strip's bezel round it.
         res = lm_lit(res, p, lo, hi, 4.0, px, 1.0, 0.0)
-        res = lm_cross(res, p, size, px, vec3(0.13, 0.065, 0.04), 0.0, 1.0)
+        res = lm_cross(res, p, size, px, vec3(1.0, 0.706, 0.486), 1.0, 1.0)
     } else {
         res = lm_face(res, p, lo, hi, 4.0, px, hover, 0.0, 0.0, 1.0)
         res = lm_under(res, p, lo, hi, 4.0, px, 0.28 * hover, hi.y + 3.0)
@@ -1550,7 +1555,7 @@ mod.widgets.Tabs.draw_mark.pixel = fn() {
 }
 mod.widgets.Tabs.draw_mark.color = #9aa3ae
 mod.widgets.Tabs.draw_text.color = #aab2bc
-mod.widgets.Tabs.draw_text_active.color = #1d130d
+mod.widgets.Tabs.draw_text_active.color = #ffb47c
 mod.widgets.Tabs.draw_text.text_style.font_size = 9.0
 mod.widgets.Tabs.draw_text_active.text_style.font_size = 9.0
 
