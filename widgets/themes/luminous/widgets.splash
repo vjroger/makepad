@@ -92,15 +92,52 @@ let lu_shadow = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, sh_h: float, 
     return 1.0 - (1.0 - amb) * (1.0 - con)
 }
 
-// The amber leak from BEHIND a focused control, all round it, heavier
-// below, and the reach 0.4H. Premultiplied, laid under the face.
+// The little light a lit frame spills OUTWARD onto the ground: about 0.4
+// of the frame's own light one device pixel out, gone to a tenth within
+// 2.7 points, a shade heavier below. Premultiplied, laid under the face.
+// `sh_h` is kept for the callers; the reach no longer grows with the size.
 let lu_leak = fn(d: float, n: vec2, sh_h: float, a: float) -> vec4 {
-    let s = 0.16 * sh_h
-    let g = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * s * s)) * (1.0 - a) * (0.55 + 0.45 * clamp(n.y, 0.0, 1.0))
-    // The body #f5c48a, a paler warm close to the rim, the tail #f1ac69.
-    var col = mix(vec3(0.945, 0.675, 0.412), vec3(0.961, 0.769, 0.541), smoothstep(0.15, 0.5, g))
-    col = mix(col, vec3(1.0, 0.925, 0.78), smoothstep(0.75, 1.0, g))
-    return vec4(col * g * 0.9, g * 0.7)
+    let s = 1.2
+    let g = 0.45 * exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * s * s)) * (1.0 - a) * (0.85 + 0.15 * clamp(n.y, 0.0, 1.0))
+    let col = mix(vec3(0.945, 0.675, 0.412), vec3(1.0, 0.761, 0.443), smoothstep(0.1, 0.35, g))
+    return vec4(col * g, g * 0.6)
+}
+
+// The lit frame of what has focus: the light sits INSIDE the edge. A line
+// of amber 1.8 points wide just inside the rim with a warm-white core, and
+// the light bleeding inward over the face, gone to a tenth about 7 points
+// in (less on a small cap), so the face is warm at its rim and untouched in
+// its middle. `dark` 1 on enamel or a well, where the bleed reads as a deep
+// amber; 0 on porcelain, where it only warms the glaze.
+let lu_frame = fn(face: vec3, d: float, px: float, fo: float, hh: float, dark: float) -> vec3 {
+    if fo < 0.001 {
+        return face
+    }
+    let x = max(-d, 0.0)
+    let k = clamp(0.1 * hh, 1.0, 2.4)
+    let bleed = exp(-max(x - 1.5, 0.0) / k) * fo
+    var f = mix(face, mix(vec3(1.0, 0.761, 0.443), vec3(0.945, 0.600, 0.330), dark), bleed * mix(0.22, 0.42, dark))
+    let lw = clamp(0.07 * hh, 1.2, 1.8)
+    let line = Finish.band(d, 0.0, lw, px) * fo
+    f = mix(f, vec3(1.0, 0.761, 0.443), line * 0.9)
+    let core = Finish.band(d, lw * 0.33, lw * 0.7, px) * fo
+    return mix(f, vec3(1.0, 0.988, 0.894), core * 0.75)
+}
+// The same lit frame laid as light over what is already drawn (premultiplied
+// `res`, coverage `a` of the shape), for a face that is not a colour of its
+// own: a well, or an outline over the bare ground.
+let lu_frame_over = fn(res: vec4, d: float, px: float, fo: float, a: float, hh: float, dark: float) -> vec4 {
+    if fo < 0.001 {
+        return res
+    }
+    let x = max(-d, 0.0)
+    let fb = exp(-max(x - 1.8, 0.0) / clamp(0.1 * hh, 1.0, 2.4)) * fo * a * mix(0.22, 0.42, dark)
+    var out = Finish.over(res, vec4(mix(vec3(1.0, 0.761, 0.443), vec3(0.945, 0.600, 0.330), dark) * fb, fb))
+    let lw = clamp(0.07 * hh, 1.2, 1.8)
+    let fl = Finish.band(d, 0.0, lw, px) * fo * 0.9
+    out = Finish.over(out, vec4(vec3(1.0, 0.761, 0.443) * fl, fl))
+    let fc = Finish.band(d, lw * 0.33, lw * 0.7, px) * fo * 0.75
+    return Finish.over(out, vec4(vec3(1.0, 0.988, 0.894) * fc, fc))
 }
 
 // A porcelain cap: its shadows, the light from under it, the glazed face
@@ -169,6 +206,7 @@ let lu_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     edge = mix(edge, face, 0.6 * dis)
     edge = mix(edge, vec3(1.0, 0.988, 0.863), fo)
     face = mix(face, edge, ring)
+    face = lu_frame(face, d, px, fo, hh, 0.0)
     return Finish.over(res, vec4(face * a, a))
 }
 
@@ -213,6 +251,7 @@ let lu_inlay = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float
     edge = mix(edge, face, 0.6 * dis)
     edge = mix(edge, vec3(1.0, 0.965, 0.839), fo)
     face = mix(face, edge, ring)
+    face = lu_frame(face, d, px, fo, hh, 1.0)
     return Finish.over(res, vec4(face * a, a))
 }
 
@@ -230,8 +269,11 @@ let lu_ontrack = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: flo
     let n = lu_normal(p, c, h, r)
     let live = 1.0 - dis
     var res = vec4(0.004, 0.008, 0.035, 1.0) * Finish.drop(p, c, h, r, vec2(0.0, px), px) * 0.8 * (1.0 - 0.5 * dis)
-    let gs = 2.2
-    let g = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * gs * gs)) * (1.0 - a) * (0.3 + 0.7 * smoothstep(-0.2, 0.9, n.y)) * 0.5 * (1.0 + 0.3 * hover + 0.5 * down) * live
+    // Outside, the light only rims the track: the same strength one device
+    // pixel out as before, gone within 3 points.
+    let gs = 1.2
+    let lift = (1.0 + 0.3 * hover + 0.5 * down) * live
+    let g = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * gs * gs)) * (1.0 - a) * (0.3 + 0.7 * smoothstep(-0.2, 0.9, n.y)) * 0.5 * lift
     let gc = mix(vec3(0.945, 0.675, 0.412), vec3(1.0, 0.761, 0.443), smoothstep(0.1, 0.4, g))
     res = Finish.over(res, vec4(gc * g, g * 0.6))
     let fo = focus * live
@@ -242,11 +284,16 @@ let lu_ontrack = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: flo
     var face = mix(vec3(0.110, 0.184, 0.408), vec3(0.086, 0.153, 0.353), smoothstep(0.0, 0.5, t))
     face = mix(face, vec3(0.071, 0.129, 0.318), smoothstep(0.5, 1.0, t))
     face = face + vec3(0.03, 0.035, 0.06) * hover * (1.0 - down) * live - vec3(0.02, 0.025, 0.04) * down * live
+    // Inside, the light lies along the enamel's lower rim and dies within
+    // 4 points, so the track glows from its own edge.
+    let inl = exp(-max(-d, 0.0) / 1.4) * smoothstep(-0.2, 0.9, n.y) * 0.3 * lift
+    face = mix(face, vec3(0.945, 0.600, 0.330), inl)
     face = mix(face, lu_ground(), 0.55 * dis)
     let ring = Finish.band(d, 0.0, px, px)
     var edge = mix(face, vec3(0.824, 0.886, 0.988), 0.6 * (1.0 - 0.6 * dis))
     edge = mix(edge, vec3(1.0, 0.988, 0.863), fo)
     face = mix(face, edge, ring)
+    face = lu_frame(face, d, px, fo, hh, 1.0)
     return Finish.over(res, vec4(face * a, a))
 }
 
@@ -275,23 +322,43 @@ let lu_well = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, fill: vec3, d
     return Finish.over(res, vec4(col * a, a))
 }
 
-// A lit value inside a well: a warm-white core burning in a one device
-// pixel amber rim, a deeper amber band inside the rim where the fill is
-// tall enough, and a soft bloom round it. `glow` scales the bloom. At rest
-// the core is a cream #efe3c6; `hot` (the hand on it, a drag, focus) takes
-// it to the white-hot #fffce4, so the thing in use is the brightest.
-let lu_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, dis: float, glow: float, hot: float) -> vec4 {
+// A lit value inside a well (`wlo`..`whi`, corner `wr`): amber running
+// from a deep #c8843c where the value starts to the bright #ffc271 at its
+// head, a thin warm-white line along its middle that brightens toward the
+// head, and the edge a shade deeper so the fill reads as a lit rod. Its
+// bloom lies on the floor of the groove ahead of the head and hardly leaves
+// the groove. `glow` scales the bloom. At rest the line is a cream #efe3c6;
+// `hot` (the hand on it, a drag, focus) takes it to the white-hot #fffce4,
+// so the thing in use is the brightest.
+let lu_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, dis: float, glow: float, hot: float, wlo: vec2, whi: vec2, wr: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = max((hi - lo) * 0.5, vec2(0.01, 0.01))
     let d = Material.sd_box(p, c, h, min(r, min(h.x, h.y)))
     let a = Finish.cover(d, px)
     let live = 1.0 - dis
-    let bl = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 1.6 * 1.6)) * (1.0 - a) * glow * live * step(0.5, h.x)
+    let dw = Material.sd_box(p, (wlo + whi) * 0.5, (whi - wlo) * 0.5, wr)
+    let inw = Finish.cover(dw, px)
+    let keep = inw + (1.0 - inw) * 0.12 * exp(-max(dw, 0.0) / 0.7)
+    let bl = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 1.6 * 1.6)) * (1.0 - a) * glow * live * step(0.5, h.x) * keep
     var res = Finish.over(dst, vec4(vec3(1.0, 0.761, 0.443) * bl * 0.6, bl * 0.15))
-    var col = mix(vec3(0.937, 0.890, 0.776), vec3(1.0, 0.988, 0.894), hot)
-    let band = Finish.band(d, px, px + max(0.0, min(1.5, (hi.y - lo.y) * 0.1 - 0.4)), px)
-    col = mix(col, vec3(0.804, 0.667, 0.349), band * 0.7)
-    col = mix(col, vec3(1.0, 0.843, 0.561), Finish.band(d, 0.0, px, px))
+    // Along the value: 0 where it starts, 1 at its head. A fill longer than
+    // it is thick runs across; a standing one (the fader) rises.
+    let across_x = step(hi.y - lo.y, hi.x - lo.x)
+    let along = mix(clamp((hi.y - p.y) / max(hi.y - lo.y, 0.5), 0.0, 1.0), clamp((p.x - lo.x) / max(hi.x - lo.x, 0.5), 0.0, 1.0), across_x)
+    // A slim fill (the fader, the minimal slider: 3 device pixels or so)
+    // has no room across for the rod: its ramp starts less deep, it keeps
+    // no darker edge and its middle line takes the whole middle pixel.
+    let hk = max(mix(h.x, h.y, across_x), 0.01)
+    let thin = 1.0 - smoothstep(0.9, 1.6, hk)
+    let ramp = smoothstep(0.0, 1.0, along)
+    var col = mix(mix(vec3(0.847, 0.580, 0.290), vec3(0.93, 0.66, 0.36), thin), vec3(1.0, 0.761, 0.443), ramp)
+    col = mix(col, col * vec3(0.92, 0.88, 0.84), Finish.band(d, 0.0, px, px) * (1.0 - thin))
+    // Across: the warm-white line is the middle of a round rod, its light
+    // falling off smoothly to the amber, never a stripe.
+    let ax = mix(abs(p.x - c.x), abs(p.y - c.y), across_x)
+    let q = ax / max(0.42 * hk, px * mix(0.6, 0.85, thin))
+    let line = exp(-q * q) * mix(mix(0.65, 0.7, thin), 1.0, ramp)
+    col = mix(col, mix(vec3(0.937, 0.890, 0.776), vec3(1.0, 0.988, 0.894), hot), line)
     col = mix(col, vec3(0.33, 0.37, 0.48), dis)
     return Finish.over(res, vec4(col * a, a))
 }
@@ -371,6 +438,7 @@ let lu_lit = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     edge = mix(edge, face, dis)
     edge = mix(edge, vec3(1.0, 0.988, 0.863), focus * live)
     face = mix(face, edge, max(ring, foot * (1.0 - dis)))
+    face = lu_frame(face, d, px, focus * live, hh, 0.0)
     return Finish.over(res, vec4(face * a, a))
 }
 
@@ -419,8 +487,8 @@ let lu_button = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, dow
             let ra = ring * mix(1.0, 0.4, dis)
             res = Finish.over(res, vec4(col * ra, ra))
         }
-        let fr = Finish.band(d, 0.0, px, px) * focus * live
-        res = Finish.over(res, vec4(vec3(1.0, 0.988, 0.863) * fr, fr))
+        // Focused: the lit frame inside the outline, over the bare ground.
+        res = lu_frame_over(res, d, px, focus * live, a, hh, 1.0)
         ink = vec3(0.89, 0.91, 0.965)
     } else {
         if kind > 1.5 && kind < 2.5 {
@@ -751,7 +819,7 @@ mod.widgets.SliderFlat.draw_bg.pixel = fn() {
     let ox = rad + self.origin_pos * span
     let f0 = mix(lo.x + px, min(ox, hx), self.arc_origin)
     let f1 = mix(hx, max(ox, hx), self.arc_origin)
-    res = lu_fill(res, p, vec2(f0, lo.y + px), vec2(f1, hi.y - px), 2.0, px, self.disabled, 0.35, max(max(self.hover, self.drag), self.focus))
+    res = lu_fill(res, p, vec2(f0, lo.y + px), vec2(f1, hi.y - px), 2.0, px, self.disabled, 0.35, max(max(self.hover, self.drag), self.focus), lo, hi, 3.0)
     return lu_handle(res, p, vec2(hx, cy), rad, px, self.hover, self.drag, self.focus, self.disabled) * lu_fade(self.pos, self.rect_size, m)
 }
 
@@ -769,7 +837,7 @@ mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
     let hi2 = max(self.origin_pos, self.slide_pos)
     let f0 = mix(0.0, lo2, self.arc_origin) * self.rect_size.x
     let f1 = mix(self.slide_pos, hi2, self.arc_origin) * self.rect_size.x
-    res = lu_fill(res, p, vec2(max(f0, lo.x + px), lo.y + px), vec2(min(f1, hi.x - px), hi.y - px), 1.0, px, self.disabled, 0.0, max(self.hover, self.drag))
+    res = lu_fill(res, p, vec2(max(f0, lo.x + px), lo.y + px), vec2(min(f1, hi.x - px), hi.y - px), 1.0, px, self.disabled, 0.0, max(self.hover, self.drag), lo, hi, 1.5)
     let hx = self.slide_pos * self.rect_size.x
     let show = max(self.hover, self.drag)
     let cap = lu_cap(p, vec2(hx - 3.0, cy - 5.0), vec2(hx + 3.0, cy + 5.0), 3.0, px, 0.0, 0.0, self.disabled, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -798,7 +866,7 @@ mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
     var res = lu_well(p, lo, hi, 3.0, px, vec3(0.137, 0.157, 0.22), self.disabled, 1.0, 1.0, 0.4)
     let span = hi.x - lo.x - rad * 2.0
     let hx = lo.x + rad + self.slide_pos * span
-    res = lu_fill(res, p, vec2(lo.x + px, lo.y + px), vec2(hx, hi.y - px), 2.0, px, self.disabled, 0.35, max(max(self.hover, self.drag), self.focus))
+    res = lu_fill(res, p, vec2(lo.x + px, lo.y + px), vec2(hx, hi.y - px), 2.0, px, self.disabled, 0.35, max(max(self.hover, self.drag), self.focus), lo, hi, 3.0)
     return lu_handle(res, p, vec2(hx, cy), rad, px, self.hover, self.drag, self.focus, self.disabled) * lu_fade(self.pos, self.rect_size, m)
 }
 
@@ -837,7 +905,7 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let cap_at = foot + self.slide_pos * travel
     let flo = mix(vec2(lo.x + px, lo.y + px), vec2(lo.x + px, sz.y - cap_at), v)
     let fhi = mix(vec2(cap_at, hi.y - px), vec2(hi.x - px, hi.y - px), v)
-    res = lu_fill(res, p, flo, fhi, 1.0, px, self.disabled, 0.0, max(self.hover, self.drag))
+    res = lu_fill(res, p, flo, fhi, 1.0, px, self.disabled, 0.35, max(self.hover, self.drag), lo, hi, 1.5)
     // The scale: a device pixel tick every 5 points on one side, longer at
     // the ends and the middle; the unity mark amber.
     let pitch = 5.0
@@ -904,16 +972,30 @@ let lu_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     let oe = start + sweep * origin
     let a0 = mix(start, min(oe, ve), arc_origin)
     let a1 = mix(ve, max(oe, ve), arc_origin)
+    // The arc fills the groove but half a device pixel, so it reads 2 to 3
+    // points wide with a pale core down its middle.
     let sdf = Sdf2d.viewport(p)
-    sdf.arc_round_caps(c.x, c.y, ring_mid, a0, a1, ring_w - px)
+    sdf.arc_round_caps(c.x, c.y, ring_mid, a0, a1, ring_w - px * 0.5)
     sdf.fill(vec4(1.0, 1.0, 1.0, 1.0))
     let arc = sdf.result.w
-    let hot = 1.0 - smoothstep(0.0, ring_w * 0.5 - px, abs(rl - ring_mid))
+    let hot = 1.0 - smoothstep(0.15 * ring_w, 0.45 * ring_w, abs(rl - ring_mid))
     // Cream at rest, white-hot only while the knob is in the hand.
     let core = mix(vec3(0.937, 0.890, 0.776), vec3(1.0, 0.988, 0.894), max(max(hover, held), focus))
     let acol = mix(vec3(1.0, 0.843, 0.561), core, hot)
     // The disc, and the light that leaks under it in the hand.
     let spot = (0.3 * hover + 0.5 * held) * live
+    // At rest the arc lays a little light on the dark round it: about a
+    // third of its own one device pixel out, gone to a tenth within 2.5
+    // points, spent by 4. Laid before the disc, so the disc covers it.
+    // Only beside the lit part: no light runs on past the arc's ends.
+    var ang = atan2(-q.x, q.y)
+    if ang < 0.0 {
+        ang = ang + 2.0 * PI
+    }
+    let es = 1.0 / max(ring_mid, 1.0)
+    let beside = smoothstep(a0 - es, a0 + es, ang) * (1.0 - smoothstep(a1 - es, a1 + es, ang))
+    let rb = beside * (1.0 - arc) * exp(-max(abs(rl - ring_mid) - ring_w * 0.5, 0.0) / 1.0) * 0.36 * live * step(0.004, abs(a1 - a0))
+    res = Finish.over(res, vec4(vec3(1.0, 0.761, 0.443) * rb, rb * 0.25))
     res = Finish.over(res, lu_cap(p, c - vec2(rc, rc), c + vec2(rc, rc), rc, px, hover, 0.0, dis, focus, 1.0, 1.0, spot, 0.0))
     let halo = max(held, focus) * live
     if halo > 0.001 {
@@ -971,8 +1053,8 @@ mod.widgets.Rotary.text_input.padding.bottom = 0.0
 // ---------------------------------------------------------------- fields
 
 // A text field: a navy enamel pill sunk into the ground, the rim of the
-// ground shading its top, a light lip under its foot. Focused, its rim
-// burns hot and the amber light leaks out from behind it.
+// ground shading its top, a light lip under its foot. Focused, the lit
+// frame burns just inside its rim and spills only a little onto the ground.
 let lu_field = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, focus: float, dis: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = (hi - lo) * 0.5
@@ -989,11 +1071,9 @@ let lu_field = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float
     // with the shade under its top growing.
     let fill = vec3(0.078, 0.157, 0.357) + vec3(0.02, 0.03, 0.05) * hover * (1.0 - down) - vec3(0.035, 0.05, 0.09) * down
     res = Finish.over(res, lu_well(p, lo, hi, r, px, fill, dis, 1.0, 0.0, 0.4 + 0.15 * down))
-    // Focused: the top of the face warms, the rim burns.
-    let warm = (1.0 - smoothstep(0.0, 0.3 * hh, p.y - lo.y)) * a * 0.14 * fo
-    res = Finish.over(res, vec4(vec3(1.0, 0.8, 0.6) * warm, 0.0))
-    let rim = Finish.band(d, 0.0, px, px) * fo
-    return Finish.over(res, vec4(vec3(1.0, 0.988, 0.863) * rim, rim))
+    // Focused: the lit frame, a line of amber just inside the rim with a
+    // warm-white core, bleeding inward as a deep amber over the enamel.
+    return lu_frame_over(res, d, px, fo, a, hh, 1.0)
 }
 
 mod.widgets.TextInputFlat.clip_x = false
@@ -1077,11 +1157,11 @@ mod.widgets.NumberSpin.draw_bg.pixel = fn() {
 }
 
 // The chevron of a drop-down: 8 x 4.5 points in a 1.5 point stroke; open,
-// it lights amber with a short halo.
+// it lights amber with a halo of barely a point.
 let lu_chevron = fn(dst: vec4, p: vec2, cc: vec2, ink: vec3, open: float, dis: float) -> vec4 {
     let dk = min(lu_seg(p, vec2(cc.x - 4.0, cc.y - 2.0), vec2(cc.x, cc.y + 2.2)), lu_seg(p, vec2(cc.x, cc.y + 2.2), vec2(cc.x + 4.0, cc.y - 2.0))) - 0.75
     let px = 0.67
-    let hb = exp(-max(dk, 0.0) / 1.2) * (1.0 - Finish.cover(dk, px)) * 0.6 * open * (1.0 - dis)
+    let hb = exp(-max(dk, 0.0) / 0.8) * (1.0 - Finish.cover(dk, px)) * 0.35 * open * (1.0 - dis)
     var res = Finish.over(dst, vec4(vec3(0.529, 0.349, 0.157) * hb, hb * 0.5))
     let col = mix(mix(ink, vec3(0.992, 0.8, 0.5), open), mix(ink, lu_ground(), 0.4), dis)
     let k = Finish.cover(dk, px)
@@ -1345,7 +1425,7 @@ mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
         f0 = lo.x + span * 0.3
         f1 = lo.x + span * 0.7
     }
-    var fill = lu_fill(vec4(0.0, 0.0, 0.0, 0.0), p, vec2(f0, lo.y + px), vec2(f1, hi.y - px), th * 0.5, px, 0.0, 1.0, 0.0)
+    var fill = lu_fill(vec4(0.0, 0.0, 0.0, 0.0), p, vec2(f0, lo.y + px), vec2(f1, hi.y - px), th * 0.5, px, 0.0, 1.0, 0.0, lo, hi, th * 0.5)
     // An intent other than the plain one tints the light with its colour.
     let ic = self.fill_color()
     let tint = step(0.5, self.intent)
@@ -1387,9 +1467,15 @@ mod.widgets.LevelMeter.draw_bg.pixel = fn() {
     let cell = Finish.cover(abs(fract(ca / pitch) * pitch - 1.5) - 1.5, px)
     let share = clamp((floor(ca / pitch) * pitch + 1.5) / span, 0.0, 1.0)
     let inb = step(pad, a) * step(a, bar - pad) * step(wb0 + 1.5, b) * step(b, wb0 + wa - 1.5)
-    var lit = vec3(0.937, 0.890, 0.776)
-    lit = mix(lit, vec3(1.0, 0.761, 0.443), step(max(self.hot_at, 0.7), share))
+    // The same light as the fills: deep amber #d8944a at the foot rising to
+    // #ffc271 by 70 %, a hotter #ffd08a to 90 %, coral past it; a thin
+    // warm-white line along the middle of the cells, as down a fill.
+    let ha = max(self.hot_at, 0.7)
+    var lit = mix(vec3(0.847, 0.580, 0.290), vec3(1.0, 0.761, 0.443), smoothstep(0.0, 1.0, share / ha))
+    lit = mix(lit, vec3(1.0, 0.816, 0.541), step(ha, share))
     lit = mix(lit, vec3(0.988, 0.478, 0.298), step(max(self.hot_to, 0.9), share))
+    let qm = (b - (wb0 + wa * 0.5)) / max(0.3 * (wa - 3.0), px * 0.8)
+    lit = mix(lit, vec3(0.937, 0.890, 0.776), exp(-qm * qm) * 0.55 * (1.0 - step(max(self.hot_to, 0.9), share)))
     // Each lit cell's ends a deeper tone of its own light.
     let edge = 1.0 - smoothstep(0.0, 1.2, min(fract(ca / pitch) * pitch, 3.0 - fract(ca / pitch) * pitch))
     lit = mix(lit, lit * vec3(0.8, 0.68, 0.6), edge * 0.5)
@@ -1474,8 +1560,8 @@ let lu_frit = fn(p: vec2, px: float) -> float {
 
 // A raised panel: a slab of dark navy glass. Its ambient shadow stays
 // inside the gap to its neighbours; its face falls from the top with the
-// grain and the sparkle; one light device pixel runs along its top.
-// `leak` 1 lets the amber light show from behind its lower corners.
+// grain and the sparkle; one light device pixel runs along its top and a
+// milled shoulder inside its edge. `leak` 1 lights its lower rim from inside.
 let lu_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: float, leak: float) -> vec4 {
     let lo = vec2(lu_snap(0.0, o.x, px), lu_snap(0.0, o.y, px))
     let hi = vec2(lu_snap(size.x, o.x, px), lu_snap(size.y, o.y, px))
@@ -1489,12 +1575,15 @@ let lu_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: floa
     // The shadow only falls outside the slab: the slab lets the ground
     // through, and a shadow under it would sink it.
     var res = vec4(0.004, 0.008, 0.035, 1.0) * (1.0 - (1.0 - amb) * (1.0 - con)) * (1.0 - a)
+    let side = smoothstep(0.3, 1.0, abs(p.x - c.x) / max(h.x, 1.0))
+    let low = smoothstep(0.1, 1.0, (p.y - c.y) / max(h.y, 1.0))
     if leak > 0.001 {
-        // The light from behind the card: #f2ba9b at its lower corners and
-        // along its foot, warming toward the edge, a reach of 16 points.
-        let side = smoothstep(0.3, 1.0, abs(p.x - c.x) / max(h.x, 1.0))
-        let low = smoothstep(0.1, 1.0, (p.y - c.y) / max(h.y, 1.0))
-        let g = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 5.3 * 5.3)) * (1.0 - a) * low * (0.4 + 0.6 * side) * 0.5 * leak
+        // The light from behind the card, as under a key: a pool on the
+        // ground under its foot and lower corners, beyond the dark foot
+        // line, at about 0.7 of its first strength and gone to a tenth
+        // within 7 points (it reached 11), so the card floats and the
+        // ground round it stays dark.
+        let g = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 3.2 * 3.2)) * (1.0 - a) * low * (0.4 + 0.6 * side) * 0.36 * leak
         let gc = mix(vec3(0.949, 0.729, 0.608), vec3(1.0, 0.847, 0.66), smoothstep(0.25, 0.5, g))
         res = Finish.over(res, vec4(gc * g, g * 0.5))
     }
@@ -1512,10 +1601,27 @@ let lu_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: floa
     face = face + vec4(vec3(0.1, 0.11, 0.14) * tl, 0.0)
     let fl = Finish.band(d, 0.0, px, px) * smoothstep(0.2, 0.9, n.y) * 0.8
     face = Finish.over(face, vec4(vec3(0.02, 0.035, 0.09) * fl, fl))
+    // Milled: a 3 point shoulder inside the edge, catching the light along
+    // the top and turning away into shade along the foot, so the slab has a
+    // thickness and the plateau stands on it.
+    let x = max(-d, 0.0)
+    let sh = (1.0 - smoothstep(0.0, 3.0, x)) * a
+    face = face + vec4(vec3(0.05, 0.058, 0.08) * sh * upper, 0.0)
+    let sd = 0.45 * sh * smoothstep(0.2, 0.9, n.y)
+    face = Finish.over(face, vec4(vec3(0.004, 0.008, 0.035) * sd, sd))
+    if leak > 0.001 {
+        // Inside, the glass is lit along its inner rim, strongest at the top
+        // edge and the corners, gone within 10 points; the middle and the
+        // dark foot line stay as they are.
+        let top = smoothstep(0.1, 1.0, (c.y - p.y) / max(h.y, 1.0))
+        let rim = max(top * (0.55 + 0.45 * side), side * 0.45 * (1.0 - low)) * leak
+        let li = exp(-max(x - 0.8, 0.0) / 2.4) * a * rim * 0.16
+        face = Finish.over(face, vec4(vec3(0.949, 0.729, 0.608) * li, li))
+    }
     return Finish.over(res, face)
 }
-// A tray: the same box sunk into the ground, the ground's rim shading its
-// top, a light lip under its foot.
+// A tray: the same box punched into the ground, the ground's rim shading
+// its top and, less, its sides, a light lip under its foot.
 let lu_tray = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
     let lo = vec2(lu_snap(0.0, o.x, px), lu_snap(0.0, o.y, px))
     let hi = vec2(lu_snap(size.x, o.x, px), lu_snap(size.y, o.y, px) - px)
@@ -1526,6 +1632,7 @@ let lu_tray = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
     var res = vec4(0.29, 0.353, 0.502, 1.0) * Finish.ring_out(d, 0.0, px, px) * smoothstep(0.2, 0.9, n.y) * 0.8
     var col = vec3(0.035, 0.055, 0.129) + vec3(1.0, 1.0, 1.0) * lu_grain(p, o, px) * 0.6
     col = mix(col, vec3(0.004, 0.012, 0.043), 0.6 * (1.0 - smoothstep(0.0, 5.0, p.y - lo.y - px)))
+    col = mix(col, vec3(0.004, 0.012, 0.043), 0.6 * Finish.inset(p, c, (hi - lo) * 0.5, r, vec2(0.0, 1.5), 2.6))
     col = mix(col, vec3(0.008, 0.024, 0.086), Finish.band(d, 0.0, px, px))
     return Finish.over(res, vec4(col * a, a))
 }
