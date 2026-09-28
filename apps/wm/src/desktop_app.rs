@@ -108,6 +108,7 @@ impl App {
             DesktopStyle::Anthracite => (shell::rgb(29, 33, 38), shell::rgb(20, 23, 27)),
             DesktopStyle::Concrete => (shell::rgb(194, 193, 188), shell::rgb(177, 176, 171)),
             DesktopStyle::Pixel => (shell::rgb(185, 205, 112), shell::rgb(169, 189, 94)),
+            DesktopStyle::Porcelain => (shell::rgb(246, 246, 244), shell::rgb(232, 232, 229)),
             DesktopStyle::Macos if dark => (shell::rgb(12, 15, 36), shell::rgb(65, 36, 69)),
             DesktopStyle::Macos => (shell::rgb(39, 43, 87), shell::rgb(171, 109, 131)),
             DesktopStyle::Windows if dark => (shell::rgb(10, 19, 34), shell::rgb(21, 49, 72)),

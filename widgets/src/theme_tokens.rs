@@ -2174,6 +2174,7 @@ const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
     (DesktopStyle::Anthracite, false, Scheme::Dark),
     (DesktopStyle::Concrete, false, Scheme::Light),
     (DesktopStyle::Pixel, false, Scheme::Light),
+    (DesktopStyle::Porcelain, false, Scheme::Light),
     (DesktopStyle::Macos, false, Scheme::Light),
     (DesktopStyle::Macos, true, Scheme::Dark),
     (DesktopStyle::Windows, false, Scheme::Light),
@@ -3913,7 +3914,7 @@ mod equalizer_tests {
         assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
         assert!(dark.iter().all(|t| !pale.contains(t)));
         assert_eq!(dark.len(), 21, "{dark:?}");
-        assert_eq!(pale.len(), 17, "{pale:?}");
+        assert_eq!(pale.len(), 18, "{pale:?}");
     }
 
     /// The weights of a relative mix are a hundred parts shared out, so

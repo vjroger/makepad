@@ -41,7 +41,7 @@ pub enum DesktopStyle {
     /// Clear glass on a light ground: thin bright rims, the ground seen
     /// through every face.
     Liquid,
-    /// Porcelain faces on a dark ground, lit from underneath.
+    /// Pale lit faces on a dark ground, lit from underneath.
     Luminous,
     /// Minimal instrument hardware: a pale case, hairlines, few colours.
     FieldKit,
@@ -73,29 +73,32 @@ pub enum DesktopStyle {
     /// Pixel art: a pale green dot-matrix glass, controls framed in square
     /// pixels.
     Pixel,
+    /// White porcelain: white on white, form drawn by light and soft
+    /// shadow alone.
+    Porcelain,
 }
 
 impl DesktopStyle {
     /// How many styles there are, and so how many weights a table indexed by
     /// discriminant needs: every variant is in `ALL`.
-    pub const COUNT: usize = 30;
+    pub const COUNT: usize = 31;
     pub const ALL: [Self; Self::COUNT] = [
         Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled,
         Self::Aluminium, Self::Frosted, Self::Liquid, Self::Luminous, Self::FieldKit,
         Self::Terminal, Self::Lcd, Self::Neon, Self::Hud,
         Self::Lacquer, Self::Safety, Self::FieldRadio, Self::Brass, Self::FuturePlastic,
-        Self::FutureMetal, Self::Anthracite, Self::Concrete, Self::Pixel,
+        Self::FutureMetal, Self::Anthracite, Self::Concrete, Self::Pixel, Self::Porcelain,
         Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android,
     ];
     /// The styles laid out as tiles rather than as floating windows, with no
     /// shelf and no title bar of their own: the tilers and every style built
     /// on the library's own surfaces rather than on somebody's desktop.
-    const TILING: [Self; 24] = [
+    const TILING: [Self; 25] = [
         Self::Omarchy, Self::BlackOrange, Self::Neumorphic, Self::Molded, Self::Glossy, Self::Milled,
         Self::Aluminium, Self::Frosted, Self::Liquid, Self::Luminous, Self::FieldKit,
         Self::Terminal, Self::Lcd, Self::Neon, Self::Hud,
         Self::Lacquer, Self::Safety, Self::FieldRadio, Self::Brass, Self::FuturePlastic,
-        Self::FutureMetal, Self::Anthracite, Self::Concrete, Self::Pixel,
+        Self::FutureMetal, Self::Anthracite, Self::Concrete, Self::Pixel, Self::Porcelain,
     ];
     fn tiling(self) -> bool {
         Self::TILING.contains(&self)
@@ -126,6 +129,7 @@ impl DesktopStyle {
             Self::Anthracite => "anthracite",
             Self::Concrete => "concrete",
             Self::Pixel => "pixel",
+            Self::Porcelain => "porcelain",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -160,6 +164,7 @@ impl DesktopStyle {
             Self::Anthracite => "Glossy anthracite",
             Self::Concrete => "Concrete",
             Self::Pixel => "Pixel art",
+            Self::Porcelain => "Porcelain white",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -189,7 +194,7 @@ impl DesktopStyle {
             Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0,
             Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0,
             Self::Lacquer | Self::Safety | Self::FieldRadio | Self::Brass | Self::FuturePlastic => 0,
-            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel => 0,
+            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel | Self::Porcelain => 0,
             Self::Macos => 1,
             Self::Windows | Self::Molded => 2,
             Self::Windows2000 => 3,
@@ -212,7 +217,7 @@ impl DesktopStyle {
             Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0.0,
             Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0.0,
             Self::Lacquer | Self::Safety | Self::FieldRadio | Self::Brass | Self::FuturePlastic => 0.0,
-            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel => 0.0,
+            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel | Self::Porcelain => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -225,7 +230,7 @@ impl DesktopStyle {
             Self::Aluminium | Self::Frosted | Self::Liquid | Self::Luminous | Self::FieldKit => 0.0,
             Self::Terminal | Self::Lcd | Self::Neon | Self::Hud => 0.0,
             Self::Lacquer | Self::Safety | Self::FieldRadio | Self::Brass | Self::FuturePlastic => 0.0,
-            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel => 0.0,
+            Self::FutureMetal | Self::Anthracite | Self::Concrete | Self::Pixel | Self::Porcelain => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -366,6 +371,10 @@ impl StyleSheet {
             DesktopStyle::Pixel => (
                 include_str!("../themes/pixel/theme.splash"),
                 include_str!("../themes/pixel/widgets.splash"),
+            ),
+            DesktopStyle::Porcelain => (
+                include_str!("../themes/porcelain/theme.splash"),
+                include_str!("../themes/porcelain/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -1130,6 +1139,7 @@ mod tests {
                         DesktopStyle::Safety | DesktopStyle::FieldRadio | DesktopStyle::FutureMetal => 2.0,
                         DesktopStyle::FuturePlastic => 6.0,
                         DesktopStyle::Concrete => 1.0,
+                        DesktopStyle::Porcelain => 4.0,
                         _ => 0.0,
                     }
                 );
