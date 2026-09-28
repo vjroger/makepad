@@ -232,6 +232,164 @@ script_mod! {
         }
     }
 
+    let ScreenCaption = Label{
+        draw_text +: {color: theme.color_screen_ink text_style: theme.font_regular{font_size: theme.font_size_p * 0.8}}
+    }
+
+    // A readout with its unit beside it, bottoms aligned, on one screen.
+    let ScreenLine = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: theme.space_1
+        align: Align{x: 0. y: 1.}
+    }
+
+    let LampColumn = View{
+        width: Fit
+        height: Fit
+        flow: Down
+        spacing: theme.space_1
+        align: Align{x: 0.5 y: 0.}
+    }
+
+    mod.stories.KitchenSinkInstruments = SinkPage{
+        Band{
+            Column{
+                Group{
+                    GroupCaption{text: "Readouts"}
+                    ScreenView{
+                        ScreenLine{Readout{text: "12:45:30" digit_height: 20.} ScreenCaption{text: "TIME"}}
+                    }
+                    ScreenView{
+                        ScreenLine{Readout{text: "-6.5" cells: 5 digit_height: 20.} ScreenCaption{text: "dB"}}
+                    }
+                    ScreenView{
+                        ScreenLine{Readout{text: "440.0" cells: 6 digit_height: 20.} ScreenCaption{text: "Hz"}}
+                    }
+                }
+                Group{
+                    GroupCaption{text: "Screen"}
+                    ScreenView{
+                        width: 190.
+                        ScreenCaption{text: "OUTPUT"}
+                        Readout{text: "-12.0" cells: 5 digit_height: 26.}
+                        LevelMeter{width: Fill height: 6. lamp: false level: 0.68 draw_bg.segment: 4.}
+                        LevelMeter{width: Fill height: 6. lamp: false level: 0.54 draw_bg.segment: 4.}
+                    }
+                }
+            }
+            Column{
+                Group{
+                    GroupCaption{text: "Lamps"}
+                    Line{
+                        align: Align{x: 0. y: 0.}
+                        LampColumn{Lamp{intent: LampIntent.Accent lit: 1.0} Lamp{intent: LampIntent.Accent lit: 0.5} Lamp{intent: LampIntent.Accent}}
+                        LampColumn{Lamp{intent: LampIntent.Success lit: 1.0} Lamp{intent: LampIntent.Success lit: 0.5} Lamp{intent: LampIntent.Success}}
+                        LampColumn{Lamp{intent: LampIntent.Warning lit: 1.0} Lamp{intent: LampIntent.Warning lit: 0.5} Lamp{intent: LampIntent.Warning}}
+                        LampColumn{Lamp{intent: LampIntent.Error lit: 1.0} Lamp{intent: LampIntent.Error lit: 0.5} Lamp{intent: LampIntent.Error}}
+                        LampColumn{Lamp{intent: LampIntent.Plain lit: 1.0} Lamp{intent: LampIntent.Plain lit: 0.5} Lamp{intent: LampIntent.Plain}}
+                        LampColumn{LampBar{intent: LampIntent.Success lit: 1.0} LampBar{intent: LampIntent.Warning lit: 0.5} LampBar{intent: LampIntent.Error}}
+                    }
+                }
+                Group{
+                    GroupCaption{text: "Meter"}
+                    NeedleMeter{value: 0.66 label: "VU"}
+                }
+            }
+            Column{
+                Group{
+                    GroupCaption{text: "Switches"}
+                    Line{
+                        align: Align{x: 0. y: 0.}
+                        Stack{
+                            width: Fit
+                            ToggleRocker{text: "Power" active: true}
+                            ToggleRocker{text: "Mute"}
+                        }
+                        Stack{
+                            width: Fit
+                            ToggleSlide{text: "Link" active: true}
+                            ToggleSlide{text: "Solo"}
+                        }
+                    }
+                }
+                Group{
+                    GroupCaption{text: "Faders"}
+                    Line{
+                        align: Align{x: 0. y: 1.}
+                        SliderFaderY{height: 110. default: 0.72}
+                        SliderFaderY{height: 110. default: 0.45}
+                        SliderFaderY{height: 110. default: 0.6}
+                        SliderFaderY{height: 110. default: 0.3}
+                    }
+                }
+            }
+        }
+
+        Band{
+            Column{
+                Group{
+                    GroupCaption{text: "Inputs"}
+                    RangeSlider{width: Fill text: "Band" min: 20.0 max: 20000.0 step: 10.0 default_start: 200.0 default_end: 5000.0 unit: " Hz" precision: 0}
+                    NumberField{width: Fill min: 0.0 max: 99.0 step: 1.0}
+                    SegmentedControl{options: ["Mono" "Stereo" "Wide"] selected: 1}
+                }
+            }
+            Column{
+                Group{
+                    GroupCaption{text: "List"}
+                    View{
+                        width: Fill
+                        height: 104.
+                        ScrollYView{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            scroll_bars +: {scroll_bar_y +: {auto_hide: false}}
+                            ListItemOne{text: "Drums"}
+                            ListItemOne{text: "Bass" selected: true}
+                            ListItemOne{text: "Keys"}
+                            ListItemOne{text: "Guitar"}
+                            ListItemOne{text: "Vocals"}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Three surfaces set on the window's ground with room between
+        // them, so a sheet's panel texture and its ground both show.
+        Group{
+            GroupCaption{text: "Grounds"}
+            Band{
+                spacing: theme.space_6
+                PanelView{
+                    width: Fill
+                    height: 70.
+                    flow: Down
+                    padding: theme.mspace_3
+                    GroupCaption{text: "Panel"}
+                }
+                InsetPanelView{
+                    width: Fill
+                    height: 70.
+                    flow: Down
+                    padding: theme.mspace_3
+                    GroupCaption{text: "Inset"}
+                }
+                RoundedView{
+                    width: Fill
+                    height: 70.
+                    draw_bg +: {color: theme.color_surface_container}
+                    flow: Down
+                    padding: theme.mspace_3
+                    GroupCaption{text: "Rounded"}
+                }
+            }
+        }
+    }
+
     // The matrix: a name column, then one column per state.
     let StateLine = View{
         width: Fill
@@ -395,6 +553,21 @@ pub const STORIES: &[Story] = &[
         added: "2025-06-01",
         tags: &["style sheet review", "state matrix"],
         doc: "# States\n\nEight controls held still in rest, hover, pressed, focus, active and disabled. The matrix passes no events to what is inside it, so the pointer cannot move a cell out of its state. A dash marks a state the control does not have.",
+        subject: "",
+        feature: None,
+        controls: &[],
+        on_actions: None,
+    },
+    Story {
+        key: "overview/kitchen-sink/instruments",
+        category: "Overview",
+        component: "Kitchen sink",
+        also: &[],
+        name: "Instruments",
+        dsl: "KitchenSinkInstruments",
+        added: "2025-06-01",
+        tags: &["style sheet review", "displays and meters"],
+        doc: "# Instruments\n\nThe displays, lamps, meters and hardware controls on one screen, each under its stock name and dressed by nothing but the style sheet: readouts of a time, a level and a frequency, a screen holding a readout and a level ladder, lamps lit, half lit and out in every intent, a needle meter, rocker and slide switches on and off, a bank of four faders, a range slider, a number field, a segmented group, a list with a selected row, and three surfaces standing on the window's ground.",
         subject: "",
         feature: None,
         controls: &[],
