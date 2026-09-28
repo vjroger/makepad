@@ -87,8 +87,8 @@ mod.theme.color_label_outer_hover = #535a6a
 mod.theme.color_label_outer_down = #535a6a
 mod.theme.color_label_outer_drag = #535a6a
 mod.theme.color_label_outer_focus = #535a6a
-mod.theme.color_label_outer_active = #636a7a
-mod.theme.color_label_outer_active_focus = #636a7a
+mod.theme.color_label_outer_active = #535a6a
+mod.theme.color_label_outer_active_focus = #535a6a
 mod.theme.color_label_outer_disabled = #b3bac6
 mod.theme.color_icon = #636a7a
 mod.theme.color_icon_active = #3860d6
@@ -158,25 +158,12 @@ mod.theme.container_corner_radius = 12.0
 mod.theme.textselection_corner_radius = 2.0
 
 // A round, open grotesque at regular weight for controls; captions are the
-// only place the semibold goes. 8.5 points of type is 11.3 layout points:
-// its capitals stand about 8.2 points tall, under a third of a 26 point row.
-mod.theme.font_size_base = 8.5
-mod.theme.font_size_p = 8.5
-// The label and body ladder the sized controls read, frozen from the base's
-// 10 point paragraph, taken down with it by the same step.
-mod.theme.type_body_l_size = 9.5
-mod.theme.type_body_m_size = 8.5
-mod.theme.type_body_s_size = 7.75
-mod.theme.type_label_l_size = 8.5
-mod.theme.type_label_m_size = 7.75
-mod.theme.type_label_s_size = 7.0
-mod.theme.type_title_s_size = 9.5
-mod.theme.type_title_m_size = 10.5
+// only place the semibold goes.
 use mod.res.*
 use mod.text.*
 // The base family is merged, not replaced: only its first member changes,
 // so the symbol, CJK and emoji members behind it still answer.
-mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family +: {ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family +: {ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_bold = mod.theme.font_bold{font_size: 8.5 font_family +: {ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_regular = mod.theme.font_regular{font_family +: {ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_family +: {ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_family +: {ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 true
