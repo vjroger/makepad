@@ -903,6 +903,59 @@ mod tests {
         }
     }
 
+    /// A sheet lays a window ground with two lines, and a window under a
+    /// sheet that writes neither keeps its ground off, so it only clears as
+    /// it always did. Read off a window made from the template the way an
+    /// app makes one, since that is where the sheet's writes have to land.
+    #[test]
+    fn a_sheet_lays_the_window_ground_and_no_shipped_sheet_does() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let shows = |vm: &mut ScriptVm| {
+                let window = script_eval!(vm, {mod.widgets.Window{}});
+                let obj = window.as_object().expect("a window object");
+                vm.bx.heap.value(obj, id!(show_bg).into(), NoTrap).as_bool()
+            };
+            assert_eq!(shows(vm), Some(false), "the stock window draws no ground");
+            for style in DesktopStyle::ALL {
+                install(vm, StyleSheet::load(style));
+                vm.with_reload(crate::script_mod);
+                assert_eq!(shows(vm), Some(false), "{} lays a ground", style.id());
+            }
+            let ground = StyleSheet {
+                name: "ground".into(),
+                theme: "mod.theme = mod.themes.dark\ntrue\n".into(),
+                widgets: "use mod.prelude.widgets_internal.*\n\
+                          mod.widgets.Window.show_bg = true\n\
+                          mod.widgets.Window.draw_bg.pixel = fn() {\n\
+                              let p = self.pos * self.rect_size\n\
+                              let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)\n\
+                              let g = Finish.grain(p / px, 0.01)\n\
+                              return vec4(self.color.rgb + vec3(g, g, g), 1.0)\n\
+                          }\n\
+                          true\n"
+                    .into(),
+                icons: Vec::new(),
+            };
+            install(vm, ground);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the ground sheet does not evaluate: {errors:?}");
+            assert_eq!(shows(vm), Some(true), "the sheet's ground is on");
+            let source = script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.Window.draw_bg, "hlsl", false)});
+            let text = vm.bx.heap.string_with(source, |_heap, text| text.to_string()).expect("source");
+            assert!(!text.starts_with("ERRORS"), "the sheet's ground does not compile: {text}");
+            assert!(text.contains("_grain("), "the window draws the sheet's pixel, not its own");
+            // And a switch back to a sheet without a ground turns it off.
+            install(vm, StyleSheet::load(DesktopStyle::Macos));
+            vm.with_reload(crate::script_mod);
+            assert_eq!(shows(vm), Some(false), "the ground outlived its sheet");
+            uninstall(vm);
+        });
+    }
+
     /// The faces the library keeps for its own chrome are the stock ones
     /// under any sheet, and a template that spreads one in is out of a
     /// sheet's reach while one that does not is not.
