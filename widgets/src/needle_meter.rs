@@ -9,7 +9,7 @@
 //!
 //! `needle_angle` is the one mapping from a value to an angle; the shader
 //! runs the same arithmetic, and a test holds it.
-use crate::{lamp::Glide, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{lamp::{amount_of, Glide}, makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -133,7 +133,8 @@ script_mod! {
                 let major = 1.0 - step(0.5, k - m * floor(k / m + 0.0001))
                 let len = mix(self.tick_minor, self.tick_major, major)
                 let radial = max(rr - len - r, r - rr)
-                let tick = Finish.cover(perp - px * mix(0.5, 0.8, major), px) * Finish.cover(radial, px) * step(0.0, -q.y * cos(ak) + q.x * sin(ak))
+                // A minor tick one device pixel wide, a major one two.
+                let tick = Finish.cover(perp - px * mix(0.5, 1.0, major), px) * Finish.cover(radial, px) * step(0.0, -q.y * cos(ak) + q.x * sin(ak))
                 col = mix(col, self.color_scale.rgb, max(arc, tick))
 
                 // The red zone: a band just outside the arc from `zone` on.
@@ -143,12 +144,15 @@ script_mod! {
                     col = mix(col, self.color_zone.rgb, zone_t * zone_r)
                 }
 
-                // The needle, from the pivot to just past the scale.
+                // The needle, one device pixel wide, from under the pivot
+                // cover to just past the scale. Its tail stops a device
+                // pixel short of the cover's edge, so no sliver of its
+                // antialiasing shows beside the cover.
                 let na = self.needle_angle(self.value)
                 let nd = vec2(sin(na), -cos(na))
                 let along = dot(q, nd)
                 let across = abs(q.x * nd.y - q.y * nd.x)
-                let needle = Finish.cover(across - px * 0.7, px) * Finish.cover(along - (rr + 3.0), px) * Finish.cover(-along - self.pivot_size, px)
+                let needle = Finish.cover(across - px * 0.5, px) * Finish.cover(along - (rr + 3.0), px) * Finish.cover(-along - max(self.pivot_size - px, 0.0), px)
                 col = mix(col, self.color_needle.rgb, needle)
 
                 // The pivot cover over the needle's root, with a dark rim.
@@ -226,13 +230,13 @@ pub struct NeedleMeter {
 impl NeedleMeter {
     /// Send the needle to `value`, 0 to 1 along the scale; it eases there.
     pub fn set_value(&mut self, cx: &mut Cx, value: f64) {
-        self.value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+        self.value = amount_of(value);
         self.head_for(cx);
     }
 
     /// Where the needle was sent.
     pub fn value(&self) -> f64 {
-        self.value.clamp(0.0, 1.0)
+        amount_of(self.value)
     }
 
     /// Where the needle stands now, on its way there.
@@ -241,8 +245,9 @@ impl NeedleMeter {
     }
 
     fn head_for(&mut self, cx: &mut Cx) {
+        self.value = amount_of(self.value);
         self.seeded = Some(self.value);
-        self.glide.set(self.value.clamp(0.0, 1.0) as f32);
+        self.glide.set(self.value as f32);
         if !self.glide.is_settled() && !self.running {
             self.running = true;
             self.last_tick = cx.seconds_since_app_start();
@@ -254,19 +259,27 @@ impl NeedleMeter {
 
 impl Widget for NeedleMeter {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // A script can write any number here; one that is no number is 0,
+        // or it would never compare equal to itself and redraw for ever.
+        self.value = amount_of(self.value);
         match self.seeded {
             None => {
                 self.seeded = Some(self.value);
-                self.glide.jump(self.value.clamp(0.0, 1.0) as f32);
+                self.glide.jump(self.value as f32);
             }
             Some(seen) if seen != self.value => self.head_for(cx),
             _ => {}
         }
         self.draw_bg.value = self.glide.value();
-        self.draw_bg.opacity = if self.disabled { 0.55 } else { 1.0 };
+        let opacity = if self.disabled { 0.55 } else { 1.0 };
+        self.draw_bg.opacity = opacity;
         self.draw_bg.begin(cx, walk, self.layout);
         if !self.label.is_empty() {
+            // The caption dims with the face: set, draw, restore.
+            let rest = self.draw_label.color;
+            self.draw_label.color = Vec4f { w: rest.w * opacity, ..rest };
             self.draw_label.draw_walk(cx, Walk::fit(), Align::default(), &self.label);
+            self.draw_label.color = rest;
         }
         self.draw_bg.end(cx);
         DrawStep::done()
@@ -352,6 +365,14 @@ mod tests {
                 inner.glide.tick(0.05, 0.3);
             }
             assert_eq!(inner.shown(), 1.0, "and lands");
+            // A value that is no number is the left end, which the needle
+            // can reach and stop at.
+            inner.set_value(&mut cx, f64::NAN);
+            assert_eq!(inner.value(), 0.0);
+            for _ in 0..40 {
+                inner.glide.tick(0.05, 0.3);
+            }
+            assert!(inner.glide.is_settled(), "the needle settles");
         });
     }
 }

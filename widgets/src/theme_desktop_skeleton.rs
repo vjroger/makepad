@@ -463,8 +463,8 @@ script_mod! {
         color_screen_ink: #x202020FF
         screen_ghost: 0.1
         color_lamp_off: #x3C3C3CFF
-        color_lamp_plain: #xF4F4F4FF
-        lamp_halo: 0.2
+        color_lamp_plain: #x8C8C8CFF
+        lamp_halo: 0.0
         // Surface and outline roles, the light mapping over the ladder above.
         color_surface: #xDDDDDDFF
         color_surface_container: #xEEEEEEFF

@@ -21,7 +21,12 @@
 //! ranges END at that ceiling: the widget clamps them, and the shader clamps
 //! them again, so neither a page nor a sheet writing the instance directly
 //! can make a lamp glow louder than a lamp does. `halo_at` is the profile,
-//! the same arithmetic the shader runs, and the tests hold it to the numbers.
+//! the same arithmetic the shader runs, and the tests hold both to the
+//! numbers. The halo only ever lightens or tints its ground (`halo_light`):
+//! a lit ink darker than the ground would otherwise ring the lamp in shade.
+//! On a light ground a halo can only tint, and the light bases set none. A
+//! disabled lamp draws no halo, and a lamp with no halo takes no room for
+//! one.
 //!
 //! The lit amount eases (`Glide`), so a lamp comes on and goes out rather
 //! than blinking, and it stops asking for frames the moment it arrives.
@@ -50,7 +55,8 @@ script_mod! {
     mod.widgets.LampBase = #(Lamp::register_widget(vm))
     /** An indicator lamp, round or a bar, lit by an amount from 0 to 1 that
      * eases. Its colour comes from its intent; off it shows a dark lens, lit
-     * a pale core, and its halo can never pass the measured ceiling. */
+     * its colour, and its halo never darkens its ground and can never pass
+     * the measured ceiling. */
     mod.widgets.Lamp = set_type_default() do mod.widgets.LampBase{
         width: Fit
         height: Fit
@@ -95,10 +101,12 @@ script_mod! {
             color_off: uniform(theme.color_lamp_off)
             /** how much of the lit colour the dark lens carries 0..0.4 step 0.01 */
             lens_tint: uniform(0.14)
-            /** how far the lit core pales toward white 0..1 step 0.05 */
-            core: uniform(0.55)
+            /** how far the lit middle pales toward white; 0 lights the plain colour, as the references do 0..1 step 0.05 */
+            core: uniform(0.0)
             /** the bar's corner, in points 0..8 step 0.25 */
             bar_radius: uniform(1.5)
+            /** the ground the lamp is set in, which the halo's share is taken over */
+            ground: uniform(theme.color_bg_app)
 
             // The lit colour of this lamp's intent.
             intent_color: fn() -> vec4 {
@@ -126,6 +134,18 @@ script_mod! {
                 return s * fall * (1.0 - smoothstep(0.55 * r, r, d))
             }
 
+            // The halo's light, premultiplied, for a share `h` from
+            // `halo_at`: the lamp's colour laid `h` of the way over the
+            // ground, which is `h` of the lamp's excess exactly. Where the
+            // ink is darker than the ground that would shade it, so there
+            // it lays only as much over as keeps the ground's luminance: a
+            // tint, never a dark ring. `ground` is the theme's; the blend
+            // itself takes whatever ground is really there.
+            halo_light: fn(ink: vec3, h: float) -> vec4 {
+                let w = clamp(Finish.lum(ink) / max(Finish.lum(self.ground.rgb), 0.001), 0.0, 1.0)
+                return vec4(ink * h, h * w)
+            }
+
             pixel: fn() {
                 let p = self.pos * self.rect_size
                 let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
@@ -145,7 +165,7 @@ script_mod! {
                 // lighter at the top as a dome is, with a small glint.
                 let v = clamp((p.y - (c.y - t * 0.5)) / max(t, 0.001), 0.0, 1.0)
                 let lens = mix(self.color_off.rgb, ink.rgb, self.lens_tint) * (1.1 - 0.2 * v)
-                // Lit: the plain colour, paling toward the middle.
+                // Lit: the plain colour, paling toward the middle by `core`.
                 let along = max(abs(p.x - c.x) - (hb.x - t * 0.5), 0.0)
                 let core_d = length(vec2(along, p.y - c.y)) / max(t * 0.5, 0.001)
                 let pale = mix(ink.rgb, vec3(1.0, 1.0, 1.0), 0.65)
@@ -161,7 +181,7 @@ script_mod! {
                 // still reads as a part and not as a hole.
                 let lip = Finish.ring_out(d, 0.0, px, px) * step(c.y, p.y) * 0.14 * (1.0 - lit)
                 let h = max(self.halo_at(d, t, px, self.halo * lit, reach), 0.0)
-                let under = vec4(ink.rgb * h, h) + vec4(lip, lip, lip, lip) * (1.0 - h)
+                let under = self.halo_light(ink.rgb, h) + vec4(lip, lip, lip, lip)
                 let out = Finish.over(under, vec4(body * a, a))
                 return out * self.opacity
             }
@@ -225,6 +245,15 @@ pub fn halo_at(d: f32, t: f32, px: f32, strength: f32, reach: f32) -> f32 {
     s * fall * window
 }
 
+/// An amount from 0 to 1, with anything that is no number taken as 0.
+pub(crate) fn amount_of(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// A value that eases toward a target: a fixed share of what is left per
 /// unit of time, so it arrives in about `secs` however unevenly it is
 /// ticked, and snaps the last little way so it can stop.
@@ -247,13 +276,16 @@ impl Glide {
         self.target
     }
 
-    /// Head for `target` from wherever it is now.
+    /// Head for `target` from wherever it is now. A target that is no
+    /// number is taken as 0: a NaN is never reached, so the ease would
+    /// never settle.
     pub fn set(&mut self, target: f32) {
-        self.target = target;
+        self.target = if target.is_finite() { target } else { 0.0 };
     }
 
     /// Be at `value` now, with nothing left to ease.
     pub fn jump(&mut self, value: f32) {
+        let value = if value.is_finite() { value } else { 0.0 };
         self.value = value;
         self.target = value;
     }
@@ -358,23 +390,38 @@ pub struct Lamp {
 impl Lamp {
     /// Light the lamp to `amount`, 0 out to 1 fully lit, easing there.
     pub fn set_lit(&mut self, cx: &mut Cx, amount: f64) {
-        self.lit = amount.clamp(0.0, 1.0);
+        self.lit = amount_of(amount);
         self.head_for(cx);
     }
 
     /// Where the lamp is heading, 0 to 1.
     pub fn lit(&self) -> f64 {
-        self.lit.clamp(0.0, 1.0)
+        amount_of(self.lit)
     }
 
     /// The halo strength and reach the lamp will draw: its properties held
-    /// to the ceiling.
+    /// to the ceiling, and no halo at all while disabled.
     pub fn halo_drawn(&self) -> (f32, f32) {
-        ((self.halo as f32).clamp(0.0, HALO_CEILING), (self.halo_reach as f32).clamp(0.0, REACH_CEILING))
+        let halo = if self.disabled { 0.0 } else { amount_of(self.halo) as f32 };
+        let reach = amount_of(self.halo_reach) as f32;
+        (halo.min(HALO_CEILING), reach.min(REACH_CEILING))
+    }
+
+    /// The room the halo takes each side, in lamp thicknesses: none for a
+    /// lamp that has no halo to draw, whatever its reach.
+    fn room(&self) -> f32 {
+        if amount_of(self.halo) > 0.0 {
+            self.halo_drawn().1
+        } else {
+            0.0
+        }
     }
 
     fn head_for(&mut self, cx: &mut Cx) {
-        let target = self.lit.clamp(0.0, 1.0);
+        // A value that is no number is out: a NaN would never settle and
+        // the lamp would ask for frames for ever.
+        self.lit = amount_of(self.lit);
+        let target = self.lit;
         self.seeded = Some(self.lit);
         self.glide.set(target as f32);
         if !self.glide.is_settled() && !self.running {
@@ -388,7 +435,7 @@ impl Lamp {
     /// The lens and the room its halo needs around it, in points.
     fn extent(&self) -> DVec2 {
         let t = self.size.max(1.0);
-        let room = t * self.halo_drawn().1 as f64;
+        let room = t * self.room() as f64;
         let len = match self.shape {
             LampShape::Round => t,
             LampShape::Bar => {
@@ -405,10 +452,12 @@ impl Lamp {
 
 impl Widget for Lamp {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // A script can write any number here; one that is no number is out.
+        self.lit = amount_of(self.lit);
         match self.seeded {
             None => {
                 self.seeded = Some(self.lit);
-                self.glide.jump(self.lit.clamp(0.0, 1.0) as f32);
+                self.glide.jump(self.lit as f32);
             }
             Some(seen) if seen != self.lit => self.head_for(cx),
             _ => {}
@@ -424,12 +473,15 @@ impl Widget for Lamp {
         }
         cx.begin_turtle(walk, Layout::default());
         let rect = cx.turtle().rect();
-        let (halo, reach) = self.halo_drawn();
+        // `reach` is the room the quad holds, which the shader reads the
+        // lens's thickness back from, so it is the room and not the reach
+        // asked for.
+        let (halo, _) = self.halo_drawn();
         self.draw_bg.lit = self.glide.value();
         self.draw_bg.intent = self.intent.index();
         self.draw_bg.bar = if self.shape == LampShape::Bar { 1.0 } else { 0.0 };
         self.draw_bg.halo = halo;
-        self.draw_bg.reach = reach;
+        self.draw_bg.reach = self.room();
         self.draw_bg.opacity = if self.disabled { 0.5 } else { 1.0 };
         // The lens keeps its own proportions in the middle of whatever box
         // the layout handed over.
@@ -520,6 +572,76 @@ mod tests {
         }
         assert_eq!(halo_at(-1.0, 8.0, PX, 0.3, 1.0), 0.0, "no halo inside the lens");
         assert_eq!(halo_at(2.0, 8.0, PX, 0.3, 0.0), 0.0, "no reach, no halo");
+    }
+
+    /// The profile the tests above hold is the one the shader draws: the
+    /// face's own `halo_at`, run by the script VM, gives the Rust numbers.
+    #[test]
+    fn the_shader_draws_the_profile_the_tests_hold() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            cx.with_vm(|vm| {
+                for t in [6.0f32, 14.0] {
+                    for (strength, reach) in [(0.25f32, 1.0f32), (0.45, 0.6), (0.9, 3.0)] {
+                        for i in 0..24 {
+                            let d = -0.5 + i as f32 * t / 16.0;
+                            let (dv, tv, pv, sv, rv) = (d as f64, t as f64, PX as f64, strength as f64, reach as f64);
+                            let value = crate::script_eval!(vm, {
+                                mod.widgets.Lamp.draw_bg.halo_at(#(dv), #(tv), #(pv), #(sv), #(rv))
+                            });
+                            let shader = value.as_f64().expect("the face's halo_at answers a number") as f32;
+                            let rust = halo_at(d, t, PX, strength, reach);
+                            assert!((shader - rust).abs() < 1e-4, "at {d} of {t} ({strength}, {reach}): shader {shader}, Rust {rust}");
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    /// A value that is no number is out: the ease settles on it instead of
+    /// asking for frames for ever, and the lamp reports it as out.
+    #[test]
+    fn a_nan_is_out_and_settles() {
+        let mut glide = Glide::new(0.5);
+        glide.set(f32::NAN);
+        glide.tick(0.016, 0.15);
+        for _ in 0..40 {
+            glide.tick(0.05, 0.15);
+        }
+        assert!(glide.is_settled(), "the ease settles");
+        assert_eq!(glide.value(), 0.0);
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let lamp = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, { mod.widgets.Lamp{lit: 1.0} });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let mut inner = lamp.borrow_mut::<Lamp>().expect("a lamp");
+            inner.set_lit(&mut cx, f64::NAN);
+            assert_eq!(inner.lit(), 0.0);
+            assert_eq!(inner.glide.target(), 0.0, "headed for out, which it can reach");
+        });
+    }
+
+    /// A lamp with no halo takes no room for one, and a disabled lamp keeps
+    /// its room but draws no halo.
+    #[test]
+    fn no_halo_no_room_and_disabled_never_glows() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let lamp = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, { mod.widgets.Lamp{lit: 1.0 size: 8.0 halo: 0.0} });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let mut inner = lamp.borrow_mut::<Lamp>().expect("a lamp");
+            assert_eq!(inner.extent(), dvec2(8.0, 8.0), "the lens and nothing round it");
+            inner.halo = 0.3;
+            assert_eq!(inner.extent(), dvec2(24.0, 24.0), "a thickness of room each side");
+            inner.disabled = true;
+            assert_eq!(inner.halo_drawn().0, 0.0, "disabled never glows");
+            assert_eq!(inner.extent(), dvec2(24.0, 24.0), "and does not move its neighbours");
+        });
     }
 
     /// The lit amount is an amount: out of range it is clamped, and a

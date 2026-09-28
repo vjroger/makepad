@@ -81,7 +81,7 @@ script_mod! {
             opacity: 1.0
             /** segment thickness, as a share of the digit height 0.05..0.2 step 0.005 */
             stroke: uniform(0.12)
-            /** the clear gap at each end of a segment, as a share of the digit height 0..0.06 step 0.002 */
+            /** the clear gap at each end of a segment, as a share of the digit height; never under a device pixel across a joint 0..0.06 step 0.002 */
             gap: uniform(0.018)
             /** the width of a digit, as a share of its height 0.3..0.8 step 0.01 */
             glyph_width: uniform(0.5)
@@ -90,13 +90,16 @@ script_mod! {
 
             // One mitred segment in digit units (the digit height is 1):
             // a bar from `a` to `b`, `s` thick, its ends cut at 45 degrees
-            // and pulled back by the gap so neighbours do not touch.
+            // and pulled back by the gap so neighbours do not touch. At a
+            // small size the gap is held to a device pixel across the
+            // mitre, or the joints fill in.
             segment: fn(q: vec2, a: vec2, b: vec2, s: float) -> float {
                 let m = (a + b) * 0.5
                 let horiz = step(abs(a.y - b.y), abs(a.x - b.x))
                 let r = q - m
                 let t = abs(mix(vec2(r.y, r.x), r, horiz))
-                let half_len = length(b - a) * 0.5 - self.gap
+                let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5) / max(self.rect_size.y, 1.0)
+                let half_len = length(b - a) * 0.5 - max(self.gap, px * 0.71)
                 return max(t.y - s * 0.5, (t.x + t.y - half_len) * 0.70710678)
             }
 

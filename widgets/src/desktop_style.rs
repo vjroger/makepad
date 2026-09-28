@@ -995,7 +995,7 @@ mod tests {
                               let body = mix(self.color_off.rgb, ink.rgb, lit)\n\
                               let a = Finish.cover(d, px)\n\
                               let h = self.halo_at(d, t, px, self.halo * lit, reach)\n\
-                              return Finish.over(vec4(ink.rgb * h, h), vec4(body * a, a)) * self.opacity\n\
+                              return Finish.over(self.halo_light(ink.rgb, h), vec4(body * a, a)) * self.opacity\n\
                           }\n\
                           true\n"
                     .into(),

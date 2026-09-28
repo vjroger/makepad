@@ -13,7 +13,13 @@
 //! The face is the view's own `draw_bg` and the glass `draw_glass`; both
 //! read `bezel`, `recess`, `sheen` and `scan` as instances, which the widget
 //! keeps in step with its properties, so a sheet replaces either pixel
-//! function and still sees the geometry the page asked for.
+//! function and still sees the geometry the page asked for. The glass takes
+//! the face's `border_radius` the same way, as its `face_radius`.
+//!
+//! The bezel is a shade and the lip a light laid over the ground, so the
+//! window reads on a dark ground and a light one alike: a ring a little
+//! darker than whatever it is set in, a device pixel of dark at its edge,
+//! and a device pixel of light on the ground under its bottom edge.
 use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
 
 script_mod! {
@@ -48,18 +54,19 @@ script_mod! {
             border_radius: uniform(theme.corner_radius * 0.5)
             /** the screen face */
             color: uniform(theme.color_screen)
-            /** the bezel ring */
-            color_bezel: uniform(theme.color_surface_container_lowest)
-            /** the lip catching the light under the bezel's bottom edge */
-            color_lip: uniform(theme.color_outline_variant)
+            /** the bezel ring: a shade laid over the ground, so it reads on any ground */
+            color_bezel: uniform(theme.color_d_05)
+            /** the lip catching the light under the bottom edge: light laid over the ground */
+            color_lip: uniform(theme.color_u_15)
 
             pixel: fn() {
                 let p = self.pos * self.rect_size
                 let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
                 // The edges on whole device pixels, so the one-pixel lines
-                // on them are one pixel and not two half-lit ones.
+                // on them are one pixel and not two half-lit ones. The last
+                // row of the box is the lip's, under the outline.
                 let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
-                let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px)) - self.rect_pos
+                let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
                 let c = (lo + hi) * 0.5
                 let ho = (hi - lo) * 0.5
                 let r_out = min(self.border_radius, min(ho.x, ho.y))
@@ -68,12 +75,13 @@ script_mod! {
                 let hf = max(ho - vec2(b, b), vec2(0.5, 0.5))
                 let face_d = Material.sd_box(p, c, hf, max(r_out - b, 0.0))
 
-                // The bezel: a flat ring, one device pixel darker at its
-                // outer edge, and a light lip under its bottom.
-                var col = self.color_bezel.rgb
-                col = mix(col, col * 0.55, Finish.band(outer, 0.0, px, px))
-                let lower = step(c.y, p.y)
-                col = mix(col, self.color_lip.rgb, Finish.band(outer, px, px * 2.0, px) * lower * self.color_lip.a)
+                // The bezel: a flat ring, a shade of whatever ground it is
+                // set in, with a device pixel of dark at its outer edge.
+                // Premultiplied from here on, so a translucent bezel stays
+                // one over the ground.
+                let bz = self.color_bezel
+                var col = vec4(bz.rgb * bz.a, bz.a)
+                col = Finish.over(col, vec4(0.0, 0.0, 0.0, 0.45 * Finish.band(outer, 0.0, px, px)))
 
                 // The face, with the surround's shadow falling across it
                 // from the top: dark at the edge, gone at `recess`.
@@ -87,26 +95,31 @@ script_mod! {
                 }
                 // One device pixel of black where the glass meets the bezel.
                 face = mix(face, face * 0.4, Finish.band(face_d, 0.0, px, px))
-                col = mix(col, face, Finish.cover(face_d, px))
-                let a = Finish.cover(outer, px)
-                return vec4(col * a, a)
+                col = mix(col, vec4(face, 1.0), Finish.cover(face_d, px))
+                col = col * Finish.cover(outer, px)
+                // The lip: a device pixel of light on the ground under the
+                // bottom edge only, and not up the sides.
+                let lip = Finish.ring_out(outer, 0.0, px, px) * step(hi.y, p.y)
+                let la = self.color_lip.a * lip
+                return Finish.over(vec4(self.color_lip.rgb * la, la), col)
             }
         }
 
         draw_glass +: {
             bezel: instance(2.0)
             sheen: instance(0.03)
-            /** the corner of the bezel's outer edge; keep it the face's 0..16 step 0.5 */
-            border_radius: uniform(theme.corner_radius * 0.5)
+            // The face's `border_radius`, which the widget copies here
+            // before each draw so the glass always has the face's corner.
+            face_radius: instance(2.0)
 
             pixel: fn() {
                 let p = self.pos * self.rect_size
                 let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
                 let lo = vec2(Finish.snap(self.rect_pos.x, px), Finish.snap(self.rect_pos.y, px)) - self.rect_pos
-                let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px)) - self.rect_pos
+                let hi = vec2(Finish.snap(self.rect_pos.x + self.rect_size.x, px), Finish.snap(self.rect_pos.y + self.rect_size.y, px) - px) - self.rect_pos
                 let c = (lo + hi) * 0.5
                 let ho = (hi - lo) * 0.5
-                let r_out = min(self.border_radius, min(ho.x, ho.y))
+                let r_out = min(self.face_radius, min(ho.x, ho.y))
                 let b = Finish.snap(max(self.bezel, 0.0), px)
                 let hf = max(ho - vec2(b, b), vec2(0.5, 0.5))
                 let face_d = Material.sd_box(p, c, hf, max(r_out - b, 0.0))
@@ -172,6 +185,9 @@ impl Widget for ScreenView {
             self.view.draw_bg.draw_vars.set_dyn_instance(cx, id!(scan), &[self.scan.clamp(0.0, 1.0) as f32]);
             self.draw_glass.draw_vars.set_dyn_instance(cx, id!(bezel), &[bezel]);
             self.draw_glass.draw_vars.set_dyn_instance(cx, id!(sheen), &[self.sheen.clamp(0.0, 1.0) as f32]);
+            let mut radius = [0.0f32];
+            self.view.draw_bg.get_uniform(cx, id!(border_radius), &mut radius);
+            self.draw_glass.draw_vars.set_dyn_instance(cx, id!(face_radius), &radius);
         }
         if let Some(ScreenDraw::Content) = self.draw_state.get() {
             // The inner view fills the turtle, or measures it when the walk
@@ -185,10 +201,10 @@ impl Widget for ScreenView {
             self.draw_state.set(ScreenDraw::Glass);
         }
         if let Some(ScreenDraw::Glass) = self.draw_state.get() {
+            // Drawn at any sheen: a sheet may have given the glass a pixel
+            // function of its own that does not read it.
             let rect = self.view.area().rect(cx);
-            if self.sheen > 0.0 {
-                self.draw_glass.draw_abs(cx, rect);
-            }
+            self.draw_glass.draw_abs(cx, rect);
             cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
@@ -235,17 +251,23 @@ mod tests {
                     ("LampBar", "lens_tint", crate::script_eval!(vm, {mod.widgets.LampBar.draw_bg})),
                     ("NeedleMeter", "pivot_size", crate::script_eval!(vm, {mod.widgets.NeedleMeter.draw_bg})),
                     ("ScreenView face", "color_bezel", crate::script_eval!(vm, {mod.widgets.ScreenView.draw_bg})),
-                    ("ScreenView glass", "sheen", crate::script_eval!(vm, {mod.widgets.ScreenView.draw_glass})),
+                    ("ScreenView glass", "face_radius", crate::script_eval!(vm, {mod.widgets.ScreenView.draw_glass})),
                     ("ToggleRocker", "rocker_color", crate::script_eval!(vm, {mod.widgets.ToggleRocker.draw_bg})),
                     ("ToggleSlide", "grip_pitch", crate::script_eval!(vm, {mod.widgets.ToggleSlide.draw_bg})),
-                    ("Window ground", "color", crate::script_eval!(vm, {mod.widgets.Window.draw_bg})),
                 ];
+                let ground = crate::script_eval!(vm, {mod.widgets.Window.draw_bg});
                 for backend in ["metal", "hlsl", "glsl", "wgsl"] {
                     for (name, own, draw) in faces {
                         let text = compile(vm, draw, backend);
                         assert!(!text.starts_with("ERRORS"), "{name} did not compile for {backend}: {text}");
                         assert!(text.contains(own), "{name} for {backend} is not its own shader");
                     }
+                    // The window's ground has no name of its own to look
+                    // for: it is the view's face without `get_color`, which
+                    // every view face calls and the ground does not.
+                    let text = compile(vm, ground, backend);
+                    assert!(!text.starts_with("ERRORS"), "the window ground did not compile for {backend}: {text}");
+                    assert!(text.contains("premul") && !text.contains("get_color"), "the window ground for {backend} is not its own shader");
                 }
             });
         });
