@@ -189,9 +189,9 @@ mod.theme.type_body_s_size = 7.75
 mod.theme.type_label_l_size = 8.5
 mod.theme.type_label_m_size = 7.75
 mod.theme.type_label_s_size = 7.0
-mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_bold = mod.theme.font_bold{font_size: 8.5 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.5 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 8.5 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 // The type roles were frozen from the base's faces; stated again so every
 // role reads in the one family.
 mod.theme.font_title_l = mod.theme.font_bold{font_size: 12.0 line_spacing: 1.2}

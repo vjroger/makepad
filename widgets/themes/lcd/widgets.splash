@@ -864,7 +864,7 @@ mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
 }
 
 // The value read out beside a slider: tabular digits in the ink.
-let lcd_value_style = mod.theme.font_regular{font_size: 7.5 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/jetbrains_mono_variable.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+let lcd_value_style = mod.theme.font_regular{font_size: 7.5 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/jetbrains_mono_variable.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 mod.widgets.SliderMinimal.text_input.draw_text.text_style = lcd_value_style
 mod.widgets.SliderFlat.text_input.draw_text.text_style = lcd_value_style
 mod.widgets.SliderRoundFlat.text_input.draw_text.text_style = lcd_value_style

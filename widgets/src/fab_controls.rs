@@ -69,9 +69,12 @@ use crate::scroll_motion::{
 
 pub fn script_mod(vm: &mut ScriptVm) {
     // Phase 1: the token table and a prelude carrying the `fab` alias, so
-    // the ported DSL below reads exactly like it does in the fab app.
+    // the ported DSL below reads exactly like it does in the fab app. The
+    // table reads the theme as it stands without a sheet
+    // (`desktop_style::keep_stock`): the kit's face is built on the app's
+    // font family, and a sheet's own family must not come through it.
     let block = script! {
-        use mod.prelude.widgets_internal.*
+        use mod.prelude.stock_internal.*
 
         mod.fab = {
             // ---- surfaces (fab default-dark grade) ----
@@ -189,19 +192,19 @@ pub fn script_mod(vm: &mut ScriptVm) {
     };
     vm.eval(block);
 
-    // Phase 2: the controls, in the fab visual language.
+    // Phase 2: the controls, in the fab visual language. Every stock
+    // template they nest, and the theme, are the library's as it stands
+    // without a sheet (`desktop_style::keep_stock`): a sheet's tokens and its
+    // writes onto `mod.widgets` reach none of them
+    // (`nothing_a_sheet_sets_reaches_a_fab_control`). The prelude comes
+    // after the templates: the kit registers halfway through the library,
+    // and a name several enums spread into `mod.widgets` (`Right`, `Linear`)
+    // is bound by whichever registered last, which is not the same half way
+    // through a run and after it; the prelude's own are the ones meant here.
     let block = script! {
         use mod.prelude.fab_internal.*
-        use mod.widgets.*
-
-        // The stock faces as they stand now, before any sheet's widget half
-        // runs. A sheet may replace `draw_bg.vertex` and `draw_bg.pixel` on
-        // the stock field, scroll bar and button, and every copy nested here
-        // that does not declare the two itself would take the sheet's; so
-        // each one spreads these in (`no_sheet_face_reaches_a_fab_control`).
-        let StockFieldFace = {vertex: mod.widgets.TextInput.draw_bg.vertex pixel: mod.widgets.TextInput.draw_bg.pixel}
-        let StockBarFace = {vertex: mod.widgets.ScrollBar.draw_bg.vertex pixel: mod.widgets.ScrollBar.draw_bg.pixel}
-        let StockButtonFace = {vertex: mod.widgets.Button.draw_bg.vertex pixel: mod.widgets.Button.draw_bg.pixel}
+        use mod.stock_widgets.*
+        use mod.prelude.stock_internal.*
 
         set_type_default() do #(DrawDragNum::script_shader(vm)){
             ..mod.draw.DrawQuad
@@ -323,9 +326,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
                 margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
                 label_align: Align{x: 1.0 y: 0.5}
-                scroll_bar +: {draw_bg +: {..StockBarFace}}
                 draw_bg +: {
-                    ..StockFieldFace
                     color: vec4(0.0, 0.0, 0.0, 0.0)
                     border_radius: 0.0
                 }
@@ -829,9 +830,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
                 margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
                 empty_text: "Filter"
-                scroll_bar +: {draw_bg +: {..StockBarFace}}
                 draw_bg +: {
-                    ..StockFieldFace
                     color: vec4(0.0, 0.0, 0.0, 0.0)
                     color_hover: vec4(0.0, 0.0, 0.0, 0.0)
                     color_focus: vec4(0.0, 0.0, 0.0, 0.0)
@@ -1051,7 +1050,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     align: Align{x: 0.0 y: 0.5}
                     spacing: 6
                     mod.widgets.FabLabelDim{ width: 30 text: "Hex" }
-                    pick := mod.widgets.Button{
+                    pick := Button{
                         width: Fit
                         height: Fill
                         // `android` and `ios` set `mod.widgets.Button.min_height`
@@ -1061,16 +1060,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         min_height: 0
                         padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
                         text: "pick"
-                        draw_bg +: {..StockButtonFace}
                     }
                     hex := TextInput{
                         width: Fill
                         height: Fill
                         min_height: 0
                         empty_text: ""
-                        scroll_bar +: {draw_bg +: {..StockBarFace}}
                         draw_bg +: {
-                            ..StockFieldFace
                             color: fab.color_input
                             border_radius: fab.radius
                         }
@@ -7070,96 +7066,29 @@ mod tests {
         assert_eq!(fab_geometry(&mut cx), plain);
     }
 
-    /// The same question about the PAINT rather than the box, for the field
-    /// the panel's filter is.
+    /// Nothing a sheet sets reaches a fab control.
     ///
-    /// `windows-2000` and `nextstep` REPLACE
-    /// `mod.widgets.TextInput.draw_bg.pixel` outright with a hard-coded
-    /// opaque white Win95 field. That ignores every colour the filter field
-    /// declares, paints over the well FabSearch draws around it and leaves
-    /// the panel's own light grey placeholder on white. Answering an
-    /// override means declaring the same leaf in this template, so the
-    /// sheet's value lands on something the panel does not use.
+    /// The kit nests stock fields, buttons and scroll bars, and builds its
+    /// face on the app's font family, and a sheet moves every one of those:
+    /// its token half before the kit registers (a spacing rung reaches the
+    /// margin of a nested field, a font the kit's words), its widget half
+    /// onto the templates the kit nests (a face, a padding, an animator
+    /// state's timing). So the kit is built from the library as it stands
+    /// without a sheet (`desktop_style::keep_stock`), and this holds it
+    /// there: under a sheet that sets everything a sheet may on every stock
+    /// template (`desktop_style::everything_sheet`), the kit's table and every
+    /// `mod.widgets.Fab*` the file registers -- read off the source, so a
+    /// control added later is read too -- resolve line for line as they do
+    /// with no sheet: every box, face, colour, font and timing. The sheet
+    /// leaves the kit's own templates alone; no sheet writes to them by name.
     ///
-    /// Read off the sheets in the tree, so a sheet that starts overriding
-    /// something else is caught here rather than by somebody finding the
-    /// filter unreadable.
-    ///
-    /// Every property a sheet sets on `target`, whether it says so in a line
-    /// of its own or through one of the sheet's own helpers. A sheet states
-    /// its field metrics ONCE and hands them to each field in turn -- `let
-    /// field_room = fn(w) { w.min_height = .. }`, then
-    /// `field_room(mod.widgets.TextInput)` -- so a scan that reads only
-    /// `mod.widgets.TextInput.x = y` lines goes blind the moment a sheet
-    /// stops repeating itself, and says the sheets did not load. The helper
-    /// bodies are read here too, so both spellings count.
-    fn sheet_overrides(text: &str, target: &str) -> Vec<String> {
-        let mut helpers: Vec<(String, String, Vec<String>)> = Vec::new();
-        let mut open: Option<(String, String, Vec<String>)> = None;
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some((name, arg)) = line
-                .strip_prefix("let ")
-                .and_then(|rest| rest.split_once(" = fn("))
-                .and_then(|(name, rest)| rest.split_once(')').map(|(arg, _)| (name, arg)))
-            {
-                open = Some((name.trim().to_string(), arg.trim().to_string(), Vec::new()));
-                continue;
-            }
-            let Some((_, arg, props)) = open.as_mut() else { continue };
-            if line == "}" {
-                helpers.push(open.take().expect("the block is open"));
-                continue;
-            }
-            if let Some(prop) = line
-                .strip_prefix(&format!("{arg}."))
-                .and_then(|rest| rest.split_once('='))
-                .map(|(prop, _)| prop.trim().to_string())
-            {
-                props.push(prop);
-            }
-        }
-        let mut found = Vec::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix(&format!("{target}.")) {
-                if let Some(prop) = rest.split([' ', '=']).next() {
-                    found.push(prop.to_string());
-                }
-                continue;
-            }
-            for (name, _, props) in &helpers {
-                // `field_face(mod.widgets.TextInput.draw_bg)` reaches the
-                // same place as `mod.widgets.TextInput.draw_bg.border_radius
-                // = ..`, so whatever the call named is put back in front.
-                let Some(arg) = line
-                    .strip_prefix(&format!("{name}("))
-                    .and_then(|rest| rest.strip_suffix(')'))
-                else {
-                    continue;
-                };
-                let under = match arg.strip_prefix(target) {
-                    Some("") => String::new(),
-                    Some(rest) => format!("{}.", rest.trim_start_matches('.')),
-                    None => continue,
-                };
-                found.extend(props.iter().map(|prop| format!("{under}{prop}")));
-            }
-        }
-        found
-    }
-
-    /// No face a sheet gives a stock template reaches a fab control.
-    ///
-    /// The kit nests stock fields, and a sheet that replaces
-    /// `draw_bg.vertex` or `draw_bg.pixel` on one reaches every nested copy
-    /// that does not declare its own. Every `mod.widgets.Fab*` the file
-    /// registers is walked, read off the source so a control added later is
-    /// walked too, under a sheet that replaces both functions on every stock
-    /// face (`desktop_style::marker_sheet`).
+    /// It stands where two narrower guards stood: one read the leaves the
+    /// shipped sheets set on a `TextInput` and asked the filter field to
+    /// declare each of them, the other walked the faces alone. Neither said
+    /// anything about the next sheet.
     #[test]
-    fn no_sheet_face_reaches_a_fab_control() {
-        use crate::desktop_style::{faces_reaching, install, marker_sheet, uninstall};
+    fn nothing_a_sheet_sets_reaches_a_fab_control() {
+        use crate::desktop_style::{everything_sheet, install, resolution, resolution_diff, uninstall};
         let src = include_str!("fab_controls.rs")
             .split("#[cfg(test)]")
             .next()
@@ -7173,78 +7102,31 @@ mod tests {
         names.sort();
         names.dedup();
         assert!(names.len() > 10, "only {} fab controls were read off the file", names.len());
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            install(vm, marker_sheet());
-            vm.bx.captured_errors = Some(Vec::new());
-            vm.with_reload(crate::script_mod);
-            let errors = vm.take_errors();
-            assert!(errors.is_empty(), "the marker sheet does not evaluate: {errors:?}");
+        let read = |vm: &mut ScriptVm| -> Vec<String> {
+            let fab = vm.module(id!(fab));
+            let mut out = resolution(vm, fab.into(), "fab");
             let widgets = vm.module(id!(widgets));
-            let mut leaks = Vec::new();
             for name in &names {
                 let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
                 assert!(value.as_object().is_some(), "`{name}` did not resolve");
-                leaks.extend(faces_reaching(vm, value, name));
+                out.extend(resolution(vm, value, name));
             }
-            assert!(leaks.is_empty(), "a sheet's face reaches the fab controls at:\n{}", leaks.join("\n"));
+            out
+        };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let plain = read(vm);
+            let sheet = everything_sheet(vm, &|name| names.contains(&name));
+            install(vm, sheet);
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.with_reload(crate::script_mod);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "the sheet does not evaluate: {errors:?}");
+            let moved = resolution_diff(&plain, &read(vm), 20);
+            assert!(moved.is_empty(), "a sheet reaches the fab controls at:\n{}", moved.join("\n"));
             uninstall(vm);
         });
-    }
-
-    #[test]
-    fn the_filter_field_answers_what_the_sheets_override_on_a_text_input() {
-        // Everything before `#[cfg(test)]`: the controls, without the tests
-        // that talk about them -- a test looking for a spelling in the whole
-        // file finds its own words and passes on them.
-        let src = include_str!("fab_controls.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a first half");
-        let search = src
-            .split("mod.widgets.FabSearch = View{")
-            .nth(1)
-            .expect("the file declares `mod.widgets.FabSearch`");
-        // The FIELD's own text, not the well's: the View around it declares a
-        // `pixel` of its own, and that must not answer for the field.
-        let field = search
-            .split("input := TextInput{")
-            .nth(1)
-            .expect("FabSearch declares `input := TextInput`");
-        let kit = &field[..field
-            .find("mod.widgets.FabPropRow")
-            .expect("FabSearch is followed by FabPropRow")];
-        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
-        let mut seen = 0usize;
-        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
-            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
-            let Ok(text) = std::fs::read_to_string(&sheet) else {
-                continue;
-            };
-            for prop in sheet_overrides(&text, "mod.widgets.TextInput") {
-                // `draw_bg.pixel` is answered by declaring `pixel:` inside
-                // this field's own `draw_bg`, and so on down.
-                let leaf = prop.rsplit('.').next().unwrap_or(&prop).to_string();
-                assert!(
-                    kit.contains(&format!("{leaf}:")),
-                    "{} overrides `{prop}` on a TextInput and the filter field does not declare `{leaf}`",
-                    sheet.display()
-                );
-                seen += 1;
-            }
-        }
-        assert!(
-            seen > 8,
-            "only {seen} overrides were read -- the sheets did not load"
-        );
-        // The two a sheet reaches through a THEME token rather than through
-        // `widgets.splash`: the stock field takes its padding from
-        // `theme.mspace_1` and its margin from `theme.mspace_v_1`, and every
-        // sheet moves the space factor those are built from.
-        assert!(kit.contains("padding: Inset{"), "the padding is not written out");
-        assert!(kit.contains("margin: Inset{"), "the margin is not written out");
-        assert!(kit.contains("min_height: 0"), "the min height is not written out");
     }
 
     /// One entry of a runtime table, as the VM has it right now.

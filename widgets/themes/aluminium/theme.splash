@@ -83,6 +83,10 @@ mod.theme.color_text_disabled = #8e8f93
 mod.theme.color_text_placeholder = #66676b
 mod.theme.color_text_placeholder_hover = #5e5f63
 mod.theme.color_text_val = #3c3d40
+// The ink the surface roles carry: a step darker than the engraving, so it
+// still reads 4.7 to 1 on the deepest well the ground grows
+// (color_surface_container_highest, #9f9fa0), where #3c3d40 reads 4.1.
+mod.theme.color_on_surface = #333436
 mod.theme.color_text_cursor = #0da1fb
 mod.theme.color_cursor = #0da1fb
 mod.theme.color_label = #3c3d40
@@ -166,7 +170,7 @@ mod.theme.type_body_s_size = 7.5
 mod.theme.type_label_l_size = 8.25
 mod.theme.type_label_m_size = 7.5
 mod.theme.type_label_s_size = 6.75
-mod.theme.font_regular = mod.theme.font_regular{font_size: 8.25 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_label = mod.theme.font_label{font_size: 8.25 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_bold = mod.theme.font_bold{font_size: 8.25 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.25 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.25 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 8.25 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 true

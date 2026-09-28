@@ -212,9 +212,9 @@ mod.theme.type_label_m_size = 7.5
 mod.theme.type_label_s_size = 7.0
 use mod.res.*
 use mod.text.*
-mod.theme.font_regular = mod.theme.font_regular{font_size: 8.25 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_label = mod.theme.font_label{font_size: 8.25 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-mod.theme.font_bold = mod.theme.font_bold{font_size: 8.25 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.25 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_label = mod.theme.font_label{font_size: 8.25 font_family: mod.theme.font_label.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 8.25 font_family: mod.theme.font_bold.font_family{ibm_plex_semibold := FontMember{res: crate_resource("self:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
 mod.theme.font_code = mod.theme.font_code{font_size: 8.0}
 mod.theme.font_title_l = mod.theme.font_bold{font_size: 13.0 line_spacing: 1.2}
 mod.theme.font_title_m = mod.theme.font_bold{font_size: 11.5 line_spacing: 1.2}

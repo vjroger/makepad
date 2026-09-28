@@ -960,7 +960,7 @@ mod.widgets.RotaryFlat.text_input.draw_text.color_focus = #f2e198
 mod.widgets.RotaryFlat.text_input.draw_text.color_empty = #8a7f55
 // digits of 13 points from the tabular monospace that ships (no condensed
 // face does)
-mod.widgets.RotaryFlat.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 9.75 font_family: FontFamily{latin := FontMember{res: crate_resource("self:resources/jetbrains_mono_variable.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
+mod.widgets.RotaryFlat.text_input.draw_text.text_style = mod.theme.font_regular{font_size: 9.75 font_family: mod.theme.font_regular.font_family{ibm_plex_text := FontMember{res: crate_resource("self:resources/jetbrains_mono_variable.ttf") weight: 500.0 asc: 0.0 desc: 0.0}}}
 
 // ---------------------------------------------------------------------------
 // FADERS. A black slot three points wide with a bright lip, engraved ticks
