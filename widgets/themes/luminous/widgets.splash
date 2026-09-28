@@ -351,6 +351,51 @@ let lm_lit = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, s: 
     return Finish.over(res, vec4(col * a, a))
 }
 
+// 2c. THE LIT ROW: the lit cell drawn for a chosen row of a list, a face
+// taller than a key. The same thin line with its pale core brightest along
+// the foot; the face a darker, browner glass (#2d1914) the light bleeds into
+// over fixed points, not over a share of the height: about 4 under the top,
+// 5 in from the sides and 6 up from the foot. Outward its red light reaches
+// `room` points and is gone there.
+let lm_litrow = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, s: float, room: float) -> vec4 {
+    let c = (lo + hi) * 0.5
+    let h = (hi - lo) * 0.5
+    let d = Material.sd_box(p, c, h, r)
+    let a = Finish.cover(d, px)
+    let x = max(-d, 0.0)
+    let od = max(d, 0.0)
+    let sv = clamp(s, 0.0, 1.3)
+    let lv = min(sv, 1.0)
+    let vy = (p.y - c.y) / max(h.y, 0.5)
+    let foot = smoothstep(0.25, 0.95, vy)
+    let near = 0.5 * exp(-od / 0.9) + 0.34 * exp(-(od * od) / (2.0 * 2.3 * 2.3))
+    let g = near * (0.75 + 0.5 * foot) * (1.0 - a) * sv * (1.0 - smoothstep(room * 0.45, room, od))
+    let gc = mix(vec3(0.8, 0.2, 0.05), vec3(0.42, 0.05, 0.015), smoothstep(0.3, 3.0, od))
+    var res = Finish.over(dst, vec4(gc * g, g * 0.55))
+    var col = vec3(0.176, 0.098, 0.078)
+    let lwt = 1.15
+    let lwb = 1.6
+    let dtop = max(p.y - lo.y - lwt, 0.0)
+    let dbot = max(hi.y - p.y - lwb, 0.0)
+    let dsid = max(min(p.x - lo.x, hi.x - p.x) - lwt, 0.0)
+    let gt = 0.5 * exp(-dtop / 1.6)
+    let gs = 0.55 * exp(-dsid / 3.5)
+    let gb = 0.62 * exp(-dbot / 2.6)
+    let ig = (1.0 - (1.0 - gt) * (1.0 - gs) * (1.0 - gb)) * lv
+    col = mix(col, vec3(0.62, 0.14, 0.02), ig)
+    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
+    let gl = (1.0 - smoothstep(0.1, 0.45, t)) * smoothstep(0.8, 2.6, x)
+    col = col + vec3(0.03, 0.02, 0.016) * gl
+    col = col * (1.0 + Finish.grain(p / px, 0.02))
+    let lw = mix(lwt, lwb, foot)
+    let inl = Finish.band(d, 0.0, lw, px) * min(sv, 1.15)
+    let lc = mix(vec3(0.88, 0.48, 0.3), vec3(1.0, 0.56, 0.24), foot)
+    col = mix(col, lc, clamp(inl, 0.0, 1.0))
+    let core = Finish.band(d, lw * 0.3, lw * 0.72, px) * mix(0.75, 1.0, foot) * min(sv, 1.15)
+    col = mix(col, vec3(1.0, 0.87, 0.64), clamp(core, 0.0, 1.0))
+    return Finish.over(res, vec4(col * a, a))
+}
+
 // 6. A LAMP: a dot `r` across the middle, orange with a pale centre and a
 // halo of 2 to 3 points; off, a dark lens in a dark ring.
 let lm_lamp = fn(dst: vec4, p: vec2, c: vec2, r: float, px: float, lit: float, dis: float) -> vec4 {
@@ -368,32 +413,48 @@ let lm_lamp = fn(dst: vec4, p: vec2, c: vec2, r: float, px: float, lit: float, d
     return Finish.over(res, vec4(col * a, a))
 }
 
-// 4. A LIT FILL inside a well (`wlo`..`whi`): orange, deep where the value
-// starts and bright at its head, a thin pale line along its middle; its
-// glow lies on the floor and walls of the groove and never leaves it.
-let lm_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, dis: float, hot: float, wlo: vec2, whi: vec2, wr: float) -> vec4 {
-    let c = (lo + hi) * 0.5
-    let h = max((hi - lo) * 0.5, vec2(0.01, 0.01))
-    let d = Material.sd_box(p, c, h, min(r, min(h.x, h.y)))
-    let a = Finish.cover(d, px)
+// 4. A LIT TUBE in a groove: a thin line `tw` points across, lying along
+// the middle of the well `wlo`..`whi` (corner `wr`) from `u0` to `u1` along
+// it (x, or y where `vert` is 1). The line is orange (#f7873b) with a pale
+// core (#ffb066). Its light turns the well's floor a dark red (#450300)
+// over the lit stretch, orange right against the line and gone to the red
+// within 2 points; it burns the well's rim a pale orange-brown (#944832)
+// there and warms the slab round the well, gone within 4 points. Past the
+// lit stretch the groove stays black.
+let lm_tube = fn(dst: vec4, p: vec2, u0: float, u1: float, tw: float, px: float, dis: float, hot: float, wlo: vec2, whi: vec2, wr: float, vert: float) -> vec4 {
     let live = 1.0 - dis
-    let dw = Material.sd_box(p, (wlo + whi) * 0.5, (whi - wlo) * 0.5, wr)
-    let inw = Finish.cover(dw, px)
+    let wc = (wlo + whi) * 0.5
+    let u = mix(p.x, p.y, vert)
+    let v = mix(p.y - wc.y, p.x - wc.x, vert)
+    let len = u1 - u0
+    let on = step(0.3, len)
+    let tr = max(min(tw * 0.5, len * 0.5), 0.01)
+    let hl = max(len * 0.5 - tr, 0.0)
+    let d = length(vec2(max(abs(u - (u0 + u1) * 0.5) - hl, 0.0), v)) - tr
+    let a = Finish.cover(d, px) * on
     let od = max(d, 0.0)
-    let bl = exp(-(od * od) / (2.0 * 1.8 * 1.8)) * (1.0 - a) * live * step(0.3, max(h.x, h.y)) * inw * (0.45 + 0.2 * hot)
-    var res = Finish.over(dst, vec4(lm_glowc() * bl, bl * 0.45))
-    let across_x = step(hi.y - lo.y, hi.x - lo.x)
-    let along = mix(clamp((hi.y - p.y) / max(hi.y - lo.y, 0.5), 0.0, 1.0), clamp((p.x - lo.x) / max(hi.x - lo.x, 0.5), 0.0, 1.0), across_x)
-    let hk = max(mix(h.x, h.y, across_x), 0.01)
-    let ramp = smoothstep(0.0, 1.0, along)
-    var col = mix(lm_deep(), lm_orange(), ramp)
-    // The head burns hottest.
-    let head = mix(p.y - lo.y, hi.x - p.x, across_x)
-    col = mix(col, lm_core(), exp(-max(head, 0.0) / 2.0) * 0.45)
-    let ax = mix(abs(p.x - c.x), abs(p.y - c.y), across_x)
-    let q = ax / max(0.38 * hk, px * 0.7)
-    let line = exp(-q * q) * mix(0.55, 0.95, ramp) * (0.85 + 0.15 * hot)
-    col = mix(col, lm_core(), line)
+    let hk = 1.0 + 0.25 * hot
+    // Along the lit stretch, soft at its two ends.
+    let am = smoothstep(u0 - 1.2, u0 + 1.2, u) * (1.0 - smoothstep(u1 - 1.2, u1 + 1.2, u)) * on * live
+    let dw = Material.sd_box(p, wc, (whi - wlo) * 0.5, wr)
+    let inw = Finish.cover(dw, px)
+    // The floor: dark red over the stretch, orange against the line.
+    let fl = 0.85 * am * inw
+    var res = Finish.over(dst, vec4(vec3(0.27, 0.012, 0.0) * fl, fl))
+    let near = exp(-od / 0.7) * inw * (1.0 - a) * on * live * hk
+    res = Finish.over(res, vec4(vec3(1.0, 0.4, 0.08) * near, near * 0.3))
+    // The rim of the well, lit along the stretch, the lower lip brighter.
+    let rim = Finish.band(dw, 0.0, px, px) * am
+    let rc = mix(vec3(0.58, 0.282, 0.196), vec3(0.65, 0.337, 0.24), step(0.0, v)) * hk
+    res = Finish.over(res, vec4(rc * rim, rim))
+    // The warm light on the slab past the rim.
+    let ow = max(dw, 0.0)
+    let wide = smoothstep(u0 - 3.0, u0 + 1.0, u) * (1.0 - smoothstep(u1 - 1.0, u1 + 3.0, u)) * on * live
+    let og = 0.42 * exp(-ow / 1.5) * (1.0 - smoothstep(3.0, 4.5, ow)) * (1.0 - inw) * wide * hk
+    res = Finish.over(res, vec4(vec3(0.47, 0.1, 0.012) * og, og))
+    // The tube: a flat bright body, its pale core along the middle.
+    let q = abs(v) / tr
+    var col = mix(vec3(0.97, 0.53, 0.2), vec3(1.0, 0.69, 0.4), exp(-q * q * 4.0) * (0.85 + 0.15 * hot))
     col = mix(col, vec3(0.24, 0.22, 0.21), dis)
     return Finish.over(res, vec4(col * a, a))
 }
@@ -839,13 +900,17 @@ let lm_thumb = fn(dst: vec4, p: vec2, c: vec2, rad: float, px: float, hover: flo
     let sh = Finish.drop(p, c, vec2(rad, rad), rad, vec2(0.0, 1.2), 1.3) * 0.7 * (1.0 - a)
     var res = Finish.over(dst, vec4(0.0, 0.0, 0.0, sh))
     let q = (p - c) / max(rad, 1.0)
-    var col = mix(vec3(0.2, 0.216, 0.243), vec3(0.078, 0.086, 0.102), smoothstep(-1.0, 1.0, q.y))
-    col = col + vec3(0.045, 0.048, 0.052) * exp(-dot(q - vec2(-0.25, -0.45), q - vec2(-0.25, -0.45)) * 5.0)
+    var col = mix(vec3(0.12, 0.14, 0.165), vec3(0.035, 0.047, 0.06), smoothstep(-1.0, 0.8, q.y))
+    col = col + vec3(0.04, 0.045, 0.05) * exp(-dot(q - vec2(-0.25, -0.45), q - vec2(-0.25, -0.45)) * 5.0)
     col = col - vec3(0.03, 0.03, 0.03) * drag * live
     // A small dimple in the middle.
     col = mix(col, vec3(0.05, 0.055, 0.065), Finish.cover(length(p - c) - 1.4, px))
+    // Its thin ring: pale on top, lit orange-brown underneath and on the
+    // side the lit tube comes from.
     let ring = Finish.band(d, 0.0, px, px)
-    var rc = mix(vec3(0.24, 0.26, 0.29), vec3(0.45, 0.48, 0.52), smoothstep(0.4, -0.7, q.y)) + vec3(0.22, 0.22, 0.22) * hover * live
+    let warm = clamp(smoothstep(-0.5, 0.6, q.y) + smoothstep(-0.2, -0.95, q.x) * 0.8, 0.0, 1.0) * live
+    var rc = mix(vec3(0.46, 0.47, 0.48), vec3(0.76, 0.74, 0.7), smoothstep(0.0, -0.9, q.y))
+    rc = mix(rc, vec3(0.86, 0.5, 0.27), warm) + vec3(0.15, 0.15, 0.15) * hover * live
     rc = mix(rc, vec3(0.16, 0.17, 0.19), 0.6 * dis)
     col = mix(col, rc, ring)
     col = mix(col, vec3(0.09, 0.1, 0.115), 0.5 * dis)
@@ -890,18 +955,18 @@ mod.widgets.SliderFlat.draw_bg.pixel = fn() {
     let rad = 7.0
     let cy = lm_snap(20.0 + (self.rect_size.y - 20.0) * 0.5, o.y, px)
     let live = 1.0 - self.disabled
-    var res = lm_groove(p, 0.0, self.rect_size.x, cy, o, px, 12.0, 6.0, self.disabled, self.hover)
-    let wlo = vec2(lm_snap(0.0, o.x, px) + 3.0, cy - 3.0)
-    let whi = vec2(lm_snap(self.rect_size.x, o.x, px) - 3.0, cy + 3.0)
+    var res = lm_groove(p, 0.0, self.rect_size.x, cy, o, px, 12.0, 9.333, self.disabled, self.hover)
+    let wlo = vec2(lm_snap(0.0, o.x, px) + 1.333, cy - 4.667)
+    let whi = vec2(lm_snap(self.rect_size.x, o.x, px) - 1.333, cy + 4.667)
     let span = self.rect_size.x - rad * 2.0
     let hx = rad + self.slide_pos * span
     let ox = rad + self.origin_pos * span
-    let f0 = mix(wlo.x + px, min(ox, hx), self.arc_origin)
+    let f0 = mix(wlo.x + 1.5, min(ox, hx), self.arc_origin)
     let f1 = mix(hx, max(ox, hx), self.arc_origin)
     // Focus lights the groove's line, laid under the fill so the fill keeps
     // its own light.
     res = lm_focus(res, p, vec2(lm_snap(0.0, o.x, px), cy - 6.0), vec2(lm_snap(self.rect_size.x, o.x, px), cy + 6.0), 6.0, px, self.focus * live)
-    res = lm_fill(res, p, vec2(f0, wlo.y + px), vec2(f1, whi.y - px), 2.0, px, self.disabled, max(max(self.hover, self.drag), self.focus), wlo, whi, 3.0)
+    res = lm_tube(res, p, f0, f1, 2.667, px, self.disabled, max(max(self.hover, self.drag), self.focus), wlo, whi, 4.667, 0.0)
     return lm_thumb(res, p, vec2(hx, cy), rad, px, self.hover, self.drag, self.focus, self.disabled) * lm_fade(self.pos, self.rect_size, m)
 }
 
@@ -922,14 +987,14 @@ mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
     let o = self.rect_pos
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let cy = lm_snap(self.rect_size.y - 2.5, o.y, px)
-    var res = lm_groove(p, 0.0, self.rect_size.x, cy, o, px, 7.0, 3.0, self.disabled, self.hover)
-    let wlo = vec2(lm_snap(0.0, o.x, px) + 2.0, cy - 1.5)
-    let whi = vec2(lm_snap(self.rect_size.x, o.x, px) - 2.0, cy + 1.5)
+    var res = lm_groove(p, 0.0, self.rect_size.x, cy, o, px, 7.0, 4.0, self.disabled, self.hover)
+    let wlo = vec2(lm_snap(0.0, o.x, px) + 1.5, cy - 2.0)
+    let whi = vec2(lm_snap(self.rect_size.x, o.x, px) - 1.5, cy + 2.0)
     let lo2 = min(self.origin_pos, self.slide_pos)
     let hi2 = max(self.origin_pos, self.slide_pos)
     let f0 = mix(0.0, lo2, self.arc_origin) * self.rect_size.x
     let f1 = mix(self.slide_pos, hi2, self.arc_origin) * self.rect_size.x
-    res = lm_fill(res, p, vec2(max(f0, wlo.x), wlo.y), vec2(min(f1, whi.x), whi.y), 1.5, px, self.disabled, max(self.hover, self.drag), wlo, whi, 1.5)
+    res = lm_tube(res, p, max(f0, wlo.x + 1.0), min(f1, whi.x - 1.0), 1.333, px, self.disabled, max(self.hover, self.drag), wlo, whi, 2.0, 0.0)
     let hx = clamp(self.slide_pos * self.rect_size.x, 4.0, self.rect_size.x - 4.0)
     let show = max(self.hover, self.drag)
     if show > 0.001 {
@@ -959,13 +1024,13 @@ mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
     let cy = lm_snap(self.rect_size.y * 0.5, o.y, px)
     let x0 = self.label_size
     let x1 = self.rect_size.x - 37.0
-    var res = lm_groove(p, x0, x1, cy, o, px, 12.0, 6.0, self.disabled, self.hover)
-    let wlo = vec2(lm_snap(x0, o.x, px) + 3.0, cy - 3.0)
-    let whi = vec2(lm_snap(x1, o.x, px) - 3.0, cy + 3.0)
-    let span = whi.x - wlo.x - rad * 2.0 + 6.0
-    let hx = wlo.x - 3.0 + rad + self.slide_pos * span
+    var res = lm_groove(p, x0, x1, cy, o, px, 12.0, 9.333, self.disabled, self.hover)
+    let wlo = vec2(lm_snap(x0, o.x, px) + 1.333, cy - 4.667)
+    let whi = vec2(lm_snap(x1, o.x, px) - 1.333, cy + 4.667)
+    let span = whi.x - wlo.x - rad * 2.0 + 2.667
+    let hx = wlo.x - 1.333 + rad + self.slide_pos * span
     res = lm_focus(res, p, vec2(lm_snap(x0, o.x, px), cy - 6.0), vec2(lm_snap(x1, o.x, px), cy + 6.0), 6.0, px, self.focus * (1.0 - self.disabled))
-    res = lm_fill(res, p, vec2(wlo.x + px, wlo.y + px), vec2(hx, whi.y - px), 2.0, px, self.disabled, max(max(self.hover, self.drag), self.focus), wlo, whi, 3.0)
+    res = lm_tube(res, p, wlo.x + 1.5, hx, 2.667, px, self.disabled, max(max(self.hover, self.drag), self.focus), wlo, whi, 4.667, 0.0)
     return lm_thumb(res, p, vec2(hx, cy), rad, px, self.hover, self.drag, self.focus, self.disabled) * lm_fade(self.pos, self.rect_size, m)
 }
 
@@ -1002,15 +1067,16 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let blo = vec2(lm_snap(blo0.x, o.x, px), lm_snap(blo0.y, o.y, px))
     let bhi = vec2(lm_snap(bhi0.x, o.x, px), lm_snap(bhi0.y, o.y, px))
     var res = lm_slab(p, blo, bhi, 4.5, px, 1.0, self.hover * live, self.disabled)
-    let slo0 = mix(vec2(self.inset_px, mid - 1.5), vec2(mid - 1.5, self.inset_px), v)
-    let shi0 = mix(vec2(sz.x - self.inset_px, mid + 1.5), vec2(mid + 1.5, sz.y - self.inset_px), v)
+    let slo0 = mix(vec2(self.inset_px, mid - 2.667), vec2(mid - 2.667, self.inset_px), v)
+    let shi0 = mix(vec2(sz.x - self.inset_px, mid + 2.667), vec2(mid + 2.667, sz.y - self.inset_px), v)
     let lo = vec2(lm_snap(slo0.x, o.x, px), lm_snap(slo0.y, o.y, px))
     let hi = vec2(lm_snap(shi0.x, o.x, px), lm_snap(shi0.y, o.y, px))
-    res = Finish.over(res, lm_well(p, lo, hi, 1.5, px, 1.0, self.disabled))
+    res = Finish.over(res, lm_well(p, lo, hi, 2.667, px, 1.0, self.disabled))
     let cap_at = foot + self.slide_pos * travel
-    let flo = mix(vec2(lo.x, lo.y), vec2(lo.x, sz.y - cap_at), v)
-    let fhi = mix(vec2(cap_at, hi.y), vec2(hi.x, hi.y), v)
-    res = lm_fill(res, p, flo, fhi, 1.5, px, self.disabled, max(self.hover, self.drag), lo, hi, 1.5)
+    // The lit tube runs from the foot of the slot to the cap.
+    let t0 = mix(lo.x + 1.0, sz.y - cap_at, v)
+    let t1 = mix(cap_at, hi.y - 1.0, v)
+    res = lm_tube(res, p, t0, t1, 2.0, px, self.disabled, max(self.hover, self.drag), lo, hi, 2.667, v)
     // The scale: a device pixel tick every 5 points beside the slab.
     let pitch = 5.0
     let k = floor((a - foot) / pitch + 0.5)
@@ -1059,9 +1125,11 @@ let lm_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     var res = lm_slab(p, c - vec2(rr, rr), c + vec2(rr, rr), rr, px, 1.0, hover * live, dis)
     let rw = rr - clamp(0.08 * rr, 2.0, 3.0)
     res = Finish.over(res, lm_well(p, c - vec2(rw, rw), c + vec2(rw, rw), rw, px, 1.0, dis))
-    let ring_w = clamp(0.085 * rr, 2.0, 3.0)
-    let ring_mid = rw - 1.4 - ring_w * 0.5
-    let rc = ring_mid - ring_w * 0.5 - clamp(0.07 * rr, 1.5, 3.0)
+    // The cap fills seven tenths of the well; the arc is a thin line (1.2
+    // to 1.6 points) standing off it, the floor either side room for its glow.
+    let rc = 0.7 * rw
+    let ring_w = clamp(0.07 * rr, 1.2, 1.6)
+    let ring_mid = 0.86 * rw
     let one = PI / 180.0
     let sweep = 2.0 * PI - gap * one
     let start = gap * one * 0.5
@@ -1083,13 +1151,21 @@ let lm_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     let e1 = c + ring_mid * vec2(-sin(a1), cos(a1))
     let inr = step(a0, ang) * step(ang, a1)
     let ad = mix(min(length(p - e0), length(p - e1)), abs(rl - ring_mid), inr)
-    let arc = Finish.cover(ad - ring_w * 0.5, px) * step(0.004, abs(a1 - a0))
-    let beside = smoothstep(a0 - es * 4.0, a0 + es, ang) * (1.0 - smoothstep(a1 - es, a1 + es * 4.0, ang))
-    let lit = (1.0 + 0.25 * max(held, focus)) * live
-    let rb = beside * (1.0 - arc) * exp(-max(ad - ring_w * 0.5, 0.0) / 1.7) * 0.55 * lit * step(0.004, abs(a1 - a0)) * step(rl, rw)
-    res = Finish.over(res, vec4(lm_glowc() * rb, rb * 0.45))
-    let hot = 1.0 - smoothstep(0.12 * ring_w, 0.42 * ring_w, ad)
-    var acol = mix(lm_orange(), lm_core(), hot * (0.8 + 0.2 * max(held, focus)))
+    let arcon = step(0.004, abs(a1 - a0))
+    let arc = Finish.cover(ad - ring_w * 0.5, px) * arcon
+    // Its light on the dark floor of the well, both sides of the line: a
+    // red-orange close to it (#9a2900 at a point), a deep red-brown that
+    // reaches the cap and the well's rim.
+    // It fades out across the bezel's rim rather than stopping at the well.
+    let lit = (1.0 + 0.25 * max(held, focus)) * live * arcon * (1.0 - smoothstep(rw - 0.5, rr, rl)) * (1.0 - arc)
+    let odd = max(ad - ring_w * 0.5, 0.0)
+    let gf = 1.2 * exp(-odd / 5.0) * lit
+    res = Finish.over(res, vec4(vec3(0.42, 0.1, 0.03) * gf, gf * 0.6))
+    let gn = 1.2 * exp(-odd / 0.6) * lit
+    res = Finish.over(res, vec4(vec3(0.85, 0.22, 0.03) * gn, gn * 0.6))
+    // The line: orange at its edges, a pale hot core down its middle.
+    let hq = ad / (0.3 * ring_w)
+    var acol = mix(vec3(1.0, 0.5, 0.2), vec3(1.0, 0.75, 0.47), exp(-hq * hq) * (0.85 + 0.15 * max(held, focus)))
     acol = mix(acol, vec3(0.3, 0.28, 0.27), dis)
     res = Finish.over(res, vec4(acol * arc, arc))
     // The cap: its shadow on the floor, the dome, the outline lighter on top.
@@ -1102,7 +1178,9 @@ let lm_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     cc = cc + vec3(0.05, 0.053, 0.058) * exp(-dot(dq - vec2(-0.3, -0.45), dq - vec2(-0.3, -0.45)) * 4.0)
     cc = cc + vec3(0.02, 0.022, 0.024) * hover * live
     let cring = Finish.band(cd, 0.0, px, px)
+    // Its edge catches the arc's light where the arc runs beside it.
     cc = mix(cc, mix(vec3(0.16, 0.175, 0.195), vec3(0.38, 0.405, 0.44), smoothstep(0.3, -0.7, dq.y)) + vec3(0.08, 0.08, 0.08) * hover * live, cring)
+    cc = mix(cc, vec3(0.62, 0.24, 0.1), cring * min(gf, 1.0) * 0.6)
     cc = mix(cc, vec3(0.09, 0.1, 0.115), 0.45 * dis)
     res = Finish.over(res, vec4(cc * ca, ca))
     // The pointer: a white line from the middle toward the rim.
@@ -1580,23 +1658,23 @@ mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
     let x0 = lm_snap(self.rect_size.x * self.start, o.x, px)
     let x1 = lm_snap(self.rect_size.x * self.end, o.x, px)
     var res = vec4(0.0, 0.0, 0.0, 0.0)
-    let wlo = vec2(x0 + 2.0, y0 + 2.0)
-    let whi = vec2(x1 - 2.0, y0 + th - 2.0)
+    let wlo = vec2(x0 + 1.333, y0 + 1.333)
+    let whi = vec2(x1 - 1.333, y0 + th - 1.333)
     if self.track > 0.5 {
         res = lm_slab(p, vec2(x0, y0), vec2(x1, y0 + th), th * 0.5, px, 1.0, 0.0, 0.0)
         res = Finish.over(res, lm_well(p, wlo, whi, (whi.y - wlo.y) * 0.5, px, 1.0, 0.0))
     }
-    let span = whi.x - wlo.x
-    var f0 = wlo.x
+    let span = whi.x - wlo.x - 2.0
+    var f0 = wlo.x + 1.0
     var f1 = f0 + span * clamp((self.value - self.start) / max(self.end - self.start, 0.001), 0.0, 1.0)
     if self.value < 0.0 {
         // Still: the sweep would need the pass clock, which a sheet may not
         // read, so the unknown amount is a lit stretch standing in the
         // middle with its ends fading.
-        f0 = wlo.x + span * 0.3
-        f1 = wlo.x + span * 0.7
+        f0 = wlo.x + 1.0 + span * 0.3
+        f1 = wlo.x + 1.0 + span * 0.7
     }
-    var fill = lm_fill(vec4(0.0, 0.0, 0.0, 0.0), p, vec2(f0, wlo.y), vec2(f1, whi.y), (whi.y - wlo.y) * 0.5, px, 0.0, 0.0, wlo, whi, (whi.y - wlo.y) * 0.5)
+    var fill = lm_tube(vec4(0.0, 0.0, 0.0, 0.0), p, f0, f1, 2.0, px, 0.0, 0.0, wlo, whi, (whi.y - wlo.y) * 0.5, 0.0)
     // An intent other than the plain one tints the light with its colour.
     let ic = self.fill_color()
     let tint = step(0.5, self.intent)
@@ -1646,6 +1724,12 @@ mod.widgets.LevelMeter.draw_bg.pixel = fn() {
     let qm = (b - (wb0 + wa * 0.5)) / max(0.3 * (wa - 6.0), px * 0.8)
     lit = mix(lit, lm_core(), exp(-qm * qm) * 0.5 * (1.0 - step(ht, share)))
     let on = step(share, self.level) * step(0.001, self.level)
+    // The lit cells warm the floor between them the dark red a lit tube
+    // gives its groove.
+    let lit_to = pad + span * self.level
+    let wfl = Finish.cover(Material.sd_box(p, (blo + bhi) * 0.5, (bhi - blo) * 0.5 - vec2(2.0, 2.0), 1.5), px)
+    let fl = (1.0 - smoothstep(lit_to - 0.5, lit_to + 1.5, a)) * step(0.001, self.level) * wfl * 0.8 * self.opacity
+    res = Finish.over(res, vec4(vec3(0.27, 0.012, 0.0) * fl, fl))
     let ghost = vec3(0.1, 0.11, 0.125)
     let col = mix(ghost, lit, on)
     res = Finish.over(res, vec4(col, 1.0) * cell * inb * self.opacity)
@@ -1863,10 +1947,18 @@ mod.widgets.ScrollYView.draw_bg.pixel = fn() {
 // under the hand the row lifts a little; the chosen row sinks deeper in a
 // lit frame, held 5 points in from the left so it clears a list bezel's rim.
 mod.widgets.ListItem.padding = mod.turtle.Inset{left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
+// The row's quad grows 6 points for the light a chosen row spills.
+mod.widgets.ListItem.clip_x = false
+mod.widgets.ListItem.clip_y = false
+mod.widgets.ListItem.draw_bg.vertex = fn() {
+    let m = 6.0
+    self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
+}
 mod.widgets.ListItem.draw_bg.pixel = fn() {
+    let m = 6.0
     let px = lm_px(self.draw_pass.dpi_factor)
     let o = self.rect_pos
-    let p = self.pos * self.rect_size
+    let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let live = 1.0 - self.disabled
     let yb = lm_snap(self.rect_size.y, o.y, px)
     let div = step(yb - px, p.y) * step(p.y, yb) * step(10.0, p.x) * step(p.x, self.rect_size.x - 10.0)
@@ -1879,8 +1971,9 @@ mod.widgets.ListItem.draw_bg.pixel = fn() {
     let wa = Finish.cover(d, px) * wash
     res = Finish.over(res, vec4(vec3(0.788, 0.808, 0.831) * wa, wa))
     if self.selected > 0.001 {
-        var sl = lm_well(p, lo, hi, 4.0, px, 1.0, 0.0)
-        sl = lm_frame(sl, p, lo, hi, 4.0, px, 1.0 + 0.2 * self.hover)
+        // Chosen: the row lit from within, as the chosen answer and the tab
+        // in use are.
+        let sl = lm_litrow(vec4(0.0, 0.0, 0.0, 0.0), p, lo, hi, 4.0, px, 1.0 + 0.12 * self.hover, 6.0)
         res = mix(res, sl, self.selected)
     }
     return res
