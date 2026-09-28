@@ -298,7 +298,7 @@ pub fn readout_cells(text: &str, count: usize, justify: ReadoutJustify) -> Vec<R
 /// of cells and the number needs more, every cell is a minus rather than the
 /// number cut short: a display that dropped a digit would show a different
 /// number, and one showing dashes is plainly out of range.
-pub fn number_text(value: f64, decimals: usize, cells: usize) -> String {
+pub fn readout_number_text(value: f64, decimals: usize, cells: usize) -> String {
     if !value.is_finite() {
         return "-".repeat(cells.max(1));
     }
@@ -401,7 +401,7 @@ impl Readout {
     /// Show a number with `decimals` places after the point. A number that
     /// does not fit a fixed row of cells shows as a row of minus signs.
     pub fn set_number(&mut self, cx: &mut Cx, value: f64, decimals: usize) {
-        let text = number_text(value, decimals, self.cells);
+        let text = readout_number_text(value, decimals, self.cells);
         self.set_text(cx, &text);
     }
 
@@ -571,11 +571,11 @@ mod tests {
     /// zero after rounding, and dashes rather than a number cut short.
     #[test]
     fn a_number_is_written_with_its_decimals_or_as_dashes_when_it_does_not_fit() {
-        assert_eq!(number_text(3.14159, 2, 0), "3.14");
-        assert_eq!(number_text(-12.0, 1, 0), "-12.0");
-        assert_eq!(number_text(-0.004, 2, 0), "0.00", "a value that rounds to zero is not negative");
-        assert_eq!(number_text(440.0, 1, 4), "440.0", "the point rides, so 440.0 is four cells");
-        assert_eq!(number_text(12345.0, 0, 4), "----");
-        assert_eq!(number_text(f64::NAN, 1, 3), "---");
+        assert_eq!(readout_number_text(3.14159, 2, 0), "3.14");
+        assert_eq!(readout_number_text(-12.0, 1, 0), "-12.0");
+        assert_eq!(readout_number_text(-0.004, 2, 0), "0.00", "a value that rounds to zero is not negative");
+        assert_eq!(readout_number_text(440.0, 1, 4), "440.0", "the point rides, so 440.0 is four cells");
+        assert_eq!(readout_number_text(12345.0, 0, 4), "----");
+        assert_eq!(readout_number_text(f64::NAN, 1, 3), "---");
     }
 }
