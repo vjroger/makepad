@@ -1566,13 +1566,105 @@ mod.widgets.Tabs.draw_text_active.pixel = fn() {
 }
 
 // ---------------------------------------------------------------------------
-// THE GROUND under everything: the window's own face. Dark slate falling
-// from #1c2731 at the head to #0a0f14 at the foot, a pale haze behind the
-// upper middle where the controls stand, a very slow cloud, and the
-// circuit: buses of one to three cyan traces with 45 degree jogs, ring pads
-// where a run ends and vias here and there, a pale core in a cyan glow,
-// densest in the lower half and the corners (fp_circuit); soft spots of
-// light far behind them. A grain that does not repeat.
+// THE GROUND under everything: the window's own face, in two depths, all laid
+// in window points. Dark slate falling from #202b36 at the head to #0b1116 at
+// the foot, a pale haze behind the upper middle where the controls stand, a
+// very slow cloud.
+// FAR: a circuit of buses of one to five traces twelve points apart, with 45
+// degree jogs, seen out of focus some way behind the frosted sheet: each
+// trace a soft band (a point of core fading over four, sigma 2.6), pads and
+// vias soft discs with a bloom round them, a wide dim halo along the buses,
+// and soft spots of light further back.
+// NEAR: the earlier ground's lanes, sharp-ish and faint: fine lanes every 26
+// and 42 points cut into runs that end in small ring pads, a line of a
+// point and a half, lightly softened (sigma 0.6), gathered where a slow cloud lies. A grain that does not repeat.
+// A near lane: `u` along it, `v` across. Lanes every `pitch` points, each
+// jogged by a hash; cut in cells `cw` long, each on or off by a hash; a run
+// ends in a ring pad. `sg` is the line's softness. Returns (line, pad, the
+// lane's brightness).
+let fp_lane = fn(u: float, v: float, sg: float, pitch: float, cw: float, seed: float, thr: float) -> vec3 {
+    let k = floor(v / pitch)
+    let lv = k * pitch + pitch * 0.5 + (floor(Finish.hash(vec2(k * 1.713 + seed, seed * 3.1 + 0.37)) * 5.0) - 2.0) * 3.0
+    let i = floor(u / cw)
+    let kk = k * 2.113 + seed * 5.3
+    let on = step(thr, Finish.hash(vec2(i * 1.371 + seed, kk)))
+    let onl = step(thr, Finish.hash(vec2((i - 1.0) * 1.371 + seed, kk)))
+    let onr = step(thr, Finish.hash(vec2((i + 1.0) * 1.371 + seed, kk)))
+    let x0 = i * cw + mix(4.0, 0.0, onl)
+    let x1 = (i + 1.0) * cw - mix(4.0, 0.0, onr)
+    let dl = max(abs(v - lv), max(x0 - u, u - x1))
+    let line = exp(0.0 - dl * dl / (2.0 * sg * sg)) * on
+    let pl = length(vec2(u - (i * cw + 2.0), v - lv))
+    let pr = length(vec2(u - ((i + 1.0) * cw - 2.0), v - lv))
+    let ring = min(abs(pl - 1.6) + (1.0 - on * (1.0 - onl)) * 9.0, abs(pr - 1.6) + (1.0 - on * (1.0 - onr)) * 9.0)
+    let pad = exp(0.0 - ring * ring / (2.0 * sg * sg))
+    let bright = step(0.78, Finish.hash(vec2(k * 0.917 + seed * 1.9, 4.41)))
+    return vec3(line, pad, bright)
+}
+// Whether cell (i, j) of a far bus carries its run: like fp_cell, but runs
+// reach the upper middle too, fewer there.
+let fp_fcell = fn(i: float, j: float, cw: float, rh: float, seed: float, ws: vec2, vert: float) -> float {
+    let cc = vec2((i + 0.5) * cw, (j + 0.5) * rh)
+    let q = mix(cc, cc.yx, vert)
+    let dn = fp_dens(q, ws)
+    return step(mix(0.80, 0.38, dn), Finish.hash(vec2(i * 0.917 + seed * 1.31, j * 1.531 + seed * 0.77 + 7.7)))
+}
+// A far bus: fp_bus drawn for the far depth, its traces `s` points apart
+// (one to five of them) so they stay apart when blurred, lanes stepping by
+// 8 points. Returns (distance to a line, distance to a pad centre,
+// brightness, 0).
+let fp_fbus = fn(u0: float, v: float, cw: float, rh: float, seed: float, ws: vec2, vert: float, s: float) -> vec4 {
+    let j = floor(v / rh)
+    let u = u0 + Finish.hash(vec2(j * 0.37 + seed, 4.2)) * cw
+    let i = floor(u / cw)
+    let on = fp_fcell(i, j, cw, rh, seed, ws, vert)
+    let onl = fp_fcell(i - 1.0, j, cw, rh, seed, ws, vert)
+    let onr = fp_fcell(i + 1.0, j, cw, rh, seed, ws, vert)
+    let nb = floor(Finish.hash(vec2(j * 0.713 + seed, seed * 1.37 + 2.9)) * 4.99)
+    let yl = (j + 0.5) * rh + (floor(Finish.hash(vec2(i * 1.371 + seed, j * 2.113 - seed * 0.53)) * 7.0) - 3.0) * 8.0 - nb * s * 0.5
+    let yr = (j + 0.5) * rh + (floor(Finish.hash(vec2((i + 1.0) * 1.371 + seed, j * 2.113 - seed * 0.53)) * 7.0) - 3.0) * 8.0 - nb * s * 0.5
+    let x0 = i * cw + mix(8.0, -0.5, onl)
+    let x1 = (i + 1.0) * cw - mix(8.0, -0.5, onr)
+    let xm = (i + 0.32 + 0.36 * Finish.hash(vec2(i * 3.17 + seed, j * 0.61 + 1.9))) * cw
+    let q = vec2(u, v)
+    // The nearest of the parallel traces: the one whose lane is closest.
+    let kc = clamp(floor((v - mix(yl, yr, step(xm, u))) / s + 0.5), 0.0, nb)
+    let d0 = fp_jog(q - vec2(0.0, kc * s), x0, x1, xm, yl, yr)
+    let da = fp_jog(q - vec2(0.0, clamp(kc - 1.0, 0.0, nb) * s), x0, x1, xm, yl, yr)
+    let db = fp_jog(q - vec2(0.0, clamp(kc + 1.0, 0.0, nb) * s), x0, x1, xm, yl, yr)
+    let dl = mix(99.0, min(d0, min(da, db)), on)
+    let kl = clamp(floor((v - yl) / s + 0.5), 0.0, nb)
+    let pl = length(vec2(u - x0, v - yl - kl * s)) + (1.0 - on * (1.0 - onl)) * 99.0
+    let kr = clamp(floor((v - yr) / s + 0.5), 0.0, nb)
+    let pr = length(vec2(u - x1, v - yr - kr * s)) + (1.0 - on * (1.0 - onr)) * 99.0
+    let vh = Finish.hash(vec2(i * 2.31 + seed, j * 1.77 + 3.3))
+    let pv = length(vec2(u - (x1 - 16.0), v - yr)) + (1.0 - on * step(0.70, vh)) * 99.0
+    let t = u / cw - i
+    let bi = Finish.hash(vec2(i * 0.53 + seed, j * 0.29 + 1.1))
+    let bn = Finish.hash(vec2((i + 1.0) * 0.53 + seed, j * 0.29 + 1.1))
+    let bp = Finish.hash(vec2((i - 1.0) * 0.53 + seed, j * 0.29 + 1.1))
+    let bb = mix(mix(bp, bi, t + 0.5), mix(bi, bn, t - 0.5), step(0.5, t))
+    let hot = step(0.80, Finish.hash(vec2(j * 0.37 + seed * 2.1, 8.8)))
+    return vec4(dl, min(pl, min(pr, pv)), 0.35 + 0.40 * bb * bb + 0.30 * hot, 0.0)
+}
+// The far circuit at window point w: (trace, pad, halo, 0), each about 0..1.
+// A trace is a gaussian of sigma 2.6 points, a pad a soft disc of radius 3
+// with a bloom of sigma 5.5 round it.
+let fp_far = fn(w: vec2, ws: vec2) -> vec4 {
+    let h = fp_fbus(w.x, w.y, 176.0, 120.0, 1.0, ws, 0.0, 12.0)
+    let v = fp_fbus(w.y, w.x, 190.0, 136.0, 7.0, ws, 1.0, 12.0)
+    let dn = 0.45 + 0.55 * fp_dens(w, ws)
+    let s2 = 2.0 * 2.6 * 2.6
+    let lh = exp(0.0 - h.x * h.x / s2) * h.z
+    let lv = exp(0.0 - v.x * v.x / s2) * v.z
+    let rh = max(h.y - 2.0, 0.0)
+    let rv = max(v.y - 2.0, 0.0)
+    let ph = (exp(0.0 - rh * rh / s2) + 0.55 * exp(0.0 - h.y * h.y / 60.0)) * h.z
+    let pv = (exp(0.0 - rv * rv / s2) + 0.55 * exp(0.0 - v.y * v.y / 60.0)) * v.z
+    let gh = exp(0.0 - h.x * h.x / 72.0) * h.z
+    let gv = exp(0.0 - v.x * v.x / 72.0) * v.z
+    return vec4(max(lh, lv) * dn, max(ph, pv) * dn, max(gh, gv) * dn, 0.0)
+}
 let fp_ground = fn(p: vec2, size: vec2, px: float) -> vec3 {
     let sz = max(size, vec2(1.0, 1.0))
     let t = clamp(p.y / sz.y, 0.0, 1.0)
@@ -1580,11 +1672,27 @@ let fp_ground = fn(p: vec2, size: vec2, px: float) -> vec3 {
     let l = length((p - vec2(0.5 * sz.x, 0.22 * sz.y)) / vec2(0.46 * sz.x, 0.44 * sz.y))
     col = mix(col, vec3(0.235, 0.298, 0.349), 0.50 * (1.0 - smoothstep(0.0, 1.0, l)))
     col = col * (0.98 + 0.04 * Finish.fbm(p / 180.0))
-    let cb = fp_circuit(p, sz, px, 0.0)
-    col = col + vec3(0.18, 0.62, 0.80) * cb.z * 0.36
-    col = mix(col, vec3(0.60, 0.85, 0.95), min(cb.x * 0.70, 0.85))
-    col = mix(col, vec3(0.70, 0.90, 0.98), min(cb.y * 0.80, 0.85))
-    col = col + vec3(0.25, 0.62, 0.78) * cb.w * 0.22
+    // FAR.
+    let fb = fp_far(p, sz)
+    col = col + vec3(0.16, 0.50, 0.66) * fb.z * 0.14
+    col = col + vec3(0.30, 0.66, 0.80) * min(fb.x, 1.0) * 0.19
+    col = col + vec3(0.40, 0.76, 0.90) * min(fb.y, 1.2) * 0.16
+    let bc = floor(p / 110.0)
+    let bh = Finish.hash(bc * 1.137 + vec2(2.9, 5.3))
+    let bp = (bc + vec2(0.2, 0.2) + 0.6 * vec2(Finish.hash(bc + vec2(7.1, 1.3)), Finish.hash(bc + vec2(3.7, 9.9)))) * 110.0
+    let bd = length(p - bp)
+    let br = 7.0 + 9.0 * Finish.hash(bc + vec2(5.5, 2.2))
+    let spot = exp(0.0 - bd * bd / (br * br)) * step(0.55, bh)
+    col = col + vec3(0.25, 0.62, 0.78) * spot * 0.22
+    // NEAR.
+    let mask = smoothstep(0.40, 0.70, Finish.fbm(p / 240.0 + vec2(3.1, 7.7)))
+    let sg = 0.6
+    let hl = fp_lane(p.x, p.y, sg, 26.0, 34.0, 1.0, 0.55)
+    let vl = fp_lane(p.y, p.x, sg, 42.0, 30.0, 7.0, 0.72)
+    let ln = max(hl.x * (0.6 + 0.8 * hl.z), vl.x * (0.6 + 0.8 * vl.z))
+    let pd = max(hl.y * (0.6 + 0.8 * hl.z), vl.y * (0.6 + 0.8 * vl.z))
+    let a = (ln * 0.17 + pd * 0.24) * (0.30 + 0.70 * mask)
+    col = mix(col, vec3(0.37, 0.80, 0.92), a)
     let g = fp_grain(p / px, 3.0 / 255.0)
     return col + vec3(g, g, g)
 }
