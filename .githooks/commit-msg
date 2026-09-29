@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuse a commit message that credits a banned identity in a trailer.
+. "$(dirname "$0")/identity.sh"
+
+grep -iE '^[a-z-]+-by:.*<[^>]*>' "$1" | sed -n 's/.*<\(.*\)>.*/\1/p' | while read -r mail; do
+	if is_banned "$mail"; then refuse "commit-msg: <$mail> may not appear in a trailer here."; fi
+done || exit 1
+exit 0

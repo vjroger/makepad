@@ -1,0 +1,11 @@
+#!/bin/sh
+# Refuse a commit whose author or committer is empty or a banned identity.
+# Enable with: git config core.hooksPath .githooks
+. "$(dirname "$0")/identity.sh"
+
+for role in AUTHOR COMMITTER; do
+	mail=$(git var GIT_${role}_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+	[ -n "$mail" ] || refuse "pre-commit: the $role email is empty."
+	if is_banned "$mail"; then refuse "pre-commit: <$mail> may not be the $role of a commit here."; fi
+done
+exit 0

@@ -16,6 +16,22 @@ use current source for API signatures and working examples.
   `widgets/src/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
 
+## Commit identity
+
+- The user's makepad commits, in every checkout, worktree and staging clone,
+  are authored and committed as `vjroger <vjroger@gmail.com>`.
+- NEVER author, commit or co-author as `r.deleeuw@qogni.com` (GitHub user
+  `rdlqogni`) or any other `qogni.com` address. That identity belongs to an
+  unrelated project and must never appear in this repository.
+- Before the first commit in a fresh clone or worktree:
+  `git config user.name vjroger`, `git config user.email vjroger@gmail.com`,
+  `git config core.hooksPath .githooks`.
+- `.githooks/` refuses a commit or push that carries a banned identity in
+  its author, committer or `Co-authored-by` trailer. Never bypass it with
+  `--no-verify`; fix the identity and re-attribute the commits before they
+  are pushed. A pushed commit under a banned identity is reported to the
+  user; history is rewritten only with their approval.
+
 ## Current agent workflow
 
 - Codex manages the work and reviews Fable's designs and results.

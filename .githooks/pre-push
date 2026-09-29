@@ -1,0 +1,28 @@
+#!/bin/sh
+# Refuse to push commits that carry a banned identity as author, committer
+# or trailer. Catches what pre-commit cannot see: rebases, cherry-picks,
+# amends that keep the author, and commits made before the hooks were on.
+. "$(dirname "$0")/identity.sh"
+
+remote=$1
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+	[ "$local_sha" = "$zero" ] && continue
+	if [ "$remote_sha" = "$zero" ]; then
+		range="$local_sha --not --remotes=$remote"
+	else
+		range="$remote_sha..$local_sha"
+	fi
+	bad=$(git log --format='%H %ae %ce%n%(trailers:only,unfold)' $range |
+		BANNED=$banned_email awk 'BEGIN { re = ENVIRON["BANNED"] }
+			length($1) == 40 && $1 ~ /^[0-9a-f]+$/ { sha = $1; if (tolower($2) ~ re || tolower($3) ~ re) print sha; next }
+			tolower($0) ~ re { print sha }' | sort -u)
+	if [ -n "$bad" ]; then
+		echo "pre-push: $local_ref carries a banned identity in:" >&2
+		echo "$bad" | sed 's/^/  /' >&2
+		status=1
+	fi
+done
+[ "$status" = 0 ] || refuse "pre-push: re-attribute these commits before pushing."
+exit 0
