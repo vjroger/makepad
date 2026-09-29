@@ -3570,20 +3570,6 @@ mod sheet_contrast_tests {
         out
     }
 
-    /// The pairs that fail under the theme the VM holds, as readable lines.
-    fn failures(vm: &mut ScriptVm, label: &str, pairs: &[(&str, &str)], need: f64) -> Vec<String> {
-        let mut out = Vec::new();
-        for (ground, ink) in pairs {
-            if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
-                let c = reads(g | 0xFF, i);
-                if c < need {
-                    out.push(format!("{label}: {ink} on {ground} = {c:.2}, wanted {need}"));
-                }
-            }
-        }
-        out
-    }
-
     /// Walks the base themes and then every sheet, handing each to `check`.
     fn walk(check: &mut dyn FnMut(&mut ScriptVm, &str)) {
         // A fresh VM: this walk reloads every sheet and uninstalls at the end,

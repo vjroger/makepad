@@ -11077,7 +11077,6 @@ mod fab_carousel_motion {
     //! glide is what the panel does with it.
     use super::fab_slider_gestures::{moved, press, release, send, Target};
     use super::*;
-    use crate::event::{ScrollEvent, ScrollPhase};
     use std::cell::Cell;
 
     const WINDOW: WindowId = WindowId(1, 1);

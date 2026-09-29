@@ -206,22 +206,12 @@ script_mod! {
 
 const PANELS: &[LiveId] = &[live_id!(docs), live_id!(controls), live_id!(actions), live_id!(tokens)];
 
-/// The order the toolbar gives way in, cheapest loss first: the two commands
-/// at the end shrink to their marks, then the title goes, then the count
-/// beside the new-only switch, then that switch's name shortens. A step is
-/// taken only when the one before it was not enough, and given back in the
-/// reverse order as the row is handed its width back.
-const STEP_MARKS: usize = 0;
-const STEP_TITLE: usize = 1;
-const STEP_NEW_COUNT: usize = 2;
-const STEP_NEW_ONLY: usize = 3;
+/// How many steps the toolbar can give way by, cheapest loss first: the two
+/// commands at the end shrink to their marks, then the title goes, then the
+/// count beside the new-only switch, then that switch's name shortens. The
+/// row itself orders them (a conceding row); the tests read them back.
+#[cfg(test)]
 const TOOLBAR_STEPS: usize = 4;
-
-/// The width the row keeps beyond what it needs. A Fill is never narrower
-/// than nothing, so with no margin at all an exactly full row and a badly
-/// overfull one read the same and the row has no threshold it can observe;
-/// a few points is a gap both the eye and the measurement can tell from none.
-const TOOLBAR_MARGIN: f64 = 6.0;
 
 #[derive(Script, ScriptHook)]
 pub struct App {
@@ -478,12 +468,6 @@ impl MatchEvent for App {
             crate::synonyms::term_count(),
             crate::synonyms::component_count()
         );
-    }
-
-    /// Everything that can crowd the top row ends in a draw of it -- the
-    /// window resized, the splitter moved, a longer story title beside the
-    /// Filler -- so the row is read after a draw and nowhere else.
-    fn handle_draw(&mut self, cx: &mut Cx, _e: &DrawEvent) {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {

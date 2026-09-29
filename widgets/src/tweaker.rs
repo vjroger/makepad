@@ -109,7 +109,7 @@ use crate::{
 };
 use crate::makepad_script::script_eval;
 use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
-use crate::theme_builder::{all_suggestions_for, surface_sliders, Applied as Built, BuilderParams, Schemes, SeedSlot, Suggestion, ThemeBuilder, COLOR_COUNTS, COMBINATION_LABEL, OWN_LABEL};
+use crate::theme_builder::{all_suggestions_for, surface_sliders, Applied as Built, BuilderParams, Schemes, SeedSlot, Suggestion, ThemeBuilder, COLOR_COUNTS};
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
@@ -5419,7 +5419,7 @@ pub(crate) fn theme_apply(
         return Ok(None);
     }
     // The literal the module run will read back: what the theme files write.
-    let mut literal = text.clone();
+    let literal;
     match value {
         ThemeVal::Color(current) => {
             let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
@@ -23725,7 +23725,7 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme_builder::{all_suggestions_from, Harmony};
+    use crate::theme_builder::{all_suggestions_from, Harmony, COMBINATION_LABEL, OWN_LABEL};
     use crate::theme_combinations::COMBINATIONS;
 
     /// A sidebar the way one really comes out of the draw: entries of three
@@ -28086,7 +28086,7 @@ line two");
 
     /// Which squares are lit as a place to trade with, and the bar the
     /// carried square stands, if any.
-    fn what_the_row_shows(cx: &Cx, head: &WidgetRef) -> (Vec<usize>, Vec<Rect>) {
+    fn what_the_row_shows(_cx: &Cx, head: &WidgetRef) -> (Vec<usize>, Vec<Rect>) {
         let picks: Vec<WidgetRef> = TB_COLOR_IDS
             .iter()
             .map(|id| head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(*id).child(live_id!(tb_color)))

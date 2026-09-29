@@ -1013,6 +1013,7 @@ fn grounds_and_crowding(params: &BuilderParams) -> ((u32, u32), Scheme, Option<S
 /// the ground of re-derives from where it lands, so the theme goes on
 /// reading. See [`clear_of`], and [`page_scheme_and_crowding`] for the appearance
 /// that follows the page and for the one case that is still hopeless.
+#[cfg(test)]
 fn page_of(params: &BuilderParams) -> u32 {
     page_scheme_and_crowding(params).0
 }
@@ -1571,6 +1572,7 @@ enum Source {
     /// The accent itself, the colour a person picked.
     Primary,
     /// The accent as something to stand ON.
+    #[allow(dead_code)]
     PrimaryContainer,
     /// What the palette already decided reads on that container, and so the
     /// second thing to try where the accent itself is too close to a ground.
@@ -1579,6 +1581,7 @@ enum Source {
     SecondaryContainer,
     OnSecondaryContainer,
     Tertiary,
+    #[allow(dead_code)]
     TertiaryContainer,
     OnTertiaryContainer,
     /// The palette's fourth colour, the one the page is made of, at its own
@@ -1977,6 +1980,8 @@ const ACCENTED: &[Accented] = {
 /// puts up as well as the one at rest -- the ink, and the bar the words
 /// answer to.
 struct Written {
+    // Read by the gate test, which holds every widget file to this table.
+    #[cfg_attr(not(test), allow(dead_code))]
     widgets: &'static [&'static str],
     grounds: &'static [&'static str],
     ink: &'static str,
@@ -2160,6 +2165,7 @@ const WRITTEN: &[Written] = {
 /// The accented grounds a widget that draws words reads and writes none of
 /// them on, each with why: the gate test's other half. A ground belongs here
 /// only where the words really are somewhere else.
+#[cfg(test)]
 const UNWRITTEN: &[(&str, &[&str], &str)] = &[
     (
         "check_box.rs",
