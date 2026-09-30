@@ -1400,10 +1400,13 @@ impl Cx {
     }
 }
 
+// Absent from the trimmed Windows bindings.
+const DXGI_FORMAT_R16G16B16A16_FLOAT: DXGI_FORMAT = DXGI_FORMAT(10);
+
 fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
     match pix {
         TexturePixel::BGRAu8 => DXGI_FORMAT_B8G8R8A8_UNORM,
-        TexturePixel::RGBAf16 => DXGI_FORMAT_R16_FLOAT,
+        TexturePixel::RGBAf16 => DXGI_FORMAT_R16G16B16A16_FLOAT,
         TexturePixel::RGBAf32 => DXGI_FORMAT_R32G32B32A32_FLOAT,
         TexturePixel::Ru8 => DXGI_FORMAT_R8_UNORM,
         TexturePixel::RGu8 => DXGI_FORMAT_R8G8_UNORM,
@@ -4851,6 +4854,21 @@ mod shader_cache_tests {
     }
 }
 
+#[cfg(test)]
+mod texture_format_tests {
+    use super::*;
+
+    #[test]
+    fn a_four_channel_half_float_target_keeps_all_four_channels() {
+        // RenderRGBAf16 as R16_FLOAT kept red alone: a relief buffer lost its
+        // emissive green and blue and read its height channel as 1.
+        assert_eq!(
+            texture_pixel_to_dx11_pixel(&TexturePixel::RGBAf16),
+            DXGI_FORMAT_R16G16B16A16_FLOAT
+        );
+    }
+}
+
 impl CxOsTexture {
     pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
         let texture = self.texture.as_ref()?;
@@ -4858,9 +4876,8 @@ impl CxOsTexture {
         unsafe {
             texture.GetDesc(&mut desc);
         }
-        // These aliases are absent from the trimmed Windows bindings.
+        // This alias is absent from the trimmed Windows bindings.
         const DXGI_FORMAT_R32_TYPELESS: DXGI_FORMAT = DXGI_FORMAT(39);
-        const DXGI_FORMAT_R16G16B16A16_FLOAT: DXGI_FORMAT = DXGI_FORMAT(10);
         let bpp = match desc.Format {
             DXGI_FORMAT_B8G8R8A8_UNORM
             | DXGI_FORMAT_R8G8B8A8_UNORM
