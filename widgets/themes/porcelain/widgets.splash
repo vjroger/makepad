@@ -4,9 +4,12 @@ use mod.prelude.widgets_internal.*
 // device pixel is `px`); every shadow, lip and lamp halo falls OUTSIDE the
 // layout box: the quad is grown in `vertex`, the templates that throw light
 // or shadow stop clipping, and no padding is spent on either. Form comes
-// from light: a white hairline on every upper edge, a grey contact line at
-// every foot, a soft cool shadow under what stands, an inner shade in what
-// is pressed in. The one colour is a small warm lamp.
+// from light: what stands is a slab with a visible side under its face (a
+// cap 1 to 2.5 points thick, a panel 3), a white hairline on its upper
+// edge, a darker one at its foot and a soft cool shadow under it that is
+// gone within half the gap to its neighbour; what is pressed in has an
+// inner shade under its upper rim and a pale lower wall; knobs, handles
+// and toggle knobs are domes. The one colour is a small warm lamp.
 
 // ---------------------------------------------------------------- helpers
 
@@ -83,14 +86,22 @@ let po_spot = fn(p: vec2, cx: float, by: float, hh: float, s: float) -> vec4 {
     return vec4(col * a, a)
 }
 
-// What a raised control throws on the plate: a soft ambient shadow falling
-// down, drawn in from the sides so it never reaches a neighbour, and a tight
-// contact shadow one device pixel under the edge. Sized by the control's
-// height up to a 26 point row and no further. Returns the coverage.
+// What a raised control throws on the plate: a soft shadow falling straight
+// down, half gone 4 points under the foot and gone by 8, drawn in 3
+// points from the sides so it never reaches a neighbour; and a close dark
+// contact shadow right under the foot. Sized by the control's height up to
+// a 26 point row and no further. Returns the coverage.
 let po_shadow = fn(p: vec2, c: vec2, h: vec2, r: float, px: float, sh_h: float, lift: float, hover: float, down: float, dis: float) -> float {
-    let amb = Finish.drop(p, c, h - vec2(0.10 * sh_h, 0.12 * sh_h), r, vec2(0.0, (0.2 + 0.08 * hover) * sh_h), (0.12 + 0.03 * hover) * sh_h) * (0.46 + 0.2 * hover) * lift * (1.0 - down) * (1.0 - 0.8 * dis)
-    let con = Finish.drop(p, c, h - vec2(px, px), r, vec2(0.0, px * 2.0), px * 1.3) * mix(0.5, 0.2, down) * (1.0 - 0.6 * dis)
-    return 1.0 - (1.0 - amb) * (1.0 - con)
+    let k = sh_h / 26.0
+    let hs = vec2(max(h.x - 3.0 * k, 0.5), h.y)
+    let rs = min(r, min(hs.x, hs.y))
+    let off = (4.0 + 0.7 * hover) * k
+    let sg = (1.9 + 0.25 * hover) * k + px * 0.5
+    let amb = Finish.drop(p, c, hs, rs, vec2(0.0, off), sg) * (0.32 + 0.07 * hover) * lift * (1.0 - down) * (1.0 - 0.8 * dis)
+    let hw = vec2(max(h.x - 5.0 * k, 0.5), h.y)
+    let wide = Finish.drop(p, c, hw, min(r, min(hw.x, hw.y)), vec2(0.0, 4.2 * k), 2.5 * k + px) * 0.07 * lift * (1.0 - down) * (1.0 - 0.8 * dis)
+    let con = Finish.drop(p, c, h - vec2(0.6 * k, 0.0), r, vec2(0.0, 0.7 * k + px * 0.5), 0.55 * k + px * 0.5) * mix(0.22, 0.10, down) * (1.0 - 0.6 * dis) * min(lift + 0.5, 1.0)
+    return 1.0 - (1.0 - amb) * (1.0 - con) * (1.0 - wide)
 }
 
 // The little warm light the focus frame spills outward: a tint one device
@@ -152,12 +163,17 @@ let po_lamp = fn(dst: vec4, p: vec2, c: vec2, rl: float, px: float, lit: float, 
     return Finish.over(res, vec4(col * a, a))
 }
 
-// A white glazed cap: its shadows, the warm light from under it when lit,
-// the glaze with a bright upper band, one white device pixel on top and a
-// grey contact line under the foot. `lift` 1 casts the ambient shadow, 0
-// seats the cap with the contact shadow only; `tone` 1 a shade cooler for
-// the small controls; `spot` the strength of the light from under it.
-let po_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, dis: float, focus: float, lift: float, tone: float, spot: float) -> vec4 {
+// A white glazed cap: a slab of porcelain standing on the plate, 1 to 2.5
+// points thick. Its top face carries a bright band over the upper third
+// and the body #f1f2f5; under the face the slab's side shows as a band
+// turning from #e8eaee to #d8dbe0 at the foot, closed by a darker device
+// pixel; round the sides a hairline of the ground's shade, across the top a
+// white one. `lift` 1 casts the full shadow, 0 seats the cap with its
+// contact shadow only; `tone` 1 a shade cooler for the small controls;
+// `spot` the strength of the light from under it; `room` how far under the
+// foot its shadow may reach (a cap standing in a well stops at the well);
+// `band` the strength of the bright upper band.
+let po_cap_r = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, dis: float, focus: float, lift: float, tone: float, spot: float, room: float, band: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = (hi - lo) * 0.5
     let hh = hi.y - lo.y
@@ -167,58 +183,88 @@ let po_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, 
     let up = (1.0 - down) * live
     let a = Finish.cover(d, px)
     let n = po_normal(p, c, h, r)
-    let sc = po_shadow(p, c, h, r, px, sh_h, lift, hover, down, dis)
+    // With little room under it (a field, the combo box, the chosen list
+    // row) the shadow is sized to that room and its tail is gone before
+    // the room ends; a cap standing in a well (room under 3.5) stops at
+    // the well's edge.
+    let tight = step(3.5, room) * (1.0 - step(30.0, room))
+    let fit = mix(1.0, clamp(room / 8.0, 0.4, 1.0), tight)
+    let reach = 1.0 - smoothstep(mix(room - 1.5, room * 0.35, tight), room, p.y - hi.y)
+    let sc = po_shadow(p, c, h, r, px, sh_h * fit, lift, hover, down, dis) * reach
     var res = vec4(po_shade() * sc, sc)
     let lit = spot * live
     if lit > 0.001 {
-        res = Finish.over(res, po_spot(p, c.x, hi.y + 0.02 * sh_h, sh_h, lit))
+        res = Finish.over(res, po_spot(p, c.x, hi.y + 0.02 * sh_h, sh_h, lit) * reach)
     }
     let fo = focus * live
     if fo > 0.001 {
         res = Finish.over(res, po_leak(d, a) * fo)
     }
-    // The glaze: a white band over the upper third, the body #f1f2f5, the
-    // foot turning to #e2e4e9 where the cap curves under.
-    let t = clamp((p.y - lo.y) / max(hh, 1.0), 0.0, 1.0)
-    let body = mix(vec3(0.946, 0.950, 0.960), vec3(0.930, 0.935, 0.948), tone)
-    var face = mix(body, vec3(1.0, 1.0, 1.0), (1.0 - smoothstep(0.18, 0.5, t)) * mix(0.85, 0.7, tone) * (1.0 - 0.8 * down))
-    let inside = -d
-    face = face - vec3(0.05, 0.048, 0.042) * (1.0 - smoothstep(0.0, 0.22 * hh, inside)) * smoothstep(0.15, 0.95, n.y) * up
-    face = face + vec3(0.025, 0.024, 0.02) * hover * up
-    // Held: pushed in, the glaze a step lower and a shade falling from the
-    // top rim over the upper third.
-    let shade = 0.07 * (1.0 - smoothstep(0.0, 0.35 * hh, p.y - lo.y))
-    face = mix(face, face - vec3(0.045 + shade, 0.043 + shade, 0.038 + shade), down * live)
+    // The slab: the top face stands `tk` over the plate; held, it sinks and
+    // most of the side goes with it.
+    let tk = clamp(0.095 * hh, 1.0, 2.5) * (1.0 - 0.6 * down)
+    let hf = vec2(h.x, max(h.y - tk * 0.5, 0.5))
+    let cf = vec2(c.x, c.y - tk * 0.5)
+    let df = Material.sd_box(p, cf, hf, min(r, min(hf.x, hf.y)))
+    let af = Finish.cover(df, px)
+    // The top face: the bright band over its upper third, the body under it.
+    let t = clamp((p.y - lo.y) / max(hf.y * 2.0, 1.0), 0.0, 1.0)
+    let body = mix(vec3(0.945, 0.949, 0.961), vec3(0.930, 0.935, 0.948), tone)
+    var face = mix(body, vec3(0.993, 0.993, 0.995), (1.0 - smoothstep(0.16, 0.45, t)) * mix(0.92, 0.75, tone) * band * (1.0 - down))
+    face = face - vec3(0.018, 0.018, 0.015) * smoothstep(0.55, 1.0, t) * up
+    face = face + vec3(0.03, 0.029, 0.025) * hover * up
+    // Held: pushed into the plate; the glaze a step lower and the rim of
+    // the plate shading it from the top over its upper half.
+    let shade = 0.08 * (1.0 - smoothstep(0.0, 0.5 * hh, p.y - lo.y)) + 0.03 * (1.0 - smoothstep(0.0, 2.5, -d))
+    face = mix(face, face - vec3(0.03 + shade, 0.029 + shade, 0.026 + shade), down * live)
     // Chosen (the light from under at full): the foot of the cap glows warm
     // from inside over its middle, so a row that clips its foot still says
     // chosen.
     let inl = smoothstep(0.85, 1.0, spot) * live
+    var warm = 0.0
     if inl > 0.001 {
         let wx = abs(p.x - c.x) / max(h.x, 1.0)
         let low = 1.0 - smoothstep(0.0, 0.55 * hh, hi.y - p.y)
-        let warm = low * (1.0 - smoothstep(0.3, 0.95, wx)) * inl
+        warm = low * (1.0 - smoothstep(0.3, 0.95, wx)) * inl
         face = mix(face, vec3(1.0, 0.87, 0.70), 0.45 * warm)
-        let hot = Finish.band(d, px, px * 2.5, px) * smoothstep(0.3, 0.9, n.y) * (1.0 - smoothstep(0.35, 0.65, wx)) * inl
+        let hot = Finish.band(df, px, px * 2.5, px) * smoothstep(0.3, 0.9, n.y) * (1.0 - smoothstep(0.35, 0.65, wx)) * inl
         face = mix(face, vec3(1.0, 0.80, 0.55), hot * 0.35)
     }
+    // Where the face rolls over into the side, one device pixel catches the
+    // light.
+    face = mix(face, vec3(0.99, 0.99, 0.993), Finish.band(df, 0.0, px, px) * smoothstep(0.2, 0.8, n.y) * up * 0.85)
     face = min(face, vec3(1.0, 1.0, 1.0))
-    face = mix(face, po_ground(), 0.55 * dis)
-    // The edge: white on top, the grey contact line below; held, the top
-    // edge greys where the rim of the plate stands over it.
+    // The side of the slab, from the face down to the foot.
+    let wk = clamp(df / max(df - d, 0.001), 0.0, 1.0)
+    var wall = mix(vec3(0.886, 0.894, 0.910), vec3(0.815, 0.826, 0.848), wk)
+    wall = mix(wall, vec3(1.0, 0.84, 0.64), 0.35 * warm)
+    var col = mix(wall, face, af)
+    col = mix(col, po_ground(), 0.55 * dis)
+    // The outline: white across the top, the ground's shade down the sides,
+    // a darker device pixel under the foot; held, the top greys where the
+    // rim of the plate stands over it.
     let ring = Finish.band(d, 0.0, px, px)
-    let upper = smoothstep(-0.35, 0.35, -n.y)
-    let cl = mix(vec3(0.70, 0.72, 0.77), vec3(0.66, 0.68, 0.73), tone)
-    var edge = mix(cl, mix(vec3(1.0, 1.0, 1.0), vec3(0.76, 0.78, 0.82), down), upper)
-    edge = mix(edge, face, 0.7 * dis)
-    face = mix(face, edge, ring)
-    face = po_frame(face, d, px, fo, hh)
-    return Finish.over(res, vec4(face * a, a))
+    let upper = smoothstep(0.3, 0.8, -n.y)
+    let lower = smoothstep(0.3, 0.85, n.y)
+    var edge = mix(vec3(0.835, 0.845, 0.868), mix(vec3(1.0, 1.0, 1.0), vec3(0.74, 0.76, 0.80), down), upper)
+    edge = mix(edge, mix(vec3(0.68, 0.695, 0.73), vec3(0.62, 0.64, 0.68), tone), lower * (1.0 - 0.5 * down))
+    edge = mix(edge, col, 0.7 * dis)
+    col = mix(col, edge, ring)
+    col = po_frame(col, d, px, fo, hh)
+    return Finish.over(res, vec4(col * a, a))
+}
+let po_cap = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, dis: float, focus: float, lift: float, tone: float, spot: float) -> vec4 {
+    return po_cap_r(p, lo, hi, r, px, hover, down, dis, focus, lift, tone, spot, 40.0, 1.0)
 }
 
-// A shape pressed into the plate: its fill, the rim of the plate shading it
-// from the top (and a little from the sides), a grey line on its upper
-// edge and a white lip on the plate under its foot. `fill` its colour,
-// `depth` the strength of the inner shade.
+// A shape pressed into the plate: its fill; the rim of the plate shading
+// it from the top (and a little from the sides) over a few points; its
+// lower wall, which faces the light, a paler strip inside the foot; a grey
+// device pixel on its upper edge and a white lip on the plate under its
+// foot. `fill` its colour, `depth` the strength of the inner shade. Under
+// the hand the floor lightens and the shade eases; held, it is pushed in:
+// the floor a clear step darker and the shade half again as deep, which
+// the hand on it does not take back.
 let po_sunk = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, fill: vec3, hover: float, down: float, dis: float, depth: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = (hi - lo) * 0.5
@@ -227,14 +273,18 @@ let po_sunk = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, fill: vec3, h
     let d = Material.sd_box(p, c, h, r)
     let n = po_normal(p, c, h, r)
     let a = Finish.cover(d, px)
-    let lipa = Finish.ring_out(d, 0.0, px * 1.5, px) * smoothstep(0.1, 0.9, n.y) * (1.0 - 0.6 * dis)
+    let live = 1.0 - 0.6 * dis
+    let lipa = Finish.ring_out(d, 0.0, px * 1.5, px) * smoothstep(0.1, 0.9, n.y) * live
     var res = vec4(vec3(1.0, 1.0, 1.0) * lipa, lipa)
-    var col = fill + vec3(0.012, 0.012, 0.01) * hover * (1.0 - down) - vec3(0.022, 0.022, 0.02) * down
-    let sg = clamp(0.1 * sh_h, 1.0, 2.6)
-    let insh = Finish.inset(p, c, h, r, vec2(0.0, sg * 0.6), sg)
-    col = mix(col, vec3(0.56, 0.585, 0.64), clamp(insh * depth * (1.0 + 0.5 * down) * (1.0 - 0.6 * dis), 0.0, 1.0))
+    var col = fill + vec3(0.024, 0.024, 0.02) * hover * (1.0 - down) - vec3(0.056, 0.056, 0.05) * down
+    let sg = clamp(0.17 * sh_h, 1.1, 3.6)
+    let insh = Finish.inset(p, c, h, r, vec2(0.0, sg * 0.8), sg)
+    col = mix(col, vec3(0.56, 0.585, 0.64), clamp(insh * depth * 1.2 * (1.0 - 0.3 * hover * (1.0 - down)) * (1.0 + 0.5 * down) * live, 0.0, 0.9))
+    let lw = clamp(0.07 * sh_h, 0.6, 1.4)
+    let low = Finish.band(d, px, px + lw, px) * smoothstep(0.35, 0.9, n.y)
+    col = mix(col, vec3(0.985, 0.987, 0.992), low * 0.55 * live)
     let ring = Finish.band(d, 0.0, px, px)
-    let edge = mix(vec3(0.66, 0.685, 0.73), vec3(0.86, 0.87, 0.895), smoothstep(-0.2, 0.9, n.y))
+    let edge = mix(vec3(0.62, 0.645, 0.69), vec3(0.86, 0.87, 0.895), smoothstep(-0.2, 0.9, n.y))
     col = mix(col, mix(edge, col, 0.5 * dis), ring)
     col = mix(col, po_ground(), 0.4 * dis)
     return Finish.over(res, vec4(col * a, a))
@@ -253,8 +303,8 @@ let po_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, di
     let live = 1.0 - dis
     let dw = Material.sd_box(p, (wlo + whi) * 0.5, (whi - wlo) * 0.5, wr)
     let inw = Finish.cover(dw, px)
-    let bl = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 1.4 * 1.4)) * (1.0 - a) * glow * live * step(0.5, h.x) * inw
-    var res = Finish.over(dst, vec4(vec3(0.99, 0.70, 0.38) * bl * 0.35, bl * 0.35))
+    let bl = exp(-(max(d, 0.0) * max(d, 0.0)) / (2.0 * 1.6 * 1.6)) * (1.0 - a) * glow * live * step(0.5, h.x) * inw
+    var res = Finish.over(dst, vec4(vec3(0.99, 0.70, 0.38) * bl * 0.5, bl * 0.5))
     let across_x = step(hi.y - lo.y, hi.x - lo.x)
     let along = mix(clamp((hi.y - p.y) / max(hi.y - lo.y, 0.5), 0.0, 1.0), clamp((p.x - lo.x) / max(hi.x - lo.x, 0.5), 0.0, 1.0), across_x)
     let hk = max(mix(h.x, h.y, across_x), 0.01)
@@ -266,6 +316,8 @@ let po_fill = fn(dst: vec4, p: vec2, lo: vec2, hi: vec2, r: float, px: float, di
     let q = ax / max(0.40 * hk, px * mix(0.6, 0.85, thin))
     let line = exp(-q * q) * mix(0.55, 0.9, ramp) * (1.0 - 0.4 * thin)
     col = mix(col, mix(vec3(1.0, 0.88, 0.66), vec3(1.0, 0.97, 0.88), hot), line)
+    // The rod lies under the rim of the groove: its top a shade deeper.
+    col = col * (1.0 - 0.24 * (1.0 - smoothstep(0.0, max(hi.y - lo.y, 0.5) * 0.45, p.y - lo.y)) * across_x)
     col = mix(col, vec3(0.80, 0.81, 0.84), dis)
     return Finish.over(res, vec4(col * a, a))
 }
@@ -277,6 +329,53 @@ let po_spinner = fn(dst: vec4, p: vec2, c: vec2, rad: float, t: float, amt: floa
     sdf.arc_round_caps(c.x, c.y, rad, a0, a0 + 1.5 * PI, stroke)
     sdf.fill(vec4(ink, amt))
     return Finish.over(dst, sdf.result)
+}
+
+// A white dome: the glaze bright at its upper left, falling to #d9dce2 at
+// its lower right foot; a white device pixel on its upper left rim and a
+// grey one on its lower right. `crown` 1 gives it a flat top face 0.78 of
+// its radius across, raised a little toward the light, its rim lit at the
+// upper left and shaded at the lower right, so the dome reads as a knob
+// with a skirt. Focused, the lit frame at its rim.
+let po_dome = fn(p: vec2, c: vec2, rad: float, px: float, hover: float, down: float, dis: float, focus: float, crown: float) -> vec4 {
+    let q = (p - c) / max(rad, 0.5)
+    let ql = length(q)
+    let d = length(p - c) - rad
+    let a = Finish.cover(d, px)
+    let g = dot(q, vec2(0.53, 0.85))
+    var col = mix(vec3(0.945, 0.949, 0.960), vec3(0.851, 0.863, 0.886), smoothstep(-0.3, 1.0, g) * smoothstep(0.0, 1.0, ql))
+    col = col - vec3(0.03, 0.03, 0.026) * smoothstep(0.72, 1.0, ql) * smoothstep(-0.4, 0.3, g)
+    // A knob's skirt turns away from the light toward its foot: a band
+    // falling to three quarters of the face at the lower right.
+    col = col * (1.0 - 0.17 * crown * smoothstep(0.80, 0.99, ql) * mix(0.3, 1.0, smoothstep(-0.5, 0.7, g)))
+    let hq = q + vec2(0.30, 0.42)
+    col = mix(col, vec3(0.995, 0.995, 0.997), exp(-dot(hq, hq) * 2.4) * 0.9 * (1.0 - 0.6 * down))
+    col = col + vec3(0.03, 0.03, 0.026) * hover - vec3(0.03, 0.03, 0.027) * down
+    let ring = Finish.band(d, 0.0, px, px)
+    col = mix(col, vec3(1.0, 1.0, 1.0), ring * (1.0 - smoothstep(-0.7, 0.0, g)) * 0.9)
+    col = mix(col, vec3(0.70, 0.715, 0.75), ring * smoothstep(0.1, 0.8, g))
+    if crown > 0.001 {
+        let rt = rad * 0.78
+        let ct = c - vec2(0.0, rad * 0.04)
+        let dt = length(p - ct) - rt
+        let at = Finish.cover(dt, px) * crown
+        let gt = dot((p - ct) / max(rt, 0.5), vec2(0.53, 0.85))
+        var top = mix(vec3(0.962, 0.965, 0.973), vec3(0.912, 0.918, 0.934), smoothstep(-0.7, 1.0, gt))
+        top = top + vec3(0.03, 0.03, 0.026) * hover
+        let rim = Finish.band(dt, 0.0, px * 1.5, px)
+        top = mix(top, vec3(1.0, 1.0, 1.0), rim * (1.0 - smoothstep(-0.6, 0.1, gt)) * 0.9)
+        top = mix(top, vec3(0.80, 0.815, 0.845), rim * smoothstep(0.0, 0.8, gt) * 0.6)
+        col = mix(col, top, at)
+    }
+    col = min(col, vec3(1.0, 1.0, 1.0))
+    col = mix(col, po_ground(), 0.55 * dis)
+    col = po_frame(col, d, px, focus * (1.0 - dis), 2.0 * rad)
+    return vec4(col * a, a)
+}
+// What a dome throws: down and a little to the right, as soft as it is
+// small. Coverage.
+let po_dome_shadow = fn(p: vec2, c: vec2, rad: float, px: float) -> float {
+    return Finish.drop(p, c, vec2(rad, rad), rad, vec2(0.10 * rad, 0.22 * rad), 0.20 * rad + px)
 }
 
 // ---------------------------------------------------------------- buttons
@@ -477,8 +576,9 @@ mod.widgets.CheckBoxFlat.draw_bg.size = 14.0
 mod.widgets.CheckBoxFlat.draw_bg.border_radius = 2.0
 mod.widgets.CheckBoxFlat.label_walk.margin.left = 14.0
 
-// The check box: a 14 point white cap with a 4 point corner; on, it is
-// pushed into the plate and carries a graphite check.
+// The check box: a 14 point well pressed into the plate, a 4 point corner;
+// on, a graphite check stands raised on its floor with its own small
+// shadow.
 mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
     let m = 8.0
     let px = po_px(self.draw_pass.dpi_factor)
@@ -494,16 +594,19 @@ mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
     let held = max(self.down, self.pressed)
     let on = max(self.active, self.mixed)
     let live = 1.0 - self.disabled
-    let spot = 0.3 * self.hover * (1.0 - held) * (1.0 - on) * live
-    let up = po_cap(p, lo, hi, r, px, self.hover, held, self.disabled, self.focus, 0.7, 1.0, spot)
-    var sunk = po_sunk(p, lo, hi, r, px, vec3(0.93, 0.935, 0.946), self.hover, held, self.disabled, 0.9)
+    var res = po_sunk(p, lo, hi, r, px, vec3(0.918, 0.923, 0.937), self.hover, held, self.disabled, 1.0)
     let d = Material.sd_box(p, c, (hi - lo) * 0.5, r)
-    sunk = po_frame_over(sunk, d, px, self.focus * live, Finish.cover(d, px), sz)
-    var res = mix(up, sunk, on)
+    res = po_frame_over(res, d, px, self.focus * live, Finish.cover(d, px), sz)
     // The error: the edge turns red.
     res = Finish.over(res, vec4(0.78, 0.18, 0.12, 1.0) * Finish.band(d, 0.0, px, px) * self.error * live)
-    // The mark: a check 7 points across in a 1.6 point stroke, or a dash.
+    // The mark: a check 7 points across in a 1.6 point stroke, or a dash,
+    // its shadow a soft copy moved down and right.
     let ink = mix(mix(vec3(0.169, 0.180, 0.208), vec3(0.66, 0.15, 0.11), self.error), vec3(0.62, 0.64, 0.68), self.disabled)
+    let so = vec2(0.35, 0.8)
+    let dms = min(po_seg(p - so, vec2(c.x - 3.2, c.y + 0.2), vec2(c.x - 1.0, c.y + 2.4)), po_seg(p - so, vec2(c.x - 1.0, c.y + 2.4), vec2(c.x + 3.3, c.y - 2.4)))
+    let dds = po_seg(p - so, vec2(c.x - 3.0, c.y), vec2(c.x + 3.0, c.y))
+    let ms = Finish.cover(mix(dms - 0.8, dds - 0.8, self.mixed), 0.9) * on * 0.32 * live
+    res = Finish.over(res, vec4(po_shade() * ms, ms))
     let dm = min(po_seg(p, vec2(c.x - 3.2, c.y + 0.2), vec2(c.x - 1.0, c.y + 2.4)), po_seg(p, vec2(c.x - 1.0, c.y + 2.4), vec2(c.x + 3.3, c.y - 2.4)))
     let dd = po_seg(p, vec2(c.x - 3.0, c.y), vec2(c.x + 3.0, c.y))
     let dk = mix(dm - 0.8, dd - 0.8, self.mixed)
@@ -513,7 +616,7 @@ mod.widgets.CheckBoxFlat.draw_bg.pixel = fn() {
 }
 
 // The toggle: a 32 x 18 point track pressed into the plate, a 14 point
-// white knob standing in it with its own shadow. On, the knob stands at
+// white dome standing in it with its own shadow. On, the knob stands at
 // the right and a small warm lamp is lit in the track where it was.
 mod.widgets.ToggleFlat.draw_bg.size = 18.0
 mod.widgets.ToggleFlat.draw_bg.pill_aspect = 1.78
@@ -533,8 +636,14 @@ mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
     let held = max(self.pressed, self.down)
     let live = 1.0 - self.disabled
     let on = self.active
-    var res = po_sunk(p, lo, hi, r, px, mix(vec3(0.94, 0.945, 0.955), vec3(0.965, 0.955, 0.945), on), self.hover, held * 0.5, self.disabled, 0.85)
-    let ed = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, r)
+    var res = po_sunk(p, lo, hi, r, px, mix(vec3(0.905, 0.912, 0.930), vec3(0.935, 0.925, 0.915), on), self.hover, held, self.disabled, 1.1)
+    let tc = (lo + hi) * 0.5
+    let ed = Material.sd_box(p, tc, (hi - lo) * 0.5, r)
+    // The groove is deep: the rim of the plate shades its floor from the
+    // top, darkest under the upper wall and gone two thirds of the way
+    // down; the round ends take a little of it.
+    let deep = Finish.inset(p, tc, (hi - lo) * 0.5 + vec2(3.0, 0.0), r, vec2(0.0, 0.3 * th), 0.22 * th) * Finish.cover(ed, px) * 0.55 * (1.0 - 0.25 * self.hover * (1.0 - held)) * (1.0 - 0.6 * self.disabled)
+    res = Finish.over(res, vec4(po_shade() * deep, deep))
     res = po_frame_over(res, ed, px, self.focus * live, Finish.cover(ed, px), th)
     // The lamp where the knob stood when off.
     let lc = vec2(lo.x + th * 0.5 + 1.0, (lo.y + hi.y) * 0.5)
@@ -544,14 +653,20 @@ mod.widgets.ToggleFlat.draw_bg.pixel = fn() {
     let kr = 7.0
     let inset = (th - kr * 2.0) * 0.5
     let kc = vec2(lo.x + inset + kr + (tw - inset * 2.0 - kr * 2.0) * kt, (lo.y + hi.y) * 0.5)
-    let knob = po_cap(p, kc - vec2(kr, kr), kc + vec2(kr, kr), kr, px, self.hover, held * 0.6, self.disabled, 0.0, 0.8, 0.0, 0.0)
-    res = Finish.over(res, knob)
+    // The knob: a white dome standing in the groove, its shadow dark on the
+    // groove's floor and spilling over the lip onto the plate, gone 4
+    // points under it. Held, the dome sinks: its shadow goes and its face
+    // darkens.
+    let ksh = Finish.drop(p, kc, vec2(kr, kr), kr, vec2(0.12 * kr, 0.30 * kr), 0.24 * kr + px) * 0.90 * (1.0 - 0.8 * self.disabled) * (1.0 - 0.9 * held) * (1.0 - smoothstep(hi.y + 0.5, hi.y + 4.0, p.y))
+    res = Finish.over(res, vec4(po_shade() * ksh, ksh))
+    let kd = po_dome(p, kc, kr, px, self.hover, held, self.disabled, 0.0, 0.0)
+    res = Finish.over(res, vec4(kd.rgb * (1.0 - 0.06 * held), kd.a))
     // The error: the track's edge turns red.
     res = Finish.over(res, vec4(0.78, 0.18, 0.12, 1.0) * Finish.band(ed, 0.0, px, px) * self.error * live)
     return res * po_fade(self.pos, self.rect_size, m)
 }
 
-// The radio: a 14 point white disc; chosen, it is pushed in and a small
+// The radio: a 14 point round well pressed into the plate; chosen, a small
 // warm lamp is lit in its middle.
 mod.widgets.RadioButtonFlat.draw_bg.vertex = fn() {
     let m = 8.0
@@ -574,11 +689,9 @@ mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
     let c = (lo + hi) * 0.5
     let live = 1.0 - self.disabled
     let on = self.active
-    let up = po_cap(p, lo, hi, sz * 0.5, px, self.hover, self.down, self.disabled, self.focus, 0.7, 1.0, 0.3 * self.hover * (1.0 - self.down) * live)
-    var sunk = po_sunk(p, lo, hi, sz * 0.5, px, vec3(0.93, 0.935, 0.946), self.hover, self.down, self.disabled, 0.9)
+    var res = po_sunk(p, lo, hi, sz * 0.5, px, vec3(0.918, 0.923, 0.937), self.hover, self.down, self.disabled, 1.0)
     let d = Finish.sd_circle(p, c, sz * 0.5)
-    sunk = po_frame_over(sunk, d, px, self.focus * live, Finish.cover(d, px), sz)
-    var res = mix(up, sunk, on)
+    res = po_frame_over(res, d, px, self.focus * live, Finish.cover(d, px), sz)
     // The lamp, with a graphite ring under it so the chosen one reads
     // without its colour.
     let rd = Finish.sd_circle(p, c, 3.4)
@@ -590,8 +703,8 @@ mod.widgets.RadioButtonFlat.draw_bg.pixel = fn() {
     return res * po_fade(self.pos, self.rect_size, m)
 }
 
-// The radio tab: words on the plate at rest; under the hand a quiet pill
-// pressed in; chosen, a raised white cap lit from under.
+// The radio tab: a cell of a track pressed into the plate; chosen, a
+// raised white cap stands in it, lit from under.
 mod.widgets.RadioButtonTabFlat.draw_bg.vertex = fn() {
     let m = 14.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
@@ -609,9 +722,14 @@ mod.widgets.RadioButtonTabFlat.draw_bg.pixel = fn() {
     let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
     let r = (hi.y - lo.y) * 0.5
     let sel = self.active
-    let quiet = po_sunk(p, lo, hi, r, px, vec3(0.925, 0.933, 0.949), self.hover, self.down, self.disabled, 0.6) * max(self.hover, self.down) * (1.0 - self.disabled)
-    let chosen = po_cap(p, lo, hi, r, px, self.hover, self.down, self.disabled, self.focus, 1.0, 0.0, 1.0)
-    return mix(quiet, chosen, sel) * po_fade(self.pos, self.rect_size, m)
+    let live = 1.0 - self.disabled
+    var cell = po_sunk(p, lo, hi, r, px, vec3(0.925, 0.933, 0.949), self.hover, self.down, self.disabled, 0.8)
+    let d = Material.sd_box(p, (lo + hi) * 0.5, (hi - lo) * 0.5, r)
+    cell = po_frame_over(cell, d, px, self.focus * live * (1.0 - sel), Finish.cover(d, px), hi.y - lo.y)
+    let clo = lo + vec2(2.0, 2.0)
+    let chi = hi - vec2(2.0, 2.0)
+    let chosen = po_cap_r(p, clo, chi, (chi.y - clo.y) * 0.5, px, self.hover, self.down, self.disabled, self.focus, 0.6, 0.0, 1.0, 2.0, 1.0)
+    return Finish.over(cell, chosen * sel) * po_fade(self.pos, self.rect_size, m)
 }
 mod.widgets.RadioButtonTabFlat.draw_text.color = #4f545d
 mod.widgets.RadioButtonTabFlat.draw_text.color_hover = #1f2227
@@ -620,20 +738,24 @@ mod.widgets.RadioButtonTabFlat.draw_text.color_disabled = #a0a4ac
 
 // ---------------------------------------------------------------- sliders
 
-// A white disc handle standing in the groove with its own shadow and a
+// A white dome handle standing in the groove with its own shadow and a
 // graphite dimple; held, the warm light shows from under it.
 let po_handle = fn(dst: vec4, p: vec2, c: vec2, rad: float, px: float, hover: float, drag: float, focus: float, dis: float) -> vec4 {
-    let lo = c - vec2(rad, rad)
-    let hi = c + vec2(rad, rad)
-    let spot = (0.3 * hover * (1.0 - drag) + 0.6 * drag) * (1.0 - dis)
-    var res = Finish.over(dst, po_cap(p, lo, hi, rad, px, hover, drag * 0.5, dis, focus, 0.8, 0.0, spot))
-    let d = Finish.sd_circle(p, c, 1.6)
-    let da = Finish.cover(d, px) * (1.0 - 0.6 * dis)
+    let live = 1.0 - dis
+    let sh = po_dome_shadow(p, c, rad, px) * (0.42 + 0.06 * hover) * (1.0 - 0.4 * drag) * (1.0 - 0.8 * dis)
+    var res = Finish.over(dst, vec4(po_shade() * sh, sh))
+    let spot = (0.45 * hover * (1.0 - drag) + 0.6 * drag) * live
+    if spot > 0.001 {
+        res = Finish.over(res, po_spot(p, c.x, c.y + rad, 2.0 * rad, spot))
+    }
+    res = Finish.over(res, po_dome(p, c, rad, px, hover, drag * 0.5, dis, focus, 0.0))
+    let dd = Finish.sd_circle(p, c, 1.6)
+    let da = Finish.cover(dd, px) * (1.0 - 0.6 * dis)
     return Finish.over(res, vec4(vec3(0.30, 0.32, 0.37) * da, da))
 }
 
 // The bar slider: a 6 point groove pressed in under its label row, the lit
-// amber value, and a 16 point white disc riding it.
+// amber value, and a 16 point white dome riding it.
 mod.widgets.SliderFlat.clip_x = false
 mod.widgets.SliderFlat.clip_y = false
 mod.widgets.SliderFlat.draw_bg.vertex = fn() {
@@ -649,7 +771,7 @@ mod.widgets.SliderFlat.draw_bg.pixel = fn() {
     let cy = po_snap(20.0 + (self.rect_size.y - 20.0) * 0.5, o.y, px)
     let lo = vec2(po_snap(0.0, o.x, px), cy - 3.0)
     let hi = vec2(po_snap(self.rect_size.x, o.x, px), cy + 3.0)
-    var res = po_sunk(p, lo, hi, 3.0, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, self.disabled, 0.9)
+    var res = po_sunk(p, lo, hi, 3.0, px, vec3(0.878, 0.886, 0.905), 0.0, 0.0, self.disabled, 1.0)
     let span = self.rect_size.x - rad * 2.0
     let hx = rad + self.slide_pos * span
     let ox = rad + self.origin_pos * span
@@ -668,7 +790,7 @@ mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
     let cy = po_snap(self.offset_y + (self.rect_size.y - self.offset_y) * 0.5, o.y, px)
     let lo = vec2(po_snap(0.0, o.x, px), cy - 1.5)
     let hi = vec2(po_snap(self.rect_size.x, o.x, px), cy + 1.5)
-    var res = po_sunk(p, lo, hi, 1.5, px, vec3(0.90, 0.907, 0.922), 0.0, 0.0, self.disabled, 0.7)
+    var res = po_sunk(p, lo, hi, 1.5, px, vec3(0.872, 0.880, 0.900), 0.0, 0.0, self.disabled, 0.9)
     let lo2 = min(self.origin_pos, self.slide_pos)
     let hi2 = max(self.origin_pos, self.slide_pos)
     let f0 = mix(0.0, lo2, self.arc_origin) * self.rect_size.x
@@ -681,7 +803,7 @@ mod.widgets.SliderMinimal.draw_bg.pixel = fn() {
 }
 
 // The round slider: a label column, then the bar slider's groove, value
-// and disc; the groove ends short of the right edge for the value.
+// and dome; the groove ends short of the right edge for the value.
 mod.widgets.SliderRoundFlat.clip_x = false
 mod.widgets.SliderRoundFlat.clip_y = false
 mod.widgets.SliderRoundFlat.draw_bg.vertex = fn() {
@@ -698,7 +820,7 @@ mod.widgets.SliderRoundFlat.draw_bg.pixel = fn() {
     let x0 = po_snap(self.label_size, o.x, px)
     let lo = vec2(x0, cy - 3.0)
     let hi = vec2(po_snap(self.rect_size.x - 37.0, o.x, px), cy + 3.0)
-    var res = po_sunk(p, lo, hi, 3.0, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, self.disabled, 0.9)
+    var res = po_sunk(p, lo, hi, 3.0, px, vec3(0.878, 0.886, 0.905), 0.0, 0.0, self.disabled, 1.0)
     let span = hi.x - lo.x - rad * 2.0
     let hx = lo.x + rad + self.slide_pos * span
     res = po_fill(res, p, vec2(lo.x + px, lo.y + px * 1.5), vec2(hx, hi.y - px * 1.5), 2.0, px, self.disabled, 0.6, max(max(self.hover, self.drag), self.focus), lo, hi, 3.0)
@@ -735,7 +857,7 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
     let shi = mix(vec2(sz.x - self.inset_px, mid + 1.5), vec2(mid + 1.5, sz.y - self.inset_px), v)
     let lo = vec2(po_snap(slo.x, o.x, px), po_snap(slo.y, o.y, px))
     let hi = vec2(po_snap(shi.x, o.x, px), po_snap(shi.y, o.y, px))
-    var res = po_sunk(p, lo, hi, 1.5, px, vec3(0.90, 0.907, 0.922), 0.0, 0.0, self.disabled, 0.8)
+    var res = po_sunk(p, lo, hi, 1.5, px, vec3(0.872, 0.880, 0.900), 0.0, 0.0, self.disabled, 1.0)
     let cap_at = foot + self.slide_pos * travel
     let flo = mix(vec2(lo.x, lo.y), vec2(lo.x, sz.y - cap_at), v)
     let fhi = mix(vec2(cap_at, hi.y), vec2(hi.x, hi.y), v)
@@ -776,29 +898,44 @@ mod.widgets.SliderFader.draw_bg.pixel = fn() {
 
 // ---------------------------------------------------------------- knobs
 
-// A knob: a white dome in a slim groove pressed into the plate; the value
-// burns in the groove as a slim amber arc, haloed only while the knob is
-// held or focused; the pointer is a graphite line on the glaze. Angles run
-// from straight down, clockwise, the gap at the bottom.
+// A knob: a white dome sitting in a groove pressed into the plate round
+// it. The groove is 3 to 5 points wide, its floor graphite, shaded
+// under its upper wall and lit along its lower one, a white lip on the
+// plate under it; the dome's shadow lies in it, down and to the right,
+// and the knob's own shadow falls on the plate beyond it. The
+// value burns in the groove as a slim amber arc, haloed only while the
+// knob is held or focused; the pointer is a short graphite line on the
+// dome. Angles run from straight down, clockwise, the gap at the bottom.
 let po_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: float, arc_origin: float, gap: float, hover: float, held: float, focus: float, dis: float) -> vec4 {
-    let ring_w = min(max(0.13 * rr, 3.0), 4.5)
+    let ring_w = clamp(0.16 * rr, 3.0, 5.0)
     let ring_out = rr
     let ring_in = rr - ring_w
     let ring_mid = (ring_in + ring_out) * 0.5
-    let rc = ring_in - min(max(0.04 * rr, 1.0), 2.0)
+    let rc = ring_in - 0.8
     let dr = Finish.sd_ring(p, c, ring_mid, ring_w)
     let q = p - c
     let rl = length(q)
     let live = 1.0 - dis
     let dir_n = q / max(rl, 0.01)
-    // The groove: pressed in, shaded along its upper wall, a white lip on
-    // the plate under its lower outer edge.
-    var res = vec4(1.0, 1.0, 1.0, 1.0) * Finish.ring_out(rl - ring_out, 0.0, px * 1.5, px) * smoothstep(0.2, 0.9, dir_n.y)
-    var col = mix(vec3(0.80, 0.815, 0.845), vec3(0.905, 0.912, 0.93), smoothstep(-0.8, 0.8, dir_n.y))
-    col = mix(col, vec3(0.68, 0.70, 0.745), Finish.band(dr, 0.0, px, px) * smoothstep(0.2, -0.8, dir_n.y))
+    var res = vec4(1.0, 1.0, 1.0, 1.0) * Finish.ring_out(rl - ring_out, 0.0, px * 1.5, px) * smoothstep(0.2, 0.9, dir_n.y) * (1.0 - 0.6 * dis)
+    // The knob stands tall: it throws a soft shadow down and to the right
+    // over the plate beyond its groove, a third of its radius long.
+    let cso = 0.14 * rr
+    let css = min(0.11 * rr, 3.6)
+    let cast = Finish.drop(p, c + vec2(0.5, 0.87) * cso, vec2(ring_out, ring_out), ring_out, vec2(0.0, 0.0), css) * 0.72 * smoothstep(-0.5, 0.3, dot(dir_n, vec2(0.45, 0.89))) * smoothstep(ring_out - 0.5, ring_out + 0.5, rl) * (1.0 - 0.7 * dis)
+    res = Finish.over(res, vec4(po_shade() * cast, cast))
+    // The groove: graphite, darkest under its upper outer wall, a soft
+    // light along its lower outer wall.
+    let u = clamp((rl - ring_in) / ring_w, 0.0, 1.0)
+    var col = vec3(0.40, 0.415, 0.45)
+    col = mix(col, vec3(0.25, 0.265, 0.30), smoothstep(0.15, 1.0, u) * (1.0 - smoothstep(-0.9, 0.4, dir_n.y)) * 0.8)
+    col = mix(col, vec3(0.60, 0.61, 0.64), smoothstep(0.5, 1.0, u) * smoothstep(0.25, 0.9, dir_n.y) * 0.5)
+    col = mix(col, vec3(0.22, 0.235, 0.27), Finish.band(dr, 0.0, px, px) * (1.0 - smoothstep(-0.8, 0.2, dir_n.y)) * step(ring_mid, rl))
     col = mix(col, po_ground(), 0.4 * dis)
     let ra = Finish.cover(dr, px)
     res = Finish.over(res, vec4(col * ra, ra))
+    let dsh = po_dome_shadow(p, c, rc, px) * 0.62 * (1.0 - smoothstep(ring_out - 0.8, ring_out + 0.4, rl)) * (1.0 - 0.7 * dis)
+    res = Finish.over(res, vec4(po_shade() * dsh, dsh))
     let one = PI / 180.0
     let sweep = 2.0 * PI - gap * one
     let start = gap * one * 0.5
@@ -807,9 +944,9 @@ let po_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     let a0 = mix(start, min(oe, ve), arc_origin)
     let a1 = mix(ve, max(oe, ve), arc_origin)
     let sdf = Sdf2d.viewport(p)
-    sdf.arc_round_caps(c.x, c.y, ring_mid, a0, a1, ring_w - px * 2.0)
+    sdf.arc_round_caps(c.x, c.y, ring_mid, a0, a1, ring_w + px)
     sdf.fill(vec4(1.0, 1.0, 1.0, 1.0))
-    let arc = sdf.result.w
+    let arc = sdf.result.w * Finish.cover(dr + px * 0.5, px)
     let hot = 1.0 - smoothstep(0.1, 0.4 * ring_w, abs(rl - ring_mid))
     let core = mix(vec3(1.0, 0.86, 0.62), vec3(1.0, 0.96, 0.86), max(max(hover, held), focus))
     let edge = smoothstep(0.25 * ring_w, 0.5 * ring_w, abs(rl - ring_mid))
@@ -824,19 +961,16 @@ let po_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
     }
     let aa = arc * mix(1.0, 0.4, dis)
     res = Finish.over(res, vec4(mix(acol, vec3(0.80, 0.81, 0.84), dis) * aa, aa))
-    // The dome, standing on the plate inside the groove.
+    // Held, the warm light shows in the groove under the dome's foot.
     let spot = (0.25 * hover + 0.45 * held) * live
-    res = Finish.over(res, po_cap(p, c - vec2(rc, rc), c + vec2(rc, rc), rc, px, hover, 0.0, dis, focus, 1.0, 0.0, spot))
-    // The dome's roundness: a soft light upper left, a shade lower right.
-    let dq = q / max(rc, 1.0)
-    let dome = Finish.cover(rl - rc + px, px)
-    let lightk = exp(-dot(dq + vec2(0.3, 0.45), dq + vec2(0.3, 0.45)) * 2.2) * 0.5
-    res = Finish.over(res, vec4(vec3(1.0, 1.0, 1.0) * lightk * dome, lightk * dome))
-    let shadek = smoothstep(0.35, 1.0, length(dq - vec2(-0.25, -0.35))) * 0.10 * dome
-    res = Finish.over(res, vec4(po_shade() * shadek, shadek))
+    if spot > 0.001 {
+        let sw = exp(-max(rl - rc, 0.0) / 1.2) * (1.0 - Finish.cover(rl - rc, px)) * smoothstep(0.0, 0.9, dir_n.y) * spot * 0.5 * (1.0 - smoothstep(ring_out - 0.5, ring_out, rl))
+        res = Finish.over(res, vec4(vec3(0.99, 0.70, 0.38) * sw, sw))
+    }
+    res = Finish.over(res, po_dome(p, c, rc, px, hover, 0.0, dis, focus, 1.0))
     let dir = vec2(-sin(ve), cos(ve))
-    let len = 0.4 * rc
-    let tip = rc - 0.18 * rc
+    let len = 0.26 * rc
+    let tip = 0.70 * rc
     let pd = po_seg(p, c + dir * (tip - len), c + dir * tip) - max(0.05 * rc, 0.85)
     let pa = Finish.cover(pd, px) * mix(1.0, 0.45, dis)
     return Finish.over(res, vec4(vec3(0.20, 0.215, 0.25) * pa, pa))
@@ -845,11 +979,11 @@ let po_knob = fn(p: vec2, c: vec2, rr: float, px: float, slide: float, origin: f
 mod.widgets.RotaryKnob.clip_x = false
 mod.widgets.RotaryKnob.clip_y = false
 mod.widgets.RotaryKnob.draw_bg.vertex = fn() {
-    let m = 14.0
+    let m = 20.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
-    let m = 14.0
+    let m = 20.0
     let px = po_px(self.draw_pass.dpi_factor)
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let dia = min(self.rect_size.x, self.rect_size.y)
@@ -859,11 +993,11 @@ mod.widgets.RotaryKnob.draw_bg.pixel = fn() {
 mod.widgets.RotaryFlat.clip_x = false
 mod.widgets.RotaryFlat.clip_y = false
 mod.widgets.RotaryFlat.draw_bg.vertex = fn() {
-    let m = 14.0
+    let m = 20.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.RotaryFlat.draw_bg.pixel = fn() {
-    let m = 14.0
+    let m = 20.0
     let px = po_px(self.draw_pass.dpi_factor)
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let dia = min(self.rect_size.x, self.rect_size.y - 22.0)
@@ -877,10 +1011,16 @@ mod.widgets.Rotary.text_input.padding.bottom = 0.0
 
 // ---------------------------------------------------------------- fields
 
-// A text field: a white pill pressed into the plate, whiter than the plate,
-// shaded under its top rim, a white lip under its foot. Focused, the lit
-// frame burns just inside its rim.
+// A text field: a white porcelain pill standing on the plate like a cap,
+// its face flatter than a button's (a writing face, a faint light at the
+// top only). Focused, the lit frame burns just inside its rim.
 let po_field = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, down: float, focus: float, dis: float) -> vec4 {
+    return po_cap_r(p, lo, hi, r, px, hover * 0.6, down * 0.5, dis, focus, 0.85, 0.0, 0.0, 7.0, 0.3)
+}
+// A number well: pressed into the plate like the small number fields of
+// the pictures, whiter than the plate, shaded under its top rim, a light
+// lip at its foot.
+let po_well = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float, focus: float, dis: float) -> vec4 {
     let c = (lo + hi) * 0.5
     let h = (hi - lo) * 0.5
     let hh = hi.y - lo.y
@@ -891,22 +1031,22 @@ let po_field = fn(p: vec2, lo: vec2, hi: vec2, r: float, px: float, hover: float
     if fo > 0.001 {
         res = po_leak(d, a) * fo
     }
-    let fill = vec3(0.978, 0.980, 0.986) + vec3(0.01, 0.01, 0.01) * fo
-    res = Finish.over(res, po_sunk(p, lo, hi, r, px, fill, hover, down, dis, 0.6))
+    let fill = vec3(0.955, 0.958, 0.966) + vec3(0.01, 0.01, 0.01) * fo
+    res = Finish.over(res, po_sunk(p, lo, hi, r, px, fill, hover, 0.0, dis, 0.8))
     return po_frame_over(res, d, px, fo, a, hh)
 }
 
 mod.widgets.TextInputFlat.clip_x = false
 mod.widgets.TextInputFlat.clip_y = false
 mod.widgets.TextInputFlat.draw_bg.vertex = fn() {
-    let m = 8.0
+    let m = 12.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.TextInputFlat.draw_bg.pixel = fn() {
     if self.color.a < 0.01 {
         return vec4(0.0, 0.0, 0.0, 0.0)
     }
-    let m = 8.0
+    let m = 12.0
     let px = po_px(self.draw_pass.dpi_factor)
     let o = self.rect_pos
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
@@ -921,7 +1061,7 @@ mod.widgets.TextInputFlat.draw_text.color = #2b2e35
 mod.widgets.TextInputFlat.draw_text.color_empty = #676c75
 mod.widgets.TextInputFlat.draw_text.color_disabled = #9ba0a8
 
-// The number field: the same well; its stepper two small white caps
+// The number field: a well; its stepper two small white caps
 // stacked at the right, parted by a grey device pixel.
 mod.widgets.NumberField.clip_x = false
 mod.widgets.NumberField.clip_y = false
@@ -936,7 +1076,7 @@ mod.widgets.NumberField.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
     let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
-    return po_field(p, lo, hi, 6.0, px, self.hover, 0.0, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
+    return po_well(p, lo, hi, 6.0, px, self.hover, self.focus, self.disabled) * po_fade(self.pos, self.rect_size, m)
 }
 mod.widgets.NumberField.spin_width = 16.0
 mod.widgets.NumberSpin.width = 16.0
@@ -995,7 +1135,7 @@ mod.widgets.DropDownFlat.draw_bg.vertex = fn() {
     let m = 14.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
-let po_dropdown = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, open: float, dis: float, focus: float) -> vec4 {
+let po_dropdown = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, down: float, open: float, dis: float, focus: float, room: float) -> vec4 {
     let m = 14.0
     let px = po_px(dpi)
     let p = pos * (size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
@@ -1004,12 +1144,12 @@ let po_dropdown = fn(pos: vec2, size: vec2, o: vec2, dpi: float, hover: float, d
     let r = (hi.y - lo.y) * 0.5
     let live = 1.0 - dis
     let spot = (0.35 * hover + 0.3 * down) * live
-    var res = po_cap(p, lo, hi, r, px, hover, max(down, open), dis, focus, 1.0, 0.0, spot)
+    var res = po_cap_r(p, lo, hi, r, px, hover, max(down, open), dis, focus, 1.0, 0.0, spot, room, 1.0)
     res = po_chevron(res, p, vec2(hi.x - 13.0, (lo.y + hi.y) * 0.5), vec3(0.24, 0.255, 0.295), open, dis)
     return res * po_fade(pos, size, m)
 }
 mod.widgets.DropDownFlat.draw_bg.pixel = fn() {
-    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.active, self.disabled, self.focus)
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, self.active, self.disabled, self.focus, 40.0)
 }
 mod.widgets.DropDownFlat.draw_text.color = #2b2e35
 mod.widgets.DropDownFlat.draw_text.color_hover = #1f2227
@@ -1035,10 +1175,10 @@ mod.widgets.MultiSelect.face.draw_bg.vertex = fn() {
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.Select.face.draw_bg.pixel = fn() {
-    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus)
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus, 40.0)
 }
 mod.widgets.MultiSelect.face.draw_bg.pixel = fn() {
-    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus)
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, self.down, 0.0, self.disabled, self.focus, 40.0)
 }
 mod.widgets.Select.face.padding = mod.turtle.Inset{left: 12.0 right: 26.0 top: 4.0 bottom: 4.0}
 mod.widgets.MultiSelect.face.padding = mod.turtle.Inset{left: 12.0 right: 26.0 top: 4.0 bottom: 4.0}
@@ -1056,7 +1196,7 @@ mod.widgets.ComboBoxFlat.draw_bg.vertex = fn() {
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.ComboBoxFlat.draw_bg.pixel = fn() {
-    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, 0.0, 0.0, self.disabled, self.focus)
+    return po_dropdown(self.pos, self.rect_size, self.rect_pos, self.draw_pass.dpi_factor, self.hover, 0.0, 0.0, self.disabled, self.focus, 6.0)
 }
 
 // Open lists: a white card with a soft shadow line; rows shade a little
@@ -1118,7 +1258,7 @@ mod.widgets.SegmentedControlFlat.draw_bg.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
     let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
-    return po_sunk(p, lo, hi, (hi.y - lo.y) * 0.5, px, vec3(0.905, 0.912, 0.928), 0.0, 0.0, 0.0, 0.8) * po_fade(self.pos, self.rect_size, m)
+    return po_sunk(p, lo, hi, (hi.y - lo.y) * 0.5, px, vec3(0.905, 0.912, 0.928), 0.0, 0.0, 0.0, 1.0) * po_fade(self.pos, self.rect_size, m)
 }
 mod.widgets.SegmentedControlFlat.draw_pill.vertex = fn() {
     let m = 12.0
@@ -1131,7 +1271,7 @@ mod.widgets.SegmentedControlFlat.draw_pill.pixel = fn() {
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
     let hi = vec2(po_snap(self.rect_size.x, o.x, px), po_snap(self.rect_size.y, o.y, px))
-    return po_cap(p, lo, hi, (hi.y - lo.y) * 0.5, px, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 1.0) * po_fade(self.pos, self.rect_size, m)
+    return po_cap_r(p, lo, hi, (hi.y - lo.y) * 0.5, px, 0.0, 0.0, 0.0, 0.0, 0.6, 0.0, 1.0, 2.0, 1.0) * po_fade(self.pos, self.rect_size, m)
 }
 mod.widgets.SegmentedControlFlat.draw_text.text_style.font_size = 9.0
 mod.widgets.SegmentedControlFlat.draw_text_selected.text_style.font_size = 9.0
@@ -1232,7 +1372,7 @@ mod.widgets.ProgressBarFlat.draw_bg.pixel = fn() {
     let hi = vec2(x1, y0 + th)
     var res = vec4(0.0, 0.0, 0.0, 0.0)
     if self.track > 0.5 {
-        res = po_sunk(p, lo, hi, th * 0.5, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, 0.0, 0.9)
+        res = po_sunk(p, lo, hi, th * 0.5, px, vec3(0.878, 0.886, 0.905), 0.0, 0.0, 0.0, 1.0)
     }
     let span = hi.x - lo.x - px * 2.0
     var f0 = lo.x + px
@@ -1276,7 +1416,7 @@ mod.widgets.LevelMeter.draw_bg.pixel = fn() {
     let whi = mix(vec2(bar, wb0 + wa), vec2(wb0 + wa, sz.y), v)
     let lo = vec2(po_snap(wlo.x, o.x, px), po_snap(wlo.y, o.y, px))
     let hi = vec2(po_snap(whi.x, o.x, px), po_snap(whi.y, o.y, px) - px)
-    var res = po_sunk(p, lo, hi, 2.0, px, vec3(0.915, 0.921, 0.935), 0.0, 0.0, 0.0, 0.8)
+    var res = po_sunk(p, lo, hi, 2.0, px, vec3(0.878, 0.886, 0.905), 0.0, 0.0, 0.0, 1.0)
     let pad = 2.0
     let span = max(1.0, bar - pad * 2.0)
     let pitch = 4.5
@@ -1361,12 +1501,15 @@ let po_grain = fn(p: vec2, o: vec2, px: float) -> float {
     return Finish.grain((p + o) / (2.0 * px), 0.008)
 }
 
-// A raised panel: a white porcelain slab standing on the plate. Its soft
-// shadow stays inside the gap to its neighbours; its face is whiter than
-// the plate, brightest at the top, with a white hairline along its top and
-// a 3 point shoulder inside its edge that catches the light above and
-// turns into shade at its foot. `leak` 1 lets the warm light show from
-// under its foot (a pressable card under the hand).
+// A raised panel: a thick white porcelain slab standing on the plate. Its
+// top face is whiter than the plate, brightest at the top, a white
+// device pixel and a 3 point shoulder of light along its upper edge; under
+// the face its side shows 3 points thick, turning from #e6e8ec to #d6d9df at
+// the foot and closed by a darker device pixel. It throws a deep soft
+// shadow, drawn in 5 points from the sides so it stays inside the gap to
+// its neighbours, half gone 5 points under the foot and gone by 11, and a
+// close contact shadow. `leak` 1 lets the warm light show from under its
+// foot (a pressable card under the hand).
 let po_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: float, leak: float, lift: float) -> vec4 {
     let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
     let hi = vec2(po_snap(size.x, o.x, px), po_snap(size.y, o.y, px))
@@ -1375,29 +1518,51 @@ let po_panel = fn(p: vec2, size: vec2, o: vec2, px: float, r: float, hover: floa
     let d = Material.sd_box(p, c, h, r)
     let a = Finish.cover(d, px)
     let n = po_normal(p, c, h, r)
-    let amb = Finish.drop(p, c, h - vec2(3.0, 1.5), r, vec2(0.0, 3.0 + 1.0 * hover), 3.2) * (0.26 + 0.06 * hover) * lift
-    let con = Finish.drop(p, c, h, r, vec2(0.0, px * 1.2), px * 1.2) * 0.35
-    let sc = (1.0 - (1.0 - amb) * (1.0 - con)) * (1.0 - a)
+    let hs = vec2(max(h.x - 5.0, 1.0), h.y)
+    let amb = Finish.drop(p, c, hs, min(r, min(hs.x, hs.y)), vec2(0.0, 4.6 + 1.0 * hover), 3.4) * (0.24 + 0.05 * hover) * lift
+    let near = Finish.drop(p, c, h - vec2(1.5, 0.0), r, vec2(0.0, 1.6), 1.3) * 0.24 * min(lift + 0.4, 1.0)
+    let con = Finish.drop(p, c, h - vec2(0.5, 0.0), r, vec2(0.0, 0.5 + px * 0.5), 0.5 + px * 0.5) * 0.3
+    // The broad shadow of a thick slab: held deep for several points under
+    // the foot and gone about 26 under it, drawn in 5 points from the
+    // sides and narrowing and softening as it falls, so none of it reaches
+    // into the gap beside the slab.
+    let bdy = max(p.y - hi.y, 0.0)
+    let bw = 2.0 + 0.3 * bdy
+    let bx = smoothstep(-bw, bw, (h.x - 5.0 - 0.25 * bdy) - abs(p.x - c.x))
+    let by = smoothstep(c.y, hi.y - 2.0, p.y) * (1.0 - smoothstep(3.0, 26.0, p.y - hi.y))
+    let broad = bx * by * 0.42 * min(lift, 1.0)
+    let sc = (1.0 - (1.0 - amb) * (1.0 - near) * (1.0 - con) * (1.0 - broad)) * (1.0 - a)
     var res = vec4(po_shade() * sc, sc)
     if leak > 0.001 {
         res = Finish.over(res, po_spot(p, c.x, hi.y + 1.0, min(size.x * 0.5, 60.0), 0.5 * leak) * (1.0 - a))
     }
-    let t = clamp((p.y - lo.y) / max(hi.y - lo.y, 1.0), 0.0, 1.0)
-    var col = mix(vec3(0.985, 0.987, 0.992), vec3(0.960, 0.963, 0.972), t) + vec3(0.008, 0.008, 0.006) * hover
-    col = col + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
+    let tk = 4.0
+    let hf = vec2(h.x, h.y - tk * 0.5)
+    let cf = vec2(c.x, c.y - tk * 0.5)
+    let df = Material.sd_box(p, cf, hf, min(r, min(hf.x, hf.y)))
+    let af = Finish.cover(df, px)
+    let t = clamp((p.y - lo.y) / max(hf.y * 2.0, 1.0), 0.0, 1.0)
+    var face = mix(vec3(0.985, 0.987, 0.992), vec3(0.957, 0.960, 0.970), t) + vec3(0.008, 0.008, 0.006) * hover
+    face = face + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
+    let x = max(-df, 0.0)
     let upper = smoothstep(0.0, 0.9, -n.y)
-    let lower = smoothstep(0.2, 0.9, n.y)
-    let x = max(-d, 0.0)
-    let sh = 1.0 - smoothstep(0.0, 3.0, x)
-    col = mix(col, vec3(1.0, 1.0, 1.0), sh * upper * 0.7)
-    col = mix(col, vec3(0.86, 0.87, 0.89), sh * lower * 0.5)
+    face = mix(face, vec3(1.0, 1.0, 1.0), (1.0 - smoothstep(0.0, 3.0, x)) * upper * 0.75)
+    face = mix(face, vec3(0.99, 0.99, 0.993), Finish.band(df, 0.0, px, px) * smoothstep(0.2, 0.8, n.y) * 0.85)
+    face = min(face, vec3(1.0, 1.0, 1.0))
+    let wk = clamp(df / max(df - d, 0.001), 0.0, 1.0)
+    let wall = mix(vec3(0.902, 0.910, 0.925), vec3(0.838, 0.850, 0.873), wk)
+    var col = mix(wall, face, af)
     let ring = Finish.band(d, 0.0, px, px)
-    col = mix(col, mix(vec3(0.74, 0.76, 0.80), vec3(1.0, 1.0, 1.0), upper), ring)
-    col = min(col, vec3(1.0, 1.0, 1.0))
+    var edge = mix(vec3(0.835, 0.845, 0.868), vec3(1.0, 1.0, 1.0), smoothstep(0.3, 0.8, -n.y))
+    edge = mix(edge, vec3(0.68, 0.695, 0.73), smoothstep(0.3, 0.85, n.y))
+    col = mix(col, edge, ring)
     return Finish.over(res, vec4(col * a, a))
 }
-// A tray: the same box pressed into the plate, shaded from its top rim, a
-// white lip on the plate under its foot.
+// A tray: the same box pressed into the plate. Its floor #dee0e6, a step
+// under the plate round it; the rim
+// shades it from the top over 5 points; along its lower inner edge the
+// wall that faces the light is a pale strip; a grey device pixel on its
+// upper rim and a white lip on the plate under its foot.
 let po_tray = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
     let lo = vec2(po_snap(0.0, o.x, px), po_snap(0.0, o.y, px))
     let hi = vec2(po_snap(size.x, o.x, px), po_snap(size.y, o.y, px) - px)
@@ -1408,9 +1573,10 @@ let po_tray = fn(p: vec2, size: vec2, o: vec2, px: float, r: float) -> vec4 {
     let a = Finish.cover(d, px)
     let lipa = Finish.ring_out(d, 0.0, px * 1.5, px) * smoothstep(0.2, 0.9, n.y)
     var res = vec4(vec3(1.0, 1.0, 1.0) * lipa, lipa)
-    var col = vec3(0.862, 0.870, 0.890) + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
-    col = mix(col, vec3(0.56, 0.585, 0.64), 0.7 * Finish.inset(p, c, h, r, vec2(0.0, 2.6), 4.2))
-    col = mix(col, vec3(0.68, 0.70, 0.745), Finish.band(d, 0.0, px, px) * smoothstep(0.3, -0.9, n.y))
+    var col = vec3(0.872, 0.880, 0.901) + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
+    col = mix(col, vec3(0.56, 0.585, 0.64), 0.8 * Finish.inset(p, c, h, r, vec2(0.0, 3.0), 3.2))
+    col = mix(col, vec3(0.975, 0.978, 0.985), Finish.band(d, px, 2.4, px) * smoothstep(0.35, 0.9, n.y) * 0.8)
+    col = mix(col, vec3(0.64, 0.66, 0.70), Finish.band(d, 0.0, px, px) * (1.0 - smoothstep(-0.9, 0.3, n.y)))
     return Finish.over(res, vec4(col * a, a))
 }
 
@@ -1418,11 +1584,11 @@ mod.widgets.PanelView.clip_x = false
 mod.widgets.PanelView.clip_y = false
 mod.widgets.PanelView.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 10.0 bottom: 10.0}
 mod.widgets.PanelView.draw_bg.vertex = fn() {
-    let m = 10.0
+    let m = 28.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.PanelView.draw_bg.pixel = fn() {
-    let m = 10.0
+    let m = 28.0
     let px = po_px(self.draw_pass.dpi_factor)
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     if self.sunken > 0.5 {
@@ -1464,11 +1630,11 @@ mod.widgets.Card.clip_x = false
 mod.widgets.Card.clip_y = false
 mod.widgets.Card.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 10.0 bottom: 10.0}
 mod.widgets.Card.draw_bg.vertex = fn() {
-    let m = 14.0
+    let m = 28.0
     self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos - vec2(m, m), self.rect_size + vec2(2.0 * m, 2.0 * m))
 }
 mod.widgets.Card.draw_bg.pixel = fn() {
-    let m = 14.0
+    let m = 28.0
     let px = po_px(self.draw_pass.dpi_factor)
     let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
     let fade = po_fade(self.pos, self.rect_size, m)
@@ -1494,28 +1660,47 @@ mod.widgets.Card.draw_bg.pixel = fn() {
     return po_panel(p, self.rect_size, self.rect_pos, px, 10.0, self.hover, self.hover, 1.4) * fade
 }
 
-// List rows: 10 points in, a grey device pixel divider under each with a
-// white one under it; under the hand the row shades a little; the chosen
-// row rises as a white slab with the warm light under its middle.
+// List rows stand in a tray pressed into the plate: each row draws the part
+// of the tray it covers, the tray being the clip the rows are drawn in (the
+// list's own box), so the tray stays put while the rows scroll. Its floor
+// a touch lighter than an inset panel, a grey device pixel round it, a
+// faint shade under its top edge; every other row a faint shade darker;
+// under the hand a row shades a little; the chosen row rises as a white
+// slab with the warm light under its middle.
 mod.widgets.ListItem.padding = mod.turtle.Inset{left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+mod.widgets.ListItem.clip_x = false
+mod.widgets.ListItem.clip_y = false
 mod.widgets.ListItem.draw_bg.pixel = fn() {
     let px = po_px(self.draw_pass.dpi_factor)
     let o = self.rect_pos
     let p = self.pos * self.rect_size
     let live = 1.0 - self.disabled
-    let yb = po_snap(self.rect_size.y, o.y, px)
-    let inx = step(10.0, p.x) * step(p.x, self.rect_size.x - 10.0)
-    let div = step(yb - px * 2.0, p.y) * step(p.y, yb - px) * inx
-    let lipl = step(yb - px, p.y) * step(p.y, yb) * inx
-    var res = vec4(0.82, 0.835, 0.86, 1.0) * div * (1.0 - self.selected)
-    res = Finish.over(res, vec4(1.0, 1.0, 1.0, 1.0) * lipl * (1.0 - self.selected))
-    let wash = (0.035 * self.hover + 0.03 * self.down) * live
-    res = Finish.over(res, vec4(po_shade() * wash, wash))
+    let tlo = vec2(po_snap(self.draw_clip.x - o.x, o.x, px), po_snap(self.draw_clip.y - o.y, o.y, px))
+    let thi = vec2(po_snap(self.draw_clip.z - o.x, o.x, px), po_snap(self.draw_clip.w - o.y, o.y, px))
+    let tc = (tlo + thi) * 0.5
+    let th = max((thi - tlo) * 0.5, vec2(1.0, 1.0))
+    let tr = min(8.0, min(th.x, th.y))
+    let d = Material.sd_box(p, tc, th, tr)
+    let n = po_normal(p, tc, th, tr)
+    let a = Finish.cover(d, px)
+    let k = floor((o.y + self.rect_size.y * 0.5) / max(self.rect_size.y, 1.0))
+    let odd = k - 2.0 * floor(k * 0.5)
+    var col = vec3(0.912, 0.919, 0.936) - vec3(0.016, 0.016, 0.014) * odd
+    col = col + vec3(1.0, 1.0, 1.0) * po_grain(p, o, px)
+    col = mix(col, vec3(0.56, 0.585, 0.64), 0.5 * Finish.inset(p, tc, th, tr, vec2(0.0, 2.0), 2.4))
+    col = col - vec3(0.03, 0.03, 0.026) * self.hover * live - vec3(0.02, 0.02, 0.018) * self.down * live
+    col = mix(col, vec3(0.975, 0.978, 0.985), Finish.band(d, px, 1.8, px) * smoothstep(0.35, 0.9, n.y) * 0.6)
+    let edge = mix(vec3(0.64, 0.66, 0.70), vec3(0.80, 0.81, 0.84), smoothstep(-0.9, 0.3, n.y))
+    col = mix(col, edge, Finish.band(d, 0.0, px, px))
+    var res = vec4(col * a, a)
     if self.selected > 0.001 {
-        let lo = vec2(po_snap(3.0, o.x, px), po_snap(3.0, o.y, px))
-        let hi = vec2(po_snap(self.rect_size.x - 3.0, o.x, px), yb - px * 4.0)
-        let sl = po_cap(p, lo, hi, 6.0, px, 0.0, 0.0, 0.0, 0.0, 0.35, 0.0, 1.0)
-        res = mix(res, sl, self.selected)
+        // The chosen slab stands 6 points clear of the row's foot, so its
+        // shadow and its warm light fade out inside the row.
+        let yb = po_snap(self.rect_size.y, o.y, px)
+        let lo = vec2(po_snap(3.0, o.x, px), po_snap(4.0, o.y, px))
+        let hi = vec2(po_snap(self.rect_size.x - 3.0, o.x, px), po_snap(self.rect_size.y - 6.0, o.y, px))
+        let sl = po_cap_r(p, lo, hi, 6.0, px, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, yb - hi.y, 1.0)
+        res = Finish.over(res, sl * self.selected)
     }
     return res
 }
@@ -1691,8 +1876,9 @@ mod.widgets.View.clip_y = false
 mod.widgets.Window.pass.clear_color = #e4e6eb
 // The window's own ground: the pale porcelain plate, lit from above: a
 // broad soft brightening high in the middle, falling a little toward the
-// foot and the corners, and a free grain under it all so the glaze is a
-// material and not a fill.
+// foot and the corners, and a few per cent more at the side edges; the
+// faint unevenness of a glaze (two slow free noises turned off the axes,
+// under a percent); and a free grain under it all.
 mod.widgets.Window.show_bg = true
 mod.widgets.Window.draw_bg.pixel = fn() {
     let px = po_px(self.draw_pass.dpi_factor)
@@ -1701,8 +1887,12 @@ mod.widgets.Window.draw_bg.pixel = fn() {
     let q = (p - vec2(sz.x * 0.5, sz.y * 0.1)) / vec2(max(sz.x * 0.8, 1.0), max(sz.y * 1.1, 1.0))
     let v = smoothstep(0.0, 1.0, length(q))
     var col = mix(vec3(0.918, 0.926, 0.944), vec3(0.868, 0.877, 0.900), v)
-    let g = Finish.grain(p / (2.0 * px), 0.009)
-    return vec4(col + vec3(g, g, g), 1.0)
+    let e = abs(self.pos.x - 0.5) * 2.0
+    col = col * (1.0 - 0.03 * smoothstep(0.7, 1.0, e))
+    let pr = vec2(0.866 * p.x - 0.5 * p.y, 0.5 * p.x + 0.866 * p.y)
+    let mott = (Finish.fbm(pr / 260.0) - 0.5) * 0.007 + (Finish.fbm(pr / 70.0 + vec2(7.3, 2.1)) - 0.5) * 0.002
+    let g = Finish.grain(p / (2.0 * px), 0.011)
+    return vec4(col + vec3(mott + g, mott + g, mott * 1.1 + g), 1.0)
 }
 
 // ---------------------------------------------------------------- states
