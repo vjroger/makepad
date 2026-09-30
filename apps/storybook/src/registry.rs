@@ -399,7 +399,7 @@ mod tests {
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
                 ("ScreenView", &["Overview"]),
-                ("Material", &["Overview", "Knob presets", "Knob cost"]),
+                ("Material", &["Overview"]),
                 ("Splash", &["Overview"]),
             ],
         ),

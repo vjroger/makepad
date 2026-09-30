@@ -147,3 +147,5 @@ target-*/
 /scratchpad/
 /.grok/
 /*.log
+# The private products, cloned into a checkout as members of its workspace.
+apps/commercial/

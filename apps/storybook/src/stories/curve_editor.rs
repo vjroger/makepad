@@ -119,8 +119,6 @@ pub const STORIES: &[Story] = &[Story {
 mod tests {
     use super::*;
     use crate::canvas::id_path;
-    use crate::knob::bake::resample;
-    use crate::knob::presets::STYLES;
     use crate::makepad_widgets::makepad_script::trap::NoTrap;
 
     /// The page is markup the compiler never reads: building it is what
@@ -153,34 +151,5 @@ mod tests {
             vec![[0.0, 1.0, 2.0], [0.4, 0.72, 1.0], [1.0, 0.0, 2.0]]
         );
         assert_eq!(page.curve_editor(&cx, ids!(wing)).anchors()[1], [0.5, 0.72, 3.0]);
-    }
-
-    /// The editor's curve is the knob's: every curve of every knob style,
-    /// resampled by the widget library, matches the bake tap for tap, to
-    /// the bit.
-    #[test]
-    fn the_editor_resamples_every_knob_curve_as_the_bake_does() {
-        for style in STYLES.iter() {
-            for (curve, which) in [
-                (&style.prof[..], "prof"),
-                (&style.flute[..], "flute"),
-                (&style.wwid[..], "wwid"),
-                (&style.whgt[..], "whgt"),
-                (&style.wprof[..], "wprof"),
-            ] {
-                for n in [64, 256] {
-                    let bake = resample(curve, n);
-                    let editor = curve_resample(curve, n);
-                    assert_eq!(bake.len(), editor.len());
-                    for (i, (a, b)) in bake.iter().zip(&editor).enumerate() {
-                        assert!(
-                            a.to_bits() == b.to_bits(),
-                            "{} {which} tap {i} of {n}: bake {a}, editor {b}",
-                            style.name
-                        );
-                    }
-                }
-            }
-        }
     }
 }
