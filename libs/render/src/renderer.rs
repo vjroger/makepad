@@ -631,7 +631,7 @@ mod gi;
 mod stream_draw;
 mod grass_draw;
 mod vfx_draw;
-mod ibl;
+pub(crate) mod ibl;
 mod items;
 pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
 

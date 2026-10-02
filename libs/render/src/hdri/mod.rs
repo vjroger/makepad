@@ -46,6 +46,7 @@ pub mod night;
 pub mod image;
 pub mod export;
 pub mod envmap;
+pub mod prepare;
 
 pub use params::*;
 // hdri::bake_env_map, load_env_map, detect_sun, remove_sun, as the spec names them.
