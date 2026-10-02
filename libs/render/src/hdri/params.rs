@@ -1184,8 +1184,7 @@ mod tests {
 
         let unknown = light("?", "?");
         assert_eq!(HdriParams { mode: "?".to_string(), ..Default::default() }.mode().as_str(), MODE_NAMES[0]);
-        let mut sun = SunParams::default();
-        sun.mode = "?".to_string();
+        let sun = SunParams { mode: "?".to_string(), ..Default::default() };
         assert_eq!(sun.mode().as_str(), SUN_MODE_NAMES[0]);
         assert_eq!(unknown.lights[0].shape().as_str(), LIGHT_SHAPE_NAMES[0]);
         assert_eq!(unknown.lights[0].blend().as_str(), BLEND_NAMES[0]);
