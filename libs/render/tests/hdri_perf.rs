@@ -174,8 +174,11 @@ fn full_bakes_4096_under_10_s() {
 
 /// The atlas the released bake also builds (`Jobs::request_preview` with
 /// `with_ibl`): ibl's prefilter (256 wide, 6 levels) plus SH9. Single
-/// threaded, so the budget does not scale with the core count; the spec
-/// expects about 0.2 s and the app must never pay it per drag tick.
+/// threaded, so the budget does not scale with the core count. The plan
+/// guessed about 0.2 s; an i9-9900K measures 0.66 s, almost all of it
+/// `ibl::prefilter` (sh9 takes 4 ms, packing 2 ms), which is what
+/// `ibl::prefiltered`'s own doc says ("a large part of a second"), so the
+/// budget is 1 s and the app must never pay it per drag tick.
 #[test]
 #[ignore = "release timing; see the module comment"]
 fn ibl_texture_of_a_1024_map_under_1_s() {
