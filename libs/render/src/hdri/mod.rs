@@ -135,10 +135,15 @@ impl Env {
         let d = rotate_y(dir, -self.params.rotation_deg);
         let base = match &self.atmo {
             Some(atmo) => {
-                let mut c = atmo.sky(d) + atmo.sun_disc(d);
+                let mut c = atmo.sky(d);
+                // The sun's and the moon's discs are blocked by the unfaded
+                // cover, like their keys in `sun`; the rest of the sky by the
+                // visible deck, which thins into the haze at the horizon.
+                let mut discs = atmo.sun_disc(d);
                 if let Some(night) = &self.night {
                     let g = self.params.sky.atmosphere.ground_color;
-                    c += night.stars(d) + night.moon(d) + night.glow(d) + night.ground(d, vec3f(g[0], g[1], g[2]));
+                    c += night.stars(d) + night.glow(d) + night.ground(d, vec3f(g[0], g[1], g[2]));
+                    discs += night.moon(d);
                 }
                 // Clouds are in front of everything in the sky: the stars, the
                 // moon and the sun's disc.
@@ -148,8 +153,12 @@ impl Env {
                         let lit = layer.shade(&s, self.cloud_sun, self.cloud_ambient);
                         c = c * (1.0 - s.alpha) + lit * s.alpha;
                     }
+                    // Only a texel on a disc pays for the second cloud lookup.
+                    if discs.max_elem() > 0.0 {
+                        discs = discs * (1.0 - layer.cover_toward(d));
+                    }
                 }
-                c
+                c + discs
             }
             None => self.studio.backdrop(d),
         };
@@ -160,8 +169,9 @@ impl Env {
     /// (every layer's key goes through `key_to_world`, which turns it with the
     /// map and applies the intensity). In order: the key light (both modes);
     /// Sky mode only: the sun while it is above the horizon, dimmed by the cloud
-    /// cover along it; else the risen moon once the sun is 6 degrees down, dimmed
-    /// the same way; else None.
+    /// cover along it (unfaded: a full overcast hides a 2 degree sun too); else
+    /// the risen moon once the sun is 6 degrees down, dimmed the same way; else
+    /// None.
     pub fn sun(&self) -> Option<EnvSun> {
         if let Some(key) = self.studio.key() {
             return Some(self.key_to_world(key));
@@ -169,7 +179,7 @@ impl Env {
         // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
         // The same cover that hides the disc in the map dims the key.
-        let cover = |dir: Vec3f| self.clouds.as_ref().map_or(1.0, |layer| layer.transmittance_toward(dir));
+        let cover = |dir: Vec3f| self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir));
         let sun = atmo.sun_dir();
         if sun.y > 0.0 {
             // The cone's mean radiance, so radiance x cone solid angle is the

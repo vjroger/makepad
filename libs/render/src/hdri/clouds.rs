@@ -127,6 +127,10 @@ impl CloudLayer {
         })
     }
 
+    /// The visible deck and veil toward `dir`: alpha, self-shadowing and the
+    /// sun's cosine. Alpha fades to 0 at the horizon (see `HORIZON_FADE`), so
+    /// it is what the viewer sees, not what the sun sees: use `cover_toward`
+    /// for light that is blocked.
     pub fn sample(&self, dir: Vec3f) -> CloudSample {
         let length = dir.length();
         if length.is_nan() || length <= 0.0 {
@@ -137,7 +141,33 @@ impl CloudLayer {
         if d.y <= 0.0 {
             return CloudSample { alpha: 0.0, light: 1.0, cos_sun };
         }
-        let fade = smoothstep(0.0, HORIZON_FADE, d.y);
+        let (alpha, light) = self.layers(d, smoothstep(0.0, HORIZON_FADE, d.y), true);
+        CloudSample { alpha: alpha.clamp(0.0, 1.0), light, cos_sun }
+    }
+
+    /// How much of whatever lies behind the layers they hide along `dir`, 0..1:
+    /// the alpha `sample` gives without the horizon fade. The fade thins the
+    /// visible deck into the horizon haze, but a light behind the deck is not
+    /// shown through that haze: at 2 degrees a full overcast is still opaque to
+    /// the sun. The key light and the discs of the sun and moon use this; 0 at
+    /// and below the horizon and for a direction that is not one.
+    pub fn cover_toward(&self, dir: Vec3f) -> f32 {
+        let length = dir.length();
+        if !length.is_finite() || length <= 0.0 {
+            return 0.0;
+        }
+        let d = dir / length;
+        if d.y <= 0.0 {
+            return 0.0;
+        }
+        self.layers(d, 1.0, false).0.clamp(0.0, 1.0)
+    }
+
+    /// Deck and veil along the unit direction `d` above the horizon: their
+    /// combined alpha, with each layer's opacity scaled by `fade`, and the
+    /// light that reaches them (1 unless `shaded`, which runs the deck's
+    /// self-shadow march).
+    fn layers(&self, d: Vec3f, fade: f32, shaded: bool) -> (f32, f32) {
         let sin_el = d.y.max(MIN_SIN_ELEVATION);
         let mut alpha = 0.0f32;
         let mut light = 1.0f32;
@@ -148,7 +178,9 @@ impl CloudLayer {
                 // Beer-Lambert through the deck, rescaled so density 1 is opaque.
                 let opacity = (1.0 - (-CUMULUS_THICKNESS * density).exp()) / (1.0 - (-CUMULUS_THICKNESS).exp());
                 alpha = opacity.min(1.0) * fade;
-                light = self.self_shadow(p);
+                if shaded {
+                    light = self.self_shadow(p);
+                }
             }
         }
         if self.cirrus > 0.0 {
@@ -163,7 +195,7 @@ impl CloudLayer {
             }
             alpha = total;
         }
-        CloudSample { alpha: alpha.clamp(0.0, 1.0), light, cos_sun }
+        (alpha, light)
     }
 
     /// Cloud radiance for a sample: sun irradiance x phase x self-shadow,
@@ -179,7 +211,9 @@ impl CloudLayer {
         sun_irradiance * (SUN_GAIN * phase * s.light) + sky * AMBIENT_GAIN
     }
 
-    /// Fraction of light that passes the clouds along `dir`: 1 - alpha.
+    /// Fraction of what the viewer sees along `dir` that is not cloud: 1 - the
+    /// visible alpha, horizon fade included. Light behind the layers is dimmed
+    /// by `1 - cover_toward` instead.
     pub fn transmittance_toward(&self, dir: Vec3f) -> f32 {
         1.0 - self.sample(dir).alpha
     }
@@ -329,6 +363,47 @@ mod tests {
     }
 
     #[test]
+    fn the_cover_toward_a_direction_has_no_horizon_fade() {
+        // A full overcast is opaque toward the horizon too; only the visible
+        // deck thins into the haze there.
+        let overcast = CloudLayer::new(&clouds(1.0, 0.0), 7, sun()).unwrap();
+        for el in [0.5f32, 1.0, 2.0, 3.0, 5.0, 8.0, 40.0] {
+            for az in (0..360).step_by(45) {
+                let cover = overcast.cover_toward(dir_from_az_el(az as f32, el));
+                assert!(cover > 0.999, "az {az} el {el}: cover {cover}");
+            }
+        }
+        // The deck keeps its fade: about a fifth at 2 degrees, two fifths at 3.
+        for (el, most) in [(2.0f32, 0.3f32), (3.0, 0.5)] {
+            let d = dir_from_az_el(0.0, el);
+            assert!(overcast.sample(d).alpha < most, "el {el}: alpha {}", overcast.sample(d).alpha);
+            assert!(overcast.transmittance_toward(d) > 1.0 - most);
+        }
+        // Where the fade is 1 (above about 7 degrees) the cover is the visible
+        // alpha, bit for bit, cirrus included.
+        let mixed = CloudLayer::new(&clouds(0.5, 0.5), 7, sun()).unwrap();
+        for d in sky_dirs() {
+            assert_eq!(mixed.cover_toward(d).to_bits(), mixed.sample(d).alpha.to_bits());
+        }
+        // Below that it is never less, deck and veil alike.
+        for layer in [&mixed, &CloudLayer::new(&clouds(0.0, 1.0), 5, sun()).unwrap()] {
+            for el in [0.3f32, 1.0, 2.0, 4.0, 6.0] {
+                for az in (0..360).step_by(30) {
+                    let d = dir_from_az_el(az as f32, el);
+                    assert!(layer.cover_toward(d) >= layer.sample(d).alpha, "az {az} el {el}");
+                }
+            }
+        }
+        // None at or below the horizon, and none toward a non-direction.
+        for d in [dir_from_az_el(30.0, 0.0), dir_from_az_el(30.0, -20.0), vec3f(0.0, -1.0, 0.0)] {
+            assert_eq!(overcast.cover_toward(d), 0.0);
+        }
+        for d in [Vec3f::default(), vec3f(f32::NAN, 1.0, 0.0), vec3f(f32::INFINITY, 1.0, 0.0)] {
+            assert_eq!(overcast.cover_toward(d), 0.0, "{d:?}");
+        }
+    }
+
+    #[test]
     fn coverage_grows_the_cloud_fraction() {
         let fraction = |c: f32| mean_alpha(&CloudLayer::new(&clouds(c, 0.0), 3, sun()).unwrap());
         let (low, mid, high) = (fraction(0.2), fraction(0.5), fraction(0.8));
@@ -441,6 +516,87 @@ mod env_tests {
         let zenith = vec3f(0.0, 1.0, 0.0);
         let change = (overcast.radiance(zenith) - clear.radiance(zenith)).length();
         assert!(change > 0.01 * luminance(clear.radiance(zenith)), "the deck shows overhead");
+    }
+
+    /// A manual sun due south at `el` degrees.
+    fn sun_at(coverage: f32, el: f32) -> HdriParams {
+        let mut p = cloudy(coverage, 1);
+        p.sky.sun.elevation_deg = el;
+        p
+    }
+
+    #[test]
+    fn full_cover_hides_a_low_sun_as_it_hides_a_high_one() {
+        // The visible deck is only 20 % opaque at 2 degrees and 40 % at 3, but
+        // the sun's key and disc are behind all of it: the horizon fade is
+        // for the haze the deck thins into, not for the light it blocks.
+        for el in [2.0f32, 3.0, 5.0, 10.0] {
+            let clear = Env::new(&sun_at(0.0, el));
+            let overcast = Env::new(&sun_at(1.0, el));
+            let clear_key = clear.sun().expect("the sun is up");
+            let overcast_key = overcast.sun().expect("the sun is still the key, only dimmed");
+            assert!(
+                luminance(overcast_key.radiance) < 1.0e-3 * luminance(clear_key.radiance),
+                "el {el}: key {:?} vs {:?}",
+                overcast_key.radiance,
+                clear_key.radiance
+            );
+            let at_sun = dir_from_az_el(180.0, el);
+            assert!(
+                luminance(overcast.radiance(at_sun)) < 1.0e-2 * luminance(clear.radiance(at_sun)),
+                "el {el}: the disc shows through: {:?} vs {:?}",
+                overcast.radiance(at_sun),
+                clear.radiance(at_sun)
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_is_dimmed_by_the_unfaded_cover() {
+        // Partial cover, a 3 degree sun: the key follows cover_toward the sun,
+        // not the deck's faded alpha.
+        let sun_dir = dir_from_az_el(180.0, 3.0);
+        let clear_key = luminance(Env::new(&sun_at(0.0, 3.0)).sun().unwrap().radiance);
+        let mut unlike_the_faded_alpha = 0;
+        for seed in 0..8 {
+            let mut p = sun_at(0.5, 3.0);
+            p.seed = seed;
+            let layer = CloudLayer::new(&p.sky.clouds, seed, sun_dir).unwrap();
+            let key = luminance(Env::new(&p).sun().unwrap().radiance) / clear_key;
+            let want = 1.0 - layer.cover_toward(sun_dir);
+            assert!((key - want).abs() < 1.0e-4, "seed {seed}: key {key}, 1 - cover {want}");
+            if (layer.transmittance_toward(sun_dir) - want).abs() > 0.05 {
+                unlike_the_faded_alpha += 1;
+            }
+        }
+        assert!(unlike_the_faded_alpha > 0, "no seed tells the cover from the faded alpha");
+    }
+
+    #[test]
+    fn full_cover_hides_a_low_moon_and_its_key() {
+        // The moon is a disc behind the deck like the sun: same cover.
+        let night = |coverage: f32| {
+            let mut p = sun_at(coverage, -30.0);
+            p.sky.night.moon = true;
+            p.sky.night.moon_elevation_deg = 3.0;
+            p.sky.night.moon_azimuth_deg = 180.0;
+            Env::new(&p)
+        };
+        let (clear, overcast) = (night(0.0), night(1.0));
+        let clear_key = clear.sun().expect("the moon is the key");
+        let overcast_key = overcast.sun().expect("and stays the key, dimmed");
+        assert!(luminance(clear_key.radiance) > 0.0);
+        assert!(luminance(overcast_key.radiance) < 1.0e-3 * luminance(clear_key.radiance));
+        // What is left of the disc's texel is the airglow and the moonlit air
+        // in front of the cloud (about 1 % here), not the moon: before the
+        // cover was unfaded 60 % of it showed through.
+        let at_moon = dir_from_az_el(180.0, 3.0);
+        assert!(
+            luminance(overcast.radiance(at_moon)) < 5.0e-2 * luminance(clear.radiance(at_moon)),
+            "{:?} vs {:?}",
+            overcast.radiance(at_moon),
+            clear.radiance(at_moon)
+        );
     }
 
     #[test]
