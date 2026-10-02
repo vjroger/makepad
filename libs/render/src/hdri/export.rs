@@ -13,8 +13,9 @@ use makepad_draw::*;
 use makepad_half::f16;
 use makepad_openexr::{write_to_vec, Compression, ExrChannel, ExrImage, ExrPart};
 use makepad_render_material::ibl::{self, EnvMap};
+use std::path::{Path, PathBuf};
 use super::image::{roll_quarter, sanitize_radiance};
-use super::vec;
+use super::{arr, vec};
 
 /// The largest finite half float. Anything brighter clips when written as half.
 const HALF_MAX: f32 = 65504.0;
@@ -239,11 +240,225 @@ pub fn encode_face_png(face: &FaceImage, exposure_ev: f32) -> Result<Vec<u8>, St
     Cx::encode_rgba_as_png(face.size as u32, face.size as u32, &rgba)
 }
 
+/// Face file suffixes, in `cube_faces` order: +X −X +Y −Y +Z −Z.
+pub const FACE_NAMES: [&str; 6] = ["px", "nx", "py", "ny", "pz", "nz"];
+
+/// Six square faces, sampled bilinearly from the map with `EnvMap::sample`, in the order
+/// +X −X +Y −Y +Z −Z. They use DrawPbr's face orientation (`draw/src/shader/draw_pbr.rs`,
+/// `default_env_face_dir`), so the files load into makepad's own cube path unchanged. Texel
+/// (x, y) of a face looks along `face_dir(face, u, v)`, with u, v = 2·(i + 0.5)/size − 1.
+/// Directions need no convention roll. Engines with another cube layout must remap. A size of
+/// 0 is treated as 1; an empty map gives black faces.
+pub fn cube_faces(env: &EnvMap, face_size: usize) -> [FaceImage; 6] {
+    let size = face_size.max(1);
+    let empty = env.width == 0 || env.height == 0 || env.data.len() < env.width * env.height;
+    std::array::from_fn(|face| {
+        let mut rgb = Vec::with_capacity(size * size * 3);
+        for y in 0..size {
+            for x in 0..size {
+                if empty {
+                    rgb.extend_from_slice(&[0.0, 0.0, 0.0]);
+                    continue;
+                }
+                let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+                let c = env.sample(arr(face_dir(face, u, v)));
+                rgb.extend_from_slice(&c[..3]);
+            }
+        }
+        FaceImage { size, rgb }
+    })
+}
+
+/// DrawPbr's cube directions (draw/src/shader/draw_pbr.rs:1632-1644, `default_env_face_dir`).
+fn face_dir(face: usize, u: f32, v: f32) -> Vec3f {
+    match face {
+        0 => vec3f(1.0, -v, -u),
+        1 => vec3f(-1.0, -v, u),
+        2 => vec3f(u, 1.0, v),
+        3 => vec3f(u, -1.0, -v),
+        4 => vec3f(u, -v, 1.0),
+        _ => vec3f(-u, -v, -1.0),
+    }
+    .normalize()
+}
+
+/// Writes `bytes` to `<path>.tmp`, flushes it to disk, then renames it over `path`. A reader never
+/// sees a half-written file, and a failure leaves no temp file behind.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = tmp_path(path);
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        // Flush to disk before the rename, so a crash cannot leave a renamed but empty file.
+        file.sync_all()?;
+        // Windows will not rename a file that is still open.
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {error}", path.display()));
+    }
+    Ok(())
+}
+
+/// `<path>.tmp`: the whole file name plus `.tmp`, so `sky.exr` becomes `sky.exr.tmp`.
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+/// Which files `export_all` writes. `cube_faces` adds the six faces. `cube_png` writes those faces
+/// as tonemapped PNGs instead of EXRs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportOptions {
+    pub exr: bool,
+    pub hdr: bool,
+    pub png: bool,
+    pub cube_faces: bool,
+    pub cube_png: bool,
+    pub precision: ExrPrecision,
+    /// Exposure for PNG output, in EV (display only; the HDR files are never scaled).
+    pub png_ev: f32,
+}
+
+impl Default for ExportOptions {
+    /// A float EXR only, the lossless choice. Everything else is opt-in.
+    fn default() -> Self {
+        ExportOptions {
+            exr: true,
+            hdr: false,
+            png: false,
+            cube_faces: false,
+            cube_png: false,
+            precision: ExrPrecision::Float,
+            png_ev: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Format {
+    Exr,
+    Hdr,
+    Png,
+}
+
+/// Writes the selected formats next to `base`, ignoring its extension:
+/// - `<stem>.exr`, `<stem>.hdr` and `<stem>.png` (the equirects, in the file convention);
+/// - then, with `cube_faces`, `<stem>_px.exr` … `<stem>_nz.exr` (or `.png` with `cube_png`),
+///   each face W/4 texels square, in `FACE_NAMES` order.
+///
+/// `progress` gets 0 first, then the finished fraction after every file. `cancelled` is polled
+/// before each file. On cancel or any error, the files this call already wrote are removed, so
+/// the folder ends up with the whole set or nothing new. A file that existed before under the
+/// same name and was already replaced is not brought back.
+///
+/// Returns the written paths in that order, and the EXR report: the worst clip count among the
+/// EXR files, faces included.
+pub fn export_all(
+    base: &Path,
+    env: &EnvMap,
+    opts: &ExportOptions,
+    progress: &dyn Fn(f32),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(Vec<PathBuf>, ExrReport), String> {
+    check_map(env, "export")?;
+    let stem = base.with_extension("");
+    let named = |suffix: &str| {
+        let mut name = stem.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    // Plan every file first, so progress has a fixed denominator.
+    let mut jobs: Vec<(PathBuf, Format, Option<usize>)> = Vec::new();
+    if opts.exr {
+        jobs.push((named(".exr"), Format::Exr, None));
+    }
+    if opts.hdr {
+        jobs.push((named(".hdr"), Format::Hdr, None));
+    }
+    if opts.png {
+        jobs.push((named(".png"), Format::Png, None));
+    }
+    if opts.cube_faces {
+        let (format, extension) = if opts.cube_png { (Format::Png, "png") } else { (Format::Exr, "exr") };
+        for (face, name) in FACE_NAMES.iter().enumerate() {
+            jobs.push((named(&format!("_{name}.{extension}")), format, Some(face)));
+        }
+    }
+    if jobs.is_empty() {
+        return Err("export: no format selected".to_string());
+    }
+    let total = jobs.len();
+    let mut written: Vec<PathBuf> = Vec::new();
+    let mut report = ExrReport::default();
+    // Faces are computed once, when the first face file is due.
+    let mut faces: Option<[FaceImage; 6]> = None;
+    progress(0.0);
+    for (done, (path, format, face)) in jobs.into_iter().enumerate() {
+        if cancelled() {
+            remove_files(&written);
+            return Err("export cancelled".to_string());
+        }
+        let encoded = match face {
+            None => encode_map(env, format, opts, &mut report),
+            Some(index) => {
+                let faces = faces.get_or_insert_with(|| cube_faces(env, (env.width / 4).max(1)));
+                encode_face(&faces[index], format, opts, &mut report)
+            }
+        };
+        let result = encoded.and_then(|bytes| write_atomic(&path, &bytes));
+        if let Err(error) = result {
+            remove_files(&written);
+            return Err(error);
+        }
+        written.push(path);
+        progress((done + 1) as f32 / total as f32);
+    }
+    Ok((written, report))
+}
+
+fn encode_map(env: &EnvMap, format: Format, opts: &ExportOptions, report: &mut ExrReport) -> Result<Vec<u8>, String> {
+    match format {
+        Format::Exr => {
+            let (bytes, file_report) = encode_exr(env, opts.precision)?;
+            report.clipped = report.clipped.max(file_report.clipped);
+            Ok(bytes)
+        }
+        Format::Hdr => Ok(encode_hdr(env)),
+        Format::Png => encode_png(env, opts.png_ev),
+    }
+}
+
+/// Faces are EXR or PNG only; `.hdr` never reaches here.
+fn encode_face(face: &FaceImage, format: Format, opts: &ExportOptions, report: &mut ExrReport) -> Result<Vec<u8>, String> {
+    match format {
+        Format::Exr => {
+            let (bytes, file_report) = face_exr(face, opts.precision)?;
+            report.clipped = report.clipped.max(file_report.clipped);
+            Ok(bytes)
+        }
+        Format::Hdr | Format::Png => encode_face_png(face, opts.png_ev),
+    }
+}
+
+fn remove_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::image::read_exr;
+    use crate::hdri::image::{load_equirect, load_image, read_exr};
+    use crate::hdri::{Env, HdriParams, LightParams};
     use makepad_draw::makepad_platform::resource_resolver::DecodeBudget;
+    use std::cell::{Cell, RefCell};
 
     /// A deterministic test map. The left half is a flat stretch, so the .hdr writer emits runs,
     /// including runs longer than 127 on wide rows. The right half varies, and the rows span
@@ -400,5 +615,199 @@ mod tests {
         let decoded = decode_image_from_data(&encode_face_png(&face, 0.0).unwrap()).unwrap();
         assert_eq!((decoded.width, decoded.height), (2, 2));
         assert_eq!((decoded.data[3] >> 16) & 0xff, byte(crate::sky::display_rgb(vec([0.5; 3]), 1.0).x));
+    }
+
+    /// A fresh folder under the system temp dir, unique to this process and test.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("makepad_hdri_export_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(paths: &[PathBuf]) -> Vec<String> {
+        paths.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect()
+    }
+
+    fn face_texel(face: &FaceImage, x: usize, y: usize) -> [f32; 3] {
+        let i = (y * face.size + x) * 3;
+        [face.rgb[i], face.rgb[i + 1], face.rgb[i + 2]]
+    }
+
+    /// `fan_out` refuses the thread that owns the pool, so the bake runs on a scoped thread, the
+    /// way the app runs it inside a Heavy job (the helper apps/files' treemap.rs uses).
+    fn with_pool<R: Send>(f: impl FnOnce(&TaskPool) -> R + Send) -> R {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let pool = cx.task_pool();
+        std::thread::scope(|scope| scope.spawn(|| f(&pool)).join().unwrap())
+    }
+
+    #[test]
+    fn cube_face_centres_equal_the_samples_down_the_axes() {
+        // Paint the equirect with its own direction, so a sample shows where it looked.
+        let env = EnvMap::from_fn(32, |d| [d[0] * 0.5 + 0.5, d[1] * 0.5 + 0.5, d[2] * 0.5 + 0.5]);
+        // An odd size puts one texel exactly on each face centre.
+        let faces = cube_faces(&env, 9);
+        let axes = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, -0.0], // face -Y's centre is (u, -1, -v) = (0, -1, -0): at the pole the sign of the zero picks the column
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for (face, axis) in faces.iter().zip(axes) {
+            assert_eq!(face.size, 9);
+            assert_eq!(face.rgb.len(), 9 * 9 * 3);
+            // The centre texel is env.sample down the axis, the engine's own lookup: no roll.
+            let centre = face_texel(face, 4, 4);
+            let want = env.sample(axis);
+            for k in 0..3 {
+                assert!((centre[k] - want[k]).abs() < 1.0e-6, "{axis:?}: {centre:?} vs {want:?}");
+            }
+            // And it really looks down the axis. The pole rows sit half a texel off ±Y and the
+            // seam columns average two neighbours, hence the loose bound.
+            for k in 0..3 {
+                assert!((centre[k] - (axis[k] * 0.5 + 0.5)).abs() < 0.1, "{axis:?}: {centre:?}");
+            }
+        }
+        // The side faces keep +Y up: their top row looks higher than their bottom row.
+        for face in [0, 1, 4, 5] {
+            assert!(face_texel(&faces[face], 4, 0)[1] > face_texel(&faces[face], 4, 8)[1], "face {face}");
+        }
+        // Face +X's left edge looks toward +Z (DrawPbr: (1, -v, -u)).
+        assert!(face_texel(&faces[0], 0, 4)[2] > face_texel(&faces[0], 8, 4)[2]);
+        // A size of 0 gives 1×1 faces; an empty map gives black faces instead of a panic.
+        assert_eq!(cube_faces(&env, 0)[2].size, 1);
+        let empty = EnvMap { width: 0, height: 0, data: Vec::new() };
+        assert_eq!(cube_faces(&empty, 2)[0], FaceImage { size: 2, rgb: vec![0.0; 12] });
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_tmp() {
+        let dir = scratch_dir("atomic");
+        let path = dir.join("out.hdr");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert!(!dir.join("out.hdr.tmp").exists());
+        // A missing folder fails cleanly and leaves nothing behind.
+        assert!(write_atomic(&dir.join("missing").join("out.hdr"), b"x").is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_all_writes_every_selected_file() {
+        let dir = scratch_dir("all");
+        let env = test_map(16, 8);
+        let opts = ExportOptions {
+            exr: true,
+            hdr: true,
+            png: true,
+            cube_faces: true,
+            cube_png: false,
+            precision: ExrPrecision::Half,
+            png_ev: 0.0,
+        };
+        let steps = RefCell::new(Vec::new());
+        // The base's extension is ignored.
+        let (paths, report) = export_all(&dir.join("sky.exr"), &env, &opts, &|p: f32| steps.borrow_mut().push(p), &|| false).unwrap();
+        assert_eq!(
+            file_names(&paths),
+            ["sky.exr", "sky.hdr", "sky.png", "sky_px.exr", "sky_nx.exr", "sky_py.exr", "sky_ny.exr", "sky_pz.exr", "sky_nz.exr"]
+        );
+        assert!(paths.iter().all(|p| p.exists()));
+        assert_eq!(report.clipped, 0);
+        // The equirect files round-trip to the engine map; faces are W/4 = 4 texels square.
+        let exr = read_exr(&std::fs::read(&paths[0]).unwrap()).unwrap();
+        assert_eq!((exr.width, exr.height), (16, 8));
+        let face = read_exr(&std::fs::read(&paths[3]).unwrap()).unwrap();
+        assert_eq!((face.width, face.height), (4, 4));
+        let steps = steps.into_inner();
+        assert_eq!(steps.len(), 10);
+        assert_eq!(steps.first(), Some(&0.0));
+        assert_eq!(steps.last(), Some(&1.0));
+        // PNG faces instead of EXR ones.
+        let faces_png = ExportOptions { exr: false, cube_faces: true, cube_png: true, ..ExportOptions::default() };
+        let (paths, _) = export_all(&dir.join("faces"), &env, &faces_png, &|_| {}, &|| false).unwrap();
+        assert_eq!(file_names(&paths), ["faces_px.png", "faces_nx.png", "faces_py.png", "faces_ny.png", "faces_pz.png", "faces_nz.png"]);
+        // A half face clip is reported too.
+        let mut sun = env.clone();
+        sun.data[4 * 16 + 12] = [1.0e6, 1.0e6, 1.0e6, 1.0];
+        let clipped = ExportOptions { exr: true, cube_faces: true, precision: ExrPrecision::Half, ..ExportOptions::default() };
+        let (_, report) = export_all(&dir.join("sun"), &sun, &clipped, &|_| {}, &|| false).unwrap();
+        assert!(report.clipped >= 1);
+        // Nothing else was left in the folder: no .tmp files.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 15 + 7);
+        // Nothing selected, or a broken map, is an error.
+        let none = ExportOptions { exr: false, ..ExportOptions::default() };
+        assert!(export_all(&dir.join("none"), &env, &none, &|_| {}, &|| false).is_err());
+        let empty = EnvMap { width: 0, height: 0, data: Vec::new() };
+        assert!(export_all(&dir.join("empty"), &empty, &opts, &|_| {}, &|| false).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_all_cancel_removes_what_it_wrote() {
+        let dir = scratch_dir("cancel");
+        let env = test_map(16, 8);
+        let opts = ExportOptions { exr: true, hdr: true, png: true, ..ExportOptions::default() };
+        let calls = Cell::new(0);
+        // Two files go through, then the third poll cancels.
+        let cancel_third = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 2
+        };
+        let result = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &cancel_third);
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 3);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "partial files were left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn exported_files_load_back_as_the_engine_map() {
+        // The spec's file roll, on disk: what export_all writes, image::load_equirect (the path
+        // phase 2's load_env_map takes) reads back in the engine convention.
+        let dir = scratch_dir("reload");
+        let env = test_map(16, 8);
+        let opts = ExportOptions { exr: true, hdr: true, ..ExportOptions::default() };
+        let (paths, report) = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &|| false).unwrap();
+        assert_eq!(file_names(&paths), ["sky.exr", "sky.hdr"]);
+        assert_eq!(report.clipped, 0);
+        // A float EXR is lossless, and at a width divisible by 4 the roll is a column copy:
+        // the map comes back bit for bit.
+        assert_eq!(load_equirect(&paths[0]).unwrap(), env);
+        // The file itself holds the file convention, a quarter turn from the engine map.
+        assert_eq!(load_image(&paths[0]).unwrap(), roll_quarter(&env, true));
+        // Radiance keeps 8 bits under the brightest channel: within 1 % of it.
+        let hdr = load_equirect(&paths[1]).unwrap();
+        assert_eq!((hdr.width, hdr.height), (16, 8));
+        for (want, got) in env.data.iter().zip(&hdr.data) {
+            let max = want[0].max(want[1]).max(want[2]);
+            for k in 0..3 {
+                assert!((got[k] - want[k]).abs() <= 0.01 * max + 1.0e-6, "{got:?} vs {want:?}");
+            }
+            assert_eq!(got[3], 1.0);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bake_par_matches_the_serial_bake() {
+        let mut studio = HdriParams::default();
+        studio.mode = "studio".to_string();
+        studio.lights.push(LightParams::default());
+        for params in [HdriParams::default(), studio] {
+            let env = Env::new(&params);
+            let serial = env.bake(32);
+            let parallel = with_pool(|pool| env.bake_par(32, |rows, row| pool.fan_out(Lane::Heavy, rows, row)));
+            assert_eq!((serial.width, serial.height), (32, 16));
+            assert_eq!(parallel, serial, "mode {}", params.mode);
+            // Sanity: the bake is finite and not black.
+            assert!(serial.data.iter().all(|t| t.iter().all(|v| v.is_finite())));
+            assert!(crate::hdri::image::mean_luminance(&serial) > 0.0);
+        }
     }
 }
