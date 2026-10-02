@@ -387,7 +387,7 @@ mod tests {
         // Exact in f32: the quintic at the quarter points, and its symmetry.
         assert_eq!(
             [fade(0.0), fade(0.25), fade(0.5), fade(0.75), fade(1.0)],
-            [0.0, 0.103_515_625, 0.5, 0.896_484_375, 1.0]
+            [0.0, 0.103_515_625, 0.5, 0.896_484_4, 1.0]
         );
     }
 

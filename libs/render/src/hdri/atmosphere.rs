@@ -751,15 +751,17 @@ mod tests {
 
     #[test]
     fn sun_direction_matches_the_noaa_conversion() {
-        let mut sun = SunParams::default();
-        sun.mode = "time".to_string();
-        sun.year = 2024;
-        sun.month = 6;
-        sun.day = 21;
-        sun.hour = 13.7;
-        sun.tz_offset = 2.0;
-        sun.latitude = 52.37;
-        sun.longitude = 4.9;
+        let mut sun = SunParams {
+            mode: "time".to_string(),
+            year: 2024,
+            month: 6,
+            day: 21,
+            hour: 13.7,
+            tz_offset: 2.0,
+            latitude: 52.37,
+            longitude: 4.9,
+            ..Default::default()
+        };
         let got = sun_direction(&sun);
         // libs/render/tests/one_sun.rs's NOAA-to-engine conversion, reproduced.
         let (el, az) = noaa_solar_position(SkyDate { year: 2024, month: 6, day: 21 }, 13.7, 2.0, 52.37, 4.9);
@@ -868,6 +870,7 @@ mod tests {
     /// hdri::atmosphere::tests::building_the_atmosphere_is_fast -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn building_the_atmosphere_is_fast() {
         let start = std::time::Instant::now();
         let runs = 10;
@@ -887,8 +890,7 @@ mod env_tests {
     use crate::sky::luminance;
 
     fn sky_params(elevation_deg: f32, azimuth_deg: f32) -> HdriParams {
-        let mut p = HdriParams::default();
-        p.mode = "sky".to_string();
+        let mut p = HdriParams { mode: "sky".to_string(), ..Default::default() };
         p.sky.sun.mode = "manual".to_string();
         p.sky.sun.elevation_deg = elevation_deg;
         p.sky.sun.azimuth_deg = azimuth_deg;
@@ -934,8 +936,7 @@ mod env_tests {
         assert!(night.sun().is_none(), "no key once the sun has set");
         assert!(night.sun_dir().expect("sky mode").y < 0.0);
 
-        let mut studio = HdriParams::default();
-        studio.mode = "studio".to_string();
+        let studio = HdriParams { mode: "studio".to_string(), ..Default::default() };
         let studio = Env::new(&studio);
         assert!(studio.sun_dir().is_none());
         assert!(studio.sun().is_none(), "no lights, so no key in studio mode");

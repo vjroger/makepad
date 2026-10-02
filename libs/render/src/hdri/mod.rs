@@ -27,6 +27,11 @@
 //!
 //! Design: docs/superpowers/specs/2026-09-29-procedural-hdri-generator-design.md
 
+// `!(x > 0.0)` and its kin are written negated on purpose throughout this module and its
+// children: a NaN fails the comparison, so it takes the guard's branch. Clippy would have
+// them as `partial_cmp`, which says the same in more words.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 use makepad_draw::*;
 use makepad_render_material::ibl::{self, EnvMap};
 
@@ -155,7 +160,7 @@ impl Env {
                     }
                     // Only a texel on a disc pays for the second cloud lookup.
                     if discs.max_elem() > 0.0 {
-                        discs = discs * (1.0 - layer.cover_toward(d));
+                        discs *= 1.0 - layer.cover_toward(d);
                     }
                 }
                 c + discs
@@ -549,8 +554,7 @@ mod tests {
 
     #[test]
     fn env_keeps_a_clamped_copy_and_bakes_a_clean_map() {
-        let mut params = HdriParams::default();
-        params.intensity_ev = 50.0;
+        let mut params = HdriParams { intensity_ev: 50.0, ..Default::default() };
         params.sky.clouds.coverage = f32::NAN;
         let env = Env::new(&params);
         assert_eq!(env.params().intensity_ev, 10.0);
@@ -643,13 +647,13 @@ mod tests {
         assert_eq!(env.bake_par(32, four_threads), env.bake(32));
         assert_eq!(env.bake_par(0, four_threads), env.bake(0), "the same size rounding");
         // A serial runner (what the UI thread does) gives the same bits too.
-        assert_eq!(bake_par_with(16, &coded, |n, f| (0..n).for_each(|i| f(i))), bake_with(16, &coded));
+        assert_eq!(bake_par_with(16, &coded, |n, f| (0..n).for_each(f)), bake_with(16, &coded));
     }
 
     #[test]
     fn rows_a_cancelled_run_skipped_stay_black() {
-        let full = bake_par_with(16, &coded, |n, f| (0..n).for_each(|i| f(i)));
-        let half = bake_par_with(16, &coded, |n, f| (0..n).filter(|i| i % 2 == 0).for_each(|i| f(i)));
+        let full = bake_par_with(16, &coded, |n, f| (0..n).for_each(f));
+        let half = bake_par_with(16, &coded, |n, f| (0..n).filter(|i| i % 2 == 0).for_each(f));
         let w = full.width;
         for y in 0..full.height {
             let row = y * w..(y + 1) * w;
@@ -660,7 +664,7 @@ mod tests {
             }
         }
         // A runner that calls out of range is ignored, not a panic.
-        let wild = bake_par_with(8, &coded, |n, f| (0..n + 5).for_each(|i| f(i)));
+        let wild = bake_par_with(8, &coded, |n, f| (0..n + 5).for_each(f));
         assert_eq!(wild, bake_with(8, &coded));
     }
 

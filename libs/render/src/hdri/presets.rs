@@ -70,9 +70,11 @@ fn normalise(name: &str) -> String {
 /// A Sky-mode starting point with a manual sun. `month`, `day` and `hour` are set to a time that
 /// matches the sun at 45°N, so switching to Time mode lands somewhere sensible.
 fn sky(seed: u32, elevation_deg: f32, azimuth_deg: f32, month: u32, day: u32, hour: f32) -> HdriParams {
-    let mut p = HdriParams::default();
-    p.mode = "sky".to_string();
-    p.seed = seed;
+    let mut p = HdriParams {
+        mode: "sky".to_string(),
+        seed,
+        ..Default::default()
+    };
     let sun = &mut p.sky.sun;
     sun.mode = "manual".to_string();
     sun.elevation_deg = elevation_deg;
@@ -191,9 +193,11 @@ fn starry_night() -> HdriParams {
 
 /// A Studio-mode starting point: the backdrop gradient (linear radiance) and its light list.
 fn studio(seed: u32, top: [f32; 3], horizon: [f32; 3], floor: [f32; 3], horizon_softness: f32, lights: Vec<LightParams>) -> HdriParams {
-    let mut p = HdriParams::default();
-    p.mode = "studio".to_string();
-    p.seed = seed;
+    let mut p = HdriParams {
+        mode: "studio".to_string(),
+        seed,
+        ..Default::default()
+    };
     p.studio.top = top;
     p.studio.horizon = horizon;
     p.studio.floor = floor;

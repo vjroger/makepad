@@ -59,7 +59,7 @@ pub struct HdriParams {
 }
 
 /// The outdoor base layer.
-#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
 pub struct SkyParams {
     pub sun: SunParams,
     pub atmosphere: AtmosphereParams,
@@ -280,18 +280,6 @@ impl Default for HdriParams {
             sky: SkyParams::default(),
             studio: StudioParams::default(),
             lights: Vec::new(),
-        }
-    }
-}
-
-impl Default for SkyParams {
-    fn default() -> Self {
-        SkyParams {
-            sun: SunParams::default(),
-            atmosphere: AtmosphereParams::default(),
-            sun_disc: SunDiscParams::default(),
-            clouds: CloudParams::default(),
-            night: NightParams::default(),
         }
     }
 }
@@ -781,7 +769,7 @@ fn sorted_keys(map: &HashMap<String, JsonValue>) -> Vec<&String> {
 fn kind_name(value: &JsonValue) -> &'static str {
     match value {
         JsonValue::Object(_) => "an object",
-        JsonValue::Array(items) if items.first().map_or(false, |item| item.is_number()) => "a list of numbers",
+        JsonValue::Array(items) if items.first().is_some_and(|item| item.is_number()) => "a list of numbers",
         JsonValue::Array(_) => "a list",
         JsonValue::String(_) => "a string",
         JsonValue::Bool(_) => "true or false",
@@ -799,7 +787,7 @@ fn check_kind(existing: &JsonValue, value: &JsonValue, path: &str) -> Result<(),
         JsonValue::Array(items) => match value.as_array() {
             // A colour stays a list of numbers.
             Some(new_items) => {
-                !items.first().map_or(false, |item| item.is_number())
+                !items.first().is_some_and(|item| item.is_number())
                     || new_items.iter().all(|item| item.is_number())
             }
             None => false,
@@ -926,11 +914,13 @@ mod tests {
 
     /// A studio set-up with a key light and a coloured multiply light.
     fn studio_params() -> HdriParams {
-        let mut p = HdriParams::default();
-        p.mode = "studio".to_string();
-        p.intensity_ev = 1.5;
-        p.rotation_deg = -12.5;
-        p.seed = 42;
+        let mut p = HdriParams {
+            mode: "studio".to_string(),
+            intensity_ev: 1.5,
+            rotation_deg: -12.5,
+            seed: 42,
+            ..Default::default()
+        };
         p.studio.top = [0.3, 0.3, 0.35];
         p.lights.push(LightParams {
             name: "Key".to_string(),
@@ -952,9 +942,11 @@ mod tests {
 
     /// Every f32 field (colours included) set to `v`, with one light.
     fn all_numbers(v: f32) -> HdriParams {
-        let mut p = HdriParams::default();
-        p.intensity_ev = v;
-        p.rotation_deg = v;
+        let mut p = HdriParams {
+            intensity_ev: v,
+            rotation_deg: v,
+            ..Default::default()
+        };
         let sun = &mut p.sky.sun;
         sun.hour = v;
         sun.tz_offset = v;
@@ -1091,8 +1083,7 @@ mod tests {
 
     #[test]
     fn clamp_wraps_angles_instead_of_pinning_them() {
-        let mut p = HdriParams::default();
-        p.rotation_deg = 190.0;
+        let mut p = HdriParams { rotation_deg: 190.0, ..Default::default() };
         p.sky.sun.azimuth_deg = 370.0;
         p.sky.night.moon_azimuth_deg = -90.0;
         p.lights.push(LightParams { azimuth_deg: -30.0, roll_deg: 200.0, ..LightParams::default() });
@@ -1107,8 +1098,7 @@ mod tests {
             ["rotation_deg", "sky.sun.azimuth_deg", "sky.night.moon_azimuth_deg", "lights[0].azimuth_deg", "lights[0].roll_deg"]
         );
         // The ends of the documented ranges stay put.
-        let mut edge = HdriParams::default();
-        edge.rotation_deg = 180.0;
+        let mut edge = HdriParams { rotation_deg: 180.0, ..Default::default() };
         edge.lights.push(LightParams { roll_deg: -180.0, azimuth_deg: 0.0, ..LightParams::default() });
         assert!(edge.clamp().is_empty());
     }
@@ -1133,8 +1123,7 @@ mod tests {
 
     #[test]
     fn unknown_choices_fall_back_and_case_is_forgiven() {
-        let mut p = HdriParams::default();
-        p.mode = " Studio".to_string();
+        let mut p = HdriParams { mode: " Studio".to_string(), ..Default::default() };
         p.sky.sun.mode = "sundial".to_string();
         p.lights.push(LightParams { shape: "hexagon".to_string(), blend: "Multiply".to_string(), ..LightParams::default() });
         p.lights.push(LightParams { shape: "DISC".to_string(), ..LightParams::default() });

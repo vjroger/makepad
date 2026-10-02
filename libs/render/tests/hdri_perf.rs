@@ -11,6 +11,9 @@
 //! layers) plus the row-parallel bake into an EnvMap: what the app's preview
 //! job pays per change.
 
+// A native-only timing test: the std clock is what it measures with.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
 use makepad_render::hdri::{Env, HdriParams};
@@ -46,7 +49,7 @@ fn timed_bake(pool: &TaskPool, params: &HdriParams, width: usize) -> Timing {
     let env = Env::new(params);
     let env_ms = start.elapsed().as_secs_f64() * 1000.0;
     // The same `run` the app's job passes: fan_out on the Heavy lane.
-    let map = env.bake_par(width, |n, f| pool.fan_out(Lane::Heavy, n, |i| f(i)));
+    let map = env.bake_par(width, |n, f| pool.fan_out(Lane::Heavy, n, f));
     Timing { total_ms: start.elapsed().as_secs_f64() * 1000.0, env_ms, map }
 }
 

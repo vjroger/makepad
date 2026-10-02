@@ -12,6 +12,7 @@
 //! - a rounded rect;
 //! - a disc (an ellipse when width != height);
 //! - a ring, `abs(r - R) - w`;
+//!
 //! with a roll, a soft edge of any width, a hotspot and an Add or Multiply blend.
 //!
 //! All colours are linear Rec.709. A light's colour is its peak radiance: the
@@ -50,10 +51,10 @@ fn sane(x: f32, lo: f32, hi: f32) -> f32 {
 pub fn kelvin_to_rgb(kelvin: f32) -> Vec3f {
     let t = sane(kelvin, 1000.0, 20000.0);
     let t2 = t * t;
-    let u = (0.860_117_757 + 1.541_182_54e-4 * t + 1.286_412_12e-7 * t2)
-        / (1.0 + 8.424_202_35e-4 * t + 7.081_451_63e-7 * t2);
-    let v = (0.317_398_726 + 4.228_062_45e-5 * t + 4.204_816_91e-8 * t2)
-        / (1.0 - 2.897_418_16e-5 * t + 1.614_560_53e-7 * t2);
+    let u = (0.860_117_73 + 1.541_182_6e-4 * t + 1.286_412_2e-7 * t2)
+        / (1.0 + 8.424_202e-4 * t + 7.081_451_4e-7 * t2);
+    let v = (0.317_398_73 + 4.228_062_6e-5 * t + 4.204_816_8e-8 * t2)
+        / (1.0 - 2.897_418_2e-5 * t + 1.614_560_6e-7 * t2);
     let d = 2.0 * u - 8.0 * v + 4.0;
     let x = 3.0 * u / d;
     let y = 2.0 * v / d;
@@ -216,7 +217,7 @@ impl Studio {
             }
             match light.blend {
                 Blend::Add => c += light.color * m,
-                Blend::Multiply => c = c * (Vec3f::all(1.0) + (light.color - Vec3f::all(1.0)) * m),
+                Blend::Multiply => c *= Vec3f::all(1.0) + (light.color - Vec3f::all(1.0)) * m,
             }
         }
         c
@@ -457,34 +458,38 @@ mod tests {
     }
 
     fn black_studio() -> StudioParams {
-        let mut s = StudioParams::default();
-        s.top = [0.0; 3];
-        s.horizon = [0.0; 3];
-        s.floor = [0.0; 3];
-        s
+        StudioParams {
+            top: [0.0; 3],
+            horizon: [0.0; 3],
+            floor: [0.0; 3],
+            ..Default::default()
+        }
     }
 
     /// A hard-edged black flag: a Multiply light whose colour is zero.
     fn flag_at(azimuth_deg: f32, elevation_deg: f32, size_deg: f32) -> LightParams {
-        let mut flag = LightParams::default();
-        flag.name = "Flag".to_string();
-        flag.azimuth_deg = azimuth_deg;
-        flag.elevation_deg = elevation_deg;
-        flag.width_deg = size_deg;
-        flag.height_deg = size_deg;
-        flag.corner = 0.0;
-        flag.softness = 0.0;
-        flag.blend = "multiply".to_string();
-        flag.rgb = Some([0.0; 3]);
-        flag
+        LightParams {
+            name: "Flag".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg: size_deg,
+            height_deg: size_deg,
+            corner: 0.0,
+            softness: 0.0,
+            blend: "multiply".to_string(),
+            rgb: Some([0.0; 3]),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn backdrop_blends_top_horizon_and_floor() {
-        let mut s = StudioParams::default();
-        s.top = [1.0, 0.0, 0.0];
-        s.horizon = [0.0, 1.0, 0.0];
-        s.floor = [0.0, 0.0, 1.0];
+        let mut s = StudioParams {
+            top: [1.0, 0.0, 0.0],
+            horizon: [0.0, 1.0, 0.0],
+            floor: [0.0, 0.0, 1.0],
+            ..Default::default()
+        };
         s.horizon_softness = 0.2; // 18 degrees of elevation
         let studio = Studio::new(&s, &[]);
         assert_eq!(studio.backdrop(vec3f(0.0, 1.0, 0.0)), vec3f(1.0, 0.0, 0.0));
@@ -502,12 +507,14 @@ mod tests {
     #[test]
     fn a_light_is_its_colour_at_the_centre_and_nothing_outside() {
         for shape in ["rect", "disc", "ring"] {
-            let mut light = LightParams::default();
-            light.shape = shape.to_string();
-            light.azimuth_deg = 30.0;
-            light.elevation_deg = 10.0;
-            light.width_deg = 40.0;
-            light.height_deg = 20.0;
+            let light = LightParams {
+                shape: shape.to_string(),
+                azimuth_deg: 30.0,
+                elevation_deg: 10.0,
+                width_deg: 40.0,
+                height_deg: 20.0,
+                ..Default::default()
+            };
             let color = light_color(&light);
             let studio = Studio::new(&black_studio(), &[light]);
             let centre = dir_from_az_el(30.0, 10.0);
@@ -547,15 +554,19 @@ mod tests {
 
     #[test]
     fn disabled_lights_are_skipped_and_the_first_add_key_leads() {
-        let mut off = LightParams::default();
-        off.enabled = false;
-        off.key = true;
-        let mut key = LightParams::default();
-        key.key = true;
-        key.azimuth_deg = 200.0;
-        key.elevation_deg = 35.0;
-        key.width_deg = 30.0;
-        key.height_deg = 20.0;
+        let off = LightParams {
+            enabled: false,
+            key: true,
+            ..Default::default()
+        };
+        let key = LightParams {
+            key: true,
+            azimuth_deg: 200.0,
+            elevation_deg: 35.0,
+            width_deg: 30.0,
+            height_deg: 20.0,
+            ..Default::default()
+        };
         let studio = Studio::new(&black_studio(), &[off, key.clone()]);
         // The disabled light at (0, 30) draws nothing.
         assert_eq!(studio.apply_lights(dir_from_az_el(0.0, 30.0), Vec3f::default()), Vec3f::default());
@@ -574,24 +585,26 @@ mod tests {
     }
 
     fn studio_params(lights: Vec<LightParams>) -> HdriParams {
-        let mut p = HdriParams::default();
-        p.mode = "studio".to_string();
-        p.studio = black_studio();
-        p.lights = lights;
-        p
+        HdriParams {
+            mode: "studio".to_string(),
+            studio: black_studio(),
+            lights,
+            ..Default::default()
+        }
     }
 
     /// A round light with a hotspot, so it has a single brightest direction.
     fn round_light(azimuth_deg: f32, elevation_deg: f32) -> LightParams {
-        let mut light = LightParams::default();
-        light.shape = "disc".to_string();
-        light.azimuth_deg = azimuth_deg;
-        light.elevation_deg = elevation_deg;
-        light.width_deg = 20.0;
-        light.height_deg = 20.0;
-        light.softness = 0.5;
-        light.hotspot = 1.0;
-        light
+        LightParams {
+            shape: "disc".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg: 20.0,
+            height_deg: 20.0,
+            softness: 0.5,
+            hotspot: 1.0,
+            ..Default::default()
+        }
     }
 
     fn peak_pixel(map: &EnvMap) -> (usize, usize) {
@@ -638,11 +651,13 @@ mod tests {
         p.studio.top = [0.5; 3];
         p.studio.horizon = [0.5; 3];
         p.studio.floor = [0.5; 3];
-        let mut soft = LightParams::default();
-        soft.azimuth_deg = 90.0;
-        soft.elevation_deg = 0.0;
-        soft.width_deg = 60.0;
-        soft.height_deg = 40.0;
+        let soft = LightParams {
+            azimuth_deg: 90.0,
+            elevation_deg: 0.0,
+            width_deg: 60.0,
+            height_deg: 40.0,
+            ..Default::default()
+        };
         p.lights = vec![soft.clone()];
         let open = Env::new(&p).bake(w);
         p.lights = vec![soft, flag_at(90.0, 0.0, 12.0)];
@@ -654,8 +669,8 @@ mod tests {
                 let dir = uv_dir((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
                 let at = project(&frame, dir);
                 // The flag's half size is tan(6 degrees) = 0.105.
-                let inside = at.map_or(false, |q| q.x.abs() < 0.1 && q.y.abs() < 0.1);
-                let outside = at.map_or(true, |q| q.x.abs() > 0.12 || q.y.abs() > 0.12);
+                let inside = at.is_some_and(|q| q.x.abs() < 0.1 && q.y.abs() < 0.1);
+                let outside = at.is_none_or(|q| q.x.abs() > 0.12 || q.y.abs() > 0.12);
                 let i = y * w + x;
                 for k in 0..3 {
                     assert!(flagged.data[i][k] <= open.data[i][k], "pixel ({x}, {y}) got brighter");
@@ -688,12 +703,14 @@ mod tests {
 
     #[test]
     fn the_key_light_is_the_env_sun_in_world_space() {
-        let mut key = LightParams::default();
-        key.key = true;
-        key.azimuth_deg = 200.0;
-        key.elevation_deg = 35.0;
-        key.width_deg = 30.0;
-        key.height_deg = 20.0;
+        let key = LightParams {
+            key: true,
+            azimuth_deg: 200.0,
+            elevation_deg: 35.0,
+            width_deg: 30.0,
+            height_deg: 20.0,
+            ..Default::default()
+        };
         let mut p = studio_params(vec![LightParams::default(), key.clone()]);
         p.intensity_ev = 1.0;
         let sun = Env::new(&p).sun().expect("a key light");
@@ -716,9 +733,11 @@ mod tests {
         let mut p = HdriParams::default();
         let dir = dir_from_az_el(60.0, 20.0);
         let without = Env::new(&p).radiance(dir);
-        let mut light = LightParams::default();
-        light.azimuth_deg = 60.0;
-        light.elevation_deg = 20.0;
+        let light = LightParams {
+            azimuth_deg: 60.0,
+            elevation_deg: 20.0,
+            ..Default::default()
+        };
         p.lights = vec![light.clone()];
         let with = Env::new(&p).radiance(dir);
         let expected = light_color(&light);

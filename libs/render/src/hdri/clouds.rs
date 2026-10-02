@@ -472,9 +472,11 @@ mod env_tests {
     use crate::sky::luminance;
 
     fn cloudy(coverage: f32, seed: u32) -> HdriParams {
-        let mut p = HdriParams::default();
-        p.mode = "sky".to_string();
-        p.seed = seed;
+        let mut p = HdriParams {
+            mode: "sky".to_string(),
+            seed,
+            ..Default::default()
+        };
         p.sky.sun.mode = "manual".to_string();
         p.sky.sun.elevation_deg = 40.0;
         p.sky.sun.azimuth_deg = 180.0;

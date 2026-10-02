@@ -172,6 +172,7 @@ pub fn encode_hdr(env: &EnvMap) -> Vec<u8> {
 /// - everything between runs becomes literals (n, bytes…), with n ≤ 128;
 /// - a run of 2 or 3 just before a long run is also written as a run, since that is cheaper than
 ///   a literal.
+///
 /// `ibl::load_hdr` reads exactly this: count > 128 is a run of count − 128, else a literal.
 fn rle_component(data: &[u8], out: &mut Vec<u8>) {
     const MIN_RUN: usize = 4;
@@ -237,7 +238,7 @@ pub fn encode_png(env: &EnvMap, exposure_ev: f32) -> Result<Vec<u8>, String> {
 /// Tonemaps one cube face to an 8-bit PNG, `size` × `size`.
 pub fn encode_face_png(face: &FaceImage, exposure_ev: f32) -> Result<Vec<u8>, String> {
     check_face(face, "PNG")?;
-    let rgba = tonemap_rgba(face.rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]]), exposure_ev);
+    let rgba = tonemap_rgba(face.rgb.as_chunks::<3>().0.iter().copied(), exposure_ev);
     Cx::encode_rgba_as_png(face.size as u32, face.size as u32, &rgba)
 }
 
@@ -468,7 +469,7 @@ fn export_stem(base: &Path) -> PathBuf {
     let is_image_extension = base
         .extension()
         .and_then(|extension| extension.to_str())
-        .map_or(false, |extension| ["exr", "hdr", "png"].iter().any(|known| extension.eq_ignore_ascii_case(known)));
+        .is_some_and(|extension| ["exr", "hdr", "png"].iter().any(|known| extension.eq_ignore_ascii_case(known)));
     if is_image_extension {
         base.with_extension("")
     } else {
@@ -623,7 +624,7 @@ mod tests {
     #[test]
     fn exr_half_round_trips_and_counts_clipped_pixels() {
         let mut map = test_map(8, 4);
-        map.data[1 * 8 + 3] = [70000.0, 1.0, 0.5, 1.0];
+        map.data[8 + 3] = [70000.0, 1.0, 0.5, 1.0]; // (3, 1)
         map.data[2 * 8 + 5] = [1.0e6, 2.0e6, 65504.0, 1.0];
         let (bytes, report) = encode_exr(&map, ExrPrecision::Half).unwrap();
         assert_eq!(report.clipped, 2);
@@ -959,8 +960,7 @@ mod tests {
 
     #[test]
     fn bake_par_matches_the_serial_bake() {
-        let mut studio = HdriParams::default();
-        studio.mode = "studio".to_string();
+        let mut studio = HdriParams { mode: "studio".to_string(), ..Default::default() };
         studio.lights.push(LightParams::default());
         for params in [HdriParams::default(), studio] {
             let env = Env::new(&params);

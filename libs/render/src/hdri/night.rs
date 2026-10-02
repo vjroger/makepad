@@ -593,8 +593,7 @@ mod tests {
     #[test]
     fn star_hours_reads_solar_time_or_the_manual_sun() {
         // The default sun: time mode, longitude 0, time zone 0.
-        let mut sun = SunParams::default();
-        sun.hour = 22.0;
+        let mut sun = SunParams { hour: 22.0, ..Default::default() };
         assert!((star_hours(&sun) - 22.0).abs() < 1.0e-5);
         // 15 degrees east of the zone's meridian, the sun runs an hour ahead of the clock.
         sun.longitude = 15.0;
@@ -761,8 +760,7 @@ mod tests {
 
     #[test]
     fn a_512_preview_shows_stars_above_the_glow() {
-        let mut p = NightParams::default();
-        p.moon = false;
+        let p = NightParams { moon: false, ..Default::default() };
         let night = night_at(&p, -30.0);
         let (w, h) = (512usize, 256usize);
         let mut visible = 0;
@@ -835,8 +833,7 @@ mod tests {
 
     #[test]
     fn night_glow_brightens_toward_the_horizon() {
-        let mut p = NightParams::default();
-        p.moon = false;
+        let p = NightParams { moon: false, ..Default::default() };
         let night = night_at(&p, -30.0);
         let zenith = luminance(night.glow(vec3f(0.0, 1.0, 0.0)));
         let horizon = luminance(night.glow(dir_from_az_el(0.0, 1.0)));
