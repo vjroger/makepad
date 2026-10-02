@@ -555,6 +555,45 @@ script_mod! {
             let b = 2.0 - abs(h * 6.0 - 4.0)
             return clamp(vec3(r, g, b), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
         }
+        // The same hash and drift pattern as the step, so the blur follows
+        // exactly the push the step applied.
+        rand: fn(p: vec2) -> float {
+            let p3 = fract(vec3(p.x, p.y, p.x) * 0.1031)
+            let k = dot(p3, vec3(p3.y, p3.z, p3.x) + vec3(33.33, 33.33, 33.33))
+            let q = p3 + vec3(k, k, k)
+            return fract((q.x + q.y) * q.z)
+        }
+        drift_at: fn(c: vec2, cell: vec2) -> vec2 {
+            let a = self.drift
+            let rel = (c - vec2(0.5, 0.5)) * self.frame_size
+            let r = a / (0.5 * min(self.frame_size.x, self.frame_size.y))
+            let turn = vec2(0.0 - rel.y, rel.x) * r
+            let outward = rel * r
+            if self.drift_mode > 4.5 {
+                let ang = self.rand(cell + vec2(71.0, 3.0)) * 6.2831853
+                return vec2(cos(ang), sin(ang)) * a
+            }
+            if self.drift_mode > 3.5 {
+                return (turn + outward) * 0.7071
+            }
+            if self.drift_mode > 2.5 {
+                return outward
+            }
+            if self.drift_mode > 1.5 {
+                return turn
+            }
+            if self.drift_mode > 0.5 {
+                return vec2(0.0, a)
+            }
+            return vec2(a, 0.0)
+        }
+        // The moshed colour at uv, before the dry mix.
+        mosh_at: fn(uv: vec2) -> vec3 {
+            let r = self.tex_ref.sample_nearest(uv)
+            let at = vec2(r.x, r.y)
+            let remapped = mix(self.tex_key.sample(at).xyz, self.tex_picture.sample(at).xyz, self.live_on)
+            return mix(vec3(r.x, r.y, r.z), remapped, self.remap)
+        }
         pixel: fn() {
             let r = self.tex_ref.sample_nearest(self.pos)
             let pic = self.tex_picture.sample(self.pos).xyz
@@ -568,9 +607,28 @@ script_mod! {
                 let c = self.hue(atan2(v.y, v.x) / 6.2831853 + 0.5) * speed
                 return vec4(c.x, c.y, c.z, 1.0)
             }
-            let uv = vec2(r.x, r.y)
-            let remapped = mix(self.tex_key.sample(uv).xyz, self.tex_picture.sample(uv).xyz, self.live_on)
-            let mosh = mix(vec3(r.x, r.y, r.z), remapped, self.remap)
+            let mut mosh = self.mosh_at(self.pos)
+            // MOTION BLUR, on the output only (the reference stays sharp, so
+            // it never accumulates): a streak along this block's motion
+            // vector and/or its drift, `blur_*` steps long.
+            if self.blur_motion + self.blur_drift > 0.001 {
+                let bs = max(self.block, 1.0)
+                let cell = floor(self.pos * self.frame_size / bs)
+                let center = mix(self.pos, (cell + vec2(0.5, 0.5)) * bs * self.inv_frame, step(1.5, bs))
+                let f = self.tex_field.sample(center)
+                let raw = vec2(f.x, f.y) * self.field_on
+                let mm = self.motion_mat
+                let mv = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain
+                let streak = mv * self.blur_motion + self.drift_at(center, cell) * self.inv_frame * self.blur_drift
+                let mut sum = vec3(0.0, 0.0, 0.0)
+                let mut k = 0.0
+                loop {
+                    if k > 11.5 { break }
+                    sum = sum + self.mosh_at(self.pos - streak * (k / 11.0 - 0.5))
+                    k = k + 1.0
+                }
+                mosh = sum / 12.0
+            }
             let c = mix(pic, mosh, self.wet)
             return vec4(clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0), clamp(c.z, 0.0, 1.0), 1.0)
         }
@@ -731,6 +789,26 @@ pub struct DrawMoshOutput {
     /// 0 output, 1 vectors, 2 damage.
     #[live]
     pub view_mode: f32,
+    #[live]
+    pub inv_frame: Vec2f,
+    #[live]
+    pub block: f32,
+    #[live]
+    pub gain: f32,
+    #[live]
+    pub motion_mat: Vec4f,
+    #[live]
+    pub drift: f32,
+    #[live]
+    pub drift_mode: f32,
+    #[live]
+    pub field_on: f32,
+    /// Streak length along the motion vectors, in steps.
+    #[live]
+    pub blur_motion: f32,
+    /// Streak length along the drift, in steps.
+    #[live]
+    pub blur_drift: f32,
 }
 
 /// One offscreen stage: its pass and its draw list.
@@ -1462,6 +1540,20 @@ impl Datamosh {
                         0.0
                     };
                     d.wet = params.wet.clamp(0.0, 1.0);
+                    d.inv_frame = vec2(1.0 / w as f32, 1.0 / h as f32);
+                    d.block = params.block_size.max(1.0);
+                    d.gain = params.gain;
+                    d.motion_mat = vec4(
+                        params.matrix[0],
+                        params.matrix[1],
+                        params.matrix[2],
+                        params.matrix[3],
+                    );
+                    d.drift = params.drift;
+                    d.drift_mode = params.drift_mode.code();
+                    d.field_on = if self.field == FieldSource::None { 0.0 } else { 1.0 };
+                    d.blur_motion = params.blur_motion.max(0.0);
+                    d.blur_drift = params.blur_drift.max(0.0);
                     d.view_mode = match params.view {
                         MoshView::Output => 0.0,
                         MoshView::Vectors => 1.0,

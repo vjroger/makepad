@@ -135,6 +135,11 @@ pub struct MoshParams {
     pub drift: f32,
     /// The pattern of that push.
     pub drift_mode: DriftMode,
+    /// Motion blur along the motion vectors, in steps of motion (0 off).
+    /// Output only: the moshed picture itself stays sharp.
+    pub blur_motion: f32,
+    /// Motion blur along the drift, in steps of drift (0 off).
+    pub blur_drift: f32,
     /// Random per-block jitter added to the vectors each step.
     pub diffusion: f32,
     /// Sub-pixel precision of the decoder: 0 is continuous, 1 whole pixels
@@ -167,6 +172,8 @@ impl Default for MoshParams {
             matrix: [1.0, 0.0, 0.0, 1.0],
             drift: 0.0,
             drift_mode: DriftMode::Horizontal,
+            blur_motion: 0.0,
+            blur_drift: 0.0,
             diffusion: 0.0,
             pel: 4.0,
             refresh: 0.0,

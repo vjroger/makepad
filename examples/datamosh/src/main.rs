@@ -84,6 +84,8 @@ script_mod! {
                             labels: ["Drift: horizontal" "Drift: vertical" "Drift: rotate" "Drift: zoom" "Drift: spiral" "Drift: random"]
                             selected_item: 0
                         }
+                        blur_motion := Knob{text: "Motion blur: vectors (steps)" min: 0.0 max: 4.0 default: 0.0 precision: 2}
+                        blur_drift := Knob{text: "Motion blur: drift (steps)" min: 0.0 max: 8.0 default: 0.0 precision: 2}
                         drift := Knob{text: "Drift (px per step, 0 = off)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
                         refresh := Knob{text: "Intra refresh" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         heal := Knob{text: "Heal" min: 0.0 max: 0.25 default: 0.0 precision: 3}
@@ -173,6 +175,8 @@ impl MatchEvent for App {
         slided(cx, ids!(pel), &mut s.params.pel);
         slided(cx, ids!(diffusion), &mut s.params.diffusion);
         slided(cx, ids!(drift), &mut s.params.drift);
+        slided(cx, ids!(blur_motion), &mut s.params.blur_motion);
+        slided(cx, ids!(blur_drift), &mut s.params.blur_drift);
         if let Some(i) = ui.drop_down(cx, ids!(drift_mode)).selected(actions) {
             s.params.drift_mode = DriftMode::ALL[i.min(DriftMode::ALL.len() - 1)];
         }
