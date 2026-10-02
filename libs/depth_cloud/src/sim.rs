@@ -7,8 +7,8 @@
 //! With momentum every grid point carries an offset and a velocity: the
 //! effect is a force, a spring pulls each point home and damping bleeds the
 //! energy off, so points fly, overshoot and settle. Without momentum the
-//! effect sets the offset directly. Offsets go to the shader as an RGBA f32
-//! texture, one texel per point.
+//! effect sets the offset directly. Offsets go to the shader as an R32F
+//! texture, three texels (x, y, z) per point.
 //!
 //! Runs on the UI thread in `draw_3d` only while something moves: idle (no
 //! effector, everything settled) it costs nothing and binds no texture.
@@ -228,17 +228,20 @@ impl PointSim {
             None => Vec::new(),
         };
         data.clear();
-        data.reserve(count * 4);
+        data.reserve(count * 3);
         for o in &self.offset {
-            data.extend_from_slice(&[o[0], o[1], o[2], 0.0]);
+            data.extend_from_slice(o);
         }
         match &self.texture {
             Some(texture) => texture.put_back_vec_f32(cx, data, None),
             None => {
                 self.texture = Some(Texture::new_with_format(
                     cx,
-                    TextureFormat::VecRGBAf32 {
-                        width: params.cols,
+                    // R32F, exact-sized on every backend (D3D11 pads
+                    // RGBA f32 textures as glyph atlases, which breaks
+                    // normalized-UV sampling): x, y, z texels per point.
+                    TextureFormat::VecRf32 {
+                        width: params.cols * 3,
                         height: params.rows,
                         data: Some(data),
                         updated: TextureUpdated::Full,

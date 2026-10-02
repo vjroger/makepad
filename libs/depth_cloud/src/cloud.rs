@@ -60,7 +60,7 @@ script_mod! {
         tex_depth: texture_2d(float)
         // A renderer's colour target (color_mode 1).
         tex_color: texture_2d(float)
-        // Per-point physics offsets (one RGBA f32 texel per grid cell).
+        // Per-point physics offsets: R32F, 3 texels (x, y, z) per grid cell.
         tex_offset: texture_2d(float)
 
         // x,y: points per row / rows; z,w: their reciprocals.
@@ -175,8 +175,15 @@ script_mod! {
             let ndc = vec2(cell.x * 2.0 - 1.0, 1.0 - cell.y * 2.0)
             var wp = vec3(ndc.x * self.tan_half.x * z, ndc.y * self.tan_half.y * z, -z)
             if self.use_offset > 0.5 {
-                let offset = self.tex_offset.sample_nearest(cell, 0.0)
-                wp = wp + offset.xyz
+                // Three R32F texels per point: x, y, z.
+                let step = self.grid.z / 3.0
+                let ox = col * 3.0 * step + 0.5 * step
+                let offset = vec3(
+                    self.tex_offset.sample_nearest(vec2(ox, cell.y), 0.0).x,
+                    self.tex_offset.sample_nearest(vec2(ox + step, cell.y), 0.0).x,
+                    self.tex_offset.sample_nearest(vec2(ox + 2.0 * step, cell.y), 0.0).x
+                )
+                wp = wp + offset
             }
             let view = self.draw_pass.camera_view * vec4(wp.x, wp.y, wp.z, 1.0)
             // Camera-facing billboard covering exactly one cell at depth z.
