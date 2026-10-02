@@ -39,6 +39,13 @@ script_mod! {
                         spacing: 4
                         padding: Inset{left: 12 right: 12 top: 12 bottom: 12}
 
+                        H4{text: "Demo"}
+                        demo := DropDown{
+                            labels: ["Effect (continuous mosh)" "Transition (clean A, mosh, clean B)"]
+                            selected_item: 0
+                        }
+
+                        Hr{}
                         H4{text: "Sources"}
                         Label{text: "Picture (what gets moshed)"}
                         picture := DropDown{
@@ -90,6 +97,7 @@ script_mod! {
                         transition_secs := Knob{text: "Duration (s)" min: 0.5 max: 8.0 default: 3.0 precision: 1}
                         hold := Knob{text: "Hold (pure mosh part)" min: 0.0 max: 0.9 default: 0.4 precision: 2}
                         refresh_peak := Knob{text: "Refresh at the end" min: 0.02 max: 1.0 default: 0.3 precision: 2}
+                        fade_out := Knob{text: "Fade out (end of transition)" min: 0.0 max: 1.0 default: 0.25 precision: 2}
                         transition_residual := Knob{text: "Incoming residual" min: 0.0 max: 1.0 default: 1.0 precision: 2}
                     }
                 }
@@ -123,6 +131,9 @@ impl MatchEvent for App {
                 *into = v as f32;
             }
         };
+        if let Some(i) = ui.drop_down(cx, ids!(demo)).selected(actions) {
+            s.transition_mode = i == 1;
+        }
         if let Some(i) = ui.drop_down(cx, ids!(picture)).selected(actions) {
             s.picture = Source::ALL[i.min(Source::ALL.len() - 1)];
         }
@@ -166,9 +177,15 @@ impl MatchEvent for App {
         slided(cx, ids!(hold), &mut s.transition.hold);
         slided(cx, ids!(refresh_peak), &mut s.transition.refresh_peak);
         slided(cx, ids!(transition_residual), &mut s.transition.residual);
+        slided(cx, ids!(fade_out), &mut s.transition.fade_out);
 
         let iframe = ui.button(cx, ids!(iframe)).clicked(actions);
         let transition = ui.button(cx, ids!(transition)).clicked(actions);
+        // The transition button puts the demo in transition mode.
+        if transition && !s.transition_mode {
+            s.transition_mode = true;
+            ui.drop_down(cx, ids!(demo)).set_selected_item(cx, 1);
+        }
         self.stage(cx, |stage| {
             stage.set_settings(s);
             if iframe {

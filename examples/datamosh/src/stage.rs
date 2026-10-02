@@ -258,6 +258,9 @@ impl MotionChoice {
 /// Everything the control panel sets.
 #[derive(Clone, Copy, Debug)]
 pub struct StageSettings {
+    /// Transition mode: the picture stays clean and only the transition
+    /// moshes. Effect mode: the effect runs continuously.
+    pub transition_mode: bool,
     pub picture: Source,
     pub motion: MotionChoice,
     /// Off: a keyframe every frame, the clean picture.
@@ -276,6 +279,7 @@ pub struct StageSettings {
 impl Default for StageSettings {
     fn default() -> Self {
         Self {
+            transition_mode: false,
             picture: Source::Shapes,
             motion: MotionChoice::GridVectors,
             mosh_on: true,
@@ -489,6 +493,16 @@ impl MoshStage {
             }
             return;
         }
+        if settings.transition_mode {
+            // Waiting for the cut: the current clip clean, the motion
+            // history already following the clip that will come in.
+            let from = Self::source_tex(sources, settings.picture);
+            let to = Self::source_tex(sources, settings.picture.other());
+            self.mosh
+                .drive_transition(&from, &to, 0.0, &settings.transition, advanced);
+            return;
+        }
+        self.mosh.end_transition();
         let picture = Self::source_tex(sources, settings.picture);
         self.mosh.set_picture(Some(&picture));
         if !advanced {

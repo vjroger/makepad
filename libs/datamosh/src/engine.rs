@@ -1100,6 +1100,7 @@ impl Datamosh {
                 params.refresh = frame.refresh;
                 params.heal = frame.heal;
                 params.residual = frame.residual;
+                params.wet *= frame.wet;
             }
         }
         params

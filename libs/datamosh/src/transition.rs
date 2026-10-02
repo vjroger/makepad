@@ -16,6 +16,9 @@
 //!   picture — nothing heals;
 //! - the rest: intra refresh ramps up block by block toward B, and a last
 //!   soft heal clears what is left of A;
+//! - the final `fade_out` of the transition dissolves the output into the
+//!   clean incoming clip on every display frame (not only on source
+//!   frames), so it lands on B exactly, with nothing left to snap;
 //! - `progress >= 1` ([`TransitionPhase::After`]): B's keyframe, clean.
 //!
 //! This module is the plan only (pure, no GPU); [`crate::Datamosh::drive_transition`]
@@ -56,6 +59,9 @@ pub struct TransitionParams {
     /// the incoming clip's changes paint over the frozen picture exactly as
     /// its P-frames would.
     pub residual: f32,
+    /// Fraction at the end of the transition over which the output
+    /// dissolves into the clean incoming clip.
+    pub fade_out: f32,
     pub motion: TransitionMotion,
 }
 
@@ -65,6 +71,7 @@ impl Default for TransitionParams {
             hold: 0.4,
             refresh_peak: 0.3,
             residual: 1.0,
+            fade_out: 0.25,
             motion: TransitionMotion::Incoming,
         }
     }
@@ -91,23 +98,27 @@ pub struct TransitionFrame {
     pub heal: f32,
     /// Residual of the motion clip painted onto the reference.
     pub residual: f32,
+    /// Output mix: 1 shows the mosh, 0 the clean incoming clip. Applied
+    /// per display frame.
+    pub wet: f32,
 }
 
 impl TransitionParams {
     /// The plan at `progress` (0 = cut point, 1 = fully the incoming clip).
     /// NaN counts as not started.
     pub fn frame(&self, progress: f32) -> TransitionFrame {
-        let quiet = |phase| TransitionFrame {
+        let clean = |phase| TransitionFrame {
             phase,
             refresh: 0.0,
             heal: 0.0,
             residual: 0.0,
+            wet: 0.0,
         };
         if !(progress > 0.0) {
-            return quiet(TransitionPhase::Before);
+            return clean(TransitionPhase::Before);
         }
         if progress >= 1.0 {
-            return quiet(TransitionPhase::After);
+            return clean(TransitionPhase::After);
         }
         let hold = self.hold.clamp(0.0, 0.99);
         let healing = ((progress - hold) / (1.0 - hold)).clamp(0.0, 1.0);
@@ -118,6 +129,7 @@ impl TransitionParams {
             refresh: self.refresh_peak.clamp(0.0, 1.0) * healing * healing,
             heal: smoothstep(0.8, 1.0, healing) * 0.5,
             residual: self.residual,
+            wet: 1.0 - smoothstep(1.0 - self.fade_out.clamp(1e-4, 1.0), 1.0, progress),
         }
     }
 }
