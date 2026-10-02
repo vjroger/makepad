@@ -21,9 +21,10 @@
 //! any `XrSceneView` and call `open`, or hand it live GPU targets with
 //! [`DepthCloud::set_rendered_source`].
 //!
-//! Shaping, all in the vertex shader: a depth crop band, and a mouse
-//! effector ([`CloudEffect`]: attract, repel, swirl, ripple) acting on the
-//! points around the cursor's ray at the scene's middle depth.
+//! Shaping: a depth crop band (vertex shader), and mouse effects
+//! ([`CloudEffect`]: attract, repel, swirl, ripple) that push the points
+//! around the cursor; each point has momentum and springs back home with
+//! damping (`crate::sim`, offsets sampled by the vertex shader).
 //!
 //! "Edge cut" drops points whose depth neighbourhood spans more than that
 //! fraction of their own depth: the smeared "flying pixels" a depth model
@@ -31,6 +32,7 @@
 
 use crate::depth::DepthMap;
 use crate::pipeline::{FrameStats, Pipeline, PipelineSettings, SourceSpec};
+use crate::sim::{PointSim, RestDepth, SimParams};
 use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 script_mod! {
@@ -58,6 +60,8 @@ script_mod! {
         tex_depth: texture_2d(float)
         // A renderer's colour target (color_mode 1).
         tex_color: texture_2d(float)
+        // Per-point physics offsets (one RGBA f32 texel per grid cell).
+        tex_offset: texture_2d(float)
 
         // x,y: points per row / rows; z,w: their reciprocals.
         grid: uniform(vec4(256.0, 144.0, 0.00390625, 0.0069444))
@@ -80,11 +84,8 @@ script_mod! {
         // Keep points inside this band of the SOURCE's depth range
         // (0 = nearest, 1 = farthest), independent of the depth amount.
         crop: uniform(vec2(-1.0, 2.0))
-        // xyz: effector position (world), w: 1 = active.
-        effector: uniform(vec4(0.0, 0.0, 0.0, 0.0))
-        // x: mode (0 off, 1 attract, 2 repel, 3 swirl, 4 ripple),
-        // y: strength, z: radius, w: time.
-        effect: uniform(vec4(0.0, 0.5, 0.5, 0.0))
+        // 1 = add tex_offset (points pushed by a mouse effect).
+        use_offset: uniform(0.0)
 
         v_color: varying(vec3f)
 
@@ -173,28 +174,9 @@ script_mod! {
             // Unproject through the origin pinhole (camera looks down -z, +y up).
             let ndc = vec2(cell.x * 2.0 - 1.0, 1.0 - cell.y * 2.0)
             var wp = vec3(ndc.x * self.tan_half.x * z, ndc.y * self.tan_half.y * z, -z)
-            if self.effect.x > 0.5 && self.effector.w > 0.5 {
-                let d = wp - self.effector.xyz
-                let r = length(d)
-                let radius = max(self.effect.z, 0.0001)
-                let s = self.effect.y * exp(-(r * r) / (radius * radius))
-                if self.effect.x < 1.5 {
-                    // Attract: pulled toward the cursor.
-                    wp = wp - d * min(s, 1.0)
-                } else if self.effect.x < 2.5 {
-                    // Repel: pushed out of a sphere around it.
-                    wp = wp + d / max(r, 0.0001) * s * radius
-                } else if self.effect.x < 3.5 {
-                    // Swirl around the view axis through the cursor.
-                    let a = s * 3.0
-                    let ca = cos(a)
-                    let sa = sin(a)
-                    wp = self.effector.xyz + vec3(d.x * ca - d.y * sa, d.x * sa + d.y * ca, d.z)
-                } else {
-                    // Ripple: depth waves running out from the cursor.
-                    let wave = sin(r * 12.0 / radius - self.effect.w * 6.0)
-                    wp = wp + vec3(0.0, 0.0, wave * s * radius * 0.3)
-                }
+            if self.use_offset > 0.5 {
+                let offset = self.tex_offset.sample_nearest(cell, 0.0)
+                wp = wp + offset.xyz
             }
             let view = self.draw_pass.camera_view * vec4(wp.x, wp.y, wp.z, 1.0)
             // Camera-facing billboard covering exactly one cell at depth z.
@@ -276,10 +258,6 @@ impl CloudEffect {
             Self::Swirl => "Swirl",
             Self::Ripple => "Ripple",
         }
-    }
-
-    fn mode(self) -> f32 {
-        self as u32 as f32
     }
 }
 
@@ -375,6 +353,17 @@ pub struct DepthCloud {
     pub effect: CloudEffect,
     #[rust(0.6)]
     pub effect_strength: f32,
+    /// How hard points are pulled home (1/s^2) and how fast their motion
+    /// dies out (1/s): low damping wobbles, high damping creeps back.
+    #[rust(40.0)]
+    pub spring: f32,
+    #[rust(5.0)]
+    pub damping: f32,
+    #[rust]
+    sim: PointSim,
+    /// CPU copy of the current depth map, for the physics' rest positions.
+    #[rust]
+    depth_cpu: Option<(usize, usize, Vec<f32>)>,
     /// Effector reach in cloud units.
     #[rust(0.35)]
     pub effect_radius: f32,
@@ -555,6 +544,7 @@ impl DepthCloud {
             if map.width < 2 || map.height < 2 || map.values.len() != map.width * map.height {
                 return;
             }
+            self.depth_cpu = Some((map.width, map.height, map.values.clone()));
             if textures.depth_size != (map.width, map.height) {
                 textures.depth = Texture::new_with_format(
                     cx,
@@ -585,6 +575,7 @@ impl DepthCloud {
         cols: usize,
         rows: usize,
         aspect: f32,
+        offsets: Option<Texture>,
     ) {
         let dummy = self
             .dummy
@@ -603,10 +594,10 @@ impl DepthCloud {
         // Same vertical FOV as the scene camera: the front view is the picture.
         let tan_y = 1.0 / scene.projection.v[5].abs().max(0.00001);
         let far = self.depth_amount.max(1.0);
-        let effector = self.effector(scene);
         let crop = self.crop;
-        let effect = [self.effect.mode(), self.effect_strength, self.effect_radius];
         let dv = &mut self.draw_cloud.draw_vars;
+        dv.set_texture(4, offsets.as_ref().unwrap_or(&dummy));
+        dv.set_uniform(cx.cx, live_id!(use_offset), &[if offsets.is_some() { 1.0 } else { 0.0 }]);
         let ((dw, dh), rect, depth_mode, params, color_mode) = match (&self.rendered, &self.textures) {
             (Some(r), _) => {
                 dv.set_texture(0, &dummy);
@@ -651,19 +642,6 @@ impl DepthCloud {
         let lo = if crop.0 <= 0.0 { -1.0 } else { crop.0 };
         let hi = if crop.1 >= 1.0 { 2.0 } else { crop.1 };
         dv.set_uniform(cx.cx, live_id!(crop), &[lo, hi]);
-        dv.set_uniform(
-            cx.cx,
-            live_id!(effector),
-            &match effector {
-                Some(p) => [p.x, p.y, p.z, 1.0],
-                None => [0.0, 0.0, 0.0, 0.0],
-            },
-        );
-        dv.set_uniform(
-            cx.cx,
-            live_id!(effect),
-            &[effect[0], effect[1], effect[2], scene.time as f32],
-        );
     }
 }
 
@@ -702,9 +680,58 @@ impl DepthCloud {
         (t > 0.0).then(|| near + dir * t)
     }
 
+    /// Advance the point physics to this frame; the offset texture while
+    /// any point is away from home.
+    fn step_physics(
+        &mut self,
+        cx: &mut Cx,
+        scene: &SceneState3D,
+        cols: usize,
+        rows: usize,
+        aspect: f32,
+    ) -> Option<Texture> {
+        let effector = self.effector(scene);
+        if effector.is_none() && !self.sim.is_moving() {
+            return None;
+        }
+        let tan_y = 1.0 / scene.projection.v[5].abs().max(0.00001);
+        let plane = self
+            .effect_depth
+            .unwrap_or_else(|| Self::pivot_distance(self.depth_amount));
+        let rest = match (&self.rendered, &self.depth_cpu) {
+            (None, Some((width, height, values))) => RestDepth::Map {
+                width: *width,
+                height: *height,
+                values,
+                inv_far: 1.0 / self.depth_amount.max(1.0),
+            },
+            _ => RestDepth::Plane(plane),
+        };
+        let params = SimParams {
+            cols,
+            rows,
+            rest,
+            tan_half: (tan_y * aspect, tan_y),
+            effector,
+            effect: self.effect,
+            strength: self.effect_strength,
+            radius: self.effect_radius,
+            spring: self.spring,
+            damping: self.damping,
+            time: scene.time,
+        };
+        let offsets = self.sim.step(cx, &params);
+        if self.sim.is_moving() {
+            self.pump = cx.new_next_frame();
+        }
+        offsets
+    }
+
     fn pump_frames(&mut self, cx: &mut Cx) {
         let uid = self.uid;
-        let mut animate = self.effect == CloudEffect::Ripple && self.mouse.is_some();
+        // Physics keeps frames coming while points move or the mouse pushes.
+        let mut animate =
+            self.sim.is_moving() || (self.effect != CloudEffect::Off && self.mouse.is_some());
         if let Some(pipeline) = self.pipeline.as_mut() {
             pipeline.flush_settings();
             if let Some(status) = pipeline.take_status() {
@@ -724,8 +751,8 @@ impl DepthCloud {
         }
         if animate {
             // The cloud draws inside its XrSceneView's own pass: redraw the whole
-        // tree so that pass re-renders too.
-        cx.redraw_all();
+            // tree so that pass re-renders too.
+            cx.redraw_all();
             self.pump = cx.new_next_frame();
         }
     }
@@ -737,13 +764,11 @@ impl Widget for DepthCloud {
             Event::NextFrame(next) if next.set.contains(&self.pump) => self.pump_frames(cx),
             Event::MouseMove(e) => {
                 self.mouse = Some(e.abs);
-                if self.effect != CloudEffect::Off {
+                if self.effect != CloudEffect::Off || self.sim.is_moving() {
                     // The cloud draws inside its XrSceneView's own pass: redraw the whole
-        // tree so that pass re-renders too.
-        cx.redraw_all();
-                    if self.effect == CloudEffect::Ripple {
-                        self.pump = cx.new_next_frame();
-                    }
+                    // tree so that pass re-renders too.
+                    cx.redraw_all();
+                    self.pump = cx.new_next_frame();
                 }
             }
             _ => {}
@@ -764,7 +789,8 @@ impl Widget for DepthCloud {
         if self.instance_ids.len() != count {
             self.instance_ids = (0..count).map(|i| i as f32).collect();
         }
-        self.set_draw_uniforms(cx, &scene, cols, rows, aspect);
+        let offsets = self.step_physics(cx.cx, &scene, cols, rows, aspect);
+        self.set_draw_uniforms(cx, &scene, cols, rows, aspect, offsets);
         if let Some(mut instances) = cx.begin_many_instances(&self.draw_cloud.draw_vars) {
             instances.instances.extend_from_slice(&self.instance_ids);
             let area = cx.end_many_instances(instances);

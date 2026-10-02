@@ -136,6 +136,8 @@ script_mod! {
                                 effect := DropDown{labels: ["Off" "Attract" "Repel" "Swirl" "Ripple"]}
                                 effect_strength := PanelSlider{text: "Strength" min: 0.0 max: 2.0 default: 0.6}
                                 effect_radius := PanelSlider{text: "Radius" min: 0.05 max: 2.0 default: 0.35}
+                                spring := PanelSlider{text: "Spring (pull home)" min: 0.0 max: 200.0 default: 40.0}
+                                damping := PanelSlider{text: "Damping" min: 0.0 max: 30.0 default: 5.0}
                             }
                         }
                     }
@@ -529,6 +531,12 @@ impl MatchEvent for App {
         if let Some(v) = slided(cx, ids!(effect_radius)) {
             self.with_cloud(cx, |_, cloud| cloud.effect_radius = v as f32);
             redraw = true;
+        }
+        if let Some(v) = slided(cx, ids!(spring)) {
+            self.with_cloud(cx, |_, cloud| cloud.spring = v as f32);
+        }
+        if let Some(v) = slided(cx, ids!(damping)) {
+            self.with_cloud(cx, |_, cloud| cloud.damping = v as f32);
         }
 
         if self.ui.button(cx, ids!(front_view)).clicked(actions) {
