@@ -1,5 +1,7 @@
-//! The per-view scene pass: `draw_scene` / `draw_scene_full`.
+//! The per-view scene pass: `draw_scene` / `draw_scene_full` (and
+//! `draw_scene_aux` for a draw of the same frame that is not the scene's).
 
+use super::ibl::EnvScope;
 use super::*;
 
 /// HDR lane: the analytic dome's radiance relative to the lit world. The
@@ -53,7 +55,10 @@ impl Renderer {
         self.draw_scene_full(cx, draw_list, draws, world, scene_state, None, None)
     }
 
-    /// [`draw_scene`] plus an optional skinned-character batch.
+    /// [`draw_scene`] plus an optional skinned-character batch. This is the
+    /// scene's own draw: its world's environment is the one the renderer
+    /// prepares, binds and drops (see [`Self::draw_scene_aux`] for a draw of
+    /// the same frame that is not the scene's).
     pub fn draw_scene_full(
         &mut self,
         cx: &mut Cx3d,
@@ -64,10 +69,49 @@ impl Renderer {
         skinned: Option<SkinnedBatch>,
         models_draw: Option<&mut DrawSceneSkinned>,
     ) -> RenderStats {
+        self.draw_scene_scoped(cx, draw_list, draws, world, scene_state, skinned, models_draw, EnvScope::Scene)
+    }
+
+    /// A draw of the same frame that is not the scene's own: a map the scene
+    /// reads (a contact or id map drawn from another camera with its own
+    /// world), recorded between or before the scene's draws. It takes no part
+    /// in the environment: `world.environment` is not resolved, so what the
+    /// scene's draws prepared, are preparing or found unbuildable stays as it
+    /// is (a world with the default environment resolved here would drop the
+    /// scene's textures and cancel its preparation on every recording, and a
+    /// host that waits for `environment_pending` would never see it land),
+    /// and the draw shows whatever the scene's last draw bound. A world that
+    /// is the scene's own with some items taken out (a mirror, the frame
+    /// behind glass) names the scene's environment and goes through
+    /// [`Self::draw_scene_full`], so it sees what the scene sees.
+    pub fn draw_scene_aux(
+        &mut self,
+        cx: &mut Cx3d,
+        draw_list: &mut DrawList,
+        draws: &mut SceneDraws,
+        world: &World,
+        scene_state: SceneState3D,
+        models_draw: Option<&mut DrawSceneSkinned>,
+    ) -> RenderStats {
+        self.draw_scene_scoped(cx, draw_list, draws, world, scene_state, None, models_draw, EnvScope::Aux)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_scene_scoped(
+        &mut self,
+        cx: &mut Cx3d,
+        draw_list: &mut DrawList,
+        draws: &mut SceneDraws,
+        world: &World,
+        scene_state: SceneState3D,
+        skinned: Option<SkinnedBatch>,
+        models_draw: Option<&mut DrawSceneSkinned>,
+        scope: EnvScope,
+    ) -> RenderStats {
         // Image-based lighting for the materials that ask for it (before
         // the items choose their materials), then the world's generic items
         // ride the placed models for this frame.
-        self.resolve_ibl(cx.cx, &world.environment);
+        self.resolve_ibl_for(cx.cx, &world.environment, scope);
         self.push_item_instances(cx.cx, world);
         let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
         self.pop_item_instances();

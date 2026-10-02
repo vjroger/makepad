@@ -66,6 +66,19 @@ pub struct DrawEnvBackground {
     pub bg: Vec4f,
 }
 
+/// How a draw takes part in the renderer's environment (`draw_scene_full`,
+/// `draw_scene_aux`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EnvScope {
+    /// The scene's own draw: its world's environment is what the renderer
+    /// prepares, binds and drops.
+    Scene,
+    /// A draw of the same frame that is not the scene's (a contact or id
+    /// map): its world's environment is not looked at, so a world that
+    /// names none cannot drop what the scene's draws prepared.
+    Aux,
+}
+
 /// What a preparation is for: the source and the sun filled in its
 /// lighting copy. Intensity and rotation are not here: they are meta texels
 /// the shader reads, rewritten in place when they change.
@@ -313,6 +326,15 @@ impl Renderer {
     /// sun, an engine preset, an overcast bake).
     pub fn ibl_sun(&self) -> Option<EnvSun> {
         self.ibl.sh.and(self.ibl.filled_sun)
+    }
+
+    /// `resolve_ibl` for a draw of this scope: the scene's draw resolves its
+    /// world's environment, an aux draw leaves the environment as it is.
+    pub(super) fn resolve_ibl_for(&mut self, cx: &mut Cx, env: &Environment, scope: EnvScope) {
+        match scope {
+            EnvScope::Scene => self.resolve_ibl(cx, env),
+            EnvScope::Aux => {}
+        }
     }
 
     /// Prepare (in the background, on change) or drop the environment's
@@ -882,6 +904,71 @@ mod tests {
         renderer.register_environment(TextureRef(3), grey(16, 0.5));
         renderer.resolve_ibl(&mut closed, &env_of(IblSource::Hdri(TextureRef(3)), 1.0, 0.0));
         assert!(renderer.environment_ready() && !renderer.environment_pending() && renderer.items_ready(&closed));
+    }
+
+    /// A frame that records maps the scene reads (motion3d's contact and id
+    /// maps, each with a world of its own and so the default environment)
+    /// before the scene's own draw: those draws must not drop what the
+    /// scene's draw prepares. Resolved like the scene's, the first map of
+    /// every recording cancelled the job and cleared the textures, so
+    /// nothing was ever adopted and a locked-time host waited for ever.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn aux_draws_do_not_drop_the_scenes_environment() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.register_environment(TextureRef(1), grey(16, 0.25));
+        let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
+        let none = Environment::default();
+        // One recording: the two maps, then the scene.
+        let record = |renderer: &mut Renderer, cx: &mut Cx| {
+            renderer.resolve_ibl_for(cx, &none, EnvScope::Aux);
+            renderer.resolve_ibl_for(cx, &none, EnvScope::Aux);
+            renderer.resolve_ibl_for(cx, &env, EnvScope::Scene);
+        };
+        record(&mut renderer, &mut cx);
+        assert!(renderer.environment_pending() && renderer.ibl.job.is_some(), "the scene's draw submitted the job");
+        let start = std::time::Instant::now();
+        while renderer.environment_pending() {
+            assert!(start.elapsed().as_secs() < 60, "the environment never landed: the maps' draws discard it");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            record(&mut renderer, &mut cx);
+        }
+        assert_eq!(renderer.environment_preparations(), 1, "every recording named the same environment: one preparation");
+        assert!(renderer.environment_ready() && renderer.items_ready(&cx));
+
+        // Landed: a map's draw leaves it, and shows what is bound.
+        renderer.resolve_ibl_for(&mut cx, &none, EnvScope::Aux);
+        assert!(renderer.environment_ready() && renderer.ibl_texture().is_some() && renderer.ibl_sh9().is_some());
+        record(&mut renderer, &mut cx);
+        assert_eq!(renderer.environment_preparations(), 1);
+        assert!(!renderer.environment_pending() && renderer.items_ready(&cx));
+
+        // The scene's own draw with no environment still drops it.
+        renderer.resolve_ibl_for(&mut cx, &none, EnvScope::Scene);
+        assert!(renderer.ibl_texture().is_none() && !renderer.environment_ready() && !renderer.environment_pending());
+    }
+
+    /// A finished preparation that waits for the scene's next draw to adopt
+    /// it is not thrown away by a map's draw in between.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn an_aux_draw_keeps_a_finished_preparation_for_the_scenes_next_draw() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.register_environment(TextureRef(1), grey(16, 0.25));
+        let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
+        renderer.resolve_ibl_for(&mut cx, &env, EnvScope::Scene);
+        let start = std::time::Instant::now();
+        while !renderer.ibl.job.as_ref().is_some_and(|j| j.is_finished()) {
+            assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        renderer.resolve_ibl_for(&mut cx, &Environment::default(), EnvScope::Aux);
+        assert!(renderer.ibl.job.is_some() && renderer.environment_pending(), "the finished job is still there to adopt");
+        renderer.resolve_ibl_for(&mut cx, &env, EnvScope::Scene);
+        assert!(renderer.environment_ready() && !renderer.environment_pending());
+        assert_eq!(renderer.environment_preparations(), 1);
     }
 
     /// What a sibling test module (C6's fog, C5's rig) feeds in answers the
