@@ -1,7 +1,8 @@
 //! Export of baked maps: OpenEXR (ZIP, float or half), Radiance `.hdr` (new-style RLE),
 //! tonemapped PNG, the six cube faces, and `export_all`, which writes a set of them next to one
-//! base path. Every file goes through `write_atomic`. A failed or cancelled export removes what
-//! it wrote, so it never leaves half a set behind.
+//! base path. A single file goes through `write_atomic`; `export_all` stages every file of the set
+//! as `<name>.tmp` and renames them all at the end, so a failed or cancelled export leaves the
+//! folder as it was, previous exports included.
 //!
 //! Every equirect encoder takes the ENGINE convention (−Z at the centre, what `Env::bake`
 //! produces) and rolls it to the file convention (+X at the centre) itself through
@@ -286,22 +287,35 @@ fn face_dir(face: usize, u: f32, v: f32) -> Vec3f {
 /// Writes `bytes` to `<path>.tmp`, flushes it to disk, then renames it over `path`. A reader never
 /// sees a half-written file, and a failure leaves no temp file behind.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = stage(path, bytes)?;
+    replace_with_staged(&tmp, path)
+}
+
+/// The first half of `write_atomic`: writes `bytes` to `<path>.tmp` and flushes them to disk, and
+/// returns that path. `path` itself is not touched. A failure removes the temp file.
+fn stage(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     let tmp = tmp_path(path);
     let result = (|| -> std::io::Result<()> {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        // Flush to disk before the rename, so a crash cannot leave a renamed but empty file.
-        file.sync_all()?;
-        // Windows will not rename a file that is still open.
-        drop(file);
-        std::fs::rename(&tmp, path)
+        // Flush to disk before any rename, so a crash cannot leave a renamed but empty file. The
+        // file closes when it drops here: Windows will not rename one that is still open.
+        file.sync_all()
     })();
     if let Err(error) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{}: {error}", path.display()));
     }
-    Ok(())
+    Ok(tmp)
+}
+
+/// The second half of `write_atomic`: renames the staged `tmp` over `path`. A failure removes `tmp`.
+fn replace_with_staged(tmp: &Path, path: &Path) -> Result<(), String> {
+    std::fs::rename(tmp, path).map_err(|error| {
+        let _ = std::fs::remove_file(tmp);
+        format!("{}: {error}", path.display())
+    })
 }
 
 /// `<path>.tmp`: the whole file name plus `.tmp`, so `sky.exr` becomes `sky.exr.tmp`.
@@ -352,10 +366,16 @@ enum Format {
 /// - then, with `cube_faces`, `<stem>_px.exr` … `<stem>_nz.exr` (or `.png` with `cube_png`),
 ///   each face W/4 texels square, in `FACE_NAMES` order.
 ///
-/// `progress` gets 0 first, then the finished fraction after every file. `cancelled` is polled
-/// before each file. On cancel or any error, the files this call already wrote are removed, so
-/// the folder ends up with the whole set or nothing new. A file that existed before under the
-/// same name and was already replaced is not brought back.
+/// Every file is first staged as `<name>.tmp`; only when all of them are written do they replace
+/// the files of the same names, in a final loop of renames. So a cancel or an error until then
+/// removes just the staged files and leaves the folder as it was, an earlier export over the same
+/// names included. A rename that fails inside the final loop (a destination another program holds
+/// open, a folder in its place) stops it: the files renamed so far are whole files and stay, the
+/// staged ones still to go are removed, and the error names the file that failed.
+///
+/// `progress` gets 0 first, then the finished fraction after every file; 1 comes once the files
+/// are in place. `cancelled` is polled before each file, and once more after the last, before the
+/// final renames: a cancel is honoured until then, and the error is "export cancelled".
 ///
 /// Returns the written paths in that order, and the EXR report: the worst clip count among the
 /// EXR files, faces included.
@@ -394,14 +414,15 @@ pub fn export_all(
         return Err("export: no format selected".to_string());
     }
     let total = jobs.len();
-    let mut written: Vec<PathBuf> = Vec::new();
+    // (staged `<path>.tmp`, final path), in the order the files were staged.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut report = ExrReport::default();
     // Faces are computed once, when the first face file is due.
     let mut faces: Option<[FaceImage; 6]> = None;
     progress(0.0);
     for (done, (path, format, face)) in jobs.into_iter().enumerate() {
         if cancelled() {
-            remove_files(&written);
+            remove_staged(&staged);
             return Err("export cancelled".to_string());
         }
         let encoded = match face {
@@ -411,15 +432,32 @@ pub fn export_all(
                 encode_face(&faces[index], format, opts, &mut report)
             }
         };
-        let result = encoded.and_then(|bytes| write_atomic(&path, &bytes));
-        if let Err(error) = result {
-            remove_files(&written);
+        match encoded.and_then(|bytes| stage(&path, &bytes)) {
+            Ok(tmp) => staged.push((tmp, path)),
+            Err(error) => {
+                remove_staged(&staged);
+                return Err(error);
+            }
+        }
+        // The last file's fraction is 1, which waits for the files to be in place.
+        if done + 1 < total {
+            progress((done + 1) as f32 / total as f32);
+        }
+    }
+    // The last chance to cancel: past here the staged files replace the old ones.
+    if cancelled() {
+        remove_staged(&staged);
+        return Err("export cancelled".to_string());
+    }
+    for (index, (tmp, path)) in staged.iter().enumerate() {
+        if let Err(error) = replace_with_staged(tmp, path) {
+            // The files before this one are in place and whole; only what is still staged goes.
+            remove_staged(&staged[index + 1..]);
             return Err(error);
         }
-        written.push(path);
-        progress((done + 1) as f32 / total as f32);
     }
-    Ok((written, report))
+    progress(1.0);
+    Ok((staged.into_iter().map(|(_, path)| path).collect(), report))
 }
 
 fn encode_map(env: &EnvMap, format: Format, opts: &ExportOptions, report: &mut ExrReport) -> Result<Vec<u8>, String> {
@@ -446,9 +484,10 @@ fn encode_face(face: &FaceImage, format: Format, opts: &ExportOptions, report: &
     }
 }
 
-fn remove_files(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = std::fs::remove_file(path);
+/// Removes the staged files (never the files they were to replace).
+fn remove_staged(staged: &[(PathBuf, PathBuf)]) {
+    for (tmp, _) in staged {
+        let _ = std::fs::remove_file(tmp);
     }
 }
 
@@ -763,6 +802,84 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(calls.get(), 3);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "partial files were left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The names in a folder, sorted.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn export_all_cancel_keeps_the_files_it_would_have_replaced() {
+        let dir = scratch_dir("cancel_keeps");
+        let env = test_map(16, 8);
+        let old = b"the previous export".to_vec();
+        std::fs::write(dir.join("sky.exr"), &old).unwrap();
+        let opts = ExportOptions { exr: true, hdr: true, png: true, ..ExportOptions::default() };
+        // sky.exr is encoded and staged, then the second poll cancels.
+        let calls = Cell::new(0);
+        let cancel_second = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        };
+        let error = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &cancel_second).unwrap_err();
+        assert_eq!(error, "export cancelled");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(std::fs::read(dir.join("sky.exr")).unwrap(), old, "the previous export was destroyed");
+        assert_eq!(listing(&dir), ["sky.exr"], "staged files or other formats were left behind");
+        // A cancel that arrives while the last file is encoded counts too: the
+        // poll after it is the last chance, before the files replace the old ones.
+        let calls = Cell::new(0);
+        let cancel_after_the_last_file = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 3
+        };
+        let error = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &cancel_after_the_last_file).unwrap_err();
+        assert_eq!(error, "export cancelled");
+        assert_eq!(calls.get(), 4);
+        assert_eq!(std::fs::read(dir.join("sky.exr")).unwrap(), old, "the previous export was destroyed");
+        assert_eq!(listing(&dir), ["sky.exr"]);
+        // Left alone, the same export does replace the old file, and leaves no staged ones.
+        let (paths, _) = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &|| false).unwrap();
+        assert_eq!(file_names(&paths), ["sky.exr", "sky.hdr", "sky.png"]);
+        assert_eq!(listing(&dir), ["sky.exr", "sky.hdr", "sky.png"]);
+        assert_eq!(load_equirect(&dir.join("sky.exr")).unwrap(), env);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_all_error_keeps_the_files_it_would_have_replaced() {
+        let dir = scratch_dir("error_keeps");
+        let env = test_map(16, 8);
+        let old = b"the previous export".to_vec();
+        std::fs::write(dir.join("sky.exr"), &old).unwrap();
+        // A folder where the second file's staging file belongs: that write fails.
+        std::fs::create_dir(dir.join("sky.hdr.tmp")).unwrap();
+        let opts = ExportOptions { exr: true, hdr: true, png: true, ..ExportOptions::default() };
+        let error = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &|| false).unwrap_err();
+        assert!(error.contains("sky.hdr"), "{error}");
+        assert_eq!(std::fs::read(dir.join("sky.exr")).unwrap(), old, "the previous export was destroyed");
+        assert_eq!(listing(&dir), ["sky.exr", "sky.hdr.tmp"], "staged files were left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_all_failing_to_replace_a_file_removes_only_the_staged_ones() {
+        let dir = scratch_dir("commit_fails");
+        let env = test_map(16, 8);
+        // sky.hdr is a folder that is not empty, so nothing can be renamed over it.
+        std::fs::create_dir(dir.join("sky.hdr")).unwrap();
+        std::fs::write(dir.join("sky.hdr").join("keep"), b"x").unwrap();
+        let opts = ExportOptions { exr: true, hdr: true, png: true, ..ExportOptions::default() };
+        let error = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &|| false).unwrap_err();
+        assert!(error.contains("sky.hdr"), "{error}");
+        // sky.exr was renamed before the failure and is a whole file; the staged hdr and png are gone.
+        assert_eq!(listing(&dir), ["sky.exr", "sky.hdr"]);
+        assert_eq!(load_equirect(&dir.join("sky.exr")).unwrap(), env);
+        assert_eq!(std::fs::read(dir.join("sky.hdr").join("keep")).unwrap(), b"x");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
