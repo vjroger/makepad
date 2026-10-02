@@ -155,6 +155,11 @@ pub fn project(frame: &LightFrame, dir: Vec3f) -> Option<Vec2f> {
 const MIN_EDGE: f32 = 1.0e-4;
 /// With hotspot 1 the edge of the shape is e^-4 (about 2%) of its centre.
 const HOTSPOT_FALLOFF: f32 = 4.0;
+/// Grid points per axis of the key light's integral over its reach box
+/// ([`key_emission`]). A grid four times finer moves the built-in keys by under
+/// 0.01 % and the worst case in the tests, a hard ring a twentieth of its radius thick,
+/// by 0.09 %.
+const KEY_GRID: usize = 256;
 
 /// The backdrop gradient and the enabled lights, prepared once per map.
 #[derive(Clone, Debug)]
@@ -171,21 +176,31 @@ pub struct Studio {
 impl Studio {
     /// `lights` are taken in list order; disabled ones are dropped here. The key is the
     /// first enabled Add light marked `key`. A flag (Multiply) never leads the lighting.
+    ///
+    /// The key's cone covers the larger of width and height, and its radiance is the
+    /// light's emission spread over that cone ([`EnvSun`]'s one meaning), integrated
+    /// here once per map by [`key_emission`].
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
-        let key = lights
-            .iter()
-            .find(|l| l.enabled && l.key && l.blend() == Blend::Add)
-            .map(|l| {
-                let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
-                EnvSun { dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg), radiance: light_color(l), cos_radius: radius.cos() }
-            });
+        let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
+        let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l)).collect();
+        let key = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).map(|i| {
+            let l = enabled[i];
+            let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
+            // 2 pi (1 - cos r), written without the cancellation.
+            let cone = 4.0 * std::f32::consts::PI * (0.5 * radius).sin().powi(2);
+            EnvSun {
+                dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg),
+                radiance: key_emission(&prepared[i..], KEY_GRID) / cone,
+                cos_radius: radius.cos(),
+            }
+        });
         Studio {
             top: rgb(studio.top),
             horizon: rgb(studio.horizon),
             floor: rgb(studio.floor),
             soft_deg: sane(studio.horizon_softness, 0.01, 1.0) * 90.0,
-            lights: lights.iter().filter(|l| l.enabled).map(PreparedLight::new).collect(),
+            lights: prepared,
             key,
         }
     }
@@ -223,11 +238,66 @@ impl Studio {
         c
     }
 
-    /// The key light in the map's own frame (unrotated, unscaled). Its radiance is the
-    /// light's peak colour, and its cone covers the larger of width and height.
+    /// The key light in the map's own frame (unrotated, unscaled). Its cone covers the
+    /// larger of width and height, and its radiance is the light's whole emission over
+    /// that cone, not its peak colour: a thin strip or a ring that fills a tenth of its
+    /// cone hands over about a tenth of its colour.
     pub fn key(&self) -> Option<EnvSun> {
         self.key
     }
+}
+
+/// The key light's whole emission, ∫ L dΩ, exactly as `apply_lights` paints it.
+/// - `lights[0]` is the key: its shape, corner, ring, soft edge, hotspot and roll all
+///   come in through its own `mask`.
+/// - Every Multiply light after it scales it as it does in the map. An Add light after
+///   it is a light of its own, and a light before it touches only what came before.
+///
+/// A midpoint grid of n x n points over the key's reach box in its own tangent plane,
+/// where dΩ = dx dy / (1 + x² + y²)^(3/2). Outside that box the mask is exactly zero,
+/// so nothing is missed.
+fn key_emission(lights: &[PreparedLight], n: usize) -> Vec3f {
+    let Some((key, after)) = lights.split_first() else {
+        return Vec3f::default();
+    };
+    let flags: Vec<&PreparedLight> = after.iter().filter(|l| l.blend == Blend::Multiply).collect();
+    let n = n.max(1);
+    let cell = vec2f(2.0 * key.reach.x / n as f32, 2.0 * key.reach.y / n as f32);
+    let mut sum = [0.0f64; 3];
+    for j in 0..n {
+        let y = -key.reach.y + (j as f32 + 0.5) * cell.y;
+        let mut row = Vec3f::default();
+        for i in 0..n {
+            let x = -key.reach.x + (i as f32 + 0.5) * cell.x;
+            // `project`'s limit: past a dot of 0.05 with the centre nothing is drawn,
+            // and the dot here is 1 / sqrt(r2).
+            let r2 = 1.0 + x * x + y * y;
+            if !(r2 <= 400.0) {
+                continue;
+            }
+            let m = key.mask(vec2f(x, y));
+            if !(m > 0.0) {
+                continue;
+            }
+            let mut w = Vec3f::all(m / (r2 * r2.sqrt()));
+            if !flags.is_empty() {
+                let dir = (key.frame.center + key.frame.right * x + key.frame.up * y).normalize();
+                for flag in &flags {
+                    let Some(q) = project(&flag.frame, dir) else { continue };
+                    let f = flag.mask(q);
+                    if f > 0.0 {
+                        w *= Vec3f::all(1.0) + (flag.color - Vec3f::all(1.0)) * f;
+                    }
+                }
+            }
+            row += w;
+        }
+        sum[0] += row.x as f64;
+        sum[1] += row.y as f64;
+        sum[2] += row.z as f64;
+    }
+    let area = (cell.x * cell.y) as f64;
+    key.color * vec3f((sum[0] * area) as f32, (sum[1] * area) as f32, (sum[2] * area) as f32)
 }
 
 /// One enabled light, reduced to what the per-pixel evaluation needs.
@@ -572,7 +642,10 @@ mod tests {
         assert_eq!(studio.apply_lights(dir_from_az_el(0.0, 30.0), Vec3f::default()), Vec3f::default());
         let sun = studio.key().expect("the enabled key light");
         assert!((sun.dir - dir_from_az_el(200.0, 35.0)).length() < 1.0e-6);
-        assert_eq!(sun.radiance, light_color(&key));
+        // Its colour, times the share of its 15 degree cone the 30 x 20 rect fills.
+        let fill = sun.radiance.y / light_color(&key).y;
+        assert!((0.8..0.86).contains(&fill), "fill {fill}");
+        assert!((sun.radiance - light_color(&key) * fill).length() < 1.0e-5 * sun.radiance.length());
         assert!((sun.cos_radius - 15f32.to_radians().cos()).abs() < 1.0e-6);
         let mut flag_key = flag_at(90.0, 0.0, 10.0);
         flag_key.key = true;
@@ -715,7 +788,7 @@ mod tests {
         p.intensity_ev = 1.0;
         let sun = Env::new(&p).sun().expect("a key light");
         assert!((sun.dir - dir_from_az_el(200.0, 35.0)).length() < 1.0e-5);
-        let expected = light_color(&key) * 2.0;
+        let expected = Studio::new(&p.studio, &p.lights).key().expect("a key light").radiance * 2.0;
         assert!((sun.radiance - expected).length() < 1.0e-5 * luminance(expected));
         assert!((sun.cos_radius - 15f32.to_radians().cos()).abs() < 1.0e-6);
         // The map's yaw turns the key with it, counter-clockwise seen from above
@@ -725,6 +798,179 @@ mod tests {
         assert!((turned.dir - dir_from_az_el(170.0, 35.0)).length() < 1.0e-5);
         p.lights[1].enabled = false;
         assert!(Env::new(&p).sun().is_none(), "a studio without a key has no sun");
+    }
+
+    /// `params` with the backdrop black and every Add light but the key taken out:
+    /// what is left is the key as `apply_lights` paints it, behind the flags.
+    fn the_key_alone(params: &HdriParams) -> HdriParams {
+        let key = params.lights.iter().position(|l| l.enabled && l.key && l.blend() == Blend::Add).expect("a key light");
+        HdriParams {
+            studio: black_studio(),
+            lights: params.lights.iter().enumerate().filter(|(i, l)| *i == key || l.blend() == Blend::Multiply).map(|(_, l)| l.clone()).collect(),
+            ..params.clone()
+        }
+    }
+
+    /// Runs f(0..n) on every core, for the fine bakes below.
+    fn on_all_cores(n: usize, f: &(dyn Fn(usize) + Sync)) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let next = AtomicUsize::new(0);
+        let cores = std::thread::available_parallelism().map_or(4, |c| c.get()).min(16);
+        std::thread::scope(|scope| {
+            for _ in 0..cores {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    f(i);
+                });
+            }
+        });
+    }
+
+    /// A baked map's ∫ L dΩ: each texel times the exact solid angle of its cell.
+    fn map_emission(map: &EnvMap) -> Vec3f {
+        use std::f64::consts::{PI, TAU};
+        let (w, h) = (map.width, map.height);
+        let mut sum = [0.0f64; 3];
+        for y in 0..h {
+            let (top, bottom) = (PI * y as f64 / h as f64, PI * (y + 1) as f64 / h as f64);
+            let cell = TAU / w as f64 * (top.cos() - bottom.cos());
+            for t in &map.data[y * w..(y + 1) * w] {
+                for k in 0..3 {
+                    sum[k] += t[k] as f64 * cell;
+                }
+            }
+        }
+        vec3f(sum[0] as f32, sum[1] as f32, sum[2] as f32)
+    }
+
+    /// Keys that exercise every term the key's integral must honour, each with
+    /// the light list it sits in.
+    fn awkward_keys() -> Vec<(&'static str, Vec<LightParams>)> {
+        let ring = LightParams {
+            key: true,
+            shape: "ring".to_string(),
+            azimuth_deg: 70.0,
+            elevation_deg: 20.0,
+            width_deg: 36.0,
+            height_deg: 18.0,
+            roll_deg: 35.0,
+            inner: 0.8,
+            softness: 0.0,
+            ..Default::default()
+        };
+        let strip = LightParams {
+            key: true,
+            azimuth_deg: 250.0,
+            elevation_deg: 10.0,
+            width_deg: 8.0,
+            height_deg: 60.0,
+            roll_deg: 60.0,
+            corner: 0.5,
+            softness: 0.4,
+            hotspot: 0.6,
+            ..Default::default()
+        };
+        // A coloured Multiply gel: it keeps red and cuts green and blue.
+        let gel = LightParams {
+            name: "Gel".to_string(),
+            azimuth_deg: 262.0,
+            elevation_deg: 4.0,
+            width_deg: 14.0,
+            height_deg: 14.0,
+            softness: 0.5,
+            blend: "multiply".to_string(),
+            rgb: Some([1.0, 0.5, 0.25]),
+            ..Default::default()
+        };
+        // An Add light over the strip, after it: it is not the key's light.
+        let over = LightParams { azimuth_deg: 250.0, elevation_deg: 10.0, ..Default::default() };
+        vec![
+            ("a hard elliptical ring, rolled", vec![ring]),
+            (
+                "a rolled strip under a flag and a gel, with a flag before it and a light over it",
+                vec![flag_at(250.0, 10.0, 30.0), strip, flag_at(250.0, 10.0, 8.0), gel, over],
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_key_carries_the_lights_emission_over_its_cone() {
+        // radiance x 2 pi (1 - cos_radius) is the light's whole ∫ L dΩ as the map
+        // draws it: its shape, edge, hotspot and roll, and the flags after it.
+        let mut cases: Vec<(String, HdriParams)> = ["Three-point", "Top softbox", "Rim pair", "Overcast dome", "Ring light"]
+            .iter()
+            .map(|name| (name.to_string(), crate::hdri::presets::preset(name).unwrap()))
+            .collect();
+        for (name, lights) in awkward_keys() {
+            cases.push((name.to_string(), studio_params(lights)));
+        }
+        let mut off = Vec::new();
+        for (name, p) in cases {
+            let key = Env::new(&p).sun().expect("a key light");
+            let cone = std::f32::consts::TAU * (1.0 - key.cos_radius);
+            let got = key.radiance * cone;
+            let want = map_emission(&Env::new(&the_key_alone(&p)).bake_par(2048, on_all_cores));
+            let ratio = [got.x / want.x, got.y / want.y, got.z / want.z];
+            if !ratio.iter().all(|r| (r - 1.0).abs() < 0.01) {
+                off.push(format!("{name}: {:.4} {:.4} {:.4}", ratio[0], ratio[1], ratio[2]));
+            }
+        }
+        assert!(off.is_empty(), "the key over its cone vs the map's emission (r g b):\n{}", off.join("\n"));
+    }
+
+    /// Every built-in key and the awkward ones, as light lists, plus two that are
+    /// hardest on the integral's grid: the thinnest hard ring and the widest soft disc.
+    fn key_light_lists() -> Vec<(String, Vec<LightParams>)> {
+        let mut lists: Vec<(String, Vec<LightParams>)> = ["Three-point", "Top softbox", "Rim pair", "Overcast dome", "Ring light"]
+            .iter()
+            .map(|name| (name.to_string(), crate::hdri::presets::preset(name).unwrap().lights))
+            .collect();
+        for (name, lights) in awkward_keys() {
+            lists.push((name.to_string(), lights));
+        }
+        let thin = LightParams { key: true, shape: "ring".to_string(), inner: 0.95, softness: 0.0, width_deg: 40.0, height_deg: 40.0, ..Default::default() };
+        let wide = LightParams { key: true, shape: "disc".to_string(), width_deg: 170.0, height_deg: 170.0, softness: 1.0, hotspot: 0.3, ..Default::default() };
+        lists.push(("the thinnest hard ring".to_string(), vec![thin]));
+        lists.push(("the widest soft disc".to_string(), vec![wide]));
+        lists
+    }
+
+    /// The enabled key's emission on an n x n grid.
+    fn emission_on(lights: &[LightParams], n: usize) -> Vec3f {
+        let studio = Studio::new(&black_studio(), lights);
+        let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
+        let i = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).expect("a key light");
+        key_emission(&studio.lights[i..], n)
+    }
+
+    #[test]
+    fn the_keys_integral_has_converged() {
+        let mut worst = 0.0f32;
+        for (name, lights) in key_light_lists() {
+            let (grid, finer) = (emission_on(&lights, KEY_GRID), emission_on(&lights, 4 * KEY_GRID));
+            for (g, f) in [(grid.x, finer.x), (grid.y, finer.y), (grid.z, finer.z)] {
+                assert!(f > 0.0, "{name}: {finer:?}");
+                worst = worst.max((g / f - 1.0).abs());
+            }
+            println!("{name}: {:.5}", grid.y / finer.y - 1.0);
+        }
+        assert!(worst < 1.0e-3, "a key moves by {worst} on a four times finer grid");
+    }
+
+    #[test]
+    fn a_hard_rect_key_carries_its_solid_angle() {
+        // A hard, square-cornered rect without a hotspot: its emission is its colour
+        // times its exact solid angle, 4 atan(tx ty / sqrt(1 + tx² + ty²)).
+        let key = LightParams { key: true, corner: 0.0, softness: 0.0, width_deg: 50.0, height_deg: 16.0, roll_deg: 25.0, ..Default::default() };
+        let (tx, ty) = (25f32.to_radians().tan(), 8f32.to_radians().tan());
+        let solid = 4.0 * (tx * ty / (1.0 + tx * tx + ty * ty).sqrt()).atan();
+        let sun = Studio::new(&black_studio(), std::slice::from_ref(&key)).key().expect("a key light");
+        let cone = std::f32::consts::TAU * (1.0 - sun.cos_radius);
+        let want = light_color(&key) * solid;
+        assert!((sun.radiance * cone - want).length() < 1.0e-3 * want.length(), "{:?} vs {want:?}", sun.radiance * cone);
     }
 
     #[test]

@@ -70,9 +70,29 @@ pub fn vec(a: [f32; 3]) -> Vec3f {
 }
 
 /// The environment's key light, for engines that light with one directional
-/// light next to the map: the direction toward the light, the radiance at the
-/// centre of its disc and the cosine of its angular radius. Phase 2 (task C1)
-/// moves this struct to makepad-scene and re-exports it here.
+/// light next to the map. Phase 2 (task C1) moves this struct to makepad-scene
+/// and re-exports it here.
+/// - `dir` points toward the light (unit, world space).
+/// - `cos_radius` is the cosine of the angular radius of the key's cone.
+/// - `radiance` is the AVERAGE radiance over that cone, with one meaning for
+///   every key: the light's whole emission (∫ L dΩ as the map draws it) divided
+///   by the cone's solid angle 2π(1 − cos_radius). So `radiance × 2π(1 −
+///   cos_radius)` is the key's irradiance on a surface facing it (for a small
+///   light; a wide one is below).
+///
+/// Per key:
+/// - The sun: its irradiance at the ground spread over the nominal disc's cone,
+///   the soft limb past it included (`Atmosphere::sun_cone_radiance`).
+/// - The moon: the mean over its disc.
+/// - A studio key: the light integrated once per map over its own tangent
+///   plane, with its shape, corner, ring, soft edge, hotspot and roll and the
+///   Multiply flags after it, so a thin strip or a ring carries only what it
+///   draws (`studio::key_emission`).
+///
+/// The cosine across a wide light is not in it. A surface facing the Overcast
+/// dome preset's 110 degree disc gets 0.78 of `radiance × solid angle` and one
+/// facing the Top softbox 0.93; the other built-in keys get 0.95 or more, and
+/// the sun and moon 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvSun {
     pub dir: Vec3f,
