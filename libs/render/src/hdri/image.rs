@@ -92,9 +92,155 @@ pub fn mean_luminance(env: &EnvMap) -> f32 {
     }
 }
 
+/// Radiance read from or written to a float file. NaN and negatives become 0. +∞ becomes 65504,
+/// half's largest value, which is where an infinity in a half file usually came from.
+pub(crate) fn sanitize_radiance(v: f32) -> f32 {
+    if v.is_nan() {
+        0.0
+    } else if v == f32::INFINITY {
+        65504.0
+    } else {
+        v.max(0.0)
+    }
+}
+
+/// OpenEXR's magic number 20000630, little-endian.
+const EXR_MAGIC: [u8; 4] = [0x76, 0x2f, 0x31, 0x01];
+/// The most texels a file may decode to (16 B each, so 1 GiB): the same cap `ibl::load_hdr` has.
+const MAX_PIXELS: usize = 64 * 1024 * 1024;
+
+/// Reads an OpenEXR through makepad-openexr. It takes the first part with R, G and B channels or,
+/// failing that, a luminance-only Y part read as grey; samples may be half, float or uint. The
+/// image is the part's data window, whatever its origin; the display window is ignored. The
+/// columns are returned as the file holds them (the file convention, +X at the centre).
+/// The reader handles scanline files with no, ZIP, ZIPS or PXR24 compression. PIZ, DWA and tiled
+/// files fail with a message that points at `.hdr`, which always imports.
+pub fn read_exr(bytes: &[u8]) -> Result<EnvMap, String> {
+    let exr = read_from_slice(bytes).map_err(|e| {
+        format!("EXR: {e} (scanline EXRs with no, ZIP, ZIPS or PXR24 compression load; for PIZ, DWA or tiled files use .hdr)")
+    })?;
+    let mut parts = exr.parts;
+    let rgb_part = parts
+        .iter()
+        .position(|p| has_channel(p, "R") && has_channel(p, "G") && has_channel(p, "B"));
+    let index = match rgb_part.or_else(|| parts.iter().position(|p| has_channel(p, "Y"))) {
+        Some(index) => index,
+        None => {
+            let names: Vec<&str> = parts
+                .iter()
+                .flat_map(|p| p.channels.iter().map(|c| c.name.as_str()))
+                .collect();
+            return Err(format!("EXR: no R, G, B (or Y) channels; found {}", names.join(", ")));
+        }
+    };
+    let mut part = parts.swap_remove(index);
+    let width = part.width().map_err(|e| format!("EXR: {e}"))?;
+    let height = part.height().map_err(|e| format!("EXR: {e}"))?;
+    let count = width
+        .checked_mul(height)
+        .filter(|&n| n > 0 && n <= MAX_PIXELS)
+        .ok_or_else(|| format!("EXR: size {width}x{height} is out of range"))?;
+    let planes = if rgb_part.is_some() {
+        [take_channel(&mut part, "R"), take_channel(&mut part, "G"), take_channel(&mut part, "B")]
+    } else {
+        let y = take_channel(&mut part, "Y");
+        [y.clone(), y.clone(), y]
+    };
+    if planes.iter().any(|plane| plane.len() != count) {
+        return Err(format!("EXR: channel sizes do not match the {width}x{height} data window"));
+    }
+    let data = (0..count)
+        .map(|i| {
+            [
+                sanitize_radiance(planes[0][i]),
+                sanitize_radiance(planes[1][i]),
+                sanitize_radiance(planes[2][i]),
+                1.0,
+            ]
+        })
+        .collect();
+    Ok(EnvMap { width, height, data })
+}
+
+fn has_channel(part: &ExrPart, name: &str) -> bool {
+    part.channels.iter().any(|c| c.name == name)
+}
+
+/// Moves one channel's samples out of the part as f32 (empty when the channel is missing).
+fn take_channel(part: &mut ExrPart, name: &str) -> Vec<f32> {
+    let Some(channel) = part.channels.iter_mut().find(|c| c.name == name) else {
+        return Vec::new();
+    };
+    match std::mem::replace(&mut channel.samples, SampleBuffer::Float(Vec::new())) {
+        SampleBuffer::Float(values) => values,
+        SampleBuffer::Half(values) => values.into_iter().map(|v| v.to_f32()).collect(),
+        SampleBuffer::Uint(values) => values.into_iter().map(|v| v as f32).collect(),
+    }
+}
+
+/// Decodes an image file from memory by its magic bytes, returning the FILE convention (the
+/// columns as the file holds them):
+/// - OpenEXR (76 2f 31 01) through `read_exr`;
+/// - Radiance (`#?`) through `ibl::load_hdr`, with a fresh 1 GiB `DecodeBudget` (the app has no
+///   document budget to charge; `load_hdr`'s own size caps still apply);
+/// - anything else `decode_image_from_data` knows (PNG, JPEG, WebP, GIF, BMP, QOI, ICO). Its
+///   8-bit sRGB values are linearised with the exact sRGB curve, and alpha is dropped.
+pub fn decode_image(bytes: &[u8]) -> Result<EnvMap, String> {
+    if bytes.starts_with(&EXR_MAGIC) {
+        return read_exr(bytes);
+    }
+    if bytes.starts_with(b"#?") {
+        return ibl::load_hdr(bytes, &mut DecodeBudget::default()).map_err(|e| format!("HDR: {e}"));
+    }
+    let buffer = decode_image_from_data(bytes).map_err(|e| format!("image: {e}"))?;
+    let count = buffer.width * buffer.height;
+    if count == 0 || buffer.data.len() < count {
+        return Err(format!("image: decoded {}x{} but got {} texels", buffer.width, buffer.height, buffer.data.len()));
+    }
+    // 256 entries cover every 8-bit value, so each texel costs three table reads instead of three powf.
+    let linear: [f32; 256] = std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0));
+    // The image cache packs 0xAARRGGBB. An animation's later frames sit past `count`; ignored.
+    let data = buffer.data[..count]
+        .iter()
+        .map(|&packed| {
+            [
+                linear[((packed >> 16) & 0xff) as usize],
+                linear[((packed >> 8) & 0xff) as usize],
+                linear[(packed & 0xff) as usize],
+                1.0,
+            ]
+        })
+        .collect();
+    Ok(EnvMap { width: buffer.width, height: buffer.height, data })
+}
+
+/// Reads and decodes a file (file convention); errors name the path.
+pub fn load_image(path: &Path) -> Result<EnvMap, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    decode_image(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Like `load_image`, but only accepts an equirect map, twice as wide as it is tall (one pixel
+/// off is tolerated: cropped downloads are common), and rolls it from the file convention into
+/// the engine convention, ready for `Env`, `ibl::ibl_texture` and `Renderer::register_environment`.
+pub fn load_equirect(path: &Path) -> Result<EnvMap, String> {
+    let file = load_image(path)?;
+    if (file.width as i64 - 2 * file.height as i64).abs() > 1 {
+        return Err(format!(
+            "{}: {}x{} is not an equirect map; it must be twice as wide as it is tall (2:1)",
+            path.display(),
+            file.width,
+            file.height
+        ));
+    }
+    Ok(roll_quarter(&file, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_half::f16;
+    use makepad_openexr::{write_to_vec, Box2i, Compression, ExrChannel, ExrImage, ExrPart};
 
     /// Texel (x, y) holds (x, y, 1, 1), so a texel shows where it came from.
     fn ramp(width: usize, height: usize) -> EnvMap {
@@ -198,5 +344,186 @@ mod tests {
         assert!(mean_luminance(&top) < mean_luminance(&equator) * 0.5);
         // An empty map meters 0 rather than NaN.
         assert_eq!(mean_luminance(&EnvMap { width: 0, height: 0, data: Vec::new() }), 0.0);
+    }
+
+    /// A fresh folder under the system temp dir, unique to this process and test.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("makepad_hdri_image_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Mid-grey (0.5) in RGBE: 128 · 2^(128 − 136).
+    const GREY: [u8; 4] = [128, 128, 128, 128];
+
+    /// A flat (not run-length coded) .hdr whose texel (x, y) is `texel(x, y)` in RGBE bytes. The
+    /// first texel of a row must not start with (2, 2), or the reader takes the row for RLE.
+    fn flat_hdr(width: usize, height: usize, texel: impl Fn(usize, usize) -> [u8; 4]) -> Vec<u8> {
+        let mut bytes = format!("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y {height} +X {width}\n").into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                bytes.extend_from_slice(&texel(x, y));
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn read_exr_reads_rgb_from_any_data_window() {
+        let r: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let g: Vec<f32> = (0..8).map(|i| i as f32 * 0.5).collect();
+        let b: Vec<f32> = (0..8).map(|i| 100.0 + i as f32).collect();
+        let mut part = ExrPart::new(None, 4, 2, Compression::None, vec![
+            ExrChannel::float("B", b.clone()),
+            ExrChannel::float("G", g.clone()),
+            ExrChannel::float("R", r.clone()),
+        ]);
+        // Off-origin data windows are common (Blobbies.exr starts at -20); the image is the window.
+        part.data_window = Box2i { min_x: -20, min_y: 5, max_x: -17, max_y: 6 };
+        let env = read_exr(&write_to_vec(&ExrImage::single(part)).unwrap()).unwrap();
+        assert_eq!((env.width, env.height), (4, 2));
+        assert_eq!(texel(&env, 1, 1), [r[5], g[5], b[5], 1.0]);
+        assert_eq!(texel(&env, 3, 0), [r[3], g[3], b[3], 1.0]);
+        // The file's columns come back as they are: no roll here.
+        assert_eq!(texel(&env, 0, 0), [r[0], g[0], b[0], 1.0]);
+    }
+
+    #[test]
+    fn read_exr_reads_half_and_luminance_only_files() {
+        let half = |values: &[f32]| values.iter().map(|&v| f16::from_f32(v)).collect::<Vec<f16>>();
+        let part = ExrPart::new(None, 2, 1, Compression::Zip, vec![
+            ExrChannel::half("R", half(&[1.0, 0.25])),
+            ExrChannel::half("G", half(&[2.0, 0.5])),
+            ExrChannel::half("B", half(&[4.0, 0.75])),
+        ]);
+        let env = read_exr(&write_to_vec(&ExrImage::single(part)).unwrap()).unwrap();
+        assert_eq!(texel(&env, 0, 0), [1.0, 2.0, 4.0, 1.0]);
+        assert_eq!(texel(&env, 1, 0), [0.25, 0.5, 0.75, 1.0]);
+        // NaN and negatives are not radiance: they read as 0. +∞ reads as half's largest value.
+        let odd = ExrPart::new(None, 3, 1, Compression::None, vec![
+            ExrChannel::float("R", vec![f32::NAN, -1.0, f32::INFINITY]),
+            ExrChannel::float("G", vec![0.0, 0.0, 0.0]),
+            ExrChannel::float("B", vec![0.0, 0.0, 0.0]),
+        ]);
+        let env = read_exr(&write_to_vec(&ExrImage::single(odd)).unwrap()).unwrap();
+        assert_eq!([texel(&env, 0, 0)[0], texel(&env, 1, 0)[0], texel(&env, 2, 0)[0]], [0.0, 0.0, 65504.0]);
+        // A luminance-only file reads as grey.
+        let grey = ExrPart::new(None, 1, 1, Compression::None, vec![ExrChannel::float("Y", vec![0.3])]);
+        let env = read_exr(&write_to_vec(&ExrImage::single(grey)).unwrap()).unwrap();
+        assert_eq!(texel(&env, 0, 0), [0.3, 0.3, 0.3, 1.0]);
+        // A depth-only file has no colour to read.
+        let depth = ExrPart::new(None, 1, 1, Compression::None, vec![ExrChannel::float("Z", vec![1.0])]);
+        let error = read_exr(&write_to_vec(&ExrImage::single(depth)).unwrap()).unwrap_err();
+        assert!(error.contains("no R, G, B"), "{error}");
+        assert!(read_exr(b"not an exr").is_err());
+    }
+
+    #[test]
+    fn decode_image_sniffs_exr_hdr_and_8_bit_files() {
+        let part = ExrPart::new(None, 1, 1, Compression::None, vec![
+            ExrChannel::float("R", vec![3.0]),
+            ExrChannel::float("G", vec![2.0]),
+            ExrChannel::float("B", vec![1.0]),
+        ]);
+        let exr = write_to_vec(&ExrImage::single(part)).unwrap();
+        assert_eq!(decode_image(&exr).unwrap().data[0], [3.0, 2.0, 1.0, 1.0]);
+        // Radiance goes through ibl::load_hdr: mid-grey texels read as 0.5.
+        let hdr = decode_image(&flat_hdr(2, 1, |_, _| GREY)).unwrap();
+        assert_eq!((hdr.width, hdr.height), (2, 1));
+        assert_eq!(texel(&hdr, 1, 0), [0.5, 0.5, 0.5, 1.0]);
+        // 8-bit files are sRGB: byte 128 is about 0.216 linear, not 0.5.
+        let png = Cx::encode_rgba_as_png(2, 1, &[255, 128, 0, 255, 0, 0, 0, 255]).unwrap();
+        let env = decode_image(&png).unwrap();
+        assert_eq!((env.width, env.height), (2, 1));
+        let t = texel(&env, 0, 0);
+        assert!((t[0] - 1.0).abs() < 1.0e-6);
+        assert!((t[1] - srgb_to_linear(128.0 / 255.0)).abs() < 1.0e-7);
+        assert_eq!(t[2], 0.0);
+        assert_eq!(t[3], 1.0);
+        assert_eq!(texel(&env, 1, 0), [0.0, 0.0, 0.0, 1.0]);
+        assert!(decode_image(b"not an image").is_err());
+        // A broken .hdr reports as HDR, not as an unknown image.
+        let error = decode_image(b"#?RADIANCE\nFORMAT=32-bit_rle_xyze\n\n-Y 1 +X 1\n\0\0\0\0").unwrap_err();
+        assert!(error.starts_with("HDR:"), "{error}");
+    }
+
+    #[test]
+    fn load_equirect_accepts_2_to_1_rolls_and_rejects_the_rest() {
+        let dir = scratch_dir("equirect");
+        let good = dir.join("good.hdr");
+        let near = dir.join("near.hdr");
+        let bad = dir.join("bad.hdr");
+        // A bright texel at the file's centre column (4 of 8), row 1: that is +X in the file.
+        let bright = [255u8, 255, 255, 129];
+        std::fs::write(&good, flat_hdr(8, 4, |x, y| if (x, y) == (4, 1) { bright } else { GREY })).unwrap();
+        std::fs::write(&near, flat_hdr(7, 4, |_, _| GREY)).unwrap();
+        std::fs::write(&bad, flat_hdr(6, 4, |_, _| GREY)).unwrap();
+        // load_image keeps the file's columns; load_equirect rolls +X to the engine's u = 0.75.
+        let file = load_image(&good).unwrap();
+        assert_eq!((file.width, file.height), (8, 4));
+        assert!(texel(&file, 4, 1)[0] > 1.5 && texel(&file, 6, 1)[0] < 0.6);
+        let engine = load_equirect(&good).unwrap();
+        assert_eq!((engine.width, engine.height), (8, 4));
+        assert!(texel(&engine, 6, 1)[0] > 1.5 && texel(&engine, 4, 1)[0] < 0.6);
+        assert_eq!(engine, roll_quarter(&file, false));
+        let x_plus = (ibl::dir_to_equirect_uv([1.0, 0.0, 0.0])[0] * 8.0).floor() as usize;
+        assert_eq!(x_plus, 6);
+        // One pixel off 2:1 is tolerated (a common crop); further off is not.
+        assert_eq!(load_equirect(&near).map(|e| (e.width, e.height)).unwrap(), (7, 4));
+        let error = load_equirect(&bad).unwrap_err();
+        assert!(error.contains("2:1"), "{error}");
+        let missing = load_equirect(&dir.join("missing.hdr")).unwrap_err();
+        assert!(missing.contains("missing.hdr"), "{missing}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A 16×8 baseline JPEG (4:4:4, quality 95, 291 bytes): the left 8×8 block is sRGB
+    /// (200, 120, 40), the right one (30, 60, 90). makepad's decoder returns (201, 120, 41) and
+    /// (30, 59, 89) for it.
+    const TWO_BLOCK_JPG: [u8; 291] = [
+        0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+        0xff, 0xdb, 0x00, 0x43, 0x00, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 0x01, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x04, 0x03, 0x02, 0x02, 0x02, 0x02, 0x05, 0x04, 0x04, 0x03, 0x04, 0x06, 0x05, 0x06, 0x06, 0x06, 0x05, 0x06, 0x06, 0x06,
+        0x07, 0x09, 0x08, 0x06, 0x07, 0x09, 0x07, 0x06, 0x06, 0x08, 0x0b, 0x08, 0x09, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x06, 0x08,
+        0x0b, 0x0c, 0x0b, 0x0a, 0x0c, 0x09, 0x0a, 0x0a, 0x0a, 0xff, 0xdb, 0x00, 0x43, 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+        0x05, 0x03, 0x03, 0x05, 0x0a, 0x07, 0x06, 0x07, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a,
+        0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a,
+        0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0xff, 0xc0,
+        0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x10, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xc4, 0x00,
+        0x15, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x09,
+        0xff, 0xc4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0xc4, 0x00, 0x15, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x08, 0x09, 0xff, 0xc4, 0x00, 0x14, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f,
+        0x00, 0x70, 0x2b, 0x2f, 0x12, 0xed, 0x49, 0x13, 0xfd, 0xff, 0xd9,
+    ];
+
+    #[test]
+    fn decode_image_reads_a_jpg_as_srgb() {
+        let env = decode_image(&TWO_BLOCK_JPG).unwrap();
+        assert_eq!((env.width, env.height), (16, 8));
+        // JPEG is lossy: allow two code values around the colours the file was made from.
+        let near = |t: [f32; 4], rgb: [u8; 3]| {
+            (0..3).all(|k| {
+                let lo = srgb_to_linear((rgb[k] as f32 - 2.0) / 255.0);
+                let hi = srgb_to_linear((rgb[k] as f32 + 2.0) / 255.0);
+                t[k] >= lo && t[k] <= hi
+            }) && t[3] == 1.0
+        };
+        for (x, y) in [(0, 0), (7, 7), (3, 4)] {
+            assert!(near(texel(&env, x, y), [200, 120, 40]), "({x},{y}): {:?}", texel(&env, x, y));
+        }
+        for (x, y) in [(8, 0), (15, 7), (12, 3)] {
+            assert!(near(texel(&env, x, y), [30, 60, 90]), "({x},{y}): {:?}", texel(&env, x, y));
+        }
+        // sRGB bytes are linearised: 200 reads as about 0.58, not 200/255 = 0.78.
+        assert!(texel(&env, 0, 0)[0] < 0.62);
+        // Through a file: a 2:1 JPG is an equirect and gets the same roll as every other format.
+        let dir = scratch_dir("jpg");
+        let path = dir.join("pano.jpg");
+        std::fs::write(&path, TWO_BLOCK_JPG).unwrap();
+        assert_eq!(load_equirect(&path).unwrap(), roll_quarter(&env, false));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
