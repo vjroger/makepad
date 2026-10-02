@@ -273,8 +273,18 @@ impl Worker {
             None => None,
         };
         self.status(format!("loading depth source {:?}", spec.depth));
-        let mut estimator = spec.depth.build()?;
-        self.status(format!("depth: {}", estimator.label()));
+        // A model that cannot load (no CUDA, wrong file) must not stop the
+        // video: play on with the free ground prior and say why.
+        let mut estimator = match spec.depth.build() {
+            Ok(estimator) => {
+                self.status(format!("depth: {}", estimator.label()));
+                estimator
+            }
+            Err(err) => {
+                self.status(format!("depth model failed, using a rough guess instead: {err}"));
+                DepthSource::GroundPrior.build()?
+            }
+        };
 
         let picture = spec.layout.picture_rect();
         let mut stabilizer = Stabilizer::default();
@@ -363,8 +373,13 @@ impl Worker {
                     }
                     Err(err) => {
                         depth_errors += 1;
-                        if depth_errors <= 3 {
-                            self.status(format!("depth failed: {err}"));
+                        if depth_errors >= 3 {
+                            // Keep the picture moving: fall back for good.
+                            self.status(format!(
+                                "depth model failed, using a rough guess instead: {err}"
+                            ));
+                            estimator = DepthSource::GroundPrior.build()?;
+                            depth_errors = 0;
                         }
                     }
                 }
