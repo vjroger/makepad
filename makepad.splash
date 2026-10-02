@@ -79,6 +79,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
     RunStudioRelease{name: "makepad-studio"}
     RunStudioRelease{name: "makepad-example-xr"}
+    RunStudioRelease{name: "makepad-example-depth-cloud"}
     RunStudioRelease{name: "makepad-example-cad"}
     RunStudioRelease{name: "makepad-fab"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
