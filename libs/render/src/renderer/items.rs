@@ -261,11 +261,17 @@ impl Renderer {
     }
 
     /// Whether every custom material the last frame's items used, and the
-    /// PBR lane, has its pipeline: until then those items draw through the
-    /// stock (matte) lane, so a locked-time host waits for this before it
-    /// takes the frame. A lane's shader is the variant for last frame's
-    /// features (variants.rs), the one it draws through.
+    /// PBR lane, has its pipeline, and the world's environment is prepared:
+    /// until then those items draw through the stock (matte) lane, and
+    /// without the environment's lane texture (the analytic sky), so a
+    /// locked-time host waits for this before it takes the frame. A lane's
+    /// shader is the variant for last frame's features (variants.rs), the
+    /// one it draws through. The environment prepares off the UI thread
+    /// (`environment_pending`); the host's next draw adopts it.
     pub fn items_ready(&self, cx: &Cx) -> bool {
+        if self.environment_pending() {
+            return false;
+        }
         // A material that is not installed (it did not build) draws through
         // the stock lane for good: nothing to wait for.
         let custom = self.items.used_custom.iter().all(|name| self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)));

@@ -100,6 +100,10 @@ pub(super) struct IblState {
     texture: Option<Texture>,
     dome: Option<Texture>,
     dome_size: (usize, usize),
+    /// What the world asked for on the last `resolve_ibl` (None: no
+    /// environment, or one that cannot be built). What `environment_pending`
+    /// compares the prepared key and the failed key with.
+    wanted: Option<PrepareKey>,
     /// What the textures and numbers below were prepared for.
     prepared_for: Option<PrepareKey>,
     /// The bound lighting copy's numbers. `sh` is `Some` exactly while a
@@ -263,10 +267,18 @@ impl Renderer {
         self.environment_ready() && self.ibl.dome.is_some()
     }
 
-    /// A preparation job is in flight (a host keeps a NextFrame alive to
-    /// pick its result up).
+    /// The world's environment is not prepared yet: a job is in flight (or
+    /// finished, and waits for the next draw to adopt it), or the world
+    /// wants one that no job was submitted for (the queue was full; the
+    /// next draw retries). A host keeps drawing while this holds, since a
+    /// draw is what adopts a result and what retries; `items_ready` is
+    /// false meanwhile, so a locked-time host does not take the frame
+    /// before the environment is in it. A source that cannot be built (an
+    /// index past the table, a handle nobody registered) and a failed job
+    /// are not pending: nothing will come.
     pub fn environment_pending(&self) -> bool {
-        self.ibl.job.is_some()
+        let s = &self.ibl;
+        s.job.is_some() || s.wanted.is_some_and(|w| s.prepared_for != Some(w) && s.failed_for != Some(w))
     }
 
     /// How many preparations were submitted so far (tests: a key change
@@ -312,6 +324,8 @@ impl Renderer {
         };
         let sun = env.sun.filter(|s| s.validate().is_ok());
         let wanted = PrepareKey { source: ibl.source, sun };
+        // Set before the submit: a source that cannot be built drops it again.
+        self.ibl.wanted = Some(wanted);
         // A job for another key than the world now names is stale: drop it
         // before it can land (else a world that returns to the bound key
         // while that job runs would see the abandoned source's textures
@@ -347,6 +361,7 @@ impl Renderer {
     fn drop_ibl(&mut self) {
         self.cancel_ibl_job();
         let s = &mut self.ibl;
+        s.wanted = None;
         s.key = None;
         s.texture = None;
         s.dome = None;
@@ -754,6 +769,119 @@ mod tests {
         assert!((renderer.ibl_mean_luminance().unwrap() - 0.5).abs() < 1.0e-3);
         renderer.resolve_ibl(&mut cx, &env);
         assert_eq!(renderer.environment_preparations(), 1, "and it is not repeated");
+    }
+
+    /// A locked-time host takes a frame once `items_ready` says so, and it
+    /// records again until then: with the environment preparing off the UI
+    /// thread, the first frame has no lane texture, so the host has to wait
+    /// for it (a scene lit by the studio environment alone renders black
+    /// until it lands). The wait covers the job in flight, a result that
+    /// finished but is not adopted yet (adopting is the next draw's work),
+    /// and an environment the world wants that no job was submitted for.
+    #[test]
+    fn items_are_not_ready_while_the_environment_prepares() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.resolve_ibl(&mut cx, &Environment::default());
+        assert!(renderer.items_ready(&cx), "no environment, nothing to wait for");
+
+        renderer.register_environment(TextureRef(1), grey(32, 0.25));
+        let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(renderer.environment_pending());
+        assert!(!renderer.items_ready(&cx), "the job is in flight: the frame has no lane texture yet");
+
+        settle(&mut renderer, &mut cx, &env);
+        assert!(renderer.environment_ready());
+        assert!(!renderer.environment_pending());
+        assert!(renderer.items_ready(&cx), "the lane texture is bound");
+        // An intensity change is a meta rewrite, not a preparation.
+        renderer.resolve_ibl(&mut cx, &env_of(IblSource::Hdri(TextureRef(1)), 2.0, 0.0));
+        assert!(renderer.items_ready(&cx));
+
+        // Another source: the old textures stay bound, the new ones are awaited.
+        renderer.register_environment(TextureRef(2), grey(16, 0.75));
+        let b = env_of(IblSource::Hdri(TextureRef(2)), 1.0, 0.0);
+        renderer.resolve_ibl(&mut cx, &b);
+        assert!(renderer.environment_ready() && !renderer.items_ready(&cx), "A is bound, B is awaited");
+        settle(&mut renderer, &mut cx, &b);
+        assert!(renderer.items_ready(&cx));
+
+        // Back to A: B stays bound while A is awaited. Then no environment
+        // at all: nothing to wait for, whatever was in flight.
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(!renderer.items_ready(&cx));
+        renderer.resolve_ibl(&mut cx, &Environment::default());
+        assert!(renderer.items_ready(&cx) && !renderer.environment_pending());
+    }
+
+    /// A job that finished is still awaited until a draw adopts it: the
+    /// host's re-record (reattach) is what picks it up, so the wait must
+    /// not end before that draw.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn a_finished_job_is_awaited_until_a_draw_adopts_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.register_environment(TextureRef(1), grey(16, 0.25));
+        let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
+        renderer.resolve_ibl(&mut cx, &env);
+        let start = std::time::Instant::now();
+        while !renderer.ibl.job.as_ref().is_some_and(|j| j.is_finished()) {
+            assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(renderer.environment_pending() && !renderer.items_ready(&cx), "finished, not adopted: nothing is bound yet");
+        assert!(renderer.ibl_texture().is_none());
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(renderer.environment_ready() && renderer.items_ready(&cx));
+    }
+
+    /// A full Heavy queue means no job was submitted, but the world still
+    /// wants the environment: the host keeps waiting (and drawing, which is
+    /// the retry), and the next draw with room submits it.
+    #[test]
+    fn a_full_queue_is_awaited_and_retried() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.register_environment(TextureRef(1), grey(16, 0.25));
+        let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
+        // Hold every Heavy slot (reserved, never submitted).
+        let pool = cx.task_pool();
+        let mut held = Vec::new();
+        while let Ok(slot) = pool.reserve(Lane::Heavy) {
+            held.push(slot);
+        }
+        renderer.resolve_ibl(&mut cx, &env);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(renderer.ibl.job.is_none() && renderer.environment_preparations() == 0, "nothing could be submitted");
+        assert!(renderer.environment_pending(), "wanted, not prepared: the host keeps drawing");
+        assert!(!renderer.items_ready(&cx));
+
+        drop(held);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert_eq!(renderer.environment_preparations(), 1, "the retry submitted it");
+        settle(&mut renderer, &mut cx, &env);
+        assert!(renderer.environment_ready() && !renderer.environment_pending() && renderer.items_ready(&cx));
+    }
+
+    /// Nothing to wait for when nothing will come: an index past the table,
+    /// a handle nobody registered, a closed pool (prepared on the spot).
+    #[test]
+    fn items_do_not_wait_for_an_environment_that_cannot_prepare() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.resolve_ibl(&mut cx, &env_of(IblSource::Procedural(999), 1.0, 0.0));
+        assert!(!renderer.environment_pending() && renderer.items_ready(&cx));
+        renderer.resolve_ibl(&mut cx, &env_of(IblSource::Hdri(TextureRef(77)), 1.0, 0.0));
+        assert!(!renderer.environment_pending() && renderer.items_ready(&cx));
+
+        use makepad_draw::makepad_platform::thread::ShutdownMode;
+        let mut closed = Cx::new(Box::new(|_, _| {}));
+        closed.task_pool().close(ShutdownMode::CancelPending);
+        renderer.register_environment(TextureRef(3), grey(16, 0.5));
+        renderer.resolve_ibl(&mut closed, &env_of(IblSource::Hdri(TextureRef(3)), 1.0, 0.0));
+        assert!(renderer.environment_ready() && !renderer.environment_pending() && renderer.items_ready(&closed));
     }
 
     /// What a sibling test module (C6's fog, C5's rig) feeds in answers the
