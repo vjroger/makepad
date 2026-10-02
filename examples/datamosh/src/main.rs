@@ -81,12 +81,12 @@ script_mod! {
                         pel := Knob{text: "Pel (0 cont., 1 full, 4 quarter)" min: 0.0 max: 4.0 step: 1.0 default: 4.0 precision: 0}
                         diffusion := Knob{text: "Diffusion (px)" min: 0.0 max: 8.0 default: 0.0 precision: 1}
                         drift_mode := DropDown{
-                            labels: ["Drift: horizontal" "Drift: vertical" "Drift: rotate" "Drift: zoom" "Drift: spiral" "Drift: random"]
-                            selected_item: 0
+                            labels: ["Drift: none" "Drift: horizontal" "Drift: vertical" "Drift: rotate" "Drift: zoom" "Drift: spiral" "Drift: random (incl. none, either direction)"]
+                            selected_item: 1
                         }
                         blur_motion := Knob{text: "Motion blur: vectors (steps)" min: 0.0 max: 4.0 default: 0.0 precision: 2}
                         blur_drift := Knob{text: "Motion blur: drift (steps)" min: 0.0 max: 8.0 default: 0.0 precision: 2}
-                        drift := Knob{text: "Drift (px per step, 0 = off)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
+                        drift := Knob{text: "Drift amount (px per step, sign = direction)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
                         refresh := Knob{text: "Intra refresh" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         heal := Knob{text: "Heal" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         residual := Knob{text: "Residual" min: 0.0 max: 1.0 default: 0.0 precision: 2}
@@ -178,10 +178,11 @@ impl MatchEvent for App {
         slided(cx, ids!(blur_motion), &mut s.params.blur_motion);
         slided(cx, ids!(blur_drift), &mut s.params.blur_drift);
         if let Some(i) = ui.drop_down(cx, ids!(drift_mode)).selected(actions) {
-            // The last entry is the demo's Random; the rest are the
-            // engine's patterns.
-            s.random_drift = i >= DriftMode::ALL.len();
-            s.params.drift_mode = DriftMode::ALL[i.min(DriftMode::ALL.len() - 1)];
+            // First "none", then the engine's patterns, then the demo's
+            // Random.
+            s.drift_off = i == 0;
+            s.random_drift = i > DriftMode::ALL.len();
+            s.params.drift_mode = DriftMode::ALL[i.saturating_sub(1).min(DriftMode::ALL.len() - 1)];
         }
         slided(cx, ids!(refresh), &mut s.params.refresh);
         slided(cx, ids!(heal), &mut s.params.heal);

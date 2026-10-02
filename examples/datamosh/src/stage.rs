@@ -261,8 +261,11 @@ pub struct StageSettings {
     /// Transition mode: the picture stays clean and only the transition
     /// moshes. Effect mode: the effect runs continuously.
     pub transition_mode: bool,
-    /// Ignore `params.drift_mode` and pick a pattern at random for every
-    /// transition (and every I-frame in effect mode).
+    /// No drift, whatever the amount says.
+    pub drift_off: bool,
+    /// Ignore `params.drift_mode` and pick at random for every transition
+    /// (and every I-frame in effect mode): no drift, or any pattern either
+    /// way round, at the amount's strength.
     pub random_drift: bool,
     pub picture: Source,
     pub motion: MotionChoice,
@@ -283,6 +286,7 @@ impl Default for StageSettings {
     fn default() -> Self {
         Self {
             transition_mode: false,
+            drift_off: false,
             random_drift: false,
             picture: Source::Shapes,
             motion: MotionChoice::GridVectors,
@@ -413,7 +417,8 @@ pub struct MoshStage {
     picture_changed: Option<Source>,
     /// The demo's Random drift: the pattern currently standing in.
     #[rust]
-    drift_pick: Option<DriftMode>,
+    /// Pattern and sign (0 = no drift at all).
+    drift_pick: Option<(DriftMode, f32)>,
     #[rust]
     rng: u32,
 }
@@ -437,24 +442,34 @@ impl MoshStage {
             return self.roll_drift();
         }
         let mut params = self.settings.params;
-        if let (true, Some(pick)) = (self.settings.random_drift, self.drift_pick) {
-            params.drift_mode = pick;
+        if self.settings.drift_off {
+            params.drift = 0.0;
+        } else if let (true, Some((mode, sign))) = (self.settings.random_drift, self.drift_pick) {
+            params.drift_mode = mode;
+            // Random with the amount at 0 would pick patterns nobody sees.
+            let amount = if params.drift == 0.0 { 3.0 } else { params.drift.abs() };
+            params.drift = amount * sign;
         }
         self.mosh.set_params(params);
     }
 
-    /// A new random drift pattern, different from the last one.
+    /// A new random drift: none, or a pattern either way round; never the
+    /// same as the last one.
     fn roll_drift(&mut self) {
         if !self.settings.random_drift {
             return;
         }
         let all = DriftMode::ALL;
+        let choices = 1 + all.len() * 2;
         let mut x = self.rng ^ (self.time * 1000.0) as u32 ^ 0x2545_f491;
         loop {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
-            let pick = all[x as usize % all.len()];
+            let pick = match x as usize % choices {
+                0 => (DriftMode::Horizontal, 0.0),
+                n => (all[(n - 1) / 2], if n % 2 == 1 { 1.0 } else { -1.0 }),
+            };
             if Some(pick) != self.drift_pick {
                 self.drift_pick = Some(pick);
                 break;
