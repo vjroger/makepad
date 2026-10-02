@@ -1255,6 +1255,50 @@ mod shader_registration_tests {
         });
     }
 
+    /// The environment background reads both float textures on every
+    /// backend: the atlas through render-material's lookups and the
+    /// full-resolution dome through its own. Shared by the standalone
+    /// test below and the cube family's.
+    fn assert_env_background_sources(vm: &mut ScriptVm) {
+        for (name, result) in [
+            ("env background GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "glsl", false)})),
+            ("env background HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "hlsl", false)})),
+        ] {
+            let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+            assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
+            assert!(source.contains("env_tex") && source.contains("detail_map"), "{name}: both textures are sampled");
+            // The dome's texel addressing works in its logical size
+            // (bg2.zw), the instance field the lookup reads.
+            assert!(source.contains("bg2"), "{name}: the dome lookup reads its logical size");
+        }
+    }
+
+    /// The environment background compiles and emits on its own. The cube
+    /// family's test registers every lane (the GI relight among them) and
+    /// stops at the first one that fails, so this one holds the
+    /// background's own contract whatever state the others are in.
+    #[test]
+    fn the_environment_background_shader_compiles_and_samples_both_textures() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_draw::script_mod(vm);
+            vm.bx.heap.new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
+            });
+            vm.bx.heap.new_module(id!(widgets));
+            makepad_render_material::builtin::register(vm);
+            crate::renderer::ibl::script_mod(vm);
+            let errors = script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawEnvBackground)});
+            let errors = vm.bx.heap.string_with(errors, |_heap, value| value.to_string()).expect("compile result should be a string");
+            let setup_errors = vm.take_errors();
+            assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
+            assert!(errors.is_empty(), "env background: {errors}");
+            assert_env_background_sources(vm);
+        });
+    }
+
     #[test]
     fn cube_family_script_shaders_compile_without_errors() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -1279,6 +1323,10 @@ mod shader_registration_tests {
             super::script_mod(vm);
             crate::local_shadows::script_mod(vm);
             crate::custom_material::register(vm);
+            // The environment background registers itself on first draw;
+            // here it is registered explicitly (builtin's mat_ibl_* are in
+            // by custom_material::register).
+            crate::renderer::ibl::script_mod(vm);
 
             // These shaders write numeric payloads (including negatives and
             // triangle ids), not display colors. A successful shader compile
@@ -1325,6 +1373,7 @@ mod shader_registration_tests {
                 ("pbr", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawScenePbr)})),
                 ("skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinnedGpu)})),
                 ("custom", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCustom)})),
+                ("env background", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawEnvBackground)})),
                 ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
                 ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
                 ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
@@ -1378,6 +1427,7 @@ mod shader_registration_tests {
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("morph_map"),"{name}: missing morph deformation");
             }
+            assert_env_background_sources(vm);
             let pbr = DrawScenePbr::script_new_with_default(vm);
             let id = pbr.skinned.draw_vars.draw_shader_id.expect("registered PBR shader");
             let cx = vm.cx();

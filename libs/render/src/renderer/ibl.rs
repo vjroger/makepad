@@ -5,7 +5,9 @@
 //! fog take from the map) and binds the lane texture on the detail slot of
 //! the materials compiled with IBL once it lands. Until then, and without
 //! an environment, nothing is bound and every stock lane keeps its
-//! analytic sky reflection.
+//! analytic sky reflection. `Background::Environment` draws the dome as the
+//! sky (`DrawEnvBackground`); once it is up the frame skips its analytic
+//! dome.
 use super::*;
 use crate::hdri::prepare::{prepare_ibl_sized, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH};
 use makepad_draw::makepad_platform::thread::{Lane, SubmitError, TaskHandle, TaskPool};
@@ -19,9 +21,16 @@ script_mod! {
     use mod.geom
 
     // The environment as the background (`Background::Environment`): a
-    // fullscreen quad drawn first in the scene pass, looking up the view
-    // ray in the IBL texture at the background's blur. The lookups are the
-    // IBL material's own (render-material builtin.rs), on `detail_map`.
+    // fullscreen quad drawn first in the scene pass. Sharp (blur 0, dome
+    // up): the full-resolution map in `env_tex`, turned like the IBL and at
+    // its intensity. Blurred: the prefiltered atlas in `detail_map` through
+    // the IBL material's own lookups (render-material builtin.rs). Both
+    // show the map at its own scale x Ibl.intensity (x the background's
+    // intensity), exactly what the IBL reflections see: HDR_SKY_GAIN is
+    // the analytic sky's and never applies here. HDR lane: that linear
+    // radiance, the composite tone maps. Legacy lane: the analytic dome's
+    // tone map (sky_dome.rs), metered on the luminance the dome shows. A
+    // hash dither against banding, as the analytic dome has.
     mod.draw.DrawEnvBackground = mod.std.set_type_default() do #(DrawEnvBackground::script_shader(vm)){
         alpha_blend: false
         backface_culling: false
@@ -32,11 +41,43 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
         detail_map: texture_2d(float)
+        env_tex: texture_2d(float)
         v_ndc: varying(vec2f)
+        // render-material's lookups, as the base assigns them. Since plan 1a
+        // task A7 the meta row is row 0 and the atlas rows start at 1, both
+        // addressed absolutely (normalised by size() only at the sample), so
+        // a padded RGBA32F allocation (D3D11, desktop GL: spare rows below
+        // the data, size() reports the allocation) cannot hide them; nothing
+        // here overrides them.
         mat_ibl_meta: mod.draw.mat_ibl_meta
         mat_ibl_dir: mod.draw.mat_ibl_dir
         mat_ibl_level: mod.draw.mat_ibl_level
         mat_ibl_sky_env: mod.draw.mat_ibl_sky_env
+        // The dome, bilinear by hand (float textures are unfiltered): u
+        // wraps, v clamps, texel centres. The dome is RGBA32F too, so the
+        // same padding applies: the texel coordinates are in the LOGICAL
+        // size (bg2.zw) and size() only converts a texel index to the
+        // sampler's coordinates (never wraps, clamps or scales by it). The
+        // test `the_dome_lookup_never_reads_the_padding_of_a_float_allocation`
+        // runs this function's transcription over a NaN-padded allocation.
+        env_texel: fn(uv: vec2) -> vec3 {
+            let size = self.env_tex.size()
+            let w = self.bg2.z
+            let h = self.bg2.w
+            let px = uv.x * w - 0.5
+            let py = clamp(uv.y * h - 0.5, 0.0, h - 1.0)
+            let x0 = floor(px)
+            let y0 = floor(py)
+            let fx = px - x0
+            let fy = py - y0
+            let xa = (x0 - floor(x0 / w) * w + 0.5) / size.x
+            let xb = (x0 + 1.0 - floor((x0 + 1.0) / w) * w + 0.5) / size.x
+            let ya = (y0 + 0.5) / size.y
+            let yb = (min(y0 + 1.0, h - 1.0) + 0.5) / size.y
+            let a = mix(self.env_tex.sample_nearest(vec2(xa, ya)).xyz, self.env_tex.sample_nearest(vec2(xb, ya)).xyz, fx)
+            let b = mix(self.env_tex.sample_nearest(vec2(xa, yb)).xyz, self.env_tex.sample_nearest(vec2(xb, yb)).xyz, fx)
+            return mix(a, b, fy)
+        }
         vertex: fn() {
             let p = self.geom.pos * 2.0 - vec2(1.0, 1.0)
             self.v_ndc = p
@@ -46,7 +87,32 @@ script_mod! {
             // The view ray through this pixel, in world space.
             let v = vec4(self.v_ndc.x * self.bg.z, self.v_ndc.y * self.bg.w, -1.0, 0.0)
             let d = normalize((self.draw_pass.camera_inv * v).xyz)
-            return vec4(self.mat_ibl_sky_env(d, self.bg.x) * self.bg.y, 1.0)
+            // Sharp with the dome up: the map itself, turned by the IBL's
+            // rotation (meta texel 9) and at its intensity; else the atlas
+            // at the blur (which carries the intensity already).
+            let sharp = step(self.bg.x, 0.0) * step(0.5, self.bg2.z)
+            var c = vec3(0.0, 0.0, 0.0)
+            if sharp > 0.5 {
+                let r = self.mat_ibl_dir(d)
+                let uv = vec2(fract(0.5 + atan2(r.x, 0.0 - r.z) / 6.2831853), acos(clamp(r.y, -1.0, 1.0)) / 3.14159265)
+                c = self.env_texel(uv) * self.mat_ibl_meta(9.0).z
+            } else {
+                c = self.mat_ibl_sky_env(d, self.bg.x)
+            }
+            c = max(c * self.bg.y, vec3(0.0, 0.0, 0.0))
+            // Legacy lane (bg2.y = 0): Reinhard on the luminance at the
+            // metered exposure, normalised, gamma 1/2.2 — the analytic
+            // dome's own steps. HDR lane (bg2.y = 1): the linear radiance
+            // as it is (no gain: the environment's own scale).
+            let hdr = step(0.5, self.bg2.y)
+            let lum = dot(c, vec3(0.2126, 0.7152, 0.0722))
+            let yt = max(lum * self.bg2.x, 0.0)
+            let ldr0 = c * ((yt / (1.0 + yt)) / max(lum, 0.000001))
+            let m = max(max(ldr0.x, ldr0.y), max(ldr0.z, 1.0))
+            let ldr = pow(ldr0 * (1.0 / m), vec3(0.4545454, 0.4545454, 0.4545454))
+            let out = mix(ldr, c, hdr)
+            let hash = fract(sin(dot(d.xy + d.zz, vec2(12.9898, 78.233))) * 43758.5453)
+            return vec4(out + vec3(1.0, 1.0, 1.0) * ((hash - 0.5) * 0.008), 1.0)
         }
         fragment: fn() {
             self.fb0 = self.pixel()
@@ -64,6 +130,14 @@ pub struct DrawEnvBackground {
     /// inverse x and y scales (view ray from the NDC).
     #[live(vec4(0.0, 1.0, 1.0, 1.0))]
     pub bg: Vec4f,
+    /// x = the legacy lane's exposure (metered on the luminance the dome
+    /// shows, the map's mean x Ibl.intensity, x 2^exposure_ev; 0 in the
+    /// HDR lane), y = the lane (1 = HDR: linear out at the environment's
+    /// own scale; 0 = legacy: the shader tone maps), zw = the dome
+    /// texture's LOGICAL size (0 = no dome yet: the atlas draws at every
+    /// blur).
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub bg2: Vec4f,
 }
 
 /// How a draw takes part in the renderer's environment (`draw_scene_full`,
@@ -234,6 +308,43 @@ fn build_ibl(
     let fill = key.sun.or(baked_sun);
     let prepared = prepare_ibl_sized(&map, fill.as_ref(), intensity, rotation_deg, dome_cap, atlas_width);
     Some(IblJobResult { generation, key, intensity, rotation_deg, prepared, baked_sun })
+}
+
+/// The quad's two instance vectors for this frame. Pure, so the lane
+/// switch, the meter and the dome gate are testable without a device.
+/// `metered_luminance` is the luminance the dome shows: the bound map's
+/// whole-sphere mean x `Ibl.intensity` (the caller multiplies).
+pub(super) fn env_dome_controls(
+    blur: f32,
+    intensity: f32,
+    projection: &Mat4f,
+    hdr_output: bool,
+    metered_luminance: f32,
+    exposure_ev: f32,
+    dome_size: Option<(usize, usize)>,
+) -> (Vec4f, Vec4f) {
+    let clean = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+    let (px, py) = (projection.v[0], projection.v[5]);
+    let bg = vec4(
+        clean(blur, 0.0).clamp(0.0, 1.0),
+        clean(intensity, 0.0).max(0.0),
+        1.0 / if px.abs() > 1e-6 { px } else { 1.0 },
+        1.0 / if py.abs() > 1e-6 { py } else { 1.0 },
+    );
+    // Legacy lane: the same reflected-light meter as sky::exposure, on the
+    // dome's whole-sphere mean at the environment's scale; the floor keeps
+    // a black map finite. The HDR lane has no exposure of its own (the
+    // composite's) and no gain: the dome is the map x Ibl.intensity,
+    // exactly what the IBL lights with (HDR_SKY_GAIN is the analytic
+    // sky's).
+    let (exposure, lane) = if hdr_output {
+        (0.0, 1.0)
+    } else {
+        let metered = clean(metered_luminance, 0.0).max(crate::sky::EXPOSURE_LUMINANCE_FLOOR);
+        ((crate::sky::EXPOSURE_KEY / metered) * 2.0f32.powf(clean(exposure_ev, 0.0).clamp(-12.0, 12.0)), 0.0)
+    };
+    let (dw, dh) = dome_size.map(|(w, h)| (w as f32, h as f32)).unwrap_or((0.0, 0.0));
+    (bg, vec4(exposure, lane, dw, dh))
 }
 
 impl Renderer {
@@ -513,11 +624,20 @@ impl Renderer {
     }
 
     /// Draw the environment as the background when the world asks for it
-    /// (first in the scene pass: everything after draws over it).
-    pub(super) fn draw_environment_background(&mut self, cx: &mut Cx3d, env: &Environment, projection: &Mat4f) {
-        let Background::Environment { blur, intensity } = env.background else { return };
-        let Some(texture) = self.ibl.texture.clone() else { return };
+    /// (first in the scene pass: everything after draws over it). Returns
+    /// true when the full-resolution dome was drawn: the frame then skips
+    /// its analytic or gradient dome. Until the dome lands, the atlas
+    /// background draws under the dome exactly as before; an MR stage
+    /// never shows an environment (the room supplies the horizon).
+    pub(super) fn draw_environment_background(&mut self, cx: &mut Cx3d, env: &Environment, projection: &Mat4f, exposure_ev: f32) -> bool {
+        let Background::Environment { blur, intensity } = env.background else { return false };
+        if !self.stage.shows_environment() {
+            return false;
+        }
+        let Some(texture) = self.ibl.texture.clone() else { return false };
         if self.ibl.background.is_none() {
+            // Held VM (a script-driven draw is mid-apply): try again next
+            // frame rather than drawing a sky with no shader.
             self.ibl.background = cx.cx.try_with_vm(|vm| {
                 makepad_render_material::builtin::register(vm);
                 let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
@@ -531,14 +651,28 @@ impl Renderer {
                 Box::new(DrawEnvBackground::script_new_with_default(vm))
             });
         }
-        let Some(d) = self.ibl.background.as_mut() else { return };
-        let (px, py) = (projection.v[0], projection.v[5]);
-        d.bg = vec4(blur.clamp(0.0, 1.0), intensity.max(0.0), 1.0 / if px.abs() > 1e-6 { px } else { 1.0 }, 1.0 / if py.abs() > 1e-6 { py } else { 1.0 });
+        let dome = self.ibl.dome.clone();
+        // The dome's LOGICAL size: the shader addresses texels in it, never
+        // in a (possibly padded) allocation's size().
+        let dome_size = dome.as_ref().map(|_| self.ibl.dome_size);
+        // The legacy meter reads the luminance the dome shows: the map's
+        // mean at the environment's scale x Ibl.intensity (C5's env_exposure
+        // meters the rig on the same product).
+        let ibl_scale = env.ibl.map_or(0.0, |i| if i.intensity.is_finite() { i.intensity.max(0.0) } else { 0.0 });
+        let (bg, bg2) = env_dome_controls(blur, intensity, projection, self.hdr_output, self.ibl.mean_luminance * ibl_scale, exposure_ev, dome_size);
+        let Some(d) = self.ibl.background.as_mut() else { return false };
+        d.bg = bg;
+        d.bg2 = bg2;
         d.draw_vars.options.depth_write = false;
         d.draw_vars.set_texture(0, &texture);
-        if d.draw_vars.can_instance() {
+        // Slot 1 is env_tex; the lane texture stands in until the dome is
+        // up (bg2.z = 0 keeps the shader on the atlas path).
+        d.draw_vars.set_texture(1, dome.as_ref().unwrap_or(&texture));
+        let drawn = d.draw_vars.can_instance();
+        if drawn {
             cx.add_instance(&d.draw_vars);
         }
+        drawn && dome.is_some()
     }
 }
 
@@ -1052,5 +1186,117 @@ mod tests {
         // An index past the table builds nothing.
         renderer.resolve_ibl(&mut cx, &env_of(IblSource::Procedural(999), 1.0, 0.0));
         assert!(renderer.ibl_texture().is_none() && !renderer.environment_pending());
+    }
+
+    /// The quad's two instance vectors: the lane switch and the meter,
+    /// decided on the CPU so the shader is one branch per pixel.
+    #[test]
+    fn the_background_controls_pick_the_lane_the_meter_and_the_dome() {
+        let mut proj = Mat4f::identity();
+        proj.v[0] = 2.0;
+        proj.v[5] = 4.0;
+        // HDR lane: the lane flag 1 (linear out at the map's own scale x
+        // Ibl.intensity, which the shader reads from meta texel 9; never
+        // HDR_SKY_GAIN, the analytic sky's), no exposure of its own (the
+        // composite's), the dome's logical size.
+        let (bg, bg2) = env_dome_controls(0.3, 1.5, &proj, true, 0.25, 1.0, Some((2048, 1024)));
+        assert_eq!(bg, vec4(0.3, 1.5, 0.5, 0.25));
+        assert_eq!(bg2, vec4(0.0, 1.0, 2048.0, 1024.0));
+        // Legacy lane: exposure metered on the luminance the dome shows (the
+        // caller passes the map's mean x Ibl.intensity), times
+        // 2^exposure_ev; lane flag 0 (the shader tone maps).
+        let (_, bg2) = env_dome_controls(0.0, 1.0, &proj, false, 0.25, 1.0, None);
+        assert!((bg2.x - crate::sky::EXPOSURE_KEY / 0.25 * 2.0).abs() < 1.0e-5, "{bg2:?}");
+        assert_eq!((bg2.y, bg2.z, bg2.w), (0.0, 0.0, 0.0), "no dome: the atlas path");
+        // A black map meters at the floor, not at infinity; NaN clamps.
+        let (_, floor) = env_dome_controls(0.0, 1.0, &proj, false, 0.0, 0.0, None);
+        assert!((floor.x - crate::sky::EXPOSURE_KEY / crate::sky::EXPOSURE_LUMINANCE_FLOOR).abs() < 1.0e-4);
+        let (bg, bg2) = env_dome_controls(f32::NAN, -2.0, &proj, false, f32::NAN, f32::NAN, Some((4, 2)));
+        assert_eq!((bg.x, bg.y), (0.0, 0.0), "blur and intensity are clamped");
+        assert!(bg2.x.is_finite() && bg2.x > 0.0);
+        // A degenerate projection still gives a finite ray scale.
+        let (bg, _) = env_dome_controls(0.0, 1.0, &Mat4f::default(), true, 1.0, 0.0, None);
+        assert_eq!((bg.z, bg.w), (1.0, 1.0));
+    }
+
+    /// The background is not the sky until the full-resolution dome is up;
+    /// the accessor the frame gates on says so, and an MR stage never
+    /// shows an environment.
+    #[test]
+    fn the_dome_replaces_the_sky_only_once_it_is_ready_and_never_in_mr() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        assert!(!renderer.environment_dome_ready());
+        renderer.register_environment(TextureRef(3), grey(16, 0.4));
+        let env = env_of(IblSource::Hdri(TextureRef(3)), 1.0, 0.0);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(!renderer.environment_dome_ready(), "preparing: the analytic dome still draws");
+        settle(&mut renderer, &mut cx, &env);
+        assert!(renderer.environment_dome_ready());
+        assert!(renderer.stage.shows_environment(), "a flat stage shows it");
+        renderer.stage.mode = crate::stage::StageMode::MrDiorama;
+        assert!(!renderer.stage.shows_environment(), "MR: the room is the horizon");
+        // The quad's dome size is the preparation's LOGICAL size (what the
+        // shader addresses texels in), not a texture allocation's.
+        assert_eq!(renderer.ibl.dome_size, (16, 8));
+    }
+
+    /// The shader's `env_texel`, transcribed line for line (Step 3): texel
+    /// coordinates in the LOGICAL size (`bg2.zw`), u wrapped, v clamped,
+    /// texel centres; only the final sample is normalised by the
+    /// allocation (`env_tex.size()`), then read back the way
+    /// `sample_nearest` reads a texel.
+    fn env_texel_cpu(alloc: &[[f32; 4]], alloc_w: usize, alloc_h: usize, w: f32, h: f32, uv: [f32; 2]) -> [f32; 3] {
+        let (sx, sy) = (alloc_w as f32, alloc_h as f32);
+        let nearest = |u: f32, v: f32| {
+            let x = ((u * sx).floor() as usize).min(alloc_w - 1);
+            let y = ((v * sy).floor() as usize).min(alloc_h - 1);
+            alloc[y * alloc_w + x]
+        };
+        let mix = |a: [f32; 4], b: [f32; 4], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1.0];
+        let px = uv[0] * w - 0.5;
+        let py = (uv[1] * h - 0.5).clamp(0.0, h - 1.0);
+        let (x0, y0) = (px.floor(), py.floor());
+        let (fx, fy) = (px - x0, py - y0);
+        let xa = (x0 - (x0 / w).floor() * w + 0.5) / sx;
+        let xb = (x0 + 1.0 - ((x0 + 1.0) / w).floor() * w + 0.5) / sx;
+        let ya = (y0 + 0.5) / sy;
+        let yb = ((y0 + 1.0).min(h - 1.0) + 0.5) / sy;
+        let a = mix(nearest(xa, ya), nearest(xb, ya), fx);
+        let b = mix(nearest(xa, yb), nearest(xb, yb), fx);
+        let c = mix(a, b, fy);
+        [c[0], c[1], c[2]]
+    }
+
+    /// The dome is a VecRGBAf32 texture too, so D3D11 and desktop GL may
+    /// allocate it with spare rows (`ceil128(max(3 h, 512))`,
+    /// `platform/src/os/windows/d3d11.rs:3345-3352`,
+    /// `platform/src/os/linux/opengl.rs:3221-3224`) and `size()` reports the
+    /// allocation. The lookup addresses texels in the logical size and
+    /// normalises only the sample, so over an allocation whose spare rows
+    /// are NaN it reads exactly the map: `EnvMap::sample_uv`, finite, at the
+    /// seam, the poles and in between.
+    #[test]
+    fn the_dome_lookup_never_reads_the_padding_of_a_float_allocation() {
+        let map = EnvMap::from_fn(32, |d| [0.5 + 0.5 * d[0], 0.5 + 0.5 * d[1], 0.5 + 0.5 * d[2]]);
+        let (w, h) = (map.width, map.height);
+        let alloc_h = (3 * h).max(512).div_ceil(128) * 128;
+        let mut alloc = map.data.clone();
+        alloc.resize(w * alloc_h, [f32::NAN; 4]);
+        for uv in [[0.5f32, 0.5f32], [0.001, 0.02], [0.999, 0.98], [0.0, 0.0], [0.75, 1.0], [0.37, 0.61], [0.016, 0.5]] {
+            let got = env_texel_cpu(&alloc, w, alloc_h, w as f32, h as f32, uv);
+            let want = map.sample_uv(uv);
+            for k in 0..3 {
+                assert!(got[k].is_finite() && (got[k] - want[k]).abs() < 1.0e-5, "uv {uv:?}: {got:?} vs {want:?}");
+            }
+        }
+        // The same lookup with size() taken as the map's size (no padding:
+        // Metal, WebGPU) is the same texels, so one shader serves both.
+        let unpadded = env_texel_cpu(&map.data, w, h, w as f32, h as f32, [0.37, 0.61]);
+        let want = map.sample_uv([0.37, 0.61]);
+        assert!((0..3).all(|k| (unpadded[k] - want[k]).abs() < 1.0e-5));
+        // The controls carry the logical size the lookup needs.
+        let (_, bg2) = env_dome_controls(0.0, 1.0, &Mat4f::identity(), true, 1.0, 0.0, Some((w, h)));
+        assert_eq!((bg2.z, bg2.w), (w as f32, h as f32));
     }
 }

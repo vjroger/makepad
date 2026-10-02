@@ -295,8 +295,11 @@ impl Renderer {
         }
         draw_list.begin_always(cx);
         cx.begin_scene_3d(scene_state);
-        // The environment as the background, first (a world that asks).
-        self.draw_environment_background(cx, &world.environment, &scene_state.projection);
+        // The environment as the background, first (a world that asks). It
+        // replaces the dome below once its full-resolution map is up; the
+        // legacy lane meters it with the sky's exposure compensation.
+        let exposure_ev = world.sky.as_ref().map(|s| s.exposure_ev).filter(|ev| ev.is_finite()).unwrap_or(0.0);
+        let env_dome = self.draw_environment_background(cx, &world.environment, &scene_state.projection, exposure_ev);
         // Camera-relative rendering: world geometry shifts by the render
         // origin on the GPU (the pass view was rebuilt around it by the
         // host's `Renderer::set_pass_camera`); CPU-side culling, cascades
@@ -503,7 +506,7 @@ impl Renderer {
         // the ANALYTIC dome (Preetham + setting sun + stars, tinted by an
         // authored palette); authored gradients under a fixed hour keep
         // DrawSceneSky.
-        if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment) {
+        if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment && !env_dome) {
             let mut transform = Mat4f::identity();
             transform.v[12] = camera_pos.x;
             transform.v[13] = camera_pos.y;
@@ -583,6 +586,9 @@ impl Renderer {
                     draws.sky.cube.draw(cx);
                 }
             }
+            stats.sky_drawn = true;
+        }
+        if env_dome {
             stats.sky_drawn = true;
         }
 
