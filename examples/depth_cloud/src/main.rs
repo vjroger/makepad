@@ -286,15 +286,10 @@ impl App {
         cx.redraw_all();
     }
 
-    /// The crop band in cloud depth units: 0 = near plane, 1 = far plane.
+    /// The crop band of the source's own depth: 0 = nearest, 1 = farthest.
     fn apply_crop(&self, cx: &mut Cx) {
-        let far = self.depth_amount.max(1.0);
-        // Interpolate in disparity, like the depth mapping itself.
-        let at = |f: f32| 1.0 / (1.0 + (1.0 / far - 1.0) * f.clamp(0.0, 1.0));
-        let (lo, hi) = self.crop;
-        let near_cut = if lo <= 0.0 { 0.0 } else { at(lo) * 0.999 };
-        let far_cut = if hi >= 1.0 { 100000.0 } else { at(hi) * 1.001 };
-        self.with_cloud(cx, |_, cloud| cloud.crop = (near_cut, far_cut));
+        let crop = self.crop;
+        self.with_cloud(cx, |_, cloud| cloud.crop = crop);
         cx.redraw_all();
     }
 
@@ -309,7 +304,15 @@ impl App {
         if let Some((color, depth, size)) = targets {
             // Scene depth 2..8 units -> cloud units around 1..4.
             self.with_cloud(cx, |cx, cloud| {
-                cloud.set_rendered_source(cx, &color, &depth, size, RenderedDepth::Linear, 0.5)
+                cloud.set_rendered_source(
+                    cx,
+                    &color,
+                    &depth,
+                    size,
+                    RenderedDepth::Linear,
+                    0.5,
+                    (2.0, 9.0),
+                )
             });
         }
         self.set_status(cx, "live rendered scene: GPU depth, no model");
@@ -484,7 +487,7 @@ impl MatchEvent for App {
                 camera.desktop_target = vec3f(0.0, 0.0, -pivot);
                 camera.distance += pivot - old_pivot;
             });
-            self.apply_crop(cx);
+            redraw = true;
         }
         if let Some(v) = slided(cx, ids!(points_per_row)) {
             self.with_cloud(cx, |_, cloud| cloud.points_per_row = v as f32);

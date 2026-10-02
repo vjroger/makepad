@@ -73,11 +73,13 @@ script_mod! {
         edge_cut: uniform(0.08)
         edge_radius: uniform(1.5)
         depth_mode: uniform(0.0)
-        // z: rendered depth units -> cloud units.
+        // Rendered sources: x,y = the scene's near/far (scene units, for the
+        // crop), z = scene depth units -> cloud units.
         depth_params: uniform(vec4(0.1, 100.0, 1.0, 0.0))
         color_mode: uniform(0.0)
-        // Keep points with view depth inside [x, y] (cloud units).
-        crop: uniform(vec2(0.0, 100000.0))
+        // Keep points inside this band of the SOURCE's depth range
+        // (0 = nearest, 1 = farthest), independent of the depth amount.
+        crop: uniform(vec2(-1.0, 2.0))
         // xyz: effector position (world), w: 1 = active.
         effector: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // x: mode (0 off, 1 attract, 2 repel, 3 swirl, 4 ripple),
@@ -138,7 +140,17 @@ script_mod! {
                 return
             }
             let z = mix(mix(z00, z10, fx), mix(z01, z11, fx), fy)
-            if z < self.crop.x || z > self.crop.y {
+            // Where the point sits in the source's own range, 0 = nearest:
+            // the stabilized disparity for frame sources, the scene's
+            // near/far (in disparity) for rendered ones.
+            let raw = self.tex_depth.sample_nearest(cell, 0.0).x
+            var far_frac = 1.0 - raw
+            if self.depth_mode > 0.5 {
+                let inv_near = 1.0 / max(self.depth_params.x, 0.00001)
+                let inv_far = 1.0 / max(self.depth_params.y, 0.00001)
+                far_frac = (inv_near - 1.0 / max(raw, 0.00001)) / max(inv_near - inv_far, 0.00001)
+            }
+            if far_frac < self.crop.x || far_frac > self.crop.y {
                 self.cull()
                 return
             }
@@ -298,6 +310,8 @@ struct RenderedSource {
     size: (usize, usize),
     encoding: RenderedDepth,
     scale: f32,
+    /// The scene's near/far in its own units: what the crop band spans.
+    depth_range: (f32, f32),
 }
 
 struct CloudTextures {
@@ -353,9 +367,9 @@ pub struct DepthCloud {
     #[rust]
     dummy: Option<Texture>,
 
-    /// Keep only points whose depth is inside this band (cloud units; the
-    /// near plane of a frame source sits at 1).
-    #[rust((0.0, 100000.0))]
+    /// Keep only points inside this band of the source's own depth range:
+    /// 0 = nearest, 1 = farthest. Unaffected by `depth_amount`.
+    #[rust((0.0, 1.0))]
     pub crop: (f32, f32),
     #[rust]
     pub effect: CloudEffect,
@@ -435,7 +449,8 @@ impl DepthCloud {
     /// Show something already rendered on the GPU (a 3D scene's colour
     /// target and its depth): the cheap path, no model and no readback.
     /// `size` is the targets' pixel size; `scale` maps scene depth units to
-    /// cloud units (about 1 = the near end of the interesting range).
+    /// cloud units (about 1 = the near end of the interesting range);
+    /// `depth_range` is the scene's near/far in its own units (the crop band).
     /// Replaces the frame source.
     pub fn set_rendered_source(
         &mut self,
@@ -445,6 +460,7 @@ impl DepthCloud {
         size: (usize, usize),
         encoding: RenderedDepth,
         scale: f32,
+        depth_range: (f32, f32),
     ) {
         self.close();
         self.rendered = Some(RenderedSource {
@@ -453,6 +469,7 @@ impl DepthCloud {
             size: (size.0.max(2), size.1.max(2)),
             encoding,
             scale,
+            depth_range,
         });
         // The cloud draws inside its XrSceneView's own pass: redraw the whole
         // tree so that pass re-renders too.
@@ -599,7 +616,8 @@ impl DepthCloud {
                 let mode = match r.encoding {
                     RenderedDepth::Linear => 1.0,
                 };
-                (r.size, [0.0, 0.0, 1.0, 1.0], mode, [0.0, 0.0, r.scale, 0.0], 1.0)
+                let (near, far) = r.depth_range;
+                (r.size, [0.0, 0.0, 1.0, 1.0], mode, [near, far, r.scale, 0.0], 1.0)
             }
             (None, Some(t)) => {
                 dv.set_texture(0, &t.y);
@@ -629,7 +647,10 @@ impl DepthCloud {
         dv.set_uniform(cx.cx, live_id!(depth_mode), &[depth_mode]);
         dv.set_uniform(cx.cx, live_id!(depth_params), &params);
         dv.set_uniform(cx.cx, live_id!(color_mode), &[color_mode]);
-        dv.set_uniform(cx.cx, live_id!(crop), &[crop.0, crop.1]);
+        // The full band never cuts, whatever the rounding at its ends.
+        let lo = if crop.0 <= 0.0 { -1.0 } else { crop.0 };
+        let hi = if crop.1 >= 1.0 { 2.0 } else { crop.1 };
+        dv.set_uniform(cx.cx, live_id!(crop), &[lo, hi]);
         dv.set_uniform(
             cx.cx,
             live_id!(effector),
