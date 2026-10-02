@@ -361,7 +361,8 @@ enum Format {
     Png,
 }
 
-/// Writes the selected formats next to `base`, ignoring its extension:
+/// Writes the selected formats next to `base`, ignoring an `exr`, `hdr` or `png` extension on it
+/// (any case; any other dot is part of the name, so `sky_45.5` gives `sky_45.5.exr`):
 /// - `<stem>.exr`, `<stem>.hdr` and `<stem>.png` (the equirects, in the file convention);
 /// - then, with `cube_faces`, `<stem>_px.exr` … `<stem>_nz.exr` (or `.png` with `cube_png`),
 ///   each face W/4 texels square, in `FACE_NAMES` order.
@@ -387,7 +388,7 @@ pub fn export_all(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(Vec<PathBuf>, ExrReport), String> {
     check_map(env, "export")?;
-    let stem = base.with_extension("");
+    let stem = export_stem(base);
     let named = |suffix: &str| {
         let mut name = stem.as_os_str().to_owned();
         name.push(suffix);
@@ -458,6 +459,21 @@ pub fn export_all(
     }
     progress(1.0);
     Ok((staged.into_iter().map(|(_, path)| path).collect(), report))
+}
+
+/// The base path without the image extension it may carry. Only `exr`, `hdr` and `png`, in any
+/// case, count as one: any other dot belongs to the name (`sky_45.5`, `hdri_v1.2`), and cutting at
+/// it would write over another export's files.
+fn export_stem(base: &Path) -> PathBuf {
+    let is_image_extension = base
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map_or(false, |extension| ["exr", "hdr", "png"].iter().any(|known| extension.eq_ignore_ascii_case(known)));
+    if is_image_extension {
+        base.with_extension("")
+    } else {
+        base.to_path_buf()
+    }
 }
 
 fn encode_map(env: &EnvMap, format: Format, opts: &ExportOptions, report: &mut ExrReport) -> Result<Vec<u8>, String> {
@@ -880,6 +896,36 @@ mod tests {
         assert_eq!(listing(&dir), ["sky.exr", "sky.hdr"]);
         assert_eq!(load_equirect(&dir.join("sky.exr")).unwrap(), env);
         assert_eq!(std::fs::read(dir.join("sky.hdr").join("keep")).unwrap(), b"x");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn export_all_keeps_a_dotted_base_name() {
+        let dir = scratch_dir("dotted");
+        let env = test_map(16, 8);
+        // Another export's file: sky_45.5 must not be taken for sky_45 plus an extension.
+        std::fs::write(dir.join("sky_45.exr"), b"another sky").unwrap();
+        let opts = ExportOptions { cube_faces: true, ..ExportOptions::default() };
+        let (paths, _) = export_all(&dir.join("sky_45.5"), &env, &opts, &|_| {}, &|| false).unwrap();
+        assert_eq!(file_names(&paths)[..3], ["sky_45.5.exr", "sky_45.5_px.exr", "sky_45.5_nx.exr"]);
+        assert_eq!(std::fs::read(dir.join("sky_45.exr")).unwrap(), b"another sky");
+        // Only exr, hdr and png, in any case, are taken for the base's extension.
+        let exr_only = ExportOptions::default();
+        for (base, want) in [
+            ("hdri_v1.2", "hdri_v1.2.exr"),
+            ("noon.v2", "noon.v2.exr"),
+            ("noon.v2.exr", "noon.v2.exr"),
+            ("sky", "sky.exr"),
+            ("sky.exr", "sky.exr"),
+            ("Sky.EXR", "Sky.exr"),
+            ("sky.hdr", "sky.exr"),
+            ("sky.Png", "sky.exr"),
+            ("sky.jpg", "sky.jpg.exr"),
+            ("sky.exr.bak", "sky.exr.bak.exr"),
+        ] {
+            let (paths, _) = export_all(&dir.join(base), &env, &exr_only, &|_| {}, &|| false).unwrap();
+            assert_eq!(file_names(&paths), [want], "base {base}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
