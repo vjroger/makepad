@@ -25,7 +25,8 @@
 //! - `ibl` works in `[f32; 3]`; this module works in `Vec3f` and converts at
 //!   the boundary with [`arr`] and [`vec`].
 //!
-//! Design: docs/superpowers/specs/2026-09-29-procedural-hdri-generator-design.md
+//! Design: local/agent_state/hdri/design.md (local notes, not under version
+//! control).
 
 // `!(x > 0.0)` and its kin are written negated on purpose throughout this module and its
 // children: a NaN fails the comparison, so it takes the guard's branch. Clippy would have

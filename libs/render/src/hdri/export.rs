@@ -1,8 +1,9 @@
 //! Export of baked maps: OpenEXR (ZIP, float or half), Radiance `.hdr` (new-style RLE),
 //! tonemapped PNG, the six cube faces, and `export_all`, which writes a set of them next to one
 //! base path. A single file goes through `write_atomic`; `export_all` stages every file of the set
-//! as `<name>.tmp` and renames them all at the end, so a failed or cancelled export leaves the
-//! folder as it was, previous exports included.
+//! as `<name>.tmp` and renames them all at the end. A cancel, or an error before those renames,
+//! leaves the folder as it was, previous exports included; a rename that fails among them leaves
+//! the files renamed before it in place (whole files), as `export_all` says.
 //!
 //! Every equirect encoder takes the ENGINE convention (−Z at the centre, what `Env::bake`
 //! produces) and rolls it to the file convention (+X at the centre) itself through
