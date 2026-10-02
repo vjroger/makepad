@@ -556,6 +556,24 @@ mod tests {
     }
 
     #[test]
+    fn a_bake_cleans_every_channel() {
+        // The one layer-free test of the clean-up: every other bake here is
+        // already inside 0..1, so only this one fails if clean_radiance or
+        // texel stops mapping NaN to 0, a negative to 0 and +inf to
+        // MAX_RADIANCE (each channel on its own branch).
+        let dirty = |_: Vec3f| vec3f(f32::NAN, -1.0, f32::INFINITY);
+        let want = [0.0, 0.0, MAX_RADIANCE, 1.0];
+        let serial = bake_with(16, &dirty);
+        assert_eq!((serial.width, serial.height), (16, 8));
+        assert!(serial.data.iter().all(|t| *t == want), "serial bake: {:?}", serial.data[0]);
+        let parallel = bake_par_with(16, &dirty, four_threads);
+        assert!(parallel.data.iter().all(|t| *t == want), "parallel bake: {:?}", parallel.data[0]);
+        // And the minus-infinity and large-negative ends of the same branches.
+        let low = |_: Vec3f| vec3f(f32::NEG_INFINITY, f32::MIN, f32::MAX);
+        assert!(bake_with(8, &low).data.iter().all(|t| *t == [0.0, 0.0, MAX_RADIANCE, 1.0]));
+    }
+
+    #[test]
     fn env_can_be_shared_across_threads() {
         // bake_par hands &Env to worker threads; later layers must keep it Send + Sync.
         fn shareable<T: Send + Sync>() {}
