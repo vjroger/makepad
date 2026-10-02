@@ -75,17 +75,18 @@ pub struct EnvSun {
     pub cos_radius: f32,
 }
 
-/// One environment, ready to sample. `new` does all the per-parameter work
-/// once. After that the struct is immutable, so bake threads share it by
-/// reference (it must stay `Send + Sync`; a test pins that).
+/// One environment, ready to sample: every layer is built once in `new`, so
+/// `radiance` is cheap enough to call per texel from many threads (the struct
+/// stays `Send + Sync`; A1's test pins that).
 pub struct Env {
     /// Clamped copy of the parameters the layers were built from.
     params: HdriParams,
     /// 2^intensity_ev, applied last so every layer keeps its own units.
     scale: f32,
-    /// Backdrop and light list. The lights are an overlay in both modes, so this
-    /// is built for Sky maps too.
+    /// The studio backdrop (Studio mode) and the light overlay (both modes).
     studio: studio::Studio,
+    /// The clear sky; Some exactly in Sky mode.
+    atmo: Option<atmosphere::Atmosphere>,
 }
 
 impl Env {
@@ -95,7 +96,15 @@ impl Env {
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
         let studio = studio::Studio::new(&params.studio, &params.lights);
-        Env { params, scale, studio }
+        let atmo = match params.mode() {
+            Mode::Sky => Some(atmosphere::Atmosphere::new(
+                atmosphere::sun_direction(&params.sky.sun),
+                &params.sky.atmosphere,
+                &params.sky.sun_disc,
+            )),
+            Mode::Studio => None,
+        };
+        Env { params, scale, studio, atmo }
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -103,41 +112,69 @@ impl Env {
     }
 
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
-    /// the rotation is already applied).
-    /// Order: undo rotation → base layer (Sky: atmosphere + disc + night + clouds; Studio: backdrop)
-    ///        → lights overlay → × 2^intensity_ev.
+    /// rotation already applied). Order: undo the rotation, base layer (Sky:
+    /// atmosphere + disc; Studio: backdrop), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
-        // The layers live in the map's own frame; turning the content by
-        // rotation_deg is looking it up at the direction turned back
-        // (ibl's sign, as EnvMap::procedural and mat_ibl_dir do).
+        // The layers live in the map's own frame; turning the map by
+        // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
-        let base = match self.params.mode() {
-            Mode::Studio => self.studio.backdrop(d),
-            // No outdoor layers yet: a Sky map is black under its lights until
-            // the atmosphere lands (task A4).
-            Mode::Sky => Vec3f::default(),
+        let base = match &self.atmo {
+            Some(atmo) => atmo.sky(d) + atmo.sun_disc(d),
+            None => self.studio.backdrop(d),
         };
         self.studio.apply_lights(d, base) * self.scale
     }
 
-    /// Key light for the engine, in world space, already × 2^intensity_ev. A
-    /// key light leads in both modes; task A4 adds the sun as the fallback in
-    /// Sky mode and A6 the moon.
+    /// Key light for the engine, in world space, already x 2^intensity_ev.
+    /// Sky mode: the light marked key if any, else the sun while it is above
+    /// the horizon (A5 dims it by the cloud cover, A6 adds the moon once the
+    /// sun is 6 deg down). Studio mode: the key light if any.
     pub fn sun(&self) -> Option<EnvSun> {
-        self.studio.key().map(|key| self.key_to_world(key))
+        if let Some(key) = self.studio.key() {
+            return Some(self.key_to_world(key));
+        }
+        let atmo = self.atmo.as_ref()?;
+        let sun = atmo.sun_dir();
+        if sun.y <= 0.0 {
+            return None;
+        }
+        // The cone's mean radiance, so radiance x cone solid angle is the
+        // sun's irradiance at the ground whatever the disc's size and limb.
+        Some(self.key_to_world(EnvSun {
+            dir: sun,
+            radiance: atmo.sun_cone_radiance(),
+            cos_radius: atmo.sun_cos_radius(),
+        }))
     }
 
-    /// World-space sun direction in Sky mode (also below the horizon), None in Studio.
-    /// Task A4 fills this in.
+    /// World-space sun direction in Sky mode (also below the horizon), None
+    /// in Studio mode.
     pub fn sun_dir(&self) -> Option<Vec3f> {
-        None
+        self.atmo
+            .as_ref()
+            .map(|atmo| rotate_y(atmo.sun_dir(), self.params.rotation_deg))
     }
 
-    /// Small bright features a texel-centre sample would alias: (world-space
-    /// direction, angular radius in radians). None yet; A4 adds the sun's
-    /// disc and A6 the moon.
+    /// Map frame to world frame, with the map's intensity applied.
+    fn key_to_world(&self, key: EnvSun) -> EnvSun {
+        EnvSun {
+            dir: rotate_y(key.dir, self.params.rotation_deg),
+            radiance: key.radiance * self.scale,
+            cos_radius: key.cos_radius,
+        }
+    }
+
+    /// The sun's disc, in world space, for the bake's refinement: below 4K
+    /// it is smaller than or comparable to a texel, so its texels are
+    /// area-averaged (A1's `refine_hot_spots`).
     fn hot_spots(&self) -> Vec<(Vec3f, f32)> {
-        Vec::new()
+        let mut hot = Vec::new();
+        if let Some(atmo) = &self.atmo {
+            if self.params.sky.sun_disc.visible && atmo.sun_dir().y > -0.1 {
+                hot.push((rotate_y(atmo.sun_dir(), self.params.rotation_deg), atmo.sun_outer_radius()));
+            }
+        }
+        hot
     }
 
     /// Serial bake of the whole map (tests, small previews): `EnvMap::from_fn`
@@ -170,16 +207,6 @@ impl Env {
             refine_hot_spots(&mut map, &radiance, &self.hot_spots());
         }
         map
-    }
-
-    /// Map frame to world frame (the map's yaw, ibl's sign), with the map's
-    /// intensity applied. Every layer's key light goes through this one place.
-    fn key_to_world(&self, key: EnvSun) -> EnvSun {
-        EnvSun {
-            dir: rotate_y(key.dir, self.params.rotation_deg),
-            radiance: key.radiance * self.scale,
-            cos_radius: key.cos_radius,
-        }
     }
 }
 
