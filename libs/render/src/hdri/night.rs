@@ -1,1 +1,889 @@
-//! Stars, moon and night glow. Task A6 replaces this file.
+//! Night layers of the Sky mode: stars, the moon and the night glow.
+//!
+//! **Brightness.** Everything is scaled against the atmosphere's `SUN_IRRADIANCE`,
+//! so the ratios inside the night are physical:
+//! - a full moon is about 1/400000 of the sun, and its disc about as bright as a
+//!   daytime sky;
+//! - a dark moonless sky (glow_strength 1) is about 22 mag/arcsec²;
+//! - a star's irradiance follows its magnitude.
+//!
+//! On top of that the night is *adapted*. As the sun sinks from the horizon to
+//! −12°, the night layers are exposed up by NIGHT_ADAPTATION_EV, the way eyes and
+//! night photographs adapt. Three things follow:
+//! - the daytime moon stays physical, faint against a blue sky;
+//! - twilight hands over to night without a jump;
+//! - a night map exports at levels a renderer can use.
+//!
+//! **Stars** sit on the celestial sphere and wheel with the solar hour around the
+//! pole for the latitude (`crate::sun::celestial_rows`). They hang on the 3D grid
+//! of the sky shader (`shaders/sky_dome.rs:171-193`), evaluated on the CPU:
+//! - space is cut into cubes; each cube hashes one jittered point and holds a
+//!   star where that point, normalised, meets the unit sphere. A cube lattice cut
+//!   by the sphere gives a uniform field with no pinch at the poles;
+//! - a star is a Gaussian of the perpendicular distance to it, of a fixed angular
+//!   size: a sharp core plus a halo, so it neither aliases away at 512×256 nor
+//!   lands on a single pixel at 8K;
+//! - brightness follows a magnitude-like distribution, colour a hashed
+//!   temperature, and the field is thicker along the Milky Way.
+//!
+//! **Moon.** A sphere lit from the sun's direction, so its phase follows the
+//! sun-moon geometry.
+//! - The terminator is where the surface turns away from the sun (n·sun = 0).
+//! - The lit side is shaded Lommel-Seeliger. The regolith scatters like dust, so
+//!   a full moon is flat bright out to the limb instead of darkening like a
+//!   Lambert ball.
+//! - Earthshine lights the dark side faintly, strongest near new moon.
+//! - Its light also scatters in the air, as a blue Rayleigh sky plus a Mie
+//!   aureole. That is what turns a moonlit sky blue.
+//!
+//! **Glow** is airglow: a thin emitting layer about 100 km up. It therefore
+//! brightens toward the horizon by the van Rhijn factor (5.7× at the horizon).
+
+use makepad_draw::*;
+use super::atmosphere::SUN_IRRADIANCE;
+use super::noise::{hash01, hash_u32};
+use super::studio::{kelvin_to_rgb, light_frame, project, LightFrame};
+use super::{EnvSun, NightParams, SunMode, SunParams};
+use crate::sky::{luminance, sun_transmittance};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
+
+/// Clamps into [lo, hi]. A NaN becomes `lo`.
+fn sane(x: f32, lo: f32, hi: f32) -> f32 {
+    x.max(lo).min(hi)
+}
+
+/// The local solar hour that turns the star dome (`celestial_rows`).
+///
+/// **Time mode.** The clock is corrected to the longitude:
+/// solar = clock + longitude/15 − tz_offset. The equation of time is ignored, and
+/// the stars follow the solar hour, not sidereal time (a known limitation).
+///
+/// **Manual mode.** There is no clock, so one is read off the sun's azimuth: east
+/// is 6 h, the noon side 12 h, west 18 h. The stars therefore turn as the sun is
+/// dragged.
+pub fn star_hours(sun: &SunParams) -> f32 {
+    let hours = match sun.mode() {
+        SunMode::Time => sun.hour + sun.longitude / 15.0 - sun.tz_offset,
+        SunMode::Manual => {
+            let az = sun.azimuth_deg;
+            if sun.latitude >= 0.0 {
+                12.0 + (az - 180.0) / 15.0
+            } else {
+                // South of the equator the noon sun stands north, and the day runs
+                // from east through north to west.
+                let from_north = (az + 180.0).rem_euclid(360.0) - 180.0;
+                12.0 - from_north / 15.0
+            }
+        }
+    };
+    if hours.is_finite() { hours.rem_euclid(24.0) } else { 12.0 }
+}
+
+/// EV the night layers are lifted by once the sun is 12 degrees down (see the module notes).
+const NIGHT_ADAPTATION_EV: f32 = 10.0;
+
+// ---- Stars ----
+
+/// Cells per unit along each axis of the 3D grid the stars hang on. At the unit
+/// sphere a cell is 1/STAR_GRID rad, about 2.1 degrees, across. About
+/// 4π·STAR_GRID²·(2·STAR_SHELL) = 9,200 cells reach the sphere.
+const STAR_GRID: f32 = 27.0;
+/// A cell holds a star only when its jittered point lies within this many cells
+/// of the unit sphere. Together with the reach it keeps every star inside the
+/// 3x3x3 gather of the directions that see it: STAR_GRID x reach + STAR_SHELL < 1.
+const STAR_SHELL: f32 = 0.5;
+/// Share of the shell's cells that hold a star at `stars` = 1 (about 8,200 stars
+/// over the sphere before the Milky Way boost; 4,100 at the default 0.5, 4,700
+/// with the boost, as measured). The naked-eye sky holds about 9,000 stars to
+/// magnitude 6.5.
+const STAR_KEEP_MAX: f32 = 0.9;
+/// The field is denser along the Milky Way: the keep share is multiplied by
+/// 1 + MILKY_WAY_BOOST at the galactic equator, falling off as a Gaussian in the
+/// sine of the galactic latitude with MILKY_WAY_SIN_HALF (sin 10 degrees) as its width.
+const MILKY_WAY_BOOST: f32 = 1.0;
+const MILKY_WAY_SIN_HALF: f32 = 0.17;
+/// Faintest magnitude drawn.
+///
+/// Star counts grow about 3.2x per magnitude (10^0.5). A cell's hash h in (0, 1]
+/// therefore maps to the magnitude m = LIMIT + 2·log10(h), and its flux relative to
+/// the faintest star is h^-0.8.
+const STAR_MAG_LIMIT: f32 = 6.5;
+/// h is floored so the brightest star is magnitude -1.5 (Sirius is -1.46).
+const STAR_HASH_FLOOR: f32 = 1.0e-4;
+/// The sun's apparent magnitude. A magnitude 0 star gives SUN_IRRADIANCE x 10^(0.4 x -26.74).
+const SUN_MAGNITUDE: f32 = -26.74;
+/// A star is two parts, both of a fixed angular size:
+/// - a sharp core, about a pixel at 4K;
+/// - a halo about half a pixel wide at 512x256, which keeps the brighter stars
+///   visible in the preview.
+const STAR_SIGMA_CORE: f32 = 0.05 * PI / 180.0;
+const STAR_SIGMA_HALO: f32 = 0.35 * PI / 180.0;
+const STAR_CORE_SHARE: f32 = 0.6;
+/// Squared reach of a star: 3 halo sigmas (1.05 degrees), as the sine of the angle.
+const STAR_REACH2: f32 = 9.0 * STAR_SIGMA_HALO * STAR_SIGMA_HALO;
+/// The Gaussians are cut at 3 sigma and lowered by their value there, so they reach
+/// zero smoothly. These are e^-4.5, and the mass left relative to 2 pi sigma^2,
+/// which is 1 - 5.5·e^-4.5.
+const GAUSS_FLOOR: f32 = 0.011_108_997;
+const GAUSS_MASS: f32 = 0.938_900_5;
+const STAR_COLORS: usize = 16;
+/// Stars look paler than their blackbody colour; this share of it is kept.
+const STAR_SATURATION: f32 = 0.6;
+
+// ---- Moon ----
+
+/// The Moon's albedo.
+/// - A full moon's disc is ALBEDO x SUN_IRRADIANCE / pi, about 0.76 before extinction.
+/// - Its illuminance is about 1/400000 of the sun's.
+const MOON_ALBEDO: f32 = 0.12;
+/// Moonlight is a little redder than sunlight.
+const MOON_TINT: Vec3f = vec3f(1.05, 1.0, 0.92);
+/// Earthshine at new moon, relative to the lit surface.
+const EARTHSHINE: f32 = 3.0e-4;
+/// Width of the soft limb, as a fraction of the radius.
+const MOON_LIMB: f32 = 0.06;
+/// Moonlight scattered by clear air, per unit of moon irradiance.
+/// - The Rayleigh sky: its zenith is about 0.05 x the irradiance with the moon at
+///   45 degrees, the same ratio a clear day sky has to its sun.
+/// - A Mie aureole around the disc.
+const MOONSKY_RAYLEIGH: f32 = 0.044;
+const MOONSKY_MIE: f32 = 0.092;
+const MOON_AUREOLE_G: f32 = 0.9;
+/// Colour of a Rayleigh sky (rescaled to luminance 1 in `NightSky::new`).
+const SKY_TINT: Vec3f = vec3f(0.60, 1.03, 1.90);
+
+// ---- Glow ----
+
+/// Zenith airglow radiance before adaptation is glow_color x glow_strength x GLOW_SCALE,
+/// tied to the sun's scale like every other night level (1.0e-6 at SUN_IRRADIANCE 20).
+/// The default [0.02, 0.03, 0.06] at strength 1 is a dark rural sky (about 22
+/// mag/arcsec²); strength 10 is a suburban one.
+const GLOW_SCALE: f32 = 5.0e-8 * SUN_IRRADIANCE;
+/// (R / (R + h))² for the Earth's radius and a 100 km airglow layer.
+const AIRGLOW_K: f32 = 0.969_33;
+
+/// Stars, moon and glow for one sun position, prepared once per map.
+#[derive(Clone, Debug)]
+pub struct NightSky {
+    /// 0 by day, 1 once the sun is 12 degrees down.
+    night_factor: f32,
+    sun_dir: Vec3f,
+    sun_elevation_deg: f32,
+    /// World to star-sphere rotation, as rows (`celestial_rows`). y is the celestial pole.
+    rows: [Vec3f; 3],
+    /// The galactic pole in star coordinates: the Milky Way runs where a star's
+    /// dot with it is near zero.
+    gal_pole: Vec3f,
+    /// A shell cell holds a star when its density roll is below this (before the
+    /// Milky Way boost) ...
+    star_keep: f32,
+    /// ... and never when it is at or above this (after the boost): the cheap
+    /// first test that lets most empty cells cost one hash.
+    star_keep_max: f32,
+    /// Irradiance of a magnitude-LIMIT star, brightness and adaptation included.
+    star_gain: f32,
+    star_seed: u32,
+    star_colors: [Vec3f; STAR_COLORS],
+    /// Zenith airglow radiance, adaptation included.
+    glow_rgb: Vec3f,
+    /// SKY_TINT at luminance 1.
+    sky_tint: Vec3f,
+    moon: Option<Moon>,
+    /// Mean upper-hemisphere radiance of the glow and the moonlit air.
+    ambient: Vec3f,
+    /// Irradiance on flat ground from the night sky and the moon.
+    ground_irradiance: Vec3f,
+}
+
+/// One star of the field, in star space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Star {
+    /// Unit direction on the celestial sphere.
+    dir: Vec3f,
+    /// Irradiance, adaptation included.
+    flux: f32,
+    /// Luminance-1 colour.
+    color: Vec3f,
+}
+
+#[derive(Clone, Debug)]
+struct Moon {
+    frame: LightFrame,
+    /// The disc's centre direction (the frame's centre), in the map's own frame.
+    dir: Vec3f,
+    cos_radius: f32,
+    tan_radius: f32,
+    /// Radiance where Lommel-Seeliger is 1 (a full moon anywhere on the disc),
+    /// extinction and adaptation included.
+    lit: Vec3f,
+    /// Uniform earthshine on the whole disc.
+    earthshine: Vec3f,
+    /// Mean radiance over the disc.
+    mean: Vec3f,
+    /// The mean times the disc's solid angle: irradiance on a surface facing the moon.
+    /// It fades out as the moon sets.
+    irradiance: Vec3f,
+}
+
+impl NightSky {
+    /// `sun_dir` and the moon placement are in the map's own frame.
+    /// `star_hours` is the local solar hour that spins the dome (see [`star_hours`]).
+    pub fn new(p: &NightParams, seed: u32, sun_dir: Vec3f, star_hours: f32, latitude: f32) -> NightSky {
+        let sun_dir = if sun_dir.is_finite() && sun_dir.length() > 1.0e-6 {
+            sun_dir.normalize()
+        } else {
+            vec3f(0.0, -1.0, 0.0)
+        };
+        let sun_elevation_deg = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let night_factor = smoothstep(0.0, 12.0, -sun_elevation_deg);
+        let lift = 2.0f32.powf(NIGHT_ADAPTATION_EV * night_factor);
+
+        let hours = sane(star_hours, 0.0, 24.0);
+        let latitude = sane(latitude, -90.0, 90.0);
+        let r = crate::sun::celestial_rows(hours, latitude);
+        let rows = [
+            vec3f(r[0].x, r[0].y, r[0].z),
+            vec3f(r[1].x, r[1].y, r[1].z),
+            vec3f(r[2].x, r[2].y, r[2].z),
+        ];
+        // star_rows are the same rows turned into the galactic frame; its pole row
+        // is the galactic pole in world space. Written in star coordinates it is a
+        // constant of the sky (the hour turns both frames together).
+        let g = crate::sun::star_rows(hours, latitude)[1];
+        let g = vec3f(g.x, g.y, g.z);
+        let gal_pole = vec3f(rows[0].dot(g), rows[1].dot(g), rows[2].dot(g)).normalize();
+
+        let star_keep = sane(p.stars, 0.0, 1.0) * STAR_KEEP_MAX;
+        let star_e0 = SUN_IRRADIANCE * 10.0f32.powf(0.4 * SUN_MAGNITUDE);
+        let star_gain = star_e0 * 10.0f32.powf(-0.4 * STAR_MAG_LIMIT) * sane(p.star_brightness, 0.0, 10.0) * lift;
+        let mut star_colors = [Vec3f::default(); STAR_COLORS];
+        for (i, color) in star_colors.iter_mut().enumerate() {
+            // Log-uniform from 3000 K (orange giants) to 12000 K (blue-white).
+            let kelvin = 3000.0 * 4.0f32.powf((i as f32 + 0.5) / STAR_COLORS as f32);
+            let white = Vec3f::all(1.0);
+            let c = white + (kelvin_to_rgb(kelvin) - white) * STAR_SATURATION;
+            *color = c / luminance(c);
+        }
+
+        let glow = p.glow_color;
+        let glow_rgb = vec3f(glow[0].max(0.0), glow[1].max(0.0), glow[2].max(0.0))
+            * (sane(p.glow_strength, 0.0, 10.0) * GLOW_SCALE * lift);
+
+        let moon = if p.moon {
+            let frame = light_frame(p.moon_azimuth_deg, sane(p.moon_elevation_deg, -90.0, 90.0), 0.0);
+            let radius = (0.5 * sane(p.moon_size_deg, 0.1, 10.0)).to_radians();
+            let dir = frame.center;
+            // Extinction through the air, with the same curve the engine's sun gets.
+            let extinction = sun_transmittance(dir.y);
+            let tint = MOON_TINT / luminance(MOON_TINT);
+            let lit = tint * extinction * (MOON_ALBEDO * SUN_IRRADIANCE / PI * sane(p.moon_brightness, 0.0, 10.0) * lift);
+            // Seen from the moon the Earth is full when the moon is new (next to the sun).
+            let earth_phase = 0.5 * (1.0 + dir.dot(sun_dir));
+            let mut moon = Moon {
+                frame,
+                dir,
+                cos_radius: radius.cos(),
+                tan_radius: radius.tan(),
+                lit,
+                earthshine: lit * (EARTHSHINE * earth_phase),
+                mean: Vec3f::default(),
+                irradiance: Vec3f::default(),
+            };
+            moon.mean = disc_mean(&moon, sun_dir);
+            // The disc's solid angle 2 pi (1 - cos r), written so it keeps its precision for a tiny r.
+            let solid_angle = 4.0 * PI * (0.5 * radius).sin().powi(2);
+            moon.irradiance = moon.mean * (solid_angle * smoothstep(-0.01, 0.01, dir.y));
+            Some(moon)
+        } else {
+            None
+        };
+
+        let mut sky = NightSky {
+            night_factor,
+            sun_dir,
+            sun_elevation_deg,
+            rows,
+            gal_pole,
+            star_keep,
+            star_keep_max: (star_keep * (1.0 + MILKY_WAY_BOOST)).min(1.0),
+            star_gain,
+            star_seed: hash_u32(seed ^ 0x5354_4152),
+            star_colors,
+            glow_rgb,
+            sky_tint: SKY_TINT / luminance(SKY_TINT),
+            moon,
+            ambient: Vec3f::default(),
+            ground_irradiance: Vec3f::default(),
+        };
+        let (ambient, sky_irradiance) = sky.integrate_glow();
+        let moon_direct = sky.moon.as_ref().map_or(Vec3f::default(), |m| m.irradiance * m.dir.y.max(0.0));
+        sky.ambient = ambient;
+        sky.ground_irradiance = sky_irradiance + moon_direct * night_factor;
+        sky
+    }
+
+    /// 0 by day, rising from sunset to 1 at the end of nautical twilight (sun at -12 degrees).
+    pub fn night_factor(&self) -> f32 {
+        self.night_factor
+    }
+
+    /// Starlight arriving from `dir`, times the night factor. Near the horizon it is
+    /// dimmed and reddened by the air, and below it there is none.
+    pub fn stars(&self, dir: Vec3f) -> Vec3f {
+        if self.night_factor <= 0.0 || self.star_keep <= 0.0 || self.star_gain <= 0.0 || !(dir.y > 0.0) {
+            return Vec3f::default();
+        }
+        let field = self.star_field(self.to_star(dir));
+        if field.max_elem() <= 0.0 {
+            return field;
+        }
+        field * sun_transmittance(dir.y) * (self.night_factor * smoothstep(0.0, 0.03, dir.y))
+    }
+
+    /// The moon's disc: lit from the sun's direction, plus earthshine. It is also drawn
+    /// by day (physically faint), and the ground hides it once it sets.
+    pub fn moon(&self, dir: Vec3f) -> Vec3f {
+        let Some(m) = &self.moon else { return Vec3f::default() };
+        if !(dir.y > 0.0) || !(dir.dot(m.dir) >= m.cos_radius) {
+            return Vec3f::default();
+        }
+        let Some(p) = project(&m.frame, dir) else { return Vec3f::default() };
+        moon_shade(m, self.sun_dir, vec2f(p.x / m.tan_radius, p.y / m.tan_radius))
+    }
+
+    /// Airglow, brighter toward the horizon, plus moonlight scattered by the air.
+    /// Times the night factor. It fades into the ground over about 2 degrees.
+    pub fn glow(&self, dir: Vec3f) -> Vec3f {
+        if self.night_factor <= 0.0 {
+            return Vec3f::default();
+        }
+        let fade = smoothstep(-0.03, 0.0, dir.y);
+        if !(fade > 0.0) {
+            return Vec3f::default();
+        }
+        let v = van_rhijn(dir.y.max(0.0));
+        let mut c = self.glow_rgb * v;
+        if let Some(m) = &self.moon {
+            if m.irradiance.max_elem() > 0.0 {
+                let cos_g = dir.dot(m.dir).clamp(-1.0, 1.0);
+                // A Rayleigh sky that brightens gently toward the horizon, and a Mie aureole.
+                let rayleigh = MOONSKY_RAYLEIGH * 0.75 * (1.0 + cos_g * cos_g) * v.sqrt();
+                let aureole = MOONSKY_MIE * henyey_greenstein(cos_g, MOON_AUREOLE_G);
+                c += m.irradiance * (self.sky_tint * rayleigh + Vec3f::all(aureole));
+            }
+        }
+        c * (self.night_factor * fade)
+    }
+
+    /// The ground below the horizon, lit by the night sky and the moon: a Lambert
+    /// `ground_color` under `ground_irradiance`. It adds to the atmosphere's own
+    /// ground, which is black at night. Toward the horizon it fades as the glow fades in.
+    pub fn ground(&self, dir: Vec3f, ground_color: Vec3f) -> Vec3f {
+        if !(dir.y < 0.0) {
+            return Vec3f::default();
+        }
+        let below = 1.0 - smoothstep(-0.03, 0.0, dir.y);
+        ground_color * self.ground_irradiance * (below / PI)
+    }
+
+    /// Mean radiance of the night sky over the upper hemisphere, glow plus moonlit air.
+    /// It is the ambient term for the clouds.
+    pub fn ambient(&self) -> Vec3f {
+        self.ambient
+    }
+
+    /// The moon as the map's key light. It applies only when the moon is enabled and
+    /// above the horizon and the sun is below -6 degrees; above that the twilight sky
+    /// still outshines it.
+    /// - The radiance is the disc's mean, so radiance x solid angle is its true irradiance.
+    /// - The direction is in the map's own frame.
+    pub fn moon_key(&self) -> Option<EnvSun> {
+        let m = self.moon.as_ref()?;
+        if !(self.sun_elevation_deg < -6.0) || !(m.dir.y > 0.0) {
+            return None;
+        }
+        Some(EnvSun { dir: m.dir, radiance: m.mean, cos_radius: m.cos_radius })
+    }
+
+    /// The moon's disc for the bake's refinement: its direction in the map's own frame and its angular radius.
+    pub fn moon_disc(&self) -> Option<(Vec3f, f32)> {
+        self.moon.as_ref().map(|m| (m.dir, m.tan_radius.atan()))
+    }
+
+    /// World direction to star space (the rows are orthonormal).
+    fn to_star(&self, dir: Vec3f) -> Vec3f {
+        vec3f(self.rows[0].dot(dir), self.rows[1].dot(dir), self.rows[2].dot(dir))
+    }
+
+    /// Star space back to the world: the transpose of the rows. Only the tests
+    /// need this direction of the turn.
+    #[cfg(test)]
+    fn to_world(&self, s: Vec3f) -> Vec3f {
+        self.rows[0] * s.x + self.rows[1] * s.y + self.rows[2] * s.z
+    }
+
+    /// Sum of the star splats around unit star-space direction `s`, gathered over the
+    /// 3x3x3 grid cells around the cell `s` falls in (see the module notes on why
+    /// that block always holds every star within reach).
+    fn star_field(&self, s: Vec3f) -> Vec3f {
+        let base = [
+            (s.x * STAR_GRID).floor() as i32,
+            (s.y * STAR_GRID).floor() as i32,
+            (s.z * STAR_GRID).floor() as i32,
+        ];
+        let mut sum = Vec3f::default();
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let Some(star) = self.star_in_cell([base[0] + dx, base[1] + dy, base[2] + dz]) else { continue };
+                    // The perpendicular distance, sin of the angle to the star: the
+                    // shader's length(cross(sd, star)).
+                    let d2 = Vec3f::cross(s, star.dir).length_squared();
+                    if !(d2 < STAR_REACH2) {
+                        continue;
+                    }
+                    sum += star.color * (star.flux * star_kernel(d2));
+                }
+            }
+        }
+        sum
+    }
+
+    /// The star in grid cell `c`, or None for an empty cell. Streams 0..6 of the
+    /// cell's hash give: the density roll, the jitter (x, y, z), the magnitude and the colour.
+    fn star_in_cell(&self, c: [i32; 3]) -> Option<Star> {
+        // The density roll first, against the densest the field can be, so most
+        // empty cells cost a single hash.
+        let roll = self.cell_hash(c, 0);
+        if roll >= self.star_keep_max {
+            return None;
+        }
+        // The jittered point, as the shader's c + k·0.5 + 0.25: always inside the cell.
+        let p = vec3f(
+            c[0] as f32 + 0.25 + 0.5 * self.cell_hash(c, 1),
+            c[1] as f32 + 0.25 + 0.5 * self.cell_hash(c, 2),
+            c[2] as f32 + 0.25 + 0.5 * self.cell_hash(c, 3),
+        );
+        let r = p.length();
+        // Only the cells the sphere passes through hold a star.
+        if !((r - STAR_GRID).abs() <= STAR_SHELL) {
+            return None;
+        }
+        let dir = p / r;
+        // The Milky Way: a denser field near the galactic equator.
+        let sin_b = self.gal_pole.dot(dir) / MILKY_WAY_SIN_HALF;
+        let keep = self.star_keep * (1.0 + MILKY_WAY_BOOST * (-sin_b * sin_b).exp());
+        if roll >= keep {
+            return None;
+        }
+        // Magnitude LIMIT + 2·log10(h): the flux is h^-0.8 faintest stars.
+        let h = self.cell_hash(c, 4).max(STAR_HASH_FLOOR);
+        let i = (self.cell_hash(c, 5) * STAR_COLORS as f32) as usize;
+        Some(Star { dir, flux: self.star_gain * h.powf(-0.8), color: self.star_colors[i.min(STAR_COLORS - 1)] })
+    }
+
+    /// A uniform value in [0, 1) for a cell and a stream index, from the seeded hash.
+    fn cell_hash(&self, c: [i32; 3], stream: u32) -> f32 {
+        hash01(c[0], c[1], c[2], self.star_seed.wrapping_add(stream))
+    }
+
+    /// Integrates the glow over the upper hemisphere by midpoint quadrature. Returns:
+    /// - the glow's mean radiance there (for cloud lighting);
+    /// - the irradiance it puts on flat ground.
+    ///
+    /// The Mie aureole is narrower than a quadrature cell, but it is a small share of either total.
+    fn integrate_glow(&self) -> (Vec3f, Vec3f) {
+        const THETA_STEPS: usize = 16;
+        const PHI_STEPS: usize = 32;
+        let d_theta = FRAC_PI_2 / THETA_STEPS as f32;
+        let d_phi = TAU / PHI_STEPS as f32;
+        let mut mean = Vec3f::default();
+        let mut irradiance = Vec3f::default();
+        for i in 0..THETA_STEPS {
+            let (sin_t, cos_t) = ((i as f32 + 0.5) * d_theta).sin_cos();
+            for j in 0..PHI_STEPS {
+                let (sin_p, cos_p) = ((j as f32 + 0.5) * d_phi).sin_cos();
+                let l = self.glow(vec3f(sin_t * cos_p, cos_t, sin_t * sin_p));
+                let d_omega = sin_t * d_theta * d_phi;
+                mean += l * d_omega;
+                irradiance += l * (d_omega * cos_t);
+            }
+        }
+        (mean / TAU, irradiance)
+    }
+}
+
+/// Normalised star profile at squared perpendicular distance `d2` (sin² of the
+/// angle; radians² to within 1e-4 over the reach).
+///
+/// It integrates to 1 over the sphere, so a star's flux is its irradiance
+/// whatever the sigmas are. The core carries STAR_CORE_SHARE and the halo the rest.
+fn star_kernel(d2: f32) -> f32 {
+    STAR_CORE_SHARE * windowed_gaussian(d2, STAR_SIGMA_CORE)
+        + (1.0 - STAR_CORE_SHARE) * windowed_gaussian(d2, STAR_SIGMA_HALO)
+}
+
+/// A Gaussian cut at 3 sigma, lowered to meet zero there, and normalised to unit mass.
+fn windowed_gaussian(d2: f32, sigma: f32) -> f32 {
+    let two_s2 = 2.0 * sigma * sigma;
+    let x = d2 / two_s2;
+    if x >= 4.5 {
+        return 0.0;
+    }
+    ((-x).exp() - GAUSS_FLOOR) / (PI * two_s2 * GAUSS_MASS)
+}
+
+/// Radiance of the moon at disc coordinates `q`.
+///
+/// `q` is the tangent-plane offset divided by tan(radius): the unit disc is the
+/// moon. The moon is far away, so the visible hemisphere is seen orthographically,
+/// and the sun lights it from `sun_dir`.
+fn moon_shade(m: &Moon, sun_dir: Vec3f, q: Vec2f) -> Vec3f {
+    let r2 = q.x * q.x + q.y * q.y;
+    if r2 >= 1.0 {
+        return Vec3f::default();
+    }
+    // Cosine of the angle toward the viewer, and the surface normal (it faces us at the centre).
+    let cos_e = (1.0 - r2).sqrt();
+    let normal = m.frame.right * q.x + m.frame.up * q.y - m.dir * cos_e;
+    let cos_i = normal.dot(sun_dir);
+    // Lommel-Seeliger: 2·cos i / (cos i + cos e). It is 1 across a full moon, and it
+    // falls to 0 at the terminator, where the surface turns away from the sun.
+    let lit = if cos_i > 0.0 { 2.0 * cos_i / (cos_i + cos_e) } else { 0.0 };
+    let limb = 1.0 - smoothstep(1.0 - MOON_LIMB, 1.0, r2.sqrt());
+    (m.lit * lit + m.earthshine) * limb
+}
+
+/// Mean radiance over the moon's disc, on a 24x24 grid of the unit disc. The key
+/// light and the moon's irradiance therefore agree with what `moon()` draws.
+fn disc_mean(m: &Moon, sun_dir: Vec3f) -> Vec3f {
+    const N: usize = 24;
+    let mut sum = Vec3f::default();
+    let mut count = 0usize;
+    for j in 0..N {
+        for i in 0..N {
+            let q = vec2f((i as f32 + 0.5) / N as f32 * 2.0 - 1.0, (j as f32 + 0.5) / N as f32 * 2.0 - 1.0);
+            if q.x * q.x + q.y * q.y < 1.0 {
+                sum += moon_shade(m, sun_dir, q);
+                count += 1;
+            }
+        }
+    }
+    sum / count.max(1) as f32
+}
+
+/// Airglow brightening toward the horizon (van Rhijn). A thin emitting shell seen at
+/// zenith angle z is looked through 1/sqrt(1 - K·sin²z) times as long; y = cos z.
+fn van_rhijn(y: f32) -> f32 {
+    1.0 / (1.0 - AIRGLOW_K * (1.0 - y * y)).max(1.0e-4).sqrt()
+}
+
+/// The Henyey-Greenstein phase function, normalised over the sphere.
+fn henyey_greenstein(cos_g: f32, g: f32) -> f32 {
+    let d = (1.0 + g * g - 2.0 * g * cos_g).max(1.0e-6);
+    (1.0 - g * g) / (4.0 * PI * d * d.sqrt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hdri::{dir_from_az_el, vec, Env, HdriParams};
+    use makepad_render_material::ibl;
+
+    #[test]
+    fn star_hours_reads_solar_time_or_the_manual_sun() {
+        // The default sun: time mode, longitude 0, time zone 0.
+        let mut sun = SunParams::default();
+        sun.hour = 22.0;
+        assert!((star_hours(&sun) - 22.0).abs() < 1.0e-5);
+        // 15 degrees east of the zone's meridian, the sun runs an hour ahead of the clock.
+        sun.longitude = 15.0;
+        assert!((star_hours(&sun) - 23.0).abs() < 1.0e-5);
+        sun.hour = 23.5;
+        assert!((star_hours(&sun) - 0.5).abs() < 1.0e-4, "wraps past midnight");
+        // Manual: the hour is read off the sun's azimuth. East is 6 h, the noon side 12 h, west 18 h.
+        sun.mode = "manual".to_string();
+        sun.latitude = 45.0;
+        for (az, hours) in [(90.0, 6.0), (180.0, 12.0), (270.0, 18.0)] {
+            sun.azimuth_deg = az;
+            assert!((star_hours(&sun) - hours).abs() < 1.0e-4, "north, az {az}");
+        }
+        sun.latitude = -30.0;
+        for (az, hours) in [(90.0, 6.0), (0.0, 12.0), (270.0, 18.0)] {
+            sun.azimuth_deg = az;
+            assert!((star_hours(&sun) - hours).abs() < 1.0e-4, "south, az {az}");
+        }
+    }
+
+    /// The direction at the centre of an equirect texel, in ibl's convention.
+    fn uv_dir(u: f32, v: f32) -> Vec3f {
+        vec(ibl::equirect_uv_to_dir([u, v]))
+    }
+
+    fn night_at(p: &NightParams, sun_elevation_deg: f32) -> NightSky {
+        NightSky::new(p, 7, dir_from_az_el(200.0, sun_elevation_deg), 22.0, 45.0)
+    }
+
+    /// Every grid cell that can touch the unit sphere.
+    fn all_cells() -> impl Iterator<Item = [i32; 3]> {
+        let n = STAR_GRID as i32 + 1;
+        (-n..=n).flat_map(move |z| (-n..=n).flat_map(move |y| (-n..=n).map(move |x| [x, y, z])))
+    }
+
+    /// The first star, in grid order, whose world direction is at least `min_y` up.
+    fn first_star_above(sky: &NightSky, min_y: f32) -> Option<Vec3f> {
+        all_cells().filter_map(|c| sky.star_in_cell(c)).map(|s| sky.to_world(s.dir)).find(|w| w.y > min_y)
+    }
+
+    /// A direction on the moon's disc at the screen coordinates (sx to the right,
+    /// sy up) of a viewer facing it, in units of the radius. ibl's basis puts the
+    /// frame's `right` on the viewer's left, hence the minus.
+    fn moon_point(frame: &LightFrame, radius_deg: f32, sx: f32, sy: f32) -> Vec3f {
+        let t = radius_deg.to_radians().tan();
+        (frame.center - frame.right * (sx * t) + frame.up * (sy * t)).normalize()
+    }
+
+    #[test]
+    fn night_factor_follows_the_sun() {
+        let p = NightParams::default();
+        assert_eq!(night_at(&p, 10.0).night_factor(), 0.0);
+        assert_eq!(night_at(&p, 0.0).night_factor(), 0.0);
+        assert!((night_at(&p, -6.0).night_factor() - 0.5).abs() < 1.0e-3);
+        assert_eq!(night_at(&p, -13.0).night_factor(), 1.0);
+    }
+
+    #[test]
+    fn stars_and_glow_are_zero_by_day() {
+        let day = night_at(&NightParams::default(), 60.0);
+        for i in 0..800 {
+            let dir = uv_dir(((i % 40) as f32 + 0.5) / 40.0, ((i / 40) as f32 + 0.5) / 20.0);
+            assert_eq!(day.stars(dir), Vec3f::default());
+            assert_eq!(day.glow(dir), Vec3f::default());
+            assert_eq!(day.ground(dir, Vec3f::all(0.2)), Vec3f::default());
+        }
+        assert_eq!(day.ambient(), Vec3f::default());
+    }
+
+    #[test]
+    fn the_default_field_holds_thousands_of_stars_evenly() {
+        let night = night_at(&NightParams::default(), -30.0);
+        let stars: Vec<Vec3f> = all_cells().filter_map(|c| night.star_in_cell(c)).map(|s| s.dir).collect();
+        // About 4,700 at density 0.5, the Milky Way boost included (the naked-eye sky
+        // holds about 9,000 to magnitude 6.5).
+        assert!(stars.len() > 2500 && stars.len() < 7000, "{} stars", stars.len());
+        for s in &stars {
+            assert!((s.length() - 1.0).abs() < 1.0e-5, "a star is a unit direction: {s:?}");
+        }
+        // No pinch at the poles: the polar caps (|y| > 0.8, a fifth of the sphere) hold
+        // about a fifth of the stars.
+        let polar = stars.iter().filter(|s| s.y.abs() > 0.8).count() as f32 / stars.len() as f32;
+        assert!(polar > 0.12 && polar < 0.28, "polar share {polar}");
+    }
+
+    #[test]
+    fn more_stars_along_the_milky_way() {
+        let night = night_at(&NightParams::default(), -30.0);
+        // Two bands of equal solid angle: within 10 degrees of the galactic equator
+        // (|sin b| < 0.17) and a band far from it (0.5 < |sin b| <= 0.67).
+        let (mut band, mut away) = (0usize, 0usize);
+        for s in all_cells().filter_map(|c| night.star_in_cell(c)) {
+            let sin_b = night.gal_pole.dot(s.dir).abs();
+            if sin_b < 0.17 {
+                band += 1;
+            } else if sin_b > 0.5 && sin_b <= 0.67 {
+                away += 1;
+            }
+        }
+        assert!(away > 200 && band as f32 > 1.3 * away as f32, "milky way {band}, away {away}");
+    }
+
+    #[test]
+    fn stars_shine_at_night_with_finite_energy() {
+        let night = night_at(&NightParams::default(), -30.0);
+        // A star the field placed high in the sky is lit at its centre.
+        let star = first_star_above(&night, 0.3).expect("the default density places stars");
+        let at_star = night.stars(star);
+        assert!(at_star.is_finite() && luminance(at_star) > 0.0, "{at_star:?}");
+        // Total starlight over the upper hemisphere. It must be finite and positive, and
+        // far below a full moon's (adapted) irradiance of about 0.04.
+        let (w, h) = (256usize, 128usize);
+        let mut total = 0.0f64;
+        for y in 0..h / 2 {
+            let theta = (y as f32 + 0.5) / h as f32 * PI;
+            let d_omega = (TAU / w as f32) * (PI / h as f32) * theta.sin();
+            for x in 0..w {
+                let l = night.stars(uv_dir((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32));
+                assert!(l.is_finite() && l.x >= 0.0 && l.y >= 0.0 && l.z >= 0.0);
+                total += (luminance(l) * d_omega) as f64;
+            }
+        }
+        assert!(total > 1.0e-8 && total < 1.0e-3, "starlight {total}");
+    }
+
+    #[test]
+    fn the_star_profile_integrates_to_one() {
+        // Riemann sum of the windowed two-Gaussian profile over its tangent plane.
+        let step = STAR_SIGMA_CORE / 6.0;
+        let n = (3.0 * STAR_SIGMA_HALO / step).ceil() as i32;
+        let mut sum = 0.0f64;
+        for i in -n..=n {
+            for j in -n..=n {
+                let (x, y) = (i as f32 * step, j as f32 * step);
+                sum += star_kernel(x * x + y * y) as f64;
+            }
+        }
+        let mass = sum * (step as f64) * (step as f64);
+        assert!((mass - 1.0).abs() < 0.02, "{mass}");
+    }
+
+    #[test]
+    fn a_star_is_never_clipped_by_its_cell() {
+        // Every direction within a star's reach gathers that star: the grid, the
+        // shell and the reach are chosen so the star's cell is always among the
+        // 3x3x3 cells around the direction's own.
+        assert!(STAR_GRID * (3.0 * STAR_SIGMA_HALO).asin() + STAR_SHELL < 1.0);
+        let night = night_at(&NightParams::default(), -30.0);
+        let star = all_cells().filter_map(|c| night.star_in_cell(c)).next().expect("a star");
+        // Sample a ring at 0.8 of the reach around the star, in star space.
+        let axis = if star.dir.y.abs() < 0.9 { vec3f(0.0, 1.0, 0.0) } else { vec3f(1.0, 0.0, 0.0) };
+        let t1 = Vec3f::cross(axis, star.dir).normalize();
+        let t2 = Vec3f::cross(star.dir, t1);
+        let r = 0.8 * (3.0 * STAR_SIGMA_HALO);
+        let expected = star.color * (star.flux * star_kernel(r * r));
+        for i in 0..24 {
+            let a = i as f32 / 24.0 * TAU;
+            let s = (star.dir * (1.0 - r * r).sqrt() + t1 * (r * a.cos()) + t2 * (r * a.sin())).normalize();
+            let got = night.star_field(s);
+            // Other stars may add to it, never take from it.
+            assert!(got.x >= expected.x * 0.999 && got.y >= expected.y * 0.999 && got.z >= expected.z * 0.999, "{got:?} < {expected:?}");
+        }
+    }
+
+    #[test]
+    fn a_512_preview_shows_stars_above_the_glow() {
+        let mut p = NightParams::default();
+        p.moon = false;
+        let night = night_at(&p, -30.0);
+        let (w, h) = (512usize, 256usize);
+        let mut visible = 0;
+        for y in 0..h / 2 {
+            for x in 0..w {
+                let dir = uv_dir((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                if luminance(night.stars(dir)) > luminance(night.glow(dir)) {
+                    visible += 1;
+                }
+            }
+        }
+        assert!(visible >= 10, "only {visible} star pixels stand out at 512x256");
+    }
+
+    #[test]
+    fn the_seed_places_the_stars() {
+        let p = NightParams::default();
+        let a = NightSky::new(&p, 7, dir_from_az_el(200.0, -30.0), 22.0, 45.0);
+        let b = NightSky::new(&p, 7, dir_from_az_el(200.0, -30.0), 22.0, 45.0);
+        let c = NightSky::new(&p, 8, dir_from_az_el(200.0, -30.0), 22.0, 45.0);
+        let star = first_star_above(&a, 0.3).expect("a star");
+        assert_eq!(a.stars(star), b.stars(star));
+        let moved = all_cells().any(|cell| a.star_in_cell(cell) != c.star_in_cell(cell));
+        assert!(moved, "another seed gives another sky");
+    }
+
+    #[test]
+    fn the_moons_lit_side_faces_the_sun() {
+        // The default moon: az 135, el 30, 0.52 degrees across.
+        let p = NightParams::default();
+        let frame = light_frame(135.0, 30.0, 0.0);
+        let r = 0.5 * p.moon_size_deg;
+        // The sun below the horizon, 90 degrees of azimuth clockwise from the moon,
+        // i.e. to the viewer's right: lit on the right.
+        let right_lit = NightSky::new(&p, 1, dir_from_az_el(225.0, -10.0), 22.0, 45.0);
+        let right = luminance(right_lit.moon(moon_point(&frame, r, 0.6, 0.0)));
+        let left = luminance(right_lit.moon(moon_point(&frame, r, -0.6, 0.0)));
+        assert!(right > 100.0 * left, "right {right}, left {left}");
+        assert!(left > 0.0, "earthshine keeps the dark side faintly visible");
+        // The sun on the other side: lit on the left.
+        let left_lit = NightSky::new(&p, 1, dir_from_az_el(45.0, -10.0), 22.0, 45.0);
+        let right = luminance(left_lit.moon(moon_point(&frame, r, 0.6, 0.0)));
+        let left = luminance(left_lit.moon(moon_point(&frame, r, -0.6, 0.0)));
+        assert!(left > 100.0 * right, "right {right}, left {left}");
+        // The sun opposite the moon: a full moon, lit evenly.
+        let full = NightSky::new(&p, 1, dir_from_az_el(315.0, -30.0), 22.0, 45.0);
+        let a = luminance(full.moon(moon_point(&frame, r, 0.6, 0.0)));
+        let b = luminance(full.moon(moon_point(&frame, r, -0.6, 0.0)));
+        assert!(a > 0.0 && (a - b).abs() < 0.01 * a, "{a} {b}");
+        // Outside the disc there is no moon.
+        assert_eq!(full.moon(dir_from_az_el(135.0, 31.0)), Vec3f::default());
+    }
+
+    #[test]
+    fn the_moon_is_a_key_only_at_night_and_when_risen() {
+        let key = |p: &NightParams, sun_el: f32| NightSky::new(p, 1, dir_from_az_el(315.0, sun_el), 22.0, 45.0).moon_key();
+        let mut p = NightParams::default();
+        assert!(key(&p, 20.0).is_none(), "day");
+        assert!(key(&p, -3.0).is_none(), "civil twilight still outshines the moon");
+        let k = key(&p, -10.0).expect("night, moon up");
+        assert!(k.dir.dot(dir_from_az_el(135.0, 30.0)) > 0.99999);
+        assert!(k.radiance.is_finite() && luminance(k.radiance) > 0.0);
+        assert!((k.cos_radius - 0.26f32.to_radians().cos()).abs() < 1.0e-6);
+        p.moon_elevation_deg = -5.0;
+        assert!(key(&p, -10.0).is_none(), "a set moon is no key");
+        p.moon_elevation_deg = 30.0;
+        p.moon = false;
+        assert!(key(&p, -10.0).is_none(), "no moon, no key");
+    }
+
+    #[test]
+    fn night_glow_brightens_toward_the_horizon() {
+        let mut p = NightParams::default();
+        p.moon = false;
+        let night = night_at(&p, -30.0);
+        let zenith = luminance(night.glow(vec3f(0.0, 1.0, 0.0)));
+        let horizon = luminance(night.glow(dir_from_az_el(0.0, 1.0)));
+        assert!(zenith > 0.0 && horizon > 3.0 * zenith, "zenith {zenith}, horizon {horizon}");
+        assert_eq!(night.glow(vec3f(0.0, -1.0, 0.0)), Vec3f::default());
+    }
+
+    #[test]
+    fn moonlight_reaches_the_ground_and_the_clouds() {
+        let p = NightParams::default();
+        let moonlit = NightSky::new(&p, 1, dir_from_az_el(315.0, -30.0), 22.0, 45.0);
+        let mut dark = p.clone();
+        dark.moon = false;
+        let moonless = NightSky::new(&dark, 1, dir_from_az_el(315.0, -30.0), 22.0, 45.0);
+        let grey = Vec3f::all(0.2);
+        let down = vec3f(0.0, -1.0, 0.0);
+        let lit = luminance(moonlit.ground(down, grey));
+        let unlit = luminance(moonless.ground(down, grey));
+        assert!(unlit > 0.0 && lit > 5.0 * unlit, "moonlit {lit}, moonless {unlit}");
+        assert!(luminance(moonlit.ambient()) > luminance(moonless.ambient()));
+        assert!(luminance(moonless.ambient()) > 0.0);
+        assert_eq!(moonlit.ground(vec3f(0.0, 1.0, 0.0), grey), Vec3f::default());
+    }
+
+    #[test]
+    fn a_night_env_draws_the_moon_and_makes_it_the_key() {
+        let mut p = HdriParams::default();
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.elevation_deg = -30.0;
+        // Opposite the default moon (az 135, el 30): a full moon.
+        p.sky.sun.azimuth_deg = 315.0;
+        let env = Env::new(&p);
+        let moon_dir = dir_from_az_el(135.0, 30.0);
+        let at_moon = luminance(env.radiance(moon_dir));
+        let beside = luminance(env.radiance(dir_from_az_el(135.0, 36.0)));
+        assert!(at_moon > 100.0 * beside, "moon {at_moon}, sky beside it {beside}");
+        let key = env.sun().expect("with the sun 30 degrees down, the risen moon is the key");
+        assert!(key.dir.dot(moon_dir) > 0.99999);
+        assert!(key.radiance.is_finite() && luminance(key.radiance) > 0.0);
+        // The map's yaw turns the moon and its key together, counter-clockwise seen
+        // from above (ibl's sign): azimuth 135 shows at 95.
+        p.rotation_deg = 40.0;
+        let turned = Env::new(&p);
+        let turned_dir = dir_from_az_el(95.0, 30.0);
+        assert!(turned.sun().expect("still the key").dir.dot(turned_dir) > 0.99999);
+        assert!(luminance(turned.radiance(turned_dir)) > 100.0 * beside);
+        let map = turned.bake(32);
+        assert!(map.data.iter().all(|t| t.iter().all(|v| v.is_finite() && *v >= 0.0)));
+    }
+}

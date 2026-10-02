@@ -85,10 +85,17 @@ pub struct Env {
     scale: f32,
     /// The studio backdrop (Studio mode) and the light overlay (both modes).
     studio: studio::Studio,
-    /// The clear sky; Some exactly in Sky mode.
+    /// The clear sky; Some exactly in Sky mode. The three Sky layers (atmosphere,
+    /// clouds, night) are all built in the map's own, unrotated frame.
     atmo: Option<atmosphere::Atmosphere>,
     /// Cloud deck and cirrus; Some in Sky mode when there is any cover.
     clouds: Option<clouds::CloudLayer>,
+    /// Stars, moon and glow; Some exactly in Sky mode.
+    night: Option<night::NightSky>,
+    /// Light on the clouds, gathered once per map: the direct sun, and the ambient
+    /// of the day sky plus the night (glow and moonlit air).
+    cloud_sun: Vec3f,
+    cloud_ambient: Vec3f,
 }
 
 impl Env {
@@ -98,19 +105,20 @@ impl Env {
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
         let studio = studio::Studio::new(&params.studio, &params.lights);
-        let (atmo, cloud_layer) = match params.mode() {
+        let (atmo, clouds, night, cloud_sun, cloud_ambient) = match params.mode() {
             Mode::Sky => {
-                let atmo = atmosphere::Atmosphere::new(
-                    atmosphere::sun_direction(&params.sky.sun),
-                    &params.sky.atmosphere,
-                    &params.sky.sun_disc,
-                );
-                let cloud_layer = clouds::CloudLayer::new(&params.sky.clouds, params.seed, atmo.sun_dir());
-                (Some(atmo), cloud_layer)
+                let sky = &params.sky;
+                let sun_dir = atmosphere::sun_direction(&sky.sun);
+                let atmo = atmosphere::Atmosphere::new(sun_dir, &sky.atmosphere, &sky.sun_disc);
+                let clouds = clouds::CloudLayer::new(&sky.clouds, params.seed, atmo.sun_dir());
+                let night = night::NightSky::new(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude);
+                let cloud_sun = atmo.sun_irradiance();
+                let cloud_ambient = atmo.ambient() + night.ambient();
+                (Some(atmo), clouds, Some(night), cloud_sun, cloud_ambient)
             }
-            Mode::Studio => (None, None),
+            Mode::Studio => (None, None, None, Vec3f::default(), Vec3f::default()),
         };
-        Env { params, scale, studio, atmo, clouds: cloud_layer }
+        Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient }
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -119,8 +127,8 @@ impl Env {
 
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
-    /// atmosphere + disc, then clouds; Studio: backdrop), lights overlay,
-    /// x 2^intensity_ev.
+    /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
+    /// over it; Studio: backdrop), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
@@ -128,11 +136,16 @@ impl Env {
         let base = match &self.atmo {
             Some(atmo) => {
                 let mut c = atmo.sky(d) + atmo.sun_disc(d);
-                // Clouds are in front of everything in the sky, the disc included.
+                if let Some(night) = &self.night {
+                    let g = self.params.sky.atmosphere.ground_color;
+                    c += night.stars(d) + night.moon(d) + night.glow(d) + night.ground(d, vec3f(g[0], g[1], g[2]));
+                }
+                // Clouds are in front of everything in the sky: the stars, the
+                // moon and the sun's disc.
                 if let Some(layer) = &self.clouds {
                     let s = layer.sample(d);
                     if s.alpha > 0.0 {
-                        let lit = layer.shade(&s, atmo.sun_irradiance(), atmo.ambient());
+                        let lit = layer.shade(&s, self.cloud_sun, self.cloud_ambient);
                         c = c * (1.0 - s.alpha) + lit * s.alpha;
                     }
                 }
@@ -145,27 +158,34 @@ impl Env {
 
     /// Key light for the engine, in world space, already x 2^intensity_ev
     /// (every layer's key goes through `key_to_world`, which turns it with the
-    /// map and applies the intensity). Sky mode: the light marked key if any,
-    /// else the sun while it is above the horizon, dimmed by the cloud cover
-    /// along it (the moon will join once the sun is 6 deg down). Studio mode:
-    /// the key light if any.
+    /// map and applies the intensity). In order: the key light (both modes);
+    /// Sky mode only: the sun while it is above the horizon, dimmed by the cloud
+    /// cover along it; else the risen moon once the sun is 6 degrees down, dimmed
+    /// the same way; else None.
     pub fn sun(&self) -> Option<EnvSun> {
         if let Some(key) = self.studio.key() {
             return Some(self.key_to_world(key));
         }
+        // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
-        let sun = atmo.sun_dir();
-        if sun.y <= 0.0 {
-            return None;
-        }
         // The same cover that hides the disc in the map dims the key.
-        let cover = self.clouds.as_ref().map_or(1.0, |layer| layer.transmittance_toward(sun));
-        // The cone's mean radiance, so radiance x cone solid angle is the
-        // sun's irradiance at the ground whatever the disc's size and limb.
+        let cover = |dir: Vec3f| self.clouds.as_ref().map_or(1.0, |layer| layer.transmittance_toward(dir));
+        let sun = atmo.sun_dir();
+        if sun.y > 0.0 {
+            // The cone's mean radiance, so radiance x cone solid angle is the
+            // sun's irradiance at the ground whatever the disc's size and limb.
+            return Some(self.key_to_world(EnvSun {
+                dir: sun,
+                radiance: atmo.sun_cone_radiance() * cover(sun),
+                cos_radius: atmo.sun_cos_radius(),
+            }));
+        }
+        // After dark the risen moon takes over, once the sun is 6 degrees down.
+        let moon = self.night.as_ref()?.moon_key()?;
         Some(self.key_to_world(EnvSun {
-            dir: sun,
-            radiance: atmo.sun_cone_radiance() * cover,
-            cos_radius: atmo.sun_cos_radius(),
+            dir: moon.dir,
+            radiance: moon.radiance * cover(moon.dir),
+            cos_radius: moon.cos_radius,
         }))
     }
 
@@ -186,14 +206,19 @@ impl Env {
         }
     }
 
-    /// The sun's disc, in world space, for the bake's refinement: below 4K
-    /// it is smaller than or comparable to a texel, so its texels are
-    /// area-averaged (A1's `refine_hot_spots`).
+    /// The sun's and the moon's discs, in world space, for the bake's
+    /// refinement: below 4K both are smaller than or comparable to a texel, so
+    /// their texels are area-averaged (A1's `refine_hot_spots`).
     fn hot_spots(&self) -> Vec<(Vec3f, f32)> {
         let mut hot = Vec::new();
         if let Some(atmo) = &self.atmo {
             if self.params.sky.sun_disc.visible && atmo.sun_dir().y > -0.1 {
                 hot.push((rotate_y(atmo.sun_dir(), self.params.rotation_deg), atmo.sun_outer_radius()));
+            }
+        }
+        if let Some((dir, radius)) = self.night.as_ref().and_then(|night| night.moon_disc()) {
+            if dir.y > -0.1 {
+                hot.push((rotate_y(dir, self.params.rotation_deg), radius));
             }
         }
         hot
