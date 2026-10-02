@@ -127,7 +127,7 @@ fn sunset() -> HdriParams {
 
 /// A full, soft, low cloud deck with the sun somewhere behind it: even light over dim, damp ground.
 fn overcast() -> HdriParams {
-    let mut p = sky(7, 40.0, 160.0, 4, 15, 11.5);
+    let mut p = sky(7, 40.0, 160.0, 3, 13, 11.1);
     p.sky.atmosphere.haze = 3.0;
     p.sky.atmosphere.ground_color = [0.12, 0.13, 0.11];
     p.sky.clouds.coverage = 1.0;
@@ -158,7 +158,7 @@ fn blue_hour() -> HdriParams {
 /// full. Moonlight washes out the faint stars, so the star field is sparse, and a few thin clouds
 /// catch the moon.
 fn moonlit_night() -> HdriParams {
-    let mut p = sky(5, -30.0, 285.0, 1, 15, 19.5);
+    let mut p = sky(5, -30.0, 285.0, 2, 19, 20.3);
     p.sky.atmosphere.haze = 1.0;
     p.sky.clouds.coverage = 0.2;
     p.sky.clouds.sharpness = 0.5;
@@ -177,7 +177,7 @@ fn moonlit_night() -> HdriParams {
 
 /// A dark, dry, moonless winter night far from town: dense bright stars and a faint airglow.
 fn starry_night() -> HdriParams {
-    let mut p = sky(6, -50.0, 330.0, 1, 15, 22.5);
+    let mut p = sky(6, -50.0, 330.0, 2, 26, 22.9);
     p.sky.atmosphere.haze = 0.6;
     p.sky.clouds.coverage = 0.0;
     p.sky.clouds.cirrus = 0.0;
@@ -293,7 +293,7 @@ fn ring_light() -> HdriParams {
 mod tests {
     use super::*;
     use crate::hdri::atmosphere::sun_direction;
-    use crate::hdri::{LightShape, Mode};
+    use crate::hdri::{LightShape, Mode, SunMode};
 
     const SKY: [&str; 7] = ["Clear noon", "Golden hour", "Sunset", "Overcast", "Blue hour", "Moonlit night", "Starry night"];
     const STUDIO: [&str; 5] = ["Three-point", "Top softbox", "Rim pair", "Overcast dome", "Ring light"];
@@ -370,6 +370,28 @@ mod tests {
         let moonlit = preset("Moonlit night").unwrap();
         assert!(moonlit.sky.night.moon && moonlit.sky.night.moon_elevation_deg > 0.0);
         assert!(!preset("Starry night").unwrap().sky.night.moon);
+    }
+
+    #[test]
+    fn a_manual_sky_presets_clock_puts_the_sun_where_the_manual_sun_is() {
+        let mut manual_presets = 0;
+        let mut off = Vec::new();
+        for name in SKY {
+            let manual = preset(name).unwrap();
+            if manual.sky.sun.mode() != SunMode::Manual {
+                continue;
+            }
+            manual_presets += 1;
+            let mut timed = manual.clone();
+            timed.sky.sun.mode = "time".to_string();
+            let (a, b) = (sun_direction(&manual.sky.sun), sun_direction(&timed.sky.sun));
+            let angle = a.dot(b).clamp(-1.0, 1.0).acos().to_degrees();
+            if angle >= 2.5 {
+                off.push(format!("{name} ({angle:.1} deg)"));
+            }
+        }
+        assert_eq!(manual_presets, 6, "every sky preset but Clear noon is Manual");
+        assert!(off.is_empty(), "Time mode puts the sun away from the manual sun in: {}", off.join(", "));
     }
 
     #[test]
