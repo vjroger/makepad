@@ -124,7 +124,7 @@ impl SunLight {
     pub fn hdr_exposure(&self) -> f32 {
         let lum = |c: Vec3f| c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
         let key = (lum(self.sky) + lum(self.ground)) * 0.5 + lum(self.color) * self.dir.y.max(0.0) * 0.5;
-        (HDR_EXPOSURE_KEY / key.max(1.0e-4)).clamp(HDR_EXPOSURE_MIN, HDR_EXPOSURE_MAX)
+        hdr_exposure_for_key(key)
     }
 
     /// Map-space view of this sun, for anything that wants the shared type.
@@ -460,6 +460,184 @@ pub fn resolve_sun(cfg: &makepad_scene::SunConfig) -> SunLight {
         sun.shadow_alpha = s.clamp(0.0, 1.0);
     }
     sun
+}
+
+/// The exposure that maps a scene key to mid-tone, in the band
+/// [`SunLight::hdr_exposure`] adapts within. One function so the rig's
+/// meter and an environment's meter agree on the constants. A key of zero
+/// (or below the floor, or NaN) meters as the floor's: the ceiling of the
+/// band, never infinity; an infinite key is the band's floor.
+pub fn hdr_exposure_for_key(key: f32) -> f32 {
+    (HDR_EXPOSURE_KEY / key.max(1.0e-4)).clamp(HDR_EXPOSURE_MIN, HDR_EXPOSURE_MAX)
+}
+
+/// What a prepared environment lends the rig this frame. The renderer fills
+/// it from the IBL preparation it currently draws with (renderer/ibl.rs);
+/// tests fill it from `ibl::sh9` and `hdri::image::mean_luminance` of a
+/// baked map. `sh` and `mean_luminance` are UNSCALED map radiance; `gain`
+/// is the one factor the lane applies to the map, `Ibl.intensity`: the
+/// environment is shown and lights at its own scale × its intensity
+/// everywhere (the dome, `mat_ibl_*`, this rig, the fog), so the light on a
+/// wall, the sky behind it and a mirror's reflection of that sky come from
+/// the same numbers. `HDR_SKY_GAIN` is the analytic sky's and never enters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvLighting {
+    /// `ibl::sh9` of the map's lighting copy (the sun's cone filled, the
+    /// directional light carries it): cosine-convolved irradiance
+    /// coefficients, `E(n) = Σ c_i Y_i(n)`; a constant map L gives E = πL.
+    pub sh: [[f32; 3]; 9],
+    /// Solid-angle weighted mean luminance of the map INCLUDING its
+    /// declared sun (Rec.709): the exposure meter's key before the gain.
+    /// The renderer adds the sun's share (`L·(1 − cos r)/2 × facing`) to the
+    /// lighting copy's mean, because the stock meter counts the sun too.
+    pub mean_luminance: f32,
+    /// The lane's gain on the map's radiance: `Ibl.intensity`.
+    pub gain: f32,
+}
+
+/// The values the ENVIRONMENT supplies to the rig are rounded to these
+/// grids before they leave: a map re-baked on the day cycle moves its
+/// detected sun by a fraction of a degree, and every consumer that keys on
+/// the sun (the OnChange lightmap bake, the SDF sidecar era at 1e-3 in
+/// `shadow_len_per_unit`) would churn on the noise. 1/512 in a unit vector
+/// is about 0.1 degrees; 1/4096 keeps a moonlit fill at 0.005 smooth.
+/// Authored `SunConfig` values are never rounded.
+const RIG_DIR_STEP: f32 = 1.0 / 512.0;
+const RIG_COLOR_STEP: f32 = 1.0 / 4096.0;
+
+/// The direction of the environment's sun in world space, when the world
+/// lets the environment place the sun. `Environment.sun` is in the map's
+/// own frame (as `hdri::envmap::bake_env_map` / `detect_sun` report it)
+/// and `Ibl.rotation_deg` turns the map, so the sun turns with it (ibl's
+/// sign: +90 degrees takes -Z to -X). `None` when the world has no
+/// environment sun, or when the script authored `SunConfig.dir` — a look,
+/// the true sun for its hour (`resolve_sun`), or a host's own eased clock
+/// (the sandbox's running day cycle over a re-baked map, which authors the
+/// eased direction so the map's quarter-hour steps never steer its shadows),
+/// none of which is the map's to override. A `Light::Sun` is the caller's
+/// business (`world_sun_dir` first).
+pub fn env_sun_dir(world: &makepad_scene::World) -> Option<Vec3f> {
+    env_sun_dir_with(world, world.environment.sun)
+}
+
+/// [`env_sun_dir`] for a sun the caller supplies in place of the world's
+/// `Environment.sun`: the renderer passes the sun its bound preparation was
+/// built without (a procedural hdri preset's baked sun, when the world
+/// declares none). Same frame (the map's), same rules.
+pub fn env_sun_dir_with(world: &makepad_scene::World, env_sun: Option<makepad_scene::EnvSun>) -> Option<Vec3f> {
+    let authored = world.sun.dir.is_some_and(|d| d.x != 0.0 || d.y != 0.0 || d.z != 0.0);
+    if authored {
+        return None;
+    }
+    let ibl = world.environment.ibl.filter(|i| i.rotation_deg.is_finite())?;
+    let sun = env_sun?;
+    // `EnvSun::validate` accepts any direction of length 1e-3 or more, so the
+    // turned direction is normalised here before it steers a light.
+    let dir = crate::hdri::rotate_y(sun.dir, ibl.rotation_deg);
+    (dir.is_finite() && dir.length() > 1.0e-6).then(|| dir.normalize())
+}
+
+/// The rig with the environment's light folded in, in the lane's units:
+/// call it on the HDR rig (after `to_hdr` and `hdr_fill_from_sky`) under
+/// HDR output and on the plain rig otherwise, and BEFORE
+/// `world_lights::apply_world_sun`, so a `Light::Sun` / `Light::Sky` still
+/// has the last word. Without a prepared environment (`env` None) or a
+/// world that names none, the rig comes back bit for bit — the legacy look
+/// stays pinned by `the_default_sun_is_the_legacy_look`.
+///
+/// Units. A disc of radiance L and angular radius r delivers `E = L·Ω`,
+/// `Ω = 2π(1 − cos r)`, to a surface facing it; the lanes light with
+/// `color · N·L` in irradiance/π, so `color = L · 2(1 − cos r) · gain ·
+/// facing`. `L` is `EnvSun.radiance`, the AVERAGE radiance over the cone
+/// (C1's doc), so `L·Ω` is the key's whole emission for a generated sun, the
+/// moon, a studio key and a detected sun alike; a studio key's is its
+/// integral, not its peak colour, so a thin strip or a ring lights with what
+/// it draws. A WIDE key delivers only part of that emission to a surface
+/// facing its centre (the cosine across its disc: 0.78 for the Overcast dome
+/// preset, 0.93 for the Top softbox): `EnvSun.facing` is that share, and the
+/// one directional light, which the lanes shade at N·L = 1 there, carries
+/// exactly it. The hemisphere terms are the SH irradiance at ±Y over π —
+/// what `mat_ibl_ambient` returns — so a stock cube and an IBL material
+/// under one map agree.
+///
+/// An environment WITHOUT a sun (overcast, a studio without a key light, a
+/// sun that has set and a moon that has not risen, a zero key) has no direct
+/// term: all its light is in the fill, never the analytic rig's colour, so a
+/// sunset fades out instead of switching to a stock sun. (The direction is
+/// then the caller's: `resolve_sun` keeps the shadows and the cascades
+/// stable.) The legacy lane has no composite to apply a meter, so the map's
+/// exposure is baked into the values the environment supplies here.
+///
+/// Only the fields the environment supplies are quantised (RIG_*_STEP) and,
+/// in the legacy lane, exposed; an authored `SunConfig` dir, colour or
+/// ambient passes through bit for bit, in both lanes.
+pub fn env_sun_rig(world: &makepad_scene::World, env: Option<&EnvLighting>, sun: SunLight, hdr: bool) -> SunLight {
+    env_sun_rig_with(world, world.environment.sun, env, sun, hdr)
+}
+
+/// [`env_sun_rig`] for a sun the caller supplies in place of the world's
+/// `Environment.sun` (see [`env_sun_dir_with`]).
+pub fn env_sun_rig_with(
+    world: &makepad_scene::World,
+    env_sun: Option<makepad_scene::EnvSun>,
+    env: Option<&EnvLighting>,
+    sun: SunLight,
+    hdr: bool,
+) -> SunLight {
+    let Some(env) = env else { return sun };
+    if world.environment.ibl.filter(|i| i.intensity.is_finite() && i.rotation_deg.is_finite()).is_none() {
+        return sun;
+    }
+    let exposure = if hdr { 1.0 } else { env_exposure(env) };
+    let gain = if env.gain.is_finite() { env.gain.max(0.0) } else { 0.0 };
+    // Non-finite and negative values read as 0; everything else lands on
+    // the colour grid.
+    let q = |v: f32, step: f32| if v.is_finite() { (v.max(0.0) / step).round() * step } else { 0.0 };
+    let qc = |v: Vec3f| vec3f(q(v.x, RIG_COLOR_STEP), q(v.y, RIG_COLOR_STEP), q(v.z, RIG_COLOR_STEP));
+    let mut out = sun;
+    if let Some(dir) = env_sun_dir_with(world, env_sun) {
+        let r = |v: f32| (v / RIG_DIR_STEP).round() * RIG_DIR_STEP;
+        let d = vec3f(r(dir.x), r(dir.y), r(dir.z));
+        if d.is_finite() && d.length() > 1.0e-6 {
+            out.dir = d.normalize();
+        }
+    }
+    if world.sun.color.is_none() {
+        out.color = match env_sun {
+            Some(s) => qc(s.radiance * (env_sun_scale(&s) * gain * exposure)),
+            None => Vec3f::default(),
+        };
+    }
+    if world.sun.ambient.is_none() {
+        let fill = |n: [f32; 3]| {
+            let c = makepad_render_material::ibl::sh9_irradiance(&env.sh, n);
+            qc(vec3f(c[0], c[1], c[2]) * (gain * exposure / std::f32::consts::PI))
+        };
+        out.sky = fill([0.0, 1.0, 0.0]);
+        out.ground = fill([0.0, -1.0, 0.0]);
+    }
+    out
+}
+
+/// What a key's radiance is multiplied by to give the directional light's
+/// colour before the lane's gain and exposure: `2(1 − cos r) × facing`
+/// (`E/π` of the key's emission that a surface facing its centre receives).
+/// A key whose cone or share is not finite delivers nothing.
+pub(crate) fn env_sun_scale(sun: &makepad_scene::EnvSun) -> f32 {
+    if !sun.cos_radius.is_finite() || !sun.facing.is_finite() {
+        return 0.0;
+    }
+    2.0 * (1.0 - sun.cos_radius.clamp(-1.0, 1.0)) * sun.facing.clamp(0.0, 1.0)
+}
+
+/// The exposure an environment meters for itself: its mean luminance in
+/// the lane's units is the key (a white wall under a uniform map of
+/// radiance L reads L, E/π = L), mapped to mid-tone within the rig's band,
+/// so the dome, the fill and the sun it lights with land together.
+pub fn env_exposure(env: &EnvLighting) -> f32 {
+    let mean = if env.mean_luminance.is_finite() { env.mean_luminance.max(0.0) } else { 0.0 };
+    let gain = if env.gain.is_finite() { env.gain.max(0.0) } else { 0.0 };
+    hdr_exposure_for_key(mean * gain)
 }
 
 #[cfg(test)]
@@ -804,5 +982,328 @@ mod tests {
         assert_eq!(tuned.dir, base.dir);
         assert_eq!(tuned.color, vec3f(1.0, 0.0, 0.0));
         assert!(approx(tuned.shadow_alpha, 0.5));
+    }
+
+    // ---- The environment's rig (phase 2, C5) --------------------------------
+
+    fn angle_deg(a: Vec3f, b: Vec3f) -> f32 {
+        a.normalize().dot(b.normalize()).clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    /// A world whose environment names a registered HDRI and carries `sun`.
+    fn env_world(sun: Option<makepad_scene::EnvSun>, rotation_deg: f32) -> makepad_scene::World {
+        let mut world = makepad_scene::World::new();
+        world.environment.ibl = Some(makepad_scene::Ibl {
+            source: makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)),
+            intensity: 1.0,
+            rotation_deg,
+        });
+        world.environment.sun = sun;
+        world
+    }
+
+    /// The lighting of a constant grey map at `level` under `Ibl.intensity`
+    /// 1 (the gain is the intensity: the environment's own scale, never
+    /// HDR_SKY_GAIN): E = πL everywhere, so the hemisphere terms come out as
+    /// `level × gain` = `level`.
+    fn grey_lighting(level: f32) -> EnvLighting {
+        // 128 wide: sh9's midpoint quadrature is 0.4 % high at 32 wide
+        // (E/π = 1.0036 for a constant map), 0.02 % at 128.
+        let map = makepad_render_material::ibl::EnvMap::constant(128, [level, level, level]);
+        EnvLighting { sh: makepad_render_material::ibl::sh9(&map), mean_luminance: level, gain: 1.0 }
+    }
+
+    /// A sun disc of real angular size (radius 0.27 degrees) toward `dir`:
+    /// a disc under a degree wide, so a surface facing it gets all of its
+    /// emission (`facing` 1) and the cone it is averaged over holds it.
+    fn disc(dir: Vec3f, radiance: f32) -> makepad_scene::EnvSun {
+        let cos_radius = 0.27_f32.to_radians().cos();
+        makepad_scene::EnvSun {
+            dir: dir.normalize(),
+            radiance: vec3f(radiance, radiance * 0.95, radiance * 0.9),
+            cos_radius,
+            facing: 1.0,
+            cos_cover: cos_radius,
+        }
+    }
+
+    #[test]
+    fn an_environment_sun_becomes_the_direct_term() {
+        let toward = vec3f(0.3, 0.8, -0.5);
+        let world = env_world(Some(disc(toward, 60000.0)), 0.0);
+        let rig = env_sun_rig(&world, Some(&grey_lighting(0.2)), SunLight::default().to_hdr(), true);
+        assert!(angle_deg(rig.dir, toward) < 0.2, "the light points at the environment's sun: {:?}", rig.dir);
+        // E = L·Ω with Ω = 2π(1 − cos r); the lanes take E/π = L·2(1 − cos r); × the
+        // gain, Ibl.intensity 1 (the map's own scale: no HDR_SKY_GAIN).
+        let want = 60000.0 * 2.0 * (1.0 - 0.27_f32.to_radians().cos());
+        assert!((rig.color.x - want).abs() < 2.0e-3, "direct {} vs {want}", rig.color.x);
+        assert!(rig.color.x > rig.color.z, "the disc's tint carries");
+        // A constant map: E = πL, E/π = L = 0.2; × gain 1.
+        assert!((rig.sky.x - 0.2).abs() < 2.0e-3, "sky {:?}", rig.sky);
+        assert!((rig.ground.x - 0.2).abs() < 2.0e-3, "ground {:?}", rig.ground);
+        // The gain is Ibl.intensity and nothing else: twice the intensity,
+        // twice every value the environment supplies.
+        let bright = env_sun_rig(&world, Some(&EnvLighting { gain: 2.0, ..grey_lighting(0.2) }), SunLight::default().to_hdr(), true);
+        assert!((bright.sky.x - 0.4).abs() < 2.0e-3 && (bright.color.x - 2.0 * want).abs() < 4.0e-3, "{bright:?}");
+        assert_eq!(rig.shadow_alpha, SunLight::default().shadow_alpha, "shadows are not the map's business");
+    }
+
+    #[test]
+    fn a_wide_key_delivers_its_facing_share_to_a_facing_surface() {
+        // Phase 2 amendment: the light on a wall that faces a wide studio key is
+        // `facing` of the key's emission (a 110 degree dome's cosine across its
+        // disc), so the one directional light carries `facing` × the whole.
+        let preset = |name: &str| crate::hdri::presets::preset(name).unwrap();
+        let key = crate::hdri::Env::new(&preset("Overcast dome")).sun().expect("the overcast dome is a studio key");
+        assert!((key.facing - 0.78).abs() < 0.01, "premise: the dome's facing {}", key.facing);
+        let stock = SunLight::default().to_hdr();
+        let lighting = grey_lighting(0.2);
+        let whole = env_sun_rig(&env_world(Some(makepad_scene::EnvSun { facing: 1.0, ..key }), 0.0), Some(&lighting), stock, true);
+        let rig = env_sun_rig(&env_world(Some(key), 0.0), Some(&lighting), stock, true);
+        assert!(whole.color.x > 0.1, "a key that lights: {:?}", whole.color);
+        for (got, whole) in [(rig.color.x, whole.color.x), (rig.color.y, whole.color.y), (rig.color.z, whole.color.z)] {
+            // 1/4096 is the colour grid.
+            assert!((got - whole * key.facing).abs() < 2.5e-4, "{got} vs {whole} x {}", key.facing);
+        }
+        // The same holds for a disc a surface sees whole: facing 1 changes nothing.
+        let sun = disc(vec3f(0.3, 0.8, -0.5), 60000.0);
+        assert_eq!(
+            env_sun_rig(&env_world(Some(sun), 0.0), Some(&lighting), stock, true),
+            env_sun_rig(&env_world(Some(makepad_scene::EnvSun { facing: 1.0, ..sun }), 0.0), Some(&lighting), stock, true)
+        );
+        // A broken share reads as what it can be trusted for: nothing.
+        let broken = env_sun_rig(&env_world(Some(makepad_scene::EnvSun { facing: f32::NAN, ..sun }), 0.0), Some(&lighting), stock, true);
+        assert_eq!(broken.color, Vec3f::default());
+    }
+
+    #[test]
+    fn without_a_prepared_environment_the_rig_is_bit_identical() {
+        let stock = SunLight::default();
+        assert_eq!(env_sun_rig(&makepad_scene::World::new(), None, stock, false), stock);
+        assert_eq!(env_sun_rig(&makepad_scene::World::new(), None, stock.to_hdr(), true), stock.to_hdr());
+        // A world that names an environment the renderer has not prepared.
+        assert_eq!(env_sun_rig(&env_world(Some(disc(vec3f(0.0, 1.0, 0.0), 1.0)), 0.0), None, stock, false), stock);
+        // A prepared map under a world without an IBL.
+        assert_eq!(env_sun_rig(&makepad_scene::World::new(), Some(&grey_lighting(0.2)), stock, false), stock);
+        assert!(env_sun_dir(&makepad_scene::World::new()).is_none());
+    }
+
+    #[test]
+    fn authored_sun_values_beat_the_environment() {
+        let toward = vec3f(0.3, 0.8, -0.5);
+        let lighting = grey_lighting(0.2);
+        let mut world = env_world(Some(disc(toward, 60000.0)), 0.0);
+        world.sun.dir = Some(vec3f(0.0, 1.0, 0.0));
+        assert!(env_sun_dir(&world).is_none(), "an authored dir is a look, or the true sun for its hour");
+        let input = resolve_sun(&world.sun).to_hdr();
+        let rig = env_sun_rig(&world, Some(&lighting), input, true);
+        assert_eq!(rig.dir, input.dir);
+        assert!(rig.color.x > 0.0, "the environment still supplies the colour");
+        world.sun.color = Some(vec3f(0.1, 0.2, 0.3));
+        let input = resolve_sun(&world.sun).to_hdr();
+        let rig = env_sun_rig(&world, Some(&lighting), input, true);
+        assert_eq!(rig.color, input.color, "an authored colour stays");
+        world.sun.ambient = Some(vec3f(0.05, 0.05, 0.05));
+        let input = resolve_sun(&world.sun).to_hdr();
+        let rig = env_sun_rig(&world, Some(&lighting), input, true);
+        assert_eq!((rig.sky, rig.ground), (input.sky, input.ground), "an authored ambient stays");
+        // The legacy lane neither quantises nor exposes authored values.
+        let input = resolve_sun(&world.sun);
+        let rig = env_sun_rig(&world, Some(&lighting), input, false);
+        assert_eq!(rig, input, "dir, colour and ambient all authored: the rig passes through bit for bit");
+    }
+
+    #[test]
+    fn the_ibl_rotation_turns_the_environment_sun() {
+        // ibl's sign: +90 degrees takes a light at -Z to -X (EnvMap::procedural).
+        let world = env_world(Some(disc(vec3f(0.0, 0.0, -1.0), 60000.0)), 90.0);
+        let dir = env_sun_dir(&world).unwrap();
+        // 0.05: an f32 acos cannot resolve less than 0.02 degrees near 0.
+        assert!(angle_deg(dir, vec3f(-1.0, 0.0, 0.0)) < 0.05, "{dir:?}");
+        let rig = env_sun_rig(&world, Some(&grey_lighting(0.2)), SunLight::default().to_hdr(), true);
+        assert!(angle_deg(rig.dir, vec3f(-1.0, 0.0, 0.0)) < 0.2, "{:?}", rig.dir);
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_unit_vector_still_steers_a_unit_light() {
+        // `EnvSun::validate` takes any direction of length 1e-3 or more, so a host-built key of
+        // length 0.5 or 50 is valid: the light's direction is normalised here.
+        for len in [0.5f32, 50.0] {
+            let mut key = disc(vec3f(0.3, 0.8, -0.5), 60000.0);
+            key.dir = key.dir * len;
+            assert!(key.validate().is_ok());
+            let world = env_world(Some(key), 30.0);
+            let dir = env_sun_dir(&world).unwrap();
+            assert!((dir.length() - 1.0).abs() < 1.0e-6, "{len}: {dir:?}");
+            let want = crate::hdri::rotate_y(vec3f(0.3, 0.8, -0.5).normalize(), 30.0);
+            assert!(angle_deg(dir, want) < 0.05, "{len}");
+            let rig = env_sun_rig(&world, Some(&grey_lighting(0.2)), SunLight::default().to_hdr(), true);
+            assert!((rig.dir.length() - 1.0).abs() < 1.0e-6 && angle_deg(rig.dir, want) < 0.2, "{len}: {:?}", rig.dir);
+        }
+    }
+
+    #[test]
+    fn a_sun_the_renderer_supplies_lights_like_a_declared_one() {
+        // IblSource::Procedural(7..): the world declares no sun and the
+        // renderer passes the preset's baked one (renderer/env_sun.rs).
+        let toward = vec3f(0.3, 0.8, -0.5);
+        let lighting = grey_lighting(0.2);
+        let stock = SunLight::default().to_hdr();
+        let declared = env_world(Some(disc(toward, 60000.0)), 30.0);
+        let bare = env_world(None, 30.0);
+        let supplied = Some(disc(toward, 60000.0));
+        assert_eq!(
+            env_sun_rig_with(&bare, supplied, Some(&lighting), stock, true),
+            env_sun_rig(&declared, Some(&lighting), stock, true)
+        );
+        assert_eq!(env_sun_dir_with(&bare, supplied), env_sun_dir(&declared));
+        assert!(env_sun_dir(&bare).is_none(), "the world itself declares none");
+        // An authored direction still wins over a supplied sun.
+        let mut authored = env_world(None, 0.0);
+        authored.sun.dir = Some(vec3f(0.0, 1.0, 0.0));
+        assert!(env_sun_dir_with(&authored, supplied).is_none());
+    }
+
+    #[test]
+    fn a_sunless_environment_has_no_direct_term() {
+        let world = env_world(None, 0.0);
+        let rig = env_sun_rig(&world, Some(&grey_lighting(0.2)), SunLight::default().to_hdr(), true);
+        assert_eq!(rig.color, Vec3f::default(), "an overcast map lights with its fill alone");
+        assert!(rig.sky.x > 0.0 && rig.ground.x > 0.0);
+        assert!(env_sun_dir(&world).is_none());
+        // Never the analytic rig's colour: not in the HDR lane, not in the legacy one.
+        let legacy = env_sun_rig(&world, Some(&grey_lighting(0.2)), SunLight::default(), false);
+        assert_eq!(legacy.color, Vec3f::default());
+        assert_ne!(SunLight::default().color, Vec3f::default(), "premise: the stock rig has a colour");
+        // A zero key is the same as none.
+        let zero = makepad_scene::EnvSun { radiance: Vec3f::default(), ..disc(vec3f(0.3, 0.8, -0.5), 1.0) };
+        assert_eq!(env_sun_rig(&env_world(Some(zero), 0.0), Some(&grey_lighting(0.2)), SunLight::default().to_hdr(), true).color, Vec3f::default());
+    }
+
+    #[test]
+    fn the_meter_reads_the_map_and_the_legacy_lane_bakes_it_in() {
+        // Mean 0.5 × gain (Ibl.intensity) 1 = key 0.5 -> exposure 0.75 / 0.5 = 1.5, inside the band.
+        let lighting = grey_lighting(0.5);
+        assert!((env_exposure(&lighting) - 1.5).abs() < 1.0e-5);
+        // The key is mean × intensity: twice the intensity meters one stop darker.
+        assert!((env_exposure(&EnvLighting { gain: 2.0, ..lighting }) - 0.75).abs() < 1.0e-5);
+        assert_eq!(hdr_exposure_for_key(0.0), HDR_EXPOSURE_MAX, "a black map hits the ceiling, never infinity");
+        assert_eq!(hdr_exposure_for_key(f32::INFINITY), HDR_EXPOSURE_MIN);
+        let world = env_world(Some(disc(vec3f(0.3, 0.8, -0.5), 60000.0)), 0.0);
+        let hdr = env_sun_rig(&world, Some(&lighting), SunLight::default().to_hdr(), true);
+        let legacy = env_sun_rig(&world, Some(&lighting), SunLight::default(), false);
+        // The legacy lane has no composite: the exposure is in the values,
+        // and the up-facing fill lands on the meter's key (0.75).
+        assert!((legacy.sky.x - 0.75).abs() < 2.0e-3, "{:?}", legacy.sky);
+        assert!((legacy.sky.x - hdr.sky.x * 1.5).abs() < 2.0e-3);
+        assert!((legacy.color.x - hdr.color.x * 1.5).abs() < 2.0e-3);
+        assert_eq!(legacy.dir, hdr.dir);
+        // The hdr rig itself is NOT exposed (the composite does that): the
+        // map's own fill, E/π = 0.5.
+        assert!((hdr.sky.x - 0.5).abs() < 2.0e-3, "{:?}", hdr.sky);
+    }
+
+    #[test]
+    fn nearby_suns_quantise_to_the_same_rig() {
+        // A re-baked map moves its detected sun by a hair; the rig must not
+        // move at all, or the OnChange bake and the SDF caches churn
+        // (frame.rs:301-308, model_instance.rs:369).
+        let lighting = grey_lighting(0.2);
+        let a = env_sun_rig(&env_world(Some(disc(vec3f(0.3, 0.8, -0.5), 60000.0)), 0.0), Some(&lighting), SunLight::default().to_hdr(), true);
+        let b = env_sun_rig(&env_world(Some(disc(vec3f(0.30002, 0.8, -0.5), 60000.7)), 0.0), Some(&lighting), SunLight::default().to_hdr(), true);
+        assert_eq!(a, b);
+        assert!((a.dir.length() - 1.0).abs() < 1.0e-6, "still a unit vector after rounding");
+        // Non-finite map values never reach the rig.
+        let broken = makepad_scene::EnvSun {
+            dir: vec3f(0.0, 1.0, 0.0),
+            radiance: vec3f(f32::NAN, 1.0, 1.0),
+            cos_radius: f32::NAN,
+            facing: f32::NAN,
+            cos_cover: f32::NAN,
+        };
+        let rig = env_sun_rig(&env_world(Some(broken), 0.0), Some(&lighting), SunLight::default().to_hdr(), true);
+        assert!(rig.color.is_finite() && rig.dir.is_finite() && rig.sky.is_finite());
+    }
+
+    /// The core's key on the sandbox's evening, as `Env::sun` reports it: 21
+    /// June at 45 N under the default clear sky, `hour` o'clock.
+    fn evening_key(hour: f32) -> Option<makepad_scene::EnvSun> {
+        let mut p = crate::hdri::HdriParams::default();
+        p.sky.sun.hour = hour;
+        crate::hdri::Env::new(&p).sun()
+    }
+
+    #[test]
+    fn the_rig_has_no_jump_over_an_evening_and_never_falls_back_to_the_analytic_colour() {
+        // Phase 2 amendment, item 3: sampled the way the core's
+        // `the_key_has_no_jump_over_an_evening` samples the key (every two
+        // minutes from 16:00 to 23:00) but on the resolved rig. The sun fades
+        // out over a couple of minutes of sun time and the moon fades in at -6
+        // degrees, so the directional colour is continuous; between the two
+        // there is no key, and then the colour is zero, not the analytic rig's.
+        // The bound is coarse on purpose (two minutes is as long as the sun's
+        // fade; the core's elevation sweeps carry the continuity proper).
+        let stock = SunLight::default().to_hdr();
+        assert!(crate::sky::luminance(stock.color) > 1.0, "premise: the analytic rig has a colour");
+        let lighting = grey_lighting(0.2);
+        let world = env_world(None, 0.0);
+        let lum = crate::sky::luminance;
+        let rigs: Vec<(f32, Option<makepad_scene::EnvSun>, SunLight)> = (0..211)
+            .map(|i| {
+                let hour = 16.0 + i as f32 / 30.0;
+                let key = evening_key(hour);
+                (hour, key, env_sun_rig_with(&world, key, Some(&lighting), stock, true))
+            })
+            .collect();
+        let peak = rigs.iter().map(|r| lum(r.2.color)).fold(0.0, f32::max);
+        assert!(peak > 0.5, "a sunny afternoon lights: {peak}");
+        let (mut dark, mut last, mut worst) = (0, None::<f32>, 0.0f32);
+        for &(hour, key, rig) in &rigs {
+            let got = lum(rig.color);
+            assert!(rig.color.is_finite() && rig.dir.is_finite(), "{hour} h");
+            if key.is_none() {
+                dark += 1;
+                assert_eq!(rig.color, Vec3f::default(), "{hour} h: no key, no direct light (the analytic colour is {:?})", stock.color);
+            }
+            if let Some(prev) = last {
+                worst = worst.max((got - prev).abs() / peak);
+                assert!((got - prev).abs() < 0.05 * peak, "{hour} h: {prev} -> {got} of a peak {peak}");
+            }
+            last = Some(got);
+        }
+        assert!(dark > 10, "the key is out for a while between sunset and the moon: {dark} samples");
+        println!("largest step of the resolved rig's colour: {:.1} % of the evening's peak", worst * 100.0);
+    }
+
+    #[test]
+    fn an_authored_dir_holds_while_the_key_comes_and_goes() {
+        // A host that re-bakes a `params:` map a quarter hour at a time under
+        // its day clock authors `SunConfig.dir` from its eased hour: the
+        // shadows stay on that sun while the map's key (whose direction steps
+        // by the bake grid) fades in and out. `authored_sun_values_beat_the_
+        // environment` pins the rule for a steady key; this is the same rule
+        // across the sunset.
+        let d = vec3f(-0.4, 0.5, 0.3).normalize();
+        let mut world = env_world(None, 0.0);
+        world.sun.dir = Some(d);
+        let lighting = grey_lighting(0.2);
+        let input = resolve_sun(&world.sun).to_hdr();
+        let toward = vec3f(0.3, 0.8, -0.5);
+        let golden = Some(disc(toward, 60000.0));
+        let fading = Some(disc(toward, 60000.0 * 0.03));
+        let rigs = [golden, fading, None].map(|key| env_sun_rig_with(&world, key, Some(&lighting), input, true));
+        for rig in &rigs {
+            assert_eq!(rig.dir, input.dir, "the authored direction, bit for bit");
+            assert_eq!(rig.dir, d);
+        }
+        assert!(rigs[0].color.x > rigs[1].color.x && rigs[1].color.x > 0.0, "{:?} {:?}", rigs[0].color, rigs[1].color);
+        assert_eq!(rigs[2].color, Vec3f::default(), "no key: no direct light");
+        // The fill is the environment's, the same in all three.
+        assert!(rigs[0].sky.x > 0.0 && rigs[0].ground.x > 0.0);
+        for rig in &rigs {
+            assert_eq!((rig.sky, rig.ground), (rigs[0].sky, rigs[0].ground));
+        }
+        let steady = env_sun_rig_with(&env_world(None, 0.0), None, Some(&lighting), SunLight::default().to_hdr(), true);
+        assert_eq!((rigs[0].sky, rigs[0].ground), (steady.sky, steady.ground), "the fill of the map, whoever aims the light");
     }
 }

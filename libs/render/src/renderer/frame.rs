@@ -169,7 +169,9 @@ impl Renderer {
         }
         self.sky_hour = hour;
         let mut sun = crate::sun::resolve_sun(&world.sun);
-        if let Some(dir) = crate::world_lights::world_sun_dir(world) { sun.dir = dir; }
+        // A world's own Sun steers every sun-driven system; else the
+        // environment's sun does (renderer/env_sun.rs); else the rig's.
+        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
         self.light_eye = camera_pos;
         self.stream_lights(camera_pos, sun.dir.y);
         self.build_frame_lights(&sun);
@@ -179,32 +181,48 @@ impl Renderer {
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.
+        let env = self.env_lighting(world);
         let sun = if self.hdr_output {
             self.scale_frame_lights_hdr();
             let mut hdr = sun.to_hdr();
             self.hdr_fill_from_sky(world, &mut hdr);
-            // Exposure is metered on the UNAUTHORED rig for this sun
-            // position: a script that dims its sun or ambient (a moonlit
-            // arena) means dark, and metering its own dim light would lift
-            // it back to mid-grey. `game.sky` exposure_ev biases it.
-            self.hdr_exposure = if world.sun.color.is_some() || world.sun.ambient.is_some() {
-                let mut stock = world.sun.clone();
-                stock.color = None;
-                stock.ambient = None;
-                let mut metered = crate::sun::resolve_sun(&stock).to_hdr();
-                self.hdr_fill_from_sky(world, &mut metered);
-                metered.hdr_exposure()
-            } else {
-                hdr.hdr_exposure()
+            // The environment's sun and fill (renderer/env_sun.rs; the lane
+            // is HDR here, so nothing is exposed in the values).
+            let hdr = self.env_sun_rig(world, hdr);
+            // Exposure. An environment meters ITSELF: the key is the map's
+            // mean luminance (its sun included) in the lane's units, so
+            // the dome, the fill and the sun it lights with land at
+            // mid-grey together, and a script's dimmed sun stays dim.
+            // Without one, exposure is metered on the UNAUTHORED rig for
+            // this sun position: a script that dims its sun or ambient (a
+            // moonlit arena) means dark, and metering its own dim light
+            // would lift it back to mid-grey. `game.sky` exposure_ev biases
+            // either.
+            self.hdr_exposure = match env.as_ref() {
+                Some(env) => crate::sun::env_exposure(env),
+                None if world.sun.color.is_some() || world.sun.ambient.is_some() => {
+                    let mut stock = world.sun.clone();
+                    stock.color = None;
+                    stock.ambient = None;
+                    let mut metered = crate::sun::resolve_sun(&stock).to_hdr();
+                    self.hdr_fill_from_sky(world, &mut metered);
+                    metered.hdr_exposure()
+                }
+                None => hdr.hdr_exposure(),
             };
             if let Some(ev) = world.sky.as_ref().map(|s| s.exposure_ev).filter(|ev| ev.is_finite() && *ev != 0.0) {
                 self.hdr_exposure *= 2.0f32.powf(ev.clamp(-8.0, 8.0));
             }
             if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
-                log!("hdr: exposure {:.3}, sun {:?} sky {:?} ground {:?} dir.y {:.3}", self.hdr_exposure, hdr.color, hdr.sky, hdr.ground, hdr.dir.y);
+                log!("hdr: exposure {:.3}, sun {:?} sky {:?} ground {:?} dir {:?} env {}", self.hdr_exposure, hdr.color, hdr.sky, hdr.ground, hdr.dir, env.is_some());
             }
             hdr
         } else {
+            // Legacy lane: the environment's values carry its own exposure.
+            let sun = self.env_sun_rig(world, sun);
+            if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
+                log!("legacy: sun {:?} sky {:?} ground {:?} dir {:?} env {}", sun.color, sun.sky, sun.ground, sun.dir, env.is_some());
+            }
             sun
         };
         // The world's own lights (documents, kits; none in a game world) are
@@ -333,7 +351,7 @@ impl Renderer {
         // uniforms are captured when the draw item opens.
         let sun = {
             let mut sun = crate::sun::resolve_sun(&world.sun);
-        if let Some(dir) = crate::world_lights::world_sun_dir(world) { sun.dir = dir; }
+            if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
             let sun = if self.hdr_output {
                 let mut hdr = sun.to_hdr();
                 self.hdr_fill_from_sky(world, &mut hdr);
@@ -341,7 +359,16 @@ impl Renderer {
             } else {
                 sun
             };
-            crate::world_lights::apply_world_sun(world, sun)
+            // The environment's sun, fill and (legacy lane) exposure, before
+            // the world's own lights have the last word.
+            let sun = self.env_sun_rig(world, sun);
+            let sun = crate::world_lights::apply_world_sun(world, sun);
+            // C8 reads these three lines (frame, shaders, bake) against
+            // each other: one sun at every site.
+            if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
+                log!("rig: dir {:?} color {:?} sky {:?} ground {:?}", sun.dir, sun.color, sun.sky, sun.ground);
+            }
+            sun
         };
 
         // SDF-atlas sun era: the sidecars bake against one sun elevation.

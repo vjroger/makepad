@@ -632,6 +632,7 @@ mod stream_draw;
 mod grass_draw;
 mod vfx_draw;
 pub(crate) mod ibl;
+mod env_sun;
 mod items;
 pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
 

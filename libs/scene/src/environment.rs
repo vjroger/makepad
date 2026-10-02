@@ -218,12 +218,21 @@ pub struct Environment {
     pub ibl: Option<Ibl>,
     pub fog: Fog,
     /// The environment's key light, when its producer knows one (a baked
-    /// sky's sun, a studio's key, a detected sun in a loaded HDRI). The
-    /// renderer's sun rig takes it unless the host's sun config or a
-    /// `Light::Sun` say otherwise; `None` keeps today's rig. Its `dir` is
-    /// in the map's own frame: a generator's own `rotation_deg` is baked
-    /// in, `Ibl.rotation_deg` is NOT; the renderer turns the sun together
-    /// with the map.
+    /// sky's sun, a studio's key, a detected sun in a loaded HDRI). Once the
+    /// environment's IBL is prepared, the renderer's sun rig takes its
+    /// direction, colour and fill from the map (`facing` and the key's
+    /// radiance give the one directional light's colour), unless the host's
+    /// sun config (`SunConfig.dir`, `color`, `ambient`) or a `Light::Sun` /
+    /// `Light::Sky` say otherwise. `None`, or a key with no radiance, under a
+    /// prepared environment means NO directional light from the environment
+    /// (an overcast map, a studio without a key, a sun that has set): the map
+    /// lights with its fill alone, never with the analytic rig's sun colour;
+    /// the shadows' direction then stays the rig's own (`resolve_sun`), so
+    /// the cascades and the baked lightmaps do not move. A world with no
+    /// environment IBL, or one the renderer has not prepared yet, keeps the
+    /// analytic rig bit for bit. `dir` is in the map's own frame: a
+    /// generator's own `rotation_deg` is baked in, `Ibl.rotation_deg` is NOT;
+    /// the renderer turns the sun together with the map.
     pub sun: Option<EnvSun>,
 }
 
