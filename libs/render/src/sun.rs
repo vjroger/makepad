@@ -566,7 +566,9 @@ pub fn env_sun_dir_with(world: &makepad_scene::World, env_sun: Option<makepad_sc
 /// sunset fades out instead of switching to a stock sun. (The direction is
 /// then the caller's: `resolve_sun` keeps the shadows and the cascades
 /// stable.) The legacy lane has no composite to apply a meter, so the map's
-/// exposure is baked into the values the environment supplies here.
+/// exposure is baked into the values the environment supplies here, and
+/// since it has no tone mapper either, the direct term is held to what the
+/// fill leaves under white ([`legacy_direct_within_white`]).
 ///
 /// Only the fields the environment supplies are quantised (RIG_*_STEP) and,
 /// in the legacy lane, exposed; an authored `SunConfig` dir, colour or
@@ -602,12 +604,6 @@ pub fn env_sun_rig_with(
             out.dir = d.normalize();
         }
     }
-    if world.sun.color.is_none() {
-        out.color = match env_sun {
-            Some(s) => qc(s.radiance * (env_sun_scale(&s) * gain * exposure)),
-            None => Vec3f::default(),
-        };
-    }
     if world.sun.ambient.is_none() {
         let fill = |n: [f32; 3]| {
             let c = makepad_render_material::ibl::sh9_irradiance(&env.sh, n);
@@ -616,7 +612,49 @@ pub fn env_sun_rig_with(
         out.sky = fill([0.0, 1.0, 0.0]);
         out.ground = fill([0.0, -1.0, 0.0]);
     }
+    // After the fill: the legacy lane limits the direct term by the sky the
+    // frame will actually show (an authored ambient included).
+    if world.sun.color.is_none() {
+        let direct = match env_sun {
+            Some(s) => s.radiance * (env_sun_scale(&s) * gain * exposure),
+            None => Vec3f::default(),
+        };
+        out.color = qc(if hdr { direct } else { legacy_direct_within_white(direct, out.sky) });
+    }
     out
+}
+
+/// What the stock legacy rig gives a white surface that faces the sun, per
+/// channel: `LEGACY_DIRECT + LEGACY_AMBIENT`. The legacy (display-referred)
+/// lane has no tone mapper, so nothing lit may exceed it: it is white.
+const LEGACY_WHITE: f32 = LEGACY_DIRECT + LEGACY_AMBIENT;
+
+/// The environment's direct term for the legacy lane: `direct` (already
+/// exposed) scaled, hue kept, so that a white surface facing the sun reads
+/// at most white, `direct + sky <= LEGACY_WHITE` in every channel. The HDR
+/// lane has a tone mapper and does not call this; neither does a rig that
+/// already fits (its values come back unchanged, so a dim or overcast map
+/// is what the meter alone gave it).
+///
+/// The meter counts a sun at a quarter of its weight (renderer/env_sun.rs),
+/// right for a lane that tone maps and wrong for one that clips: the golden
+/// hour preset's direct term sat at (3.4, 1.8, 0.6) and drew every sunlit
+/// surface as saturated yellow (seen on a Windows capture). The fill is not
+/// limited: it stays the map's own light at the metered exposure and shades
+/// everything the sun does not reach. A sunny map's legacy rig is therefore
+/// a sun and a fill that add up to white, as the stock rig's 0.72 + 0.28 do,
+/// in the map's colours; the map's own sun-to-shade ratio is more than a
+/// display with no tone curve can show.
+fn legacy_direct_within_white(direct: Vec3f, sky: Vec3f) -> Vec3f {
+    let mut scale = 1.0f32;
+    for (d, s) in [(direct.x, sky.x), (direct.y, sky.y), (direct.z, sky.z)] {
+        if d.is_finite() && d > 0.0 {
+            // A fill that is white already leaves no room for the sun.
+            let room = (LEGACY_WHITE - if s.is_finite() { s.max(0.0) } else { 0.0 }).max(0.0);
+            scale = scale.min(room / d);
+        }
+    }
+    direct * scale
 }
 
 /// What a key's radiance is multiplied by to give the directional light's
@@ -1218,7 +1256,9 @@ mod tests {
         assert!((env_exposure(&EnvLighting { gain: 2.0, ..lighting }) - 0.75).abs() < 1.0e-5);
         assert_eq!(hdr_exposure_for_key(0.0), HDR_EXPOSURE_MAX, "a black map hits the ceiling, never infinity");
         assert_eq!(hdr_exposure_for_key(f32::INFINITY), HDR_EXPOSURE_MIN);
-        let world = env_world(Some(disc(vec3f(0.3, 0.8, -0.5), 60000.0)), 0.0);
+        // A sun that fits under white next to the exposed fill (0.2 + 0.75):
+        // the legacy lane's values are the meter's alone.
+        let world = env_world(Some(disc(vec3f(0.3, 0.8, -0.5), 6000.0)), 0.0);
         let hdr = env_sun_rig(&world, Some(&lighting), SunLight::default().to_hdr(), true);
         let legacy = env_sun_rig(&world, Some(&lighting), SunLight::default(), false);
         // The legacy lane has no composite: the exposure is in the values,
@@ -1230,6 +1270,69 @@ mod tests {
         // The hdr rig itself is NOT exposed (the composite does that): the
         // map's own fill, E/π = 0.5.
         assert!((hdr.sky.x - 0.5).abs() < 2.0e-3, "{:?}", hdr.sky);
+    }
+
+    #[test]
+    fn the_legacy_lane_holds_the_environments_sun_within_white() {
+        // The golden hour preset's metered direct term was (3.4, 1.8, 0.6) in
+        // a lane with no tone mapper and drew every sunlit surface as
+        // saturated yellow. A white surface facing the sun reads at most
+        // white (the stock rig's own 0.72 + 0.28), whatever the map's sun.
+        let lighting = grey_lighting(0.5);
+        for radiance in [6000.0, 60000.0, 6.0e6] {
+            let world = env_world(Some(disc(vec3f(0.3, 0.8, -0.5), radiance)), 0.0);
+            let hdr = env_sun_rig(&world, Some(&lighting), SunLight::default().to_hdr(), true);
+            let legacy = env_sun_rig(&world, Some(&lighting), SunLight::default(), false);
+            let exposure = env_exposure(&lighting);
+            // The fill is the meter's, the direction the map's, whatever the sun does.
+            assert!((legacy.sky.x - hdr.sky.x * exposure).abs() < 2.0e-3, "{radiance}: {:?}", legacy.sky);
+            assert_eq!(legacy.dir, hdr.dir);
+            for (direct, fill) in [(legacy.color.x, legacy.sky.x), (legacy.color.y, legacy.sky.y), (legacy.color.z, legacy.sky.z)] {
+                // 1/4096 is the colour grid.
+                assert!(direct + fill <= LEGACY_WHITE + 2.5e-4, "{radiance}: {direct} + {fill} clips");
+            }
+            // The hdr lane is the map's own (the composite tone maps it).
+            let want = radiance * 2.0 * (1.0 - 0.27_f32.to_radians().cos());
+            assert!((hdr.color.x - want).abs() < 2.0e-3 * want.max(1.0), "{radiance}: {:?} vs {want}", hdr.color);
+            if hdr.color.x * exposure + legacy.sky.x > LEGACY_WHITE {
+                // The sun does not fit: the channel with the least room is
+                // exactly white on a facing wall, and the sun's hue is kept
+                // (the disc's tint is 1 : 0.95 : 0.9).
+                assert!((legacy.color.x + legacy.sky.x - LEGACY_WHITE).abs() < 5.0e-4, "{radiance}: {:?} {:?}", legacy.color, legacy.sky);
+                assert!((legacy.color.y / legacy.color.x - 0.95).abs() < 2.0e-3, "{radiance}: hue kept {:?}", legacy.color);
+                assert!((legacy.color.z / legacy.color.x - 0.9).abs() < 2.0e-3, "{radiance}: hue kept {:?}", legacy.color);
+            } else {
+                assert!((legacy.color.x - hdr.color.x * exposure).abs() < 2.0e-3, "{radiance}: a sun that fits is left alone");
+            }
+        }
+        // A warm sun (red far above blue) is limited by its red channel; the
+        // colour balance stays.
+        let warm = makepad_scene::EnvSun { radiance: vec3f(60000.0, 30000.0, 10000.0), ..disc(vec3f(0.3, 0.8, -0.5), 1.0) };
+        let legacy = env_sun_rig(&env_world(Some(warm), 0.0), Some(&lighting), SunLight::default(), false);
+        assert!((legacy.color.x + legacy.sky.x - LEGACY_WHITE).abs() < 5.0e-4, "{:?}", legacy.color);
+        assert!((legacy.color.y / legacy.color.x - 0.5).abs() < 2.0e-3 && (legacy.color.z / legacy.color.x - 1.0 / 6.0).abs() < 2.0e-3, "{:?}", legacy.color);
+        // A fill that is white already leaves no room: no sun, never a negative one.
+        // (A mean of 2 at gain 3 meters past the band's floor: exposure 0.25, fill 1.5.)
+        let washed = EnvLighting { gain: 3.0, ..grey_lighting(2.0) };
+        let rig = env_sun_rig(&env_world(Some(disc(vec3f(0.3, 0.8, -0.5), 60000.0)), 0.0), Some(&washed), SunLight::default(), false);
+        assert!(rig.sky.x >= LEGACY_WHITE && rig.color == Vec3f::default(), "{rig:?}");
+        // Authored values are the script's: an authored colour is not held back
+        // (it is in display units already), and an authored ambient is the fill
+        // the environment's sun is limited against.
+        let mut authored = env_world(Some(disc(vec3f(0.3, 0.8, -0.5), 60000.0)), 0.0);
+        authored.sun.color = Some(vec3f(3.0, 2.0, 1.0));
+        let rig = env_sun_rig(&authored, Some(&lighting), resolve_sun(&authored.sun), false);
+        assert_eq!(rig.color, vec3f(3.0, 2.0, 1.0));
+        authored.sun.color = None;
+        authored.sun.ambient = Some(vec3f(0.5, 0.5, 0.5));
+        let rig = env_sun_rig(&authored, Some(&lighting), resolve_sun(&authored.sun), false);
+        assert_eq!(rig.sky, vec3f(0.5, 0.5, 0.5));
+        assert!((rig.color.x + 0.5 - LEGACY_WHITE).abs() < 5.0e-4, "{:?}", rig.color);
+        // No sun, no direct term (unchanged), and never NaN.
+        assert_eq!(env_sun_rig(&env_world(None, 0.0), Some(&lighting), SunLight::default(), false).color, Vec3f::default());
+        let broken = makepad_scene::EnvSun { radiance: vec3f(f32::NAN, f32::INFINITY, 1.0), ..disc(vec3f(0.3, 0.8, -0.5), 1.0) };
+        let rig = env_sun_rig(&env_world(Some(broken), 0.0), Some(&lighting), SunLight::default(), false);
+        assert!(rig.color.is_finite(), "{:?}", rig.color);
     }
 
     #[test]

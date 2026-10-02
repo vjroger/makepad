@@ -205,11 +205,14 @@ fn a_landed_environment_lights_the_rig_in_both_lanes() {
     assert!((hdr.sky.x - 0.5).abs() < 0.01 && (hdr.ground.x - 0.5).abs() < 0.01, "the fill is the sky's: {:?} {:?}", hdr.sky, hdr.ground);
     let exposure = crate::sun::env_exposure(&lighting);
     assert!((exposure - 0.75 / (0.5 + key_share)).abs() < 1.0e-3, "meters the map, the disc included: {exposure}");
-    // Legacy lane: the same values, exposed in them.
+    // Legacy lane: the fill exposed in the values; the sun exposed too, but
+    // held within white next to that fill (hdr.color.x * exposure = 1.74 would
+    // clip: no tone mapper in this lane), so a wall facing it reads 1.0.
     renderer.hdr_output = false;
     let legacy = renderer.env_sun_rig(&world, stock);
-    assert!((legacy.color.x - hdr.color.x * exposure).abs() < 2.0e-3, "{:?}", legacy.color);
     assert!((legacy.sky.x - hdr.sky.x * exposure).abs() < 2.0e-3, "{:?}", legacy.sky);
+    assert!(hdr.color.x * exposure > 1.0, "premise: this sun would clip when exposed");
+    assert!((legacy.color.x + legacy.sky.x - 1.0).abs() < 5.0e-4, "{:?} {:?}", legacy.color, legacy.sky);
     assert_eq!(legacy.dir, hdr.dir);
     assert_eq!(legacy.shadow_alpha, stock.shadow_alpha);
 
