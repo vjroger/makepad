@@ -805,6 +805,8 @@ mod realm_lifecycle_tests;
 #[cfg(test)]
 mod sun_tests;
 #[cfg(test)]
+mod env_prepare_tests;
+#[cfg(test)]
 mod cull_tests;
 #[cfg(test)]
 mod part_attachment_tests;
