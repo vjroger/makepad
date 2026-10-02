@@ -83,6 +83,9 @@ pub struct Env {
     params: HdriParams,
     /// 2^intensity_ev, applied last so every layer keeps its own units.
     scale: f32,
+    /// Backdrop and light list. The lights are an overlay in both modes, so this
+    /// is built for Sky maps too.
+    studio: studio::Studio,
 }
 
 impl Env {
@@ -91,7 +94,8 @@ impl Env {
         let mut params = params.clone();
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
-        Env { params, scale }
+        let studio = studio::Studio::new(&params.studio, &params.lights);
+        Env { params, scale, studio }
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -106,15 +110,21 @@ impl Env {
         // The layers live in the map's own frame; turning the content by
         // rotation_deg is looking it up at the direction turned back
         // (ibl's sign, as EnvMap::procedural and mat_ibl_dir do).
-        let _local = rotate_y(dir, -self.params.rotation_deg);
-        // The base layers and the light overlay arrive with tasks A3 to A6.
-        Vec3f::default() * self.scale
+        let d = rotate_y(dir, -self.params.rotation_deg);
+        let base = match self.params.mode() {
+            Mode::Studio => self.studio.backdrop(d),
+            // No outdoor layers yet: a Sky map is black under its lights until
+            // the atmosphere lands (task A4).
+            Mode::Sky => Vec3f::default(),
+        };
+        self.studio.apply_lights(d, base) * self.scale
     }
 
-    /// Key light for the engine, in world space, already × 2^intensity_ev.
-    /// Tasks A3 and A4 fill this in; until then there is no key.
+    /// Key light for the engine, in world space, already × 2^intensity_ev. A
+    /// key light leads in both modes; task A4 adds the sun as the fallback in
+    /// Sky mode and A6 the moon.
     pub fn sun(&self) -> Option<EnvSun> {
-        None
+        self.studio.key().map(|key| self.key_to_world(key))
     }
 
     /// World-space sun direction in Sky mode (also below the horizon), None in Studio.
@@ -160,6 +170,16 @@ impl Env {
             refine_hot_spots(&mut map, &radiance, &self.hot_spots());
         }
         map
+    }
+
+    /// Map frame to world frame (the map's yaw, ibl's sign), with the map's
+    /// intensity applied. Every layer's key light goes through this one place.
+    fn key_to_world(&self, key: EnvSun) -> EnvSun {
+        EnvSun {
+            dir: rotate_y(key.dir, self.params.rotation_deg),
+            radiance: key.radiance * self.scale,
+            cos_radius: key.cos_radius,
+        }
     }
 }
 
