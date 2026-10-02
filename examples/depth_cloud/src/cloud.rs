@@ -300,6 +300,12 @@ impl DepthCloud {
         self.draw_cloud.redraw(cx);
     }
 
+    /// Back to the frame source (models, packed RGBD, depth passes).
+    pub fn clear_rendered_source(&mut self, cx: &mut Cx) {
+        self.rendered = None;
+        self.draw_cloud.redraw(cx);
+    }
+
     /// Picture pixel size of the active source, `None` when nothing to draw.
     fn picture_size(&self) -> Option<(f32, f32)> {
         if let Some(rendered) = &self.rendered {

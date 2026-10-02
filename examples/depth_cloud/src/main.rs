@@ -34,6 +34,7 @@ pub use makepad_xr;
 
 mod cloud;
 mod depth;
+mod picker;
 mod pipeline;
 mod rendered;
 
@@ -98,10 +99,18 @@ script_mod! {
                                     height: Fit
                                     flow: Right
                                     spacing: 8
+                                    open_video := Button{text: "Open video..."}
+                                    open_model := Button{text: "Open model..."}
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
                                     play_pause := Button{text: "Pause"}
                                     front_view := Button{text: "Front view"}
                                 }
-                                Label{width: Fill text: "Drag to orbit, wheel to dolly."}
+                                Label{width: Fill text: "Or drop a video / model file on the window. Drag to orbit, wheel to dolly."}
                                 Hr{}
                             }
 
@@ -239,6 +248,11 @@ pub struct App {
     stats_at: f64,
     #[rust]
     scene_mode: bool,
+    /// Chosen through the buttons or a drop; `None` = built-in test clip.
+    #[rust]
+    video_path: Option<String>,
+    #[rust]
+    model_path: Option<String>,
 }
 
 impl App {
@@ -345,6 +359,75 @@ impl App {
         self.pump = cx.new_next_frame();
     }
 
+    /// (Re)start playback from the chosen video and model.
+    fn open_chosen(&mut self, cx: &mut Cx) {
+        let input = match &self.video_path {
+            Some(path) => VideoInput::File(path.clone()),
+            None => VideoInput::Synthetic,
+        };
+        let layout = match input {
+            VideoInput::Synthetic => FrameLayout::SideBySide,
+            VideoInput::File(_) => FrameLayout::Full,
+        };
+        let depth = if layout != FrameLayout::Full {
+            DepthSource::Packed(layout)
+        } else {
+            match Args::native(self.model_path.clone(), false) {
+                Ok(source) => source,
+                Err(_) => DepthSource::GroundPrior,
+            }
+        };
+        let no_model = matches!(depth, DepthSource::GroundPrior);
+        self.start_pipeline(cx, SourceSpec { input, layout, depth });
+        if no_model {
+            self.set_status(
+                cx,
+                "No depth model loaded: using a rough guess. Click \"Open model...\" and pick depth_anything_v2_vits.pth.",
+            );
+        }
+    }
+
+    fn start_pipeline(&mut self, cx: &mut Cx, spec: SourceSpec) {
+        // Leave the live scene, drop the old worker (it stops on its own).
+        if self.scene_mode {
+            self.scene_mode = false;
+            let live = self.ui.widget(cx, ids!(live_scene));
+            if let Some(mut live) = live.borrow_mut::<RenderedScene>() {
+                live.active = false;
+            };
+            self.with_cloud(cx, |cx, cloud| cloud.clear_rendered_source(cx));
+        }
+        self.pipeline = None;
+        let picture_rect = spec.layout.picture_rect();
+        self.with_cloud(cx, |_, cloud| cloud.set_picture_rect(picture_rect));
+        self.front_view(cx);
+        if self.paused {
+            self.paused = false;
+            self.ui.button(cx, ids!(play_pause)).set_text(cx, "Pause");
+        }
+        match Pipeline::start(cx.task_pool(), spec, self.settings) {
+            Ok(pipeline) => {
+                self.pipeline = Some(pipeline);
+                self.pump = cx.new_next_frame();
+            }
+            Err(err) => self.set_status(cx, &err),
+        }
+    }
+
+    /// A video or model file from a dialog or a drop.
+    fn open_file(&mut self, cx: &mut Cx, path: String) {
+        if picker::is_model_file(&path) {
+            if !cfg!(feature = "localai") {
+                self.set_status(cx, "This build has no model support: rebuild with --features localai.");
+                return;
+            }
+            self.model_path = Some(path);
+        } else {
+            self.video_path = Some(path);
+        }
+        self.open_chosen(cx);
+    }
+
     fn update_settings(&mut self) {
         if let Some(pipeline) = self.pipeline.as_mut() {
             pipeline.set_settings(self.settings);
@@ -366,16 +449,14 @@ impl MatchEvent for App {
                 return;
             }
         };
-        let picture_rect = spec.layout.picture_rect();
-        self.with_cloud(cx, |_, cloud| cloud.set_picture_rect(picture_rect));
-        self.front_view(cx);
-        match Pipeline::start(cx.task_pool(), spec, self.settings) {
-            Ok(pipeline) => {
-                self.pipeline = Some(pipeline);
-                self.pump = cx.new_next_frame();
-            }
-            Err(err) => self.set_status(cx, &err),
+        if let VideoInput::File(path) = &spec.input {
+            self.video_path = Some(path.clone());
         }
+        #[cfg(feature = "localai")]
+        if let DepthSource::Anything { model_path } = &spec.depth {
+            self.model_path = Some(model_path.clone());
+        }
+        self.start_pipeline(cx, spec);
     }
 
     fn handle_next_frame(&mut self, cx: &mut Cx, e: &NextFrameEvent) {
@@ -385,6 +466,19 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            if let Some(path) = picker::picked(action, picker::PICK_VIDEO)
+                .or_else(|| picker::picked(action, picker::PICK_MODEL))
+            {
+                self.open_file(cx, path);
+            }
+        }
+        if self.ui.button(cx, ids!(open_video)).clicked(actions) {
+            picker::pick_video(cx);
+        }
+        if self.ui.button(cx, ids!(open_model)).clicked(actions) {
+            picker::pick_model(cx);
+        }
         let ui = self.ui.clone();
         let slided = |cx: &mut Cx, id: &[LiveId]| ui.slider(cx, id).slided(actions);
 
@@ -467,6 +561,13 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Drop(drop) = event {
+            for item in drop.items.iter() {
+                if let DragItem::FilePath { path, .. } = item {
+                    self.open_file(cx, path.clone());
+                }
+            }
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
