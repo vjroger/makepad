@@ -87,6 +87,8 @@ pub struct Env {
     studio: studio::Studio,
     /// The clear sky; Some exactly in Sky mode.
     atmo: Option<atmosphere::Atmosphere>,
+    /// Cloud deck and cirrus; Some in Sky mode when there is any cover.
+    clouds: Option<clouds::CloudLayer>,
 }
 
 impl Env {
@@ -96,15 +98,19 @@ impl Env {
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
         let studio = studio::Studio::new(&params.studio, &params.lights);
-        let atmo = match params.mode() {
-            Mode::Sky => Some(atmosphere::Atmosphere::new(
-                atmosphere::sun_direction(&params.sky.sun),
-                &params.sky.atmosphere,
-                &params.sky.sun_disc,
-            )),
-            Mode::Studio => None,
+        let (atmo, cloud_layer) = match params.mode() {
+            Mode::Sky => {
+                let atmo = atmosphere::Atmosphere::new(
+                    atmosphere::sun_direction(&params.sky.sun),
+                    &params.sky.atmosphere,
+                    &params.sky.sun_disc,
+                );
+                let cloud_layer = clouds::CloudLayer::new(&params.sky.clouds, params.seed, atmo.sun_dir());
+                (Some(atmo), cloud_layer)
+            }
+            Mode::Studio => (None, None),
         };
-        Env { params, scale, studio, atmo }
+        Env { params, scale, studio, atmo, clouds: cloud_layer }
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -113,22 +119,36 @@ impl Env {
 
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
-    /// atmosphere + disc; Studio: backdrop), lights overlay, x 2^intensity_ev.
+    /// atmosphere + disc, then clouds; Studio: backdrop), lights overlay,
+    /// x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
         let base = match &self.atmo {
-            Some(atmo) => atmo.sky(d) + atmo.sun_disc(d),
+            Some(atmo) => {
+                let mut c = atmo.sky(d) + atmo.sun_disc(d);
+                // Clouds are in front of everything in the sky, the disc included.
+                if let Some(layer) = &self.clouds {
+                    let s = layer.sample(d);
+                    if s.alpha > 0.0 {
+                        let lit = layer.shade(&s, atmo.sun_irradiance(), atmo.ambient());
+                        c = c * (1.0 - s.alpha) + lit * s.alpha;
+                    }
+                }
+                c
+            }
             None => self.studio.backdrop(d),
         };
         self.studio.apply_lights(d, base) * self.scale
     }
 
-    /// Key light for the engine, in world space, already x 2^intensity_ev.
-    /// Sky mode: the light marked key if any, else the sun while it is above
-    /// the horizon (A5 dims it by the cloud cover, A6 adds the moon once the
-    /// sun is 6 deg down). Studio mode: the key light if any.
+    /// Key light for the engine, in world space, already x 2^intensity_ev
+    /// (every layer's key goes through `key_to_world`, which turns it with the
+    /// map and applies the intensity). Sky mode: the light marked key if any,
+    /// else the sun while it is above the horizon, dimmed by the cloud cover
+    /// along it (the moon will join once the sun is 6 deg down). Studio mode:
+    /// the key light if any.
     pub fn sun(&self) -> Option<EnvSun> {
         if let Some(key) = self.studio.key() {
             return Some(self.key_to_world(key));
@@ -138,11 +158,13 @@ impl Env {
         if sun.y <= 0.0 {
             return None;
         }
+        // The same cover that hides the disc in the map dims the key.
+        let cover = self.clouds.as_ref().map_or(1.0, |layer| layer.transmittance_toward(sun));
         // The cone's mean radiance, so radiance x cone solid angle is the
         // sun's irradiance at the ground whatever the disc's size and limb.
         Some(self.key_to_world(EnvSun {
             dir: sun,
-            radiance: atmo.sun_cone_radiance(),
+            radiance: atmo.sun_cone_radiance() * cover,
             cos_radius: atmo.sun_cos_radius(),
         }))
     }
