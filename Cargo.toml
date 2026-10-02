@@ -123,6 +123,7 @@ workspace.members = [
     "examples/box3d",
     "examples/hello_world",
     "examples/render_to_texture",
+    "examples/datamosh",
     # === digital-fabrication product ===
     "apps/fab",
     "apps/fabric",
@@ -167,6 +168,9 @@ workspace.members = [
     # chain, the RIFE producer behind the same warp, and the mode set
     # (extracted from the VJ, which is still its reference user) ===
     "libs/frametween",
+    # === realtime datamosh: P-frame motion transfer between sources and
+    # the deleted-keyframe transition ===
+    "libs/datamosh",
     # === archive.org search + download content input (VJ / asset-ui) ===
     "libs/archive_org",
     # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget

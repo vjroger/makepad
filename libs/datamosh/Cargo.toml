@@ -1,0 +1,18 @@
+# Makepad datamosh — the missing-I-frame look as a realtime GPU effect.
+#
+# A decoder that never gets its next keyframe: a reference picture is moved
+# step after step by motion vectors taken from ANOTHER source (a clip, an
+# animation, a 3D render), the way a P-frame moves the last I-frame. The
+# vectors come from an MPEG-style block-matching estimator that runs on any
+# texture, or straight from a renderer's own velocity output. The same
+# engine drives the classic datamosh transition between two clips.
+
+[package]
+name = "makepad-datamosh"
+version = "0.1.0"
+edition = "2021"
+description = "Realtime GPU datamosh: P-frame motion transfer between sources, block-matching motion estimation, and the datamosh transition"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
