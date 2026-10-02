@@ -175,13 +175,21 @@ impl Env {
     /// dimmed by the cloud cover along them (unfaded: a full overcast hides a 2
     /// degree sun too).
     ///
-    /// The sun and the moon fade instead of switching, so a day cycle that runs
-    /// over sunset never jumps: the sun's key is its radiance x the part of its
-    /// disc that shows, `smoothstep(-outer, +outer, elevation)` (outer: the disc's
-    /// outer limb, soft edge included), so it is half on the horizon and `Some`
-    /// until the whole disc is down; the moon's arrives over a sun elevation of
-    /// -6 to -8 degrees, `smoothstep(6, 8, -sun elevation)`, so between the two
-    /// there is a stretch of twilight with no key at all.
+    /// The sun and the moon fade instead of switching: the key is a continuous
+    /// function of the hour, so a host that samples it finely (a slider, a day
+    /// cycle read every frame) passes sunset without a jump. The sun's key is its
+    /// radiance x the part of its disc that shows, `smoothstep(-outer, +outer,
+    /// elevation)` (outer: the disc's outer limb, soft edge included), so it is
+    /// half on the horizon and `Some` until the whole disc is down; the moon's
+    /// arrives over a sun elevation of -6 to -8 degrees, `smoothstep(6, 8, -sun
+    /// elevation)`, so between the two there is a stretch of twilight with no key
+    /// at all.
+    ///
+    /// The fade is narrow, though: the sun crosses it in about two minutes of
+    /// sun time. A host that takes the key from a coarser grid steps by the grid,
+    /// not by the fade: the sandbox's day cycle re-bakes a map a quarter hour at
+    /// a time, and its key steps by up to 17 % of the 16:00 key at 45 N on 21 June
+    /// under the default clear sky (the last step into sunset is 1.4 %).
     pub fn sun(&self) -> Option<EnvSun> {
         if let Some(key) = self.studio.key() {
             return Some(self.key_to_world(key));
