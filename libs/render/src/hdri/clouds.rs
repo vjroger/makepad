@@ -215,13 +215,6 @@ impl CloudLayer {
         sun_irradiance * (SUN_GAIN * phase * s.light) + sky * AMBIENT_GAIN
     }
 
-    /// Fraction of what the viewer sees along `dir` that is not cloud: 1 - the
-    /// visible alpha, horizon fade included. Light behind the layers is dimmed
-    /// by `1 - cover_toward` instead.
-    pub fn transmittance_toward(&self, dir: Vec3f) -> f32 {
-        1.0 - self.sample(dir).alpha
-    }
-
     fn cumulus_density(&self, p: Vec2f) -> f32 {
         let noise = fbm_lod(p, CUMULUS_OCTAVES, BROAD_OCTAVES, detail_at(p.length()), self.seed);
         self.cover(noise)
@@ -363,7 +356,8 @@ mod tests {
         }
         // Full cover is opaque overhead.
         assert!(layer.sample(vec3f(0.0, 1.0, 0.0)).alpha > 0.99);
-        assert_eq!(layer.transmittance_toward(vec3f(0.0, -1.0, 0.0)), 1.0);
+        // Nothing below the horizon is covered either.
+        assert_eq!(layer.cover_toward(vec3f(0.0, -1.0, 0.0)), 0.0);
     }
 
     #[test]
@@ -381,7 +375,6 @@ mod tests {
         for (el, most) in [(2.0f32, 0.3f32), (3.0, 0.5)] {
             let d = dir_from_az_el(0.0, el);
             assert!(overcast.sample(d).alpha < most, "el {el}: alpha {}", overcast.sample(d).alpha);
-            assert!(overcast.transmittance_toward(d) > 1.0 - most);
         }
         // Where the fade is 1 (above about 7 degrees) the cover is the visible
         // alpha, bit for bit, cirrus included.
@@ -608,7 +601,7 @@ mod env_tests {
             let key = luminance(Env::new(&p).sun().unwrap().radiance) / clear_key;
             let want = 1.0 - layer.cover_toward(sun_dir);
             assert!((key - want).abs() < 1.0e-4, "seed {seed}: key {key}, 1 - cover {want}");
-            if (layer.transmittance_toward(sun_dir) - want).abs() > 0.05 {
+            if ((1.0 - layer.sample(sun_dir).alpha) - want).abs() > 0.05 {
                 unlike_the_faded_alpha += 1;
             }
         }
