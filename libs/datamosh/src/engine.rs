@@ -33,7 +33,7 @@
 //! order. Upstream producers that render a texture this engine reads in the
 //! same frame register with [`Datamosh::depends_on`] so they run first.
 
-use crate::params::{MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
+use crate::params::{DriftMode, MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
 use crate::transition::{TransitionFrame, TransitionMotion, TransitionParams, TransitionPhase};
 use makepad_widgets::*;
 
@@ -1485,7 +1485,7 @@ impl Datamosh {
                         params.matrix[2],
                         params.matrix[3],
                     );
-                    d.drift = params.drift;
+                    d.drift = if params.drift_mode == DriftMode::None { 0.0 } else { params.drift };
                     d.drift_mode = drift_code;
                     d.diffusion = params.diffusion.max(0.0);
                     d.pel = params.pel.max(0.0);
@@ -1539,7 +1539,7 @@ impl Datamosh {
                         params.matrix[2],
                         params.matrix[3],
                     );
-                    d.drift = params.drift;
+                    d.drift = if params.drift_mode == DriftMode::None { 0.0 } else { params.drift };
                     d.drift_mode = drift_code;
                     d.field_on = if self.field == FieldSource::None { 0.0 } else { 1.0 };
                     d.blur_motion = params.blur_motion.max(0.0);

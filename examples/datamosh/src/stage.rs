@@ -255,18 +255,71 @@ impl MotionChoice {
     ];
 }
 
+/// A VJ mixer's handful of 0..1 sliders, mapped onto the engine's
+/// parameters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mixer {
+    /// 0 no drift; then each pattern forwards and reversed, one slot each;
+    /// the very top is Random (a new pick each time the slider gets there).
+    pub drift: f32,
+    /// Block size, 1 px at 0 to 64 px at 1 (log scale).
+    pub block: f32,
+    /// Codec damage and the incoming clip's residual, and the transition's
+    /// hold as 1 - dirty.
+    pub dirty: f32,
+}
+
+impl Mixer {
+    /// Slots on the drift slider: none, five patterns times two
+    /// directions, random.
+    pub const RANDOM_SLOT: usize = 1 + 2 * DriftMode::PATTERNS.len();
+
+    pub fn drift_slot(&self) -> usize {
+        (self.drift.clamp(0.0, 1.0) * Self::RANDOM_SLOT as f32).round() as usize
+    }
+
+    /// Pattern and sign for a non-random slot.
+    pub fn drift_for_slot(slot: usize) -> (DriftMode, f32) {
+        match slot {
+            0 => (DriftMode::None, 0.0),
+            n => {
+                let pattern = DriftMode::PATTERNS[((n - 1) / 2).min(DriftMode::PATTERNS.len() - 1)];
+                (pattern, if n % 2 == 1 { 1.0 } else { -1.0 })
+            }
+        }
+    }
+
+    pub fn drift_label(&self) -> String {
+        match self.drift_slot() {
+            Self::RANDOM_SLOT => "random".into(),
+            0 => "none".into(),
+            slot => {
+                let (mode, sign) = Self::drift_for_slot(slot);
+                format!("{}{}", mode.label(), if sign < 0.0 { " reversed" } else { "" })
+            }
+        }
+    }
+
+    pub fn block_size(&self) -> f32 {
+        2f32.powf(self.block.clamp(0.0, 1.0) * 6.0).round()
+    }
+}
+
+impl Default for Mixer {
+    fn default() -> Self {
+        Self { drift: 0.0, block: 4.0 / 6.0, dirty: 0.4 }
+    }
+}
+
 /// Everything the control panel sets.
 #[derive(Clone, Copy, Debug)]
 pub struct StageSettings {
     /// Transition mode: the picture stays clean and only the transition
     /// moshes. Effect mode: the effect runs continuously.
     pub transition_mode: bool,
-    /// No drift, whatever the amount says.
-    pub drift_off: bool,
-    /// Ignore `params.drift_mode` and pick at random for every transition
-    /// (and every I-frame in effect mode): no drift, or any pattern either
-    /// way round, at the amount's strength.
-    pub random_drift: bool,
+    /// The mixer's three 0..1 sliders, which set drift, block size and
+    /// dirtiness in `params` / `transition` (see [`Mixer`]).
+    pub mixer: Mixer,
     pub picture: Source,
     pub motion: MotionChoice,
     /// Off: a keyframe every frame, the clean picture.
@@ -286,8 +339,7 @@ impl Default for StageSettings {
     fn default() -> Self {
         Self {
             transition_mode: false,
-            drift_off: false,
-            random_drift: false,
+            mixer: Mixer::default(),
             picture: Source::Shapes,
             motion: MotionChoice::GridVectors,
             mosh_on: true,
@@ -295,7 +347,7 @@ impl Default for StageSettings {
             source_fps: 30.0,
             auto_iframe: 8.0,
             params: MoshParams {
-                entropy: 0.15,
+                drift: 3.0,
                 ..MoshParams::default()
             },
             transition: TransitionParams::default(),
@@ -429,54 +481,49 @@ impl MoshStage {
     }
 
     pub fn set_settings(&mut self, settings: StageSettings) {
+        let was_random = self.settings.mixer.drift_slot() == Mixer::RANDOM_SLOT;
         self.settings = settings;
+        // Random picks again only when the slider ARRIVES at the end.
+        if !was_random && settings.mixer.drift_slot() == Mixer::RANDOM_SLOT {
+            self.roll_drift();
+        }
         self.push_params();
     }
 
-    /// The engine's parameters: the panel's, with the demo's own random
-    /// drift pick standing in for the pattern when Random is on.
+    /// The engine's parameters: the panel's, with the mixer sliders mapped
+    /// onto them.
     fn push_params(&mut self) {
-        if self.settings.random_drift && self.drift_pick.is_none() {
-            // Just switched to Random: start with a pick (roll comes back
-            // here with it set).
-            return self.roll_drift();
-        }
+        let mixer = self.settings.mixer;
+        let pick = match mixer.drift_slot() {
+            Mixer::RANDOM_SLOT => self.drift_pick.unwrap_or((DriftMode::None, 0.0)),
+            slot => Mixer::drift_for_slot(slot),
+        };
         let mut params = self.settings.params;
-        if self.settings.drift_off {
-            params.drift = 0.0;
-        } else if let (true, Some((mode, sign))) = (self.settings.random_drift, self.drift_pick) {
-            params.drift_mode = mode;
-            // Random picks the pattern and multiplies the slider's value by
-            // 1, -1 or 0.
-            params.drift *= sign;
-        }
+        // The pattern, and the amount slider's value times 1, -1 or 0.
+        params.drift_mode = pick.0;
+        params.drift *= pick.1;
+        params.block_size = mixer.block_size();
+        params.entropy = mixer.dirty;
+        self.settings.transition.residual = mixer.dirty;
+        self.settings.transition.hold = 1.0 - mixer.dirty;
         self.mosh.set_params(params);
     }
 
-    /// A new random drift: none, or a pattern either way round; never the
-    /// same as the last one.
+    /// A new random drift among the slider's own settings (none, or any
+    /// pattern either way round), never the same as the last one.
     fn roll_drift(&mut self) {
-        if !self.settings.random_drift {
-            return;
-        }
-        let all = DriftMode::ALL;
-        let choices = 1 + all.len() * 2;
         let mut x = self.rng ^ (self.time * 1000.0) as u32 ^ 0x2545_f491;
         loop {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
-            let pick = match x as usize % choices {
-                0 => (DriftMode::Horizontal, 0.0),
-                n => (all[(n - 1) / 2], if n % 2 == 1 { 1.0 } else { -1.0 }),
-            };
+            let pick = Mixer::drift_for_slot(x as usize % Mixer::RANDOM_SLOT);
             if Some(pick) != self.drift_pick {
                 self.drift_pick = Some(pick);
                 break;
             }
         }
         self.rng = x;
-        self.push_params();
     }
 
     pub fn request_iframe(&mut self) {
@@ -488,7 +535,6 @@ impl MoshStage {
         if self.transition.is_some() {
             return;
         }
-        self.roll_drift();
         let from = self.settings.picture;
         self.transition = Some(RunningTransition {
             from,
@@ -570,7 +616,6 @@ impl MoshStage {
             if self.iframe_requested {
                 self.iframe_requested = false;
                 self.mosh.keyframe();
-                self.roll_drift();
             }
             return;
         }
@@ -589,9 +634,6 @@ impl MoshStage {
         let auto =
             settings.auto_iframe > 0.0 && self.time - self.last_iframe >= settings.auto_iframe;
         if !settings.mosh_on || self.iframe_requested || auto {
-            if settings.mosh_on {
-                self.roll_drift();
-            }
             self.iframe_requested = false;
             self.last_iframe = self.time;
             self.mosh.keyframe();
@@ -647,7 +689,7 @@ impl Widget for MoshStage {
                 shapes: SourcePass::new(cx.cx),
             });
             self.mosh.set_frame_size(SRC_W, SRC_H);
-            self.mosh.set_params(self.settings.params);
+            self.push_params();
         }
         // The sources run at their own frame rate; the decoder steps only
         // when they have a new frame.

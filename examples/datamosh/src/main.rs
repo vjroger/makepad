@@ -11,7 +11,7 @@ pub use makepad_widgets;
 
 mod stage;
 
-use makepad_datamosh::{DriftMode, MoshMode, MoshView, TransitionMotion};
+use makepad_datamosh::{MoshMode, MoshView, TransitionMotion};
 use makepad_widgets::*;
 use stage::{MoshStage, MotionChoice, Source};
 
@@ -46,6 +46,13 @@ script_mod! {
                         }
 
                         Hr{}
+                        H4{text: "Mixer (the few sliders a VJ mixer has)"}
+                        mix_drift := Knob{text: "Drift: 0 none .. patterns +/- .. top random" min: 0.0 max: 1.0 default: 0.0 precision: 3}
+                        drift_label := Label{text: "drift: none"}
+                        mix_block := Knob{text: "Block size" min: 0.0 max: 1.0 default: 0.667 precision: 3}
+                        mix_dirty := Knob{text: "Dirty: damage, incoming residual, 1 - hold" min: 0.0 max: 1.0 default: 0.4 precision: 3}
+
+                        Hr{}
                         H4{text: "Sources"}
                         Label{text: "Picture (what gets moshed)"}
                         picture := DropDown{
@@ -76,21 +83,15 @@ script_mod! {
                             labels: ["Output" "Vectors" "Damage"]
                             selected_item: 0
                         }
-                        block_size := Knob{text: "Block size (px)" min: 1.0 max: 64.0 step: 1.0 default: 16.0 precision: 0}
                         gain := Knob{text: "Motion gain" min: -3.0 max: 3.0 default: 1.0 precision: 2}
                         pel := Knob{text: "Pel (0 cont., 1 full, 4 quarter)" min: 0.0 max: 4.0 step: 1.0 default: 4.0 precision: 0}
                         diffusion := Knob{text: "Diffusion (px)" min: 0.0 max: 8.0 default: 0.0 precision: 1}
-                        drift_mode := DropDown{
-                            labels: ["Drift: none" "Drift: horizontal" "Drift: vertical" "Drift: rotate" "Drift: zoom" "Drift: spiral" "Drift: random (incl. none, either direction)"]
-                            selected_item: 1
-                        }
                         blur_motion := Knob{text: "Motion blur: vectors (steps)" min: 0.0 max: 4.0 default: 0.0 precision: 2}
                         blur_drift := Knob{text: "Motion blur: drift (steps)" min: 0.0 max: 8.0 default: 0.0 precision: 2}
-                        drift := Knob{text: "Drift amount (px per step, sign = direction)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
+                        drift := Knob{text: "Drift strength (px per step)" min: -8.0 max: 8.0 default: 3.0 precision: 1}
                         refresh := Knob{text: "Intra refresh" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         heal := Knob{text: "Heal" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         residual := Knob{text: "Residual" min: 0.0 max: 1.0 default: 0.0 precision: 2}
-                        entropy := Knob{text: "Entropy (codec damage)" min: 0.0 max: 1.0 default: 0.15 precision: 2}
                         wet := Knob{text: "Wet" min: 0.0 max: 1.0 default: 1.0 precision: 2}
 
                         Hr{}
@@ -101,10 +102,8 @@ script_mod! {
                             selected_item: 0
                         }
                         transition_secs := Knob{text: "Duration (s)" min: 0.5 max: 8.0 default: 3.0 precision: 1}
-                        hold := Knob{text: "Hold (pure mosh part)" min: 0.0 max: 0.9 default: 0.4 precision: 2}
                         refresh_peak := Knob{text: "Refresh at the end" min: 0.02 max: 1.0 default: 0.3 precision: 2}
                         fade_out := Knob{text: "Fade out (end of transition)" min: 0.0 max: 1.0 default: 0.25 precision: 2}
-                        transition_residual := Knob{text: "Incoming residual" min: 0.0 max: 1.0 default: 1.0 precision: 2}
                     }
                 }
             }
@@ -170,28 +169,22 @@ impl MatchEvent for App {
         if let Some(v) = ui.slider(cx, ids!(transition_secs)).slided(actions) {
             s.transition_secs = v;
         }
-        slided(cx, ids!(block_size), &mut s.params.block_size);
         slided(cx, ids!(gain), &mut s.params.gain);
         slided(cx, ids!(pel), &mut s.params.pel);
         slided(cx, ids!(diffusion), &mut s.params.diffusion);
         slided(cx, ids!(drift), &mut s.params.drift);
         slided(cx, ids!(blur_motion), &mut s.params.blur_motion);
         slided(cx, ids!(blur_drift), &mut s.params.blur_drift);
-        if let Some(i) = ui.drop_down(cx, ids!(drift_mode)).selected(actions) {
-            // First "none", then the engine's patterns, then the demo's
-            // Random.
-            s.drift_off = i == 0;
-            s.random_drift = i > DriftMode::ALL.len();
-            s.params.drift_mode = DriftMode::ALL[i.saturating_sub(1).min(DriftMode::ALL.len() - 1)];
-        }
+        slided(cx, ids!(mix_drift), &mut s.mixer.drift);
+        slided(cx, ids!(mix_block), &mut s.mixer.block);
+        slided(cx, ids!(mix_dirty), &mut s.mixer.dirty);
+        ui.label(cx, ids!(drift_label))
+            .set_text(cx, &format!("drift: {}", s.mixer.drift_label()));
         slided(cx, ids!(refresh), &mut s.params.refresh);
         slided(cx, ids!(heal), &mut s.params.heal);
         slided(cx, ids!(residual), &mut s.params.residual);
-        slided(cx, ids!(entropy), &mut s.params.entropy);
         slided(cx, ids!(wet), &mut s.params.wet);
-        slided(cx, ids!(hold), &mut s.transition.hold);
         slided(cx, ids!(refresh_peak), &mut s.transition.refresh_peak);
-        slided(cx, ids!(transition_residual), &mut s.transition.residual);
         slided(cx, ids!(fade_out), &mut s.transition.fade_out);
 
         let iframe = ui.button(cx, ids!(iframe)).clicked(actions);

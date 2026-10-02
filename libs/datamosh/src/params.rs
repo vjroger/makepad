@@ -40,8 +40,10 @@ impl MoshMode {
 /// The shape of the constant push added to every vector each step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum DriftMode {
-    /// Everything slides sideways (positive: right).
+    /// No drift, whatever the amount.
     #[default]
+    None,
+    /// Everything slides sideways (positive: right).
     Horizontal,
     /// Everything slides vertically (positive: down).
     Vertical,
@@ -55,6 +57,7 @@ pub enum DriftMode {
 
 impl DriftMode {
     pub const ALL: &'static [DriftMode] = &[
+        DriftMode::None,
         DriftMode::Horizontal,
         DriftMode::Vertical,
         DriftMode::Rotate,
@@ -64,6 +67,7 @@ impl DriftMode {
 
     pub const fn label(self) -> &'static str {
         match self {
+            DriftMode::None => "None",
             DriftMode::Horizontal => "Horizontal",
             DriftMode::Vertical => "Vertical",
             DriftMode::Rotate => "Rotate",
@@ -73,9 +77,18 @@ impl DriftMode {
     }
 
     /// The code the shaders branch on.
+    /// The patterns that move something (all but `None`).
+    pub const PATTERNS: &'static [DriftMode] = &[
+        DriftMode::Horizontal,
+        DriftMode::Vertical,
+        DriftMode::Rotate,
+        DriftMode::Zoom,
+        DriftMode::Spiral,
+    ];
+
     pub(crate) const fn code(self) -> f32 {
         match self {
-            DriftMode::Horizontal => 0.0,
+            DriftMode::None | DriftMode::Horizontal => 0.0,
             DriftMode::Vertical => 1.0,
             DriftMode::Rotate => 2.0,
             DriftMode::Zoom => 3.0,
@@ -166,7 +179,7 @@ impl Default for MoshParams {
             gain: 1.0,
             matrix: [1.0, 0.0, 0.0, 1.0],
             drift: 0.0,
-            drift_mode: DriftMode::Horizontal,
+            drift_mode: DriftMode::None,
             blur_motion: 0.0,
             blur_drift: 0.0,
             diffusion: 0.0,
