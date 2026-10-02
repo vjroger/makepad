@@ -301,7 +301,7 @@ impl DepthEstimator for PackedDepth {
 #[cfg(feature = "localai")]
 mod native {
     use super::*;
-    use makepad_ai_vision::da3::{Da3MetricLarge, DA3_PATCH};
+    use makepad_ai_vision::da3::{Da3MetricLarge, Da3Precision, DA3_PATCH};
     use makepad_ai_vision::depth_anything::DepthAnything;
 
     const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -334,18 +334,43 @@ mod native {
 
     pub struct AnythingDepth {
         model: DepthAnything,
+        path: String,
     }
 
     impl AnythingDepth {
         pub fn load(path: &str) -> Result<Self, String> {
-            let model = DepthAnything::load(path).map_err(|e| format!("Depth-Anything load {path}: {e}"))?;
-            Ok(Self { model })
+            let model = DepthAnything::load(path)
+                .map_err(|e| format!("Depth-Anything load {path}: {e}"))?;
+            Ok(Self {
+                model,
+                path: path.to_string(),
+            })
+        }
+
+        fn run(&self, pixels: &[f32], w: usize, h: usize) -> Result<RawDepth, String> {
+            let prediction = self
+                .model
+                .forward_normalized(pixels, w, h)
+                .map_err(|e| format!("Depth-Anything: {e}"))?;
+            Ok(RawDepth {
+                width: prediction.width,
+                height: prediction.height,
+                values: prediction.disparity,
+                kind: DepthKind::Disparity,
+            })
         }
     }
 
     impl DepthEstimator for AnythingDepth {
         fn label(&self) -> String {
-            format!("Depth-Anything {} (native)", self.model.config().variant())
+            let precision = match self.model.precision() {
+                Da3Precision::FullBf16 => "bf16",
+                Da3Precision::StrictF32 => "f32",
+            };
+            format!(
+                "Depth-Anything {} ({precision}, native)",
+                self.model.config().variant()
+            )
         }
 
         fn estimate(
@@ -355,16 +380,21 @@ mod native {
             depth_res: usize,
         ) -> Result<RawDepth, String> {
             let (pixels, w, h) = network_input(frame, picture, depth_res)?;
-            let prediction = self
-                .model
-                .forward_normalized(&pixels, w, h)
-                .map_err(|e| format!("Depth-Anything: {e}"))?;
-            Ok(RawDepth {
-                width: prediction.width,
-                height: prediction.height,
-                values: prediction.disparity,
-                kind: DepthKind::Disparity,
-            })
+            match self.run(&pixels, w, h) {
+                Ok(raw) => Ok(raw),
+                // bf16 tensor-core kernels need sm_80+ (RTX 30 series and
+                // newer); older GPUs refuse them. Reload once in f32.
+                Err(err) if self.model.precision() == Da3Precision::FullBf16 => {
+                    makepad_widgets::log!(
+                        "depth-cloud: bf16 path failed ({err}); reloading the model in f32"
+                    );
+                    self.model =
+                        DepthAnything::load_with_precision(&self.path, Da3Precision::StrictF32)
+                            .map_err(|e| format!("Depth-Anything f32 load: {e}"))?;
+                    self.run(&pixels, w, h)
+                }
+                Err(err) => Err(err),
+            }
         }
     }
 
