@@ -81,39 +81,52 @@ script_mod! {
                             width: 320
                             height: Fill
                             flow: Down
-                            padding: 14
-                            spacing: 8
                             draw_bg +: {color: #x11161c}
 
-                            H3{text: "Depth cloud"}
-                            status := Label{width: Fill text: "starting..."}
-                            stats := Label{width: Fill text: ""}
-                            Hr{}
-
-                            Label{text: "Depth (speed vs accuracy)"}
-                            depth_res := PanelSlider{text: "Model input (px)" min: 112.0 max: 518.0 step: 14.0 default: 308.0 precision: 0}
-                            depth_every := PanelSlider{text: "Depth every N frames" min: 1.0 max: 8.0 step: 1.0 default: 1.0 precision: 0}
-                            range_smoothing := PanelSlider{text: "Range stability" min: 0.0 max: 0.98 default: 0.85}
-                            pixel_smoothing := PanelSlider{text: "Pixel smoothing" min: 0.0 max: 0.9 default: 0.0}
-                            Hr{}
-
-                            Label{text: "Point cloud"}
-                            depth_amount := PanelSlider{text: "Depth amount (far/near)" min: 1.0 max: 12.0 default: 4.0}
-                            points_per_row := PanelSlider{text: "Points per row" min: 64.0 max: 1280.0 step: 16.0 default: 384.0 precision: 0}
-                            point_size := PanelSlider{text: "Point size (cells)" min: 0.3 max: 4.0 default: 1.15}
-                            edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.08}
-                            fov := PanelSlider{text: "Field of view (deg)" min: 20.0 max: 100.0 step: 1.0 default: 50.0 precision: 0}
-                            Hr{}
-
+                            // Always visible: title, status and the buttons.
                             View{
                                 width: Fill
                                 height: Fit
-                                flow: Right
-                                spacing: 8
-                                play_pause := Button{text: "Pause"}
-                                front_view := Button{text: "Front view"}
+                                flow: Down
+                                padding: Inset{left: 14 right: 14 top: 14 bottom: 6}
+                                spacing: 6
+                                H3{text: "Depth cloud"}
+                                status := Label{width: Fill text: "starting..."}
+                                stats := Label{width: Fill text: ""}
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    play_pause := Button{text: "Pause"}
+                                    front_view := Button{text: "Front view"}
+                                }
+                                Label{width: Fill text: "Drag to orbit, wheel to dolly."}
+                                Hr{}
                             }
-                            Label{width: Fill text: "Drag to orbit, wheel to dolly."}
+
+                            // The sliders scroll when the window is short.
+                            ScrollYView{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: Inset{left: 14 right: 14 bottom: 14}
+                                spacing: 8
+
+                                Label{text: "Depth (speed vs accuracy)"}
+                                depth_res := PanelSlider{text: "Model input (px)" min: 112.0 max: 518.0 step: 14.0 default: 308.0 precision: 0}
+                                depth_every := PanelSlider{text: "Depth every N frames" min: 1.0 max: 8.0 step: 1.0 default: 1.0 precision: 0}
+                                range_smoothing := PanelSlider{text: "Range stability" min: 0.0 max: 0.98 default: 0.85}
+                                pixel_smoothing := PanelSlider{text: "Pixel smoothing" min: 0.0 max: 0.9 default: 0.0}
+                                Hr{}
+
+                                Label{text: "Point cloud"}
+                                depth_amount := PanelSlider{text: "Depth amount (far/near)" min: 1.0 max: 12.0 default: 4.0}
+                                points_per_row := PanelSlider{text: "Points per row" min: 64.0 max: 1280.0 step: 16.0 default: 384.0 precision: 0}
+                                point_size := PanelSlider{text: "Point size (cells)" min: 0.3 max: 4.0 default: 1.15}
+                                edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.08}
+                                fov := PanelSlider{text: "Field of view (deg)" min: 20.0 max: 100.0 step: 1.0 default: 50.0 precision: 0}
+                            }
                         }
                     }
                 }
