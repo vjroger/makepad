@@ -362,6 +362,10 @@ enum Format {
     Png,
 }
 
+/// The error `export_all` returns when its `cancelled` poll stopped it, and for nothing else: a
+/// caller tells a cancel from a failure by comparing with it.
+pub const EXPORT_CANCELLED: &str = "export cancelled";
+
 /// Writes the selected formats next to `base`, ignoring an `exr`, `hdr` or `png` extension on it
 /// (any case; any other dot is part of the name, so `sky_45.5` gives `sky_45.5.exr`):
 /// - `<stem>.exr`, `<stem>.hdr` and `<stem>.png` (the equirects, in the file convention);
@@ -377,7 +381,7 @@ enum Format {
 ///
 /// `progress` gets 0 first, then the finished fraction after every file; 1 comes once the files
 /// are in place. `cancelled` is polled before each file, and once more after the last, before the
-/// final renames: a cancel is honoured until then, and the error is "export cancelled".
+/// final renames: a cancel is honoured until then, and the error is [`EXPORT_CANCELLED`].
 ///
 /// Returns the written paths in that order, and the EXR report: the worst clip count among the
 /// EXR files, faces included.
@@ -425,7 +429,7 @@ pub fn export_all(
     for (done, (path, format, face)) in jobs.into_iter().enumerate() {
         if cancelled() {
             remove_staged(&staged);
-            return Err("export cancelled".to_string());
+            return Err(EXPORT_CANCELLED.to_string());
         }
         let encoded = match face {
             None => encode_map(env, format, opts, &mut report),
@@ -449,7 +453,7 @@ pub fn export_all(
     // The last chance to cancel: past here the staged files replace the old ones.
     if cancelled() {
         remove_staged(&staged);
-        return Err("export cancelled".to_string());
+        return Err(EXPORT_CANCELLED.to_string());
     }
     for (index, (tmp, path)) in staged.iter().enumerate() {
         if let Err(error) = replace_with_staged(tmp, path) {
@@ -843,7 +847,7 @@ mod tests {
             calls.get() > 1
         };
         let error = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &cancel_second).unwrap_err();
-        assert_eq!(error, "export cancelled");
+        assert_eq!(error, EXPORT_CANCELLED);
         assert_eq!(calls.get(), 2);
         assert_eq!(std::fs::read(dir.join("sky.exr")).unwrap(), old, "the previous export was destroyed");
         assert_eq!(listing(&dir), ["sky.exr"], "staged files or other formats were left behind");
@@ -855,7 +859,7 @@ mod tests {
             calls.get() > 3
         };
         let error = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &cancel_after_the_last_file).unwrap_err();
-        assert_eq!(error, "export cancelled");
+        assert_eq!(error, EXPORT_CANCELLED);
         assert_eq!(calls.get(), 4);
         assert_eq!(std::fs::read(dir.join("sky.exr")).unwrap(), old, "the previous export was destroyed");
         assert_eq!(listing(&dir), ["sky.exr"]);
