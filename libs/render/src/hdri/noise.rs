@@ -289,6 +289,126 @@ mod tests {
         }
     }
 
+    /// Fixed sample points for the golden values: negative and large
+    /// coordinates, seeds from 0 to 0xdeadbeef and octave counts from 1 to the
+    /// maximum of 12. (x, y, z, seed, octaves)
+    const GOLDEN_POINTS: [(f32, f32, f32, u32, u32); 6] = [
+        (-3.7, 2.1, 0.37, 9, 1),
+        (0.25, -0.75, 5.5, 1, 2),
+        (-0.001, 1000.5, -33.3, 0, 3),
+        (12.34, -56.78, 7.7, 0xdead_beef, 5),
+        (-17.9, -4.2, -2.5, 42, 8),
+        (-123.456, -0.5, -0.5, 7, 12),
+    ];
+
+    /// `got` must be `want` bit for bit; a failure shows both as floats.
+    #[track_caller]
+    fn assert_golden(name: &str, i: usize, got: f32, want: u32) {
+        assert_eq!(got.to_bits(), want, "{name} at point {i}: got {got:?}, want {:?}", f32::from_bits(want));
+    }
+
+    #[test]
+    fn noise_matches_its_golden_values() {
+        // Taken from the implementation as written. The purity test above
+        // cannot see what these pin: the lattice hashing, the fade, the
+        // gradient set, worley's salts and every fbm constant (the 3-4-5 turn,
+        // OCTAVE_TURN, the shifts, octave_seed). Changing any of them moves
+        // every preset's clouds, so a change here is a deliberate re-bake of
+        // them all. The floats in the comments are for the reader.
+        let want_value2: [u32; 6] = [
+            0x3f11584b, // 0.5677535
+            0x3e0402da, // 0.12891713
+            0x3efb22ea, // 0.49050075
+            0x3f293ad1, // 0.6610537
+            0x3f6be785, // 0.92150146
+            0x3f542dba, // 0.82882273
+        ];
+        let want_value3: [u32; 6] = [
+            0x3f057fe2, // 0.5214826
+            0x3ee7591f, // 0.45185181
+            0x3eaf2099, // 0.34204558
+            0x3f57e109, // 0.8432775
+            0x3f2c7cca, // 0.67377913
+            0x3f33bde6, // 0.7021164
+        ];
+        let want_perlin3: [u32; 6] = [
+            0x3da21568, // 0.07914239
+            0x3df88a80, // 0.12135792
+            0xbeb2383c, // -0.34808528
+            0xbeb86342, // -0.36013228
+            0x3f271444, // 0.652653
+            0x3f060ce2, // 0.5236341
+        ];
+        let want_worley3: [u32; 6] = [
+            0x3f2297eb, // 0.6351306
+            0x3f068e63, // 0.52561015
+            0x3e8d123b, // 0.2755297
+            0x3f426e51, // 0.7594958
+            0x3f3c018a, // 0.7343985
+            0x3efb1cb7, // 0.49045345
+        ];
+        let want_fbm2: [u32; 6] = [
+            0x3f11584b, // 0.5677535 (one octave is value2 itself)
+            0x3e973592, // 0.29533058
+            0x3f1021e1, // 0.56301695
+            0x3f075707, // 0.5286717
+            0x3f3d6b9b, // 0.7399232
+            0x3f43d1b8, // 0.7649188
+        ];
+        let want_fbm3: [u32; 6] = [
+            0x3f057fe2, // 0.5214826 (one octave is value3 itself)
+            0x3ef091d8, // 0.4698627
+            0x3eafa60d, // 0.34306374
+            0x3f402cee, // 0.7506856
+            0x3f12632e, // 0.57182586
+            0x3f18890f, // 0.59584135
+        ];
+        for (i, &(x, y, z, seed, octaves)) in GOLDEN_POINTS.iter().enumerate() {
+            assert_golden("value2", i, value2(x, y, seed), want_value2[i]);
+            assert_golden("value3", i, value3(x, y, z, seed), want_value3[i]);
+            assert_golden("perlin3", i, perlin3(x, y, z, seed), want_perlin3[i]);
+            assert_golden("worley3", i, worley3(x, y, z, seed), want_worley3[i]);
+            assert_golden("fbm2", i, fbm2(x, y, octaves, seed), want_fbm2[i]);
+            assert_golden("fbm3", i, fbm3(x, y, z, octaves, seed), want_fbm3[i]);
+        }
+    }
+
+    #[test]
+    fn the_gradient_table_and_the_fade_are_pinned() {
+        // Offsets 1, 2, 4 make every code's combination of x, y and z a
+        // different sum, so this is the whole 16-entry table, repeats included.
+        let table: Vec<f32> = (0..16u32).map(|code| grad3(code << 28, 1.0, 2.0, 4.0)).collect();
+        assert_eq!(
+            table,
+            [3.0, 1.0, -1.0, -3.0, 5.0, 3.0, -3.0, -5.0, 6.0, 2.0, -2.0, -6.0, 3.0, 1.0, 2.0, -6.0]
+        );
+        // The low 28 bits of the hash do not pick a gradient.
+        assert_eq!(grad3(0x5fff_ffff, 1.0, 2.0, 4.0), grad3(5 << 28, 1.0, 2.0, 4.0));
+        // Exact in f32: the quintic at the quarter points, and its symmetry.
+        assert_eq!(
+            [fade(0.0), fade(0.25), fade(0.5), fade(0.75), fade(1.0)],
+            [0.0, 0.103_515_625, 0.5, 0.896_484_375, 1.0]
+        );
+    }
+
+    #[test]
+    fn the_fbm_statistics_promised_to_the_clouds_hold() {
+        // The cloud layer sizes its coverage thresholds from these: the mean
+        // and spread of 5-octave fbm over the shared grid of points (seed 7).
+        // Measured from the implementation, with a margin for the f64 sums.
+        let pts = points();
+        let stats = |f: &dyn Fn(f32, f32, f32) -> f32| {
+            let v: Vec<f64> = pts.iter().map(|&(x, y, z)| f(x, y, z) as f64).collect();
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            let std = (v.iter().map(|a| (a - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+            (mean, std)
+        };
+        let (mean2, std2) = stats(&|x, y, _| fbm2(x, y, 5, 7));
+        assert!((mean2 - 0.4915).abs() < 0.002 && (std2 - 0.1231).abs() < 0.002, "fbm2 mean {mean2} std {std2}");
+        let (mean3, std3) = stats(&|x, y, z| fbm3(x, y, z, 5, 7));
+        assert!((mean3 - 0.4925).abs() < 0.002 && (std3 - 0.1194).abs() < 0.002, "fbm3 mean {mean3} std {std3}");
+    }
+
     #[test]
     fn noise_stays_in_its_documented_range() {
         let pts = points();
