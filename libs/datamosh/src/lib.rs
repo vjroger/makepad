@@ -56,7 +56,7 @@ pub use engine::{
     DrawMoshMedian, DrawMoshOutput, DrawMoshRefine, DrawMoshSearch, DrawMoshStep, DrawMoshSubpel,
     DrawMoshVectors, LEVELS, SEARCH_RADIUS, SWEEPS,
 };
-pub use params::{MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
+pub use params::{DriftMode, MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
 pub use transition::{TransitionFrame, TransitionMotion, TransitionParams, TransitionPhase};
 
 /// Register the draw shaders and `DatamoshView`. Call after

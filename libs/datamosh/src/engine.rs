@@ -415,6 +415,33 @@ script_mod! {
             let q = p3 + vec3(k, k, k)
             return fract((q.x + q.y) * q.z)
         }
+        // The drift pattern at a block centre, in pixels. The radial ones
+        // are measured from the frame centre and reach `drift` at the
+        // nearest frame edge.
+        drift_at: fn(c: vec2, cell: vec2) -> vec2 {
+            let a = self.drift
+            let rel = (c - vec2(0.5, 0.5)) * self.frame_size
+            let r = a / (0.5 * min(self.frame_size.x, self.frame_size.y))
+            let turn = vec2(0.0 - rel.y, rel.x) * r
+            let outward = rel * r
+            if self.drift_mode > 4.5 {
+                let ang = self.rand(cell + vec2(71.0, 3.0)) * 6.2831853
+                return vec2(cos(ang), sin(ang)) * a
+            }
+            if self.drift_mode > 3.5 {
+                return (turn + outward) * 0.7071
+            }
+            if self.drift_mode > 2.5 {
+                return outward
+            }
+            if self.drift_mode > 1.5 {
+                return turn
+            }
+            if self.drift_mode > 0.5 {
+                return vec2(0.0, a)
+            }
+            return vec2(a, 0.0)
+        }
         ref_bilinear: fn(uv: vec2) -> vec4 {
             let p = uv * self.frame_size - vec2(0.5, 0.5)
             let f = fract(p)
@@ -450,7 +477,8 @@ script_mod! {
             let r4 = self.rand(cell * 1.7 + vec2(seed * 3.17 + 3.0, 9.0))
             let r5 = self.rand(cell * 0.61 + vec2(53.0, seed * 0.57 + 13.0))
             let mm = self.motion_mat
-            let mut m = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain + self.drift
+            let mut m = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain
+            m = m + self.drift_at(center, cell) * self.inv_frame
             m = m + (vec2(r1, r2) - vec2(0.5, 0.5)) * self.diffusion * self.inv_frame
             // The decoder's sub-pixel precision.
             if self.pel > 0.5 {
@@ -659,9 +687,11 @@ pub struct DrawMoshStep {
     /// Row-major 2x2 applied to every vector.
     #[live]
     pub motion_mat: Vec4f,
-    /// uv per step.
+    /// Pixels per step (see `drift_at`).
     #[live]
-    pub drift: Vec2f,
+    pub drift: f32,
+    #[live]
+    pub drift_mode: f32,
     #[live]
     pub diffusion: f32,
     #[live]
@@ -1387,7 +1417,8 @@ impl Datamosh {
                         params.matrix[2],
                         params.matrix[3],
                     );
-                    d.drift = vec2(params.drift[0] / w as f32, params.drift[1] / h as f32);
+                    d.drift = params.drift;
+                    d.drift_mode = params.drift_mode.code();
                     d.diffusion = params.diffusion.max(0.0);
                     d.pel = params.pel.max(0.0);
                     d.refresh = params.refresh.clamp(0.0, 1.0);

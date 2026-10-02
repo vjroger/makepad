@@ -11,7 +11,7 @@ pub use makepad_widgets;
 
 mod stage;
 
-use makepad_datamosh::{MoshMode, MoshView, TransitionMotion};
+use makepad_datamosh::{DriftMode, MoshMode, MoshView, TransitionMotion};
 use makepad_widgets::*;
 use stage::{MoshStage, MotionChoice, Source};
 
@@ -80,7 +80,11 @@ script_mod! {
                         gain := Knob{text: "Motion gain" min: -3.0 max: 3.0 default: 1.0 precision: 2}
                         pel := Knob{text: "Pel (0 cont., 1 full, 4 quarter)" min: 0.0 max: 4.0 step: 1.0 default: 4.0 precision: 0}
                         diffusion := Knob{text: "Diffusion (px)" min: 0.0 max: 8.0 default: 0.0 precision: 1}
-                        drift_y := Knob{text: "Drift up/down (px per step)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
+                        drift_mode := DropDown{
+                            labels: ["Drift: horizontal" "Drift: vertical" "Drift: rotate" "Drift: zoom" "Drift: spiral" "Drift: random"]
+                            selected_item: 0
+                        }
+                        drift := Knob{text: "Drift (px per step, 0 = off)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
                         refresh := Knob{text: "Intra refresh" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         heal := Knob{text: "Heal" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         residual := Knob{text: "Residual" min: 0.0 max: 1.0 default: 0.0 precision: 2}
@@ -168,7 +172,10 @@ impl MatchEvent for App {
         slided(cx, ids!(gain), &mut s.params.gain);
         slided(cx, ids!(pel), &mut s.params.pel);
         slided(cx, ids!(diffusion), &mut s.params.diffusion);
-        slided(cx, ids!(drift_y), &mut s.params.drift[1]);
+        slided(cx, ids!(drift), &mut s.params.drift);
+        if let Some(i) = ui.drop_down(cx, ids!(drift_mode)).selected(actions) {
+            s.params.drift_mode = DriftMode::ALL[i.min(DriftMode::ALL.len() - 1)];
+        }
         slided(cx, ids!(refresh), &mut s.params.refresh);
         slided(cx, ids!(heal), &mut s.params.heal);
         slided(cx, ids!(residual), &mut s.params.residual);

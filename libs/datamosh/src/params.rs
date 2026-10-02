@@ -37,6 +37,58 @@ impl MoshMode {
     }
 }
 
+/// The shape of the constant push added to every vector each step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DriftMode {
+    /// Everything slides sideways (positive: right).
+    #[default]
+    Horizontal,
+    /// Everything slides vertically (positive: down).
+    Vertical,
+    /// Turns around the frame centre (positive: clockwise).
+    Rotate,
+    /// Flows out of the frame centre (positive) or into it (negative).
+    Zoom,
+    /// Rotate and zoom together: a whirlpool.
+    Spiral,
+    /// Every block keeps sliding its own random way.
+    Random,
+}
+
+impl DriftMode {
+    pub const ALL: &'static [DriftMode] = &[
+        DriftMode::Horizontal,
+        DriftMode::Vertical,
+        DriftMode::Rotate,
+        DriftMode::Zoom,
+        DriftMode::Spiral,
+        DriftMode::Random,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            DriftMode::Horizontal => "Horizontal",
+            DriftMode::Vertical => "Vertical",
+            DriftMode::Rotate => "Rotate",
+            DriftMode::Zoom => "Zoom",
+            DriftMode::Spiral => "Spiral",
+            DriftMode::Random => "Random",
+        }
+    }
+
+    /// The code the step shader branches on.
+    pub(crate) const fn code(self) -> f32 {
+        match self {
+            DriftMode::Horizontal => 0.0,
+            DriftMode::Vertical => 1.0,
+            DriftMode::Rotate => 2.0,
+            DriftMode::Zoom => 3.0,
+            DriftMode::Spiral => 4.0,
+            DriftMode::Random => 5.0,
+        }
+    }
+}
+
 /// What the output texture shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum MoshView {
@@ -78,8 +130,11 @@ pub struct MoshParams {
     /// motion horizontally, `[0, 1, 1, 0]` swaps the axes, a rotation
     /// turns it.
     pub matrix: [f32; 4],
-    /// A constant push added to every vector each step.
-    pub drift: [f32; 2],
+    /// A push added to every vector each step, in pixels per step (at the
+    /// frame edge for the radial patterns); 0 is off, negative reverses it.
+    pub drift: f32,
+    /// The pattern of that push.
+    pub drift_mode: DriftMode,
     /// Random per-block jitter added to the vectors each step.
     pub diffusion: f32,
     /// Sub-pixel precision of the decoder: 0 is continuous, 1 whole pixels
@@ -110,7 +165,8 @@ impl Default for MoshParams {
             block_size: 16.0,
             gain: 1.0,
             matrix: [1.0, 0.0, 0.0, 1.0],
-            drift: [0.0, 0.0],
+            drift: 0.0,
+            drift_mode: DriftMode::Horizontal,
             diffusion: 0.0,
             pel: 4.0,
             refresh: 0.0,
