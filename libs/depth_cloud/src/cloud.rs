@@ -357,6 +357,10 @@ pub struct DepthCloud {
     /// dies out (1/s): low damping wobbles, high damping creeps back.
     #[rust(40.0)]
     pub spring: f32,
+    /// On: points have momentum (spring + damping). Off: the effect bends
+    /// them directly and they snap home when the mouse leaves.
+    #[rust(true)]
+    pub momentum: bool,
     #[rust(5.0)]
     pub damping: f32,
     #[rust]
@@ -367,8 +371,8 @@ pub struct DepthCloud {
     /// Effector reach in cloud units.
     #[rust(0.35)]
     pub effect_radius: f32,
-    /// Depth of the plane the cursor's ray meets to place the effector;
-    /// `None` = the scene's middle depth.
+    /// Rendered sources only (their depth lives on the GPU): the depth the
+    /// physics assumes the points rest at; `None` = the scene's middle.
     #[rust]
     pub effect_depth: Option<f32>,
     #[rust]
@@ -646,8 +650,10 @@ impl DepthCloud {
 }
 
 impl DepthCloud {
-    /// Where the cursor's ray meets the effect plane, in world space.
-    fn effector(&self, scene: &SceneState3D) -> Option<Vec3f> {
+    /// The ray from the camera through the cursor (origin, unit direction):
+    /// the effect acts on everything within `effect_radius` of it, at any
+    /// depth, like a cylinder through the scene.
+    fn effector(&self, scene: &SceneState3D) -> Option<(Vec3f, Vec3f)> {
         if self.effect == CloudEffect::Off {
             return None;
         }
@@ -669,15 +675,22 @@ impl DepthCloud {
         let near = unproject(-1.0);
         let far = unproject(1.0);
         let dir = far - near;
-        let depth = self
-            .effect_depth
-            .unwrap_or_else(|| Self::pivot_distance(self.depth_amount));
-        // The plane z = -depth (the capture camera looks down -z).
-        if dir.z.abs() < 1e-6 {
-            return None;
-        }
-        let t = (-depth - near.z) / dir.z;
-        (t > 0.0).then(|| near + dir * t)
+        let len = dir.length();
+        (len > 1e-6).then(|| (near, dir * (1.0 / len)))
+    }
+
+    /// Camera distance to the scene's middle, where `effect_radius` applies.
+    fn effect_ref_depth(&self, scene: &SceneState3D) -> f32 {
+        let middle = vec3(
+            0.0,
+            0.0,
+            -self
+                .effect_depth
+                .unwrap_or_else(|| Self::pivot_distance(self.depth_amount)),
+        );
+        let camera = scene.view.invert().transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
+        let camera = vec3(camera.x, camera.y, camera.z);
+        (middle - camera).length().max(0.05)
     }
 
     /// Advance the point physics to this frame; the offset texture while
@@ -718,6 +731,8 @@ impl DepthCloud {
             radius: self.effect_radius,
             spring: self.spring,
             damping: self.damping,
+            momentum: self.momentum,
+            ref_depth: self.effect_ref_depth(scene),
             time: scene.time,
         };
         let offsets = self.sim.step(cx, &params);

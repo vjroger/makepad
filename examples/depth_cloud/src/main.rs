@@ -132,10 +132,11 @@ script_mod! {
                                 crop_far := PanelSlider{text: "Crop far" min: 0.0 max: 1.0 default: 1.0}
                                 Hr{}
 
-                                Label{text: "Mouse effect"}
+                                Label{text: "Mouse effect (a ray from the camera through the cursor)"}
                                 effect := DropDown{labels: ["Off" "Attract" "Repel" "Swirl" "Ripple"]}
                                 effect_strength := PanelSlider{text: "Strength" min: 0.0 max: 2.0 default: 0.6}
                                 effect_radius := PanelSlider{text: "Radius" min: 0.05 max: 2.0 default: 0.35}
+                                momentum := CheckBox{text: "Momentum (fly, spring back, settle)" active: true}
                                 spring := PanelSlider{text: "Spring (pull home)" min: 0.0 max: 200.0 default: 40.0}
                                 damping := PanelSlider{text: "Damping" min: 0.0 max: 30.0 default: 5.0}
                             }
@@ -530,6 +531,10 @@ impl MatchEvent for App {
         }
         if let Some(v) = slided(cx, ids!(effect_radius)) {
             self.with_cloud(cx, |_, cloud| cloud.effect_radius = v as f32);
+            redraw = true;
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(momentum)).changed(actions) {
+            self.with_cloud(cx, |_, cloud| cloud.momentum = on);
             redraw = true;
         }
         if let Some(v) = slided(cx, ids!(spring)) {
