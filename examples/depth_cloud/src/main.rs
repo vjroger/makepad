@@ -123,7 +123,7 @@ script_mod! {
                                 depth_amount := PanelSlider{text: "Depth amount (far/near)" min: 1.0 max: 12.0 default: 4.0}
                                 points_per_row := PanelSlider{text: "Points per row" min: 64.0 max: 1280.0 step: 16.0 default: 384.0 precision: 0}
                                 point_size := PanelSlider{text: "Point size (cells)" min: 0.3 max: 4.0 default: 1.15}
-                                edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.08}
+                                edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.0}
                                 fov := PanelSlider{text: "Field of view (deg)" min: 20.0 max: 100.0 step: 1.0 default: 50.0 precision: 0}
                                 Hr{}
 

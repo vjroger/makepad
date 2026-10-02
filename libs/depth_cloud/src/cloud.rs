@@ -74,7 +74,7 @@ script_mod! {
         // 1/near, 1/far.
         inv_range: uniform(vec2(1.0, 0.25))
         point_size: uniform(1.0)
-        edge_cut: uniform(0.08)
+        edge_cut: uniform(0.0)
         edge_radius: uniform(1.5)
         depth_mode: uniform(0.0)
         // Rendered sources: x,y = the scene's near/far (scene units, for the
@@ -227,7 +227,7 @@ script_mod! {
     mod.widgets.DepthCloud = set_type_default() do mod.widgets.DepthCloudBase{
         points_per_row: 384.0
         point_size: 1.15
-        edge_cut: 0.08
+        edge_cut: 0.0
         edge_radius: 1.5
         depth_amount: 4.0
     }
@@ -329,7 +329,7 @@ pub struct DepthCloud {
     #[live(1.15)]
     pub point_size: f32,
     /// Relative depth jump that culls a point as a flying pixel (0 = off).
-    #[live(0.08)]
+    #[live(0.0)]
     pub edge_cut: f32,
     /// Edge-test reach in depth texels.
     #[live(1.5)]
