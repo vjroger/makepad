@@ -402,7 +402,9 @@ impl NightSky {
         if !(self.sun_elevation_deg < -6.0) || !(m.dir.y > 0.0) {
             return None;
         }
-        Some(EnvSun { dir: m.dir, radiance: m.mean, cos_radius: m.cos_radius })
+        // A disc a fraction of a degree wide with a hard edge: a surface facing
+        // it gets all of its emission, and the disc is its own covering cone.
+        Some(EnvSun { dir: m.dir, radiance: m.mean, cos_radius: m.cos_radius, facing: 1.0, cos_cover: m.cos_radius })
     }
 
     /// The moon's disc for the bake's refinement: its direction in the map's own frame and its angular radius.
@@ -824,6 +826,10 @@ mod tests {
         assert!(k.dir.dot(dir_from_az_el(135.0, 30.0)) > 0.99999);
         assert!(k.radiance.is_finite() && luminance(k.radiance) > 0.0);
         assert!((k.cos_radius - 0.26f32.to_radians().cos()).abs() < 1.0e-6);
+        // A hard-edged disc under a degree wide: all its emission reaches a facing
+        // surface, and it is its own covering cone.
+        assert_eq!((k.facing, k.cos_cover), (1.0, k.cos_radius));
+        assert!(k.validate().is_ok(), "{k:?}");
         p.moon_elevation_deg = -5.0;
         assert!(key(&p, -10.0).is_none(), "a set moon is no key");
         p.moon_elevation_deg = 30.0;

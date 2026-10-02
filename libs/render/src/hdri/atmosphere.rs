@@ -942,6 +942,35 @@ mod env_tests {
         assert!(studio.sun().is_none(), "no lights, so no key in studio mode");
     }
 
+    /// The sun's key carries its disc's reach: a surface facing a disc under a
+    /// degree wide gets all of its emission, and the covering cone is the one
+    /// the drawn disc ends at, soft limb included (the cone `radiance` is
+    /// averaged over is the nominal disc inside it).
+    #[test]
+    fn the_suns_key_is_covered_by_its_outer_limb() {
+        let (az, el) = (200.0, 30.0);
+        let sun_dir = dir_from_az_el(az, el);
+        let p = sky_params(el, az);
+        let key = Env::new(&p).sun().expect("the sun is up, so it is the key");
+        assert!(key.validate().is_ok(), "{key:?}");
+        assert_eq!(key.facing, 1.0);
+        let atmo = Atmosphere::new(sun_dir, &p.sky.atmosphere, &p.sky.sun_disc);
+        assert!((key.cos_cover - atmo.sun_outer_radius().cos()).abs() < 1.0e-7, "{} vs {}", key.cos_cover, atmo.sun_outer_radius().cos());
+        assert!(key.cos_cover < key.cos_radius, "a soft limb reaches past the nominal disc");
+        // And that really is where the disc ends: lit inside the cone, black outside it.
+        let outer_deg = atmo.sun_outer_radius().to_degrees();
+        let inside = dir_from_az_el(az, el + 0.9 * outer_deg);
+        let outside = dir_from_az_el(az, el + 1.1 * outer_deg);
+        assert!(inside.dot(key.dir) > key.cos_cover && luminance(atmo.sun_disc(inside)) > 0.0);
+        assert!(outside.dot(key.dir) < key.cos_cover && luminance(atmo.sun_disc(outside)) == 0.0);
+        // A hard-edged disc is its own covering cone.
+        let mut hard = p.clone();
+        hard.sky.sun_disc.softness = 0.0;
+        let key = Env::new(&hard).sun().expect("the sun is up");
+        assert!((key.cos_cover - key.cos_radius).abs() < 1.0e-7, "{} vs {}", key.cos_cover, key.cos_radius);
+        assert!(key.validate().is_ok(), "{key:?}");
+    }
+
     #[test]
     fn rotation_turns_the_sun_and_the_sky_together() {
         let p = sky_params(25.0, 90.0);
@@ -952,6 +981,9 @@ mod env_tests {
         let want = rotate_y(a.sun_dir().unwrap(), 40.0);
         assert!((b.sun_dir().unwrap() - want).length() < 1.0e-5);
         assert!((b.sun().unwrap().dir - want).length() < 1.0e-5);
+        // The cones and the facing share are about the key's own centre: the yaw leaves them.
+        let (ka, kb) = (a.sun().unwrap(), b.sun().unwrap());
+        assert_eq!((kb.cos_radius, kb.facing, kb.cos_cover), (ka.cos_radius, ka.facing, ka.cos_cover));
         for &(az, el) in &[(10.0f32, 20.0f32), (200.0, 60.0), (300.0, 5.0)] {
             let d = dir_from_az_el(az, el);
             let ca = a.radiance(d);

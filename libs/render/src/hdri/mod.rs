@@ -70,36 +70,9 @@ pub fn vec(a: [f32; 3]) -> Vec3f {
     vec3f(a[0], a[1], a[2])
 }
 
-/// The environment's key light, for engines that light with one directional
-/// light next to the map. Phase 2 (task C1) moves this struct to makepad-scene
-/// and re-exports it here.
-/// - `dir` points toward the light (unit, world space).
-/// - `cos_radius` is the cosine of the angular radius of the key's cone.
-/// - `radiance` is the AVERAGE radiance over that cone, with one meaning for
-///   every key: the light's whole emission (∫ L dΩ as the map draws it) divided
-///   by the cone's solid angle 2π(1 − cos_radius). So `radiance × 2π(1 −
-///   cos_radius)` is the key's irradiance on a surface facing it (for a small
-///   light; a wide one is below).
-///
-/// Per key:
-/// - The sun: its irradiance at the ground spread over the nominal disc's cone,
-///   the soft limb past it included (`Atmosphere::sun_cone_radiance`).
-/// - The moon: the mean over its disc.
-/// - A studio key: the light integrated once per map over its own tangent
-///   plane, with its shape, corner, ring, soft edge, hotspot and roll and the
-///   Multiply flags after it, so a thin strip or a ring carries only what it
-///   draws (`studio::key_emission`).
-///
-/// The cosine across a wide light is not in it. A surface facing the Overcast
-/// dome preset's 110 degree disc gets 0.78 of `radiance × solid angle` and one
-/// facing the Top softbox 0.93; the other built-in keys get 0.95 or more, and
-/// the sun and moon 1.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EnvSun {
-    pub dir: Vec3f,
-    pub radiance: Vec3f,
-    pub cos_radius: f32,
-}
+/// The environment's key light is the engine's own type (makepad-scene),
+/// so a baked or detected sun goes straight into `World.environment.sun`.
+pub use makepad_scene::EnvSun;
 
 /// One environment, ready to sample: every layer is built once in `new`, so
 /// `radiance` is cheap enough to call per texel from many threads (the struct
@@ -210,19 +183,20 @@ impl Env {
         if sun.y > 0.0 {
             // The cone's mean radiance, so radiance x cone solid angle is the
             // sun's irradiance at the ground whatever the disc's size and limb.
+            // A disc under a degree wide: a surface facing it gets all of its
+            // emission (facing 1), and its outer limb, soft edge included, is
+            // the cone that holds it.
             return Some(self.key_to_world(EnvSun {
                 dir: sun,
                 radiance: atmo.sun_cone_radiance() * cover(sun),
                 cos_radius: atmo.sun_cos_radius(),
+                facing: 1.0,
+                cos_cover: atmo.sun_outer_radius().cos(),
             }));
         }
         // After dark the risen moon takes over, once the sun is 6 degrees down.
         let moon = self.night.as_ref()?.moon_key()?;
-        Some(self.key_to_world(EnvSun {
-            dir: moon.dir,
-            radiance: moon.radiance * cover(moon.dir),
-            cos_radius: moon.cos_radius,
-        }))
+        Some(self.key_to_world(EnvSun { radiance: moon.radiance * cover(moon.dir), ..moon }))
     }
 
     /// World-space sun direction in Sky mode (also below the horizon), None
@@ -233,12 +207,14 @@ impl Env {
             .map(|atmo| rotate_y(atmo.sun_dir(), self.params.rotation_deg))
     }
 
-    /// Map frame to world frame, with the map's intensity applied.
+    /// Map frame to world frame, with the map's intensity applied. The cones
+    /// and the facing share are angles about the key's own centre, so only the
+    /// direction turns.
     fn key_to_world(&self, key: EnvSun) -> EnvSun {
         EnvSun {
             dir: rotate_y(key.dir, self.params.rotation_deg),
             radiance: key.radiance * self.scale,
-            cos_radius: key.cos_radius,
+            ..key
         }
     }
 
@@ -712,5 +688,18 @@ mod tests {
         refine_hot_spots(&mut same, &coded, &[]);
         refine_hot_spots(&mut same, &coded, &[(vec3f(0.0, 1.0, 0.0), 1.0)]);
         assert_eq!(same, plain);
+    }
+
+    /// The engine's key light and the generator's are one type: a
+    /// `hdri::EnvSun` goes straight into `World.environment.sun`.
+    #[test]
+    fn the_env_sun_is_the_scene_type() {
+        fn scene(s: makepad_scene::EnvSun) -> makepad_scene::EnvSun {
+            s
+        }
+        let s = EnvSun { dir: vec3f(0.0, 1.0, 0.0), radiance: vec3f(1.0, 1.0, 1.0), cos_radius: 0.99, facing: 1.0, cos_cover: 0.98 };
+        assert_eq!(scene(s), s);
+        let env = makepad_scene::Environment { sun: Some(s), ..makepad_scene::Environment::default() };
+        assert!(env.validate().is_ok());
     }
 }

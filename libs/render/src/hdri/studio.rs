@@ -193,6 +193,11 @@ impl Studio {
                 dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg),
                 radiance: key_emission(&prepared[i..], KEY_GRID) / cone,
                 cos_radius: radius.cos(),
+                // Placeholders until key_emission returns the light's own
+                // share and reach (task C2): a facing surface gets it all
+                // and the cone it is averaged over covers it.
+                facing: 1.0,
+                cos_cover: radius.cos(),
             }
         });
         Studio {
@@ -791,6 +796,7 @@ mod tests {
         let expected = Studio::new(&p.studio, &p.lights).key().expect("a key light").radiance * 2.0;
         assert!((sun.radiance - expected).length() < 1.0e-5 * luminance(expected));
         assert!((sun.cos_radius - 15f32.to_radians().cos()).abs() < 1.0e-6);
+        assert!(sun.validate().is_ok(), "the key is a valid scene key: {sun:?}");
         // The map's yaw turns the key with it, counter-clockwise seen from above
         // (ibl's sign): azimuth 200 shows at 170.
         p.rotation_deg = 30.0;
