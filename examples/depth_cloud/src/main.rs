@@ -6,14 +6,18 @@
 //!
 //! ```text
 //! makepad-example-depth-cloud [VIDEO] [--layout full|sbs|tb]
-//!     [--depth flat|ground|packed|da3] [--model DA3_SAFETENSORS]
+//!     [--depth flat|ground|packed|anything|da3] [--model WEIGHTS]
 //! ```
 //!
 //! * no VIDEO: a built-in animated RGBD clip (exact depth, no model needed);
 //! * `--layout sbs|tb` + `--depth packed`: RGBD videos (picture left/top,
 //!   grayscale depth right/bottom, white = near) play with zero model cost;
-//! * `--depth da3 --model ...`: native Depth-Anything-3 metric-large
-//!   (`--features localai`; CUDA today). `DEPTH_CLOUD_MODEL` also works.
+//! * `--model depth_anything_v2_vits.pth` (`--depth anything`, the default
+//!   with a model): native Depth-Anything-V2 (Small = realtime tier; also
+//!   Distill-Any-Depth and V2-Base/Large checkpoints). `--depth da3 --model
+//!   model.safetensors`: Depth-Anything-3 metric-large. Both need
+//!   `--features localai` and run on CUDA (NVIDIA, Windows/Linux).
+//!   `DEPTH_CLOUD_MODEL` also works.
 //! * `--depth ground`: a free "lower is nearer" prior, `flat`: a plane.
 //!
 //! Controls: drag = orbit, wheel = dolly, "Front view" = back to the video.
@@ -142,7 +146,7 @@ impl Args {
         let default_depth = if layout != FrameLayout::Full {
             "packed"
         } else if model.is_some() {
-            "da3"
+            "anything"
         } else {
             "ground"
         };
@@ -150,8 +154,13 @@ impl Args {
             "flat" => DepthSource::Flat,
             "ground" => DepthSource::GroundPrior,
             "packed" => DepthSource::Packed(layout),
-            "da3" => Self::da3(model)?,
-            other => return Err(format!("unknown --depth {other} (flat|ground|packed|da3)")),
+            "anything" => Self::native(model, false)?,
+            "da3" => Self::native(model, true)?,
+            other => {
+                return Err(format!(
+                    "unknown --depth {other} (flat|ground|packed|anything|da3)"
+                ))
+            }
         };
         Ok(Self {
             spec: SourceSpec {
@@ -163,14 +172,18 @@ impl Args {
     }
 
     #[cfg(feature = "localai")]
-    fn da3(model: Option<String>) -> Result<DepthSource, String> {
-        let model_path = model.ok_or("--depth da3 needs --model <DA3METRIC-LARGE model.safetensors>")?;
-        Ok(DepthSource::Da3 { model_path })
+    fn native(model: Option<String>, da3: bool) -> Result<DepthSource, String> {
+        let model_path = model.ok_or("a native depth model needs --model <weights file>")?;
+        Ok(if da3 {
+            DepthSource::Da3 { model_path }
+        } else {
+            DepthSource::Anything { model_path }
+        })
     }
 
     #[cfg(not(feature = "localai"))]
-    fn da3(_model: Option<String>) -> Result<DepthSource, String> {
-        Err("--depth da3 needs a build with --features localai".into())
+    fn native(_model: Option<String>, _da3: bool) -> Result<DepthSource, String> {
+        Err("native depth models need a build with --features localai".into())
     }
 }
 

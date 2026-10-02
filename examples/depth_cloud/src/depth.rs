@@ -169,6 +169,10 @@ pub enum DepthSource {
     GroundPrior,
     /// Depth packed in the frame itself (RGBD side-by-side / top-bottom).
     Packed(FrameLayout),
+    /// Native Depth-Anything-V2 family, e.g. V2-Small: the realtime tier
+    /// (`--features localai`).
+    #[cfg(feature = "localai")]
+    Anything { model_path: String },
     /// Native Depth-Anything-3 metric-large (`--features localai`).
     #[cfg(feature = "localai")]
     Da3 { model_path: String },
@@ -185,7 +189,9 @@ impl DepthSource {
                     .ok_or("packed depth needs a side-by-side or top-bottom layout")?,
             }),
             #[cfg(feature = "localai")]
-            Self::Da3 { model_path } => Box::new(da3::Da3Depth::load(model_path)?),
+            Self::Anything { model_path } => Box::new(native::AnythingDepth::load(model_path)?),
+            #[cfg(feature = "localai")]
+            Self::Da3 { model_path } => Box::new(native::Da3Depth::load(model_path)?),
         })
     }
 }
@@ -262,14 +268,74 @@ impl DepthEstimator for PackedDepth {
 }
 
 #[cfg(feature = "localai")]
-mod da3 {
+mod native {
     use super::*;
     use makepad_ai_vision::da3::{Da3MetricLarge, DA3_PATCH};
+    use makepad_ai_vision::depth_anything::DepthAnything;
 
     const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
     /// DA3's sky-head threshold (`depth_backend.rs` / `encode_metric_mm`).
     const SKY_THRESHOLD: f32 = 0.3;
+
+    /// The picture region resized to a 14-multiple and ImageNet-normalized
+    /// into planar RGB.
+    fn network_input(
+        frame: &FrameView,
+        picture: [f32; 4],
+        depth_res: usize,
+    ) -> Result<(Vec<f32>, usize, usize), String> {
+        if !frame.is_valid() {
+            return Err("frame too small".into());
+        }
+        let (sw, sh) = frame.rect_px(picture);
+        let (w, h) = fit_dims(sw, sh, depth_res, DA3_PATCH);
+        let rgb = frame.rgb(picture, w, h);
+        let plane = w * h;
+        let mut pixels = vec![0.0f32; 3 * plane];
+        for (i, px) in rgb.iter().enumerate() {
+            for c in 0..3 {
+                pixels[c * plane + i] = (px[c] - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
+            }
+        }
+        Ok((pixels, w, h))
+    }
+
+    pub struct AnythingDepth {
+        model: DepthAnything,
+    }
+
+    impl AnythingDepth {
+        pub fn load(path: &str) -> Result<Self, String> {
+            let model = DepthAnything::load(path).map_err(|e| format!("Depth-Anything load {path}: {e}"))?;
+            Ok(Self { model })
+        }
+    }
+
+    impl DepthEstimator for AnythingDepth {
+        fn label(&self) -> String {
+            format!("Depth-Anything {} (native)", self.model.config().variant())
+        }
+
+        fn estimate(
+            &mut self,
+            frame: &FrameView,
+            picture: [f32; 4],
+            depth_res: usize,
+        ) -> Result<RawDepth, String> {
+            let (pixels, w, h) = network_input(frame, picture, depth_res)?;
+            let prediction = self
+                .model
+                .forward_normalized(&pixels, w, h)
+                .map_err(|e| format!("Depth-Anything: {e}"))?;
+            Ok(RawDepth {
+                width: prediction.width,
+                height: prediction.height,
+                values: prediction.disparity,
+                kind: DepthKind::Disparity,
+            })
+        }
+    }
 
     pub struct Da3Depth {
         model: Da3MetricLarge,
@@ -293,19 +359,7 @@ mod da3 {
             picture: [f32; 4],
             depth_res: usize,
         ) -> Result<RawDepth, String> {
-            if !frame.is_valid() {
-                return Err("frame too small".into());
-            }
-            let (sw, sh) = frame.rect_px(picture);
-            let (w, h) = fit_dims(sw, sh, depth_res, DA3_PATCH);
-            let rgb = frame.rgb(picture, w, h);
-            let plane = w * h;
-            let mut pixels = vec![0.0f32; 3 * plane];
-            for (i, px) in rgb.iter().enumerate() {
-                for c in 0..3 {
-                    pixels[c * plane + i] = (px[c] - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
-                }
-            }
+            let (pixels, w, h) = network_input(frame, picture, depth_res)?;
             let prediction = self
                 .model
                 .forward_normalized(&pixels, w, h, None)
