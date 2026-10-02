@@ -33,7 +33,7 @@
 //! order. Upstream producers that render a texture this engine reads in the
 //! same frame register with [`Datamosh::depends_on`] so they run first.
 
-use crate::params::{MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
+use crate::params::{DriftMode, MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
 use crate::transition::{TransitionFrame, TransitionMotion, TransitionParams, TransitionPhase};
 use makepad_widgets::*;
 
@@ -418,16 +418,12 @@ script_mod! {
         // The drift pattern at a block centre, in pixels. The radial ones
         // are measured from the frame centre and reach `drift` at the
         // nearest frame edge.
-        drift_at: fn(c: vec2, cell: vec2) -> vec2 {
+        drift_at: fn(c: vec2) -> vec2 {
             let a = self.drift
             let rel = (c - vec2(0.5, 0.5)) * self.frame_size
             let r = a / (0.5 * min(self.frame_size.x, self.frame_size.y))
             let turn = vec2(0.0 - rel.y, rel.x) * r
             let outward = rel * r
-            if self.drift_mode > 4.5 {
-                let ang = self.rand(cell + vec2(71.0, 3.0)) * 6.2831853
-                return vec2(cos(ang), sin(ang)) * a
-            }
             if self.drift_mode > 3.5 {
                 return (turn + outward) * 0.7071
             }
@@ -478,7 +474,7 @@ script_mod! {
             let r5 = self.rand(cell * 0.61 + vec2(53.0, seed * 0.57 + 13.0))
             let mm = self.motion_mat
             let mut m = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain
-            m = m + self.drift_at(center, cell) * self.inv_frame
+            m = m + self.drift_at(center) * self.inv_frame
             m = m + (vec2(r1, r2) - vec2(0.5, 0.5)) * self.diffusion * self.inv_frame
             // The decoder's sub-pixel precision.
             if self.pel > 0.5 {
@@ -555,24 +551,14 @@ script_mod! {
             let b = 2.0 - abs(h * 6.0 - 4.0)
             return clamp(vec3(r, g, b), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
         }
-        // The same hash and drift pattern as the step, so the blur follows
-        // exactly the push the step applied.
-        rand: fn(p: vec2) -> float {
-            let p3 = fract(vec3(p.x, p.y, p.x) * 0.1031)
-            let k = dot(p3, vec3(p3.y, p3.z, p3.x) + vec3(33.33, 33.33, 33.33))
-            let q = p3 + vec3(k, k, k)
-            return fract((q.x + q.y) * q.z)
-        }
-        drift_at: fn(c: vec2, cell: vec2) -> vec2 {
+        // The same drift pattern as the step, so the blur follows exactly
+        // the push the step applied.
+        drift_at: fn(c: vec2) -> vec2 {
             let a = self.drift
             let rel = (c - vec2(0.5, 0.5)) * self.frame_size
             let r = a / (0.5 * min(self.frame_size.x, self.frame_size.y))
             let turn = vec2(0.0 - rel.y, rel.x) * r
             let outward = rel * r
-            if self.drift_mode > 4.5 {
-                let ang = self.rand(cell + vec2(71.0, 3.0)) * 6.2831853
-                return vec2(cos(ang), sin(ang)) * a
-            }
             if self.drift_mode > 3.5 {
                 return (turn + outward) * 0.7071
             }
@@ -619,7 +605,7 @@ script_mod! {
                 let raw = vec2(f.x, f.y) * self.field_on
                 let mm = self.motion_mat
                 let mv = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain
-                let streak = mv * self.blur_motion + self.drift_at(center, cell) * self.inv_frame * self.blur_drift
+                let streak = mv * self.blur_motion + self.drift_at(center) * self.inv_frame * self.blur_drift
                 let mut sum = vec3(0.0, 0.0, 0.0)
                 let mut k = 0.0
                 loop {
@@ -958,6 +944,11 @@ pub struct Datamosh {
     upstream: Vec<DrawPassId>,
     #[rust]
     rendered: bool,
+    /// What [`DriftMode::Random`] stands for until the next keyframe.
+    #[rust]
+    random_drift: Option<DriftMode>,
+    #[rust]
+    rng: u32,
 }
 
 impl Datamosh {
@@ -1198,6 +1189,26 @@ impl Datamosh {
         self.latest_motion = 0;
     }
 
+    /// The concrete pattern for `mode`: Random is rolled once per keyframe
+    /// and held until the next one.
+    fn drift_pick(&mut self, mode: DriftMode) -> DriftMode {
+        if mode != DriftMode::Random {
+            return mode;
+        }
+        if let Some(pick) = self.random_drift {
+            return pick;
+        }
+        // xorshift32, seeded off the step counter on first use.
+        let mut x = self.rng ^ self.steps.wrapping_mul(0x9e37_79b9) ^ 0x2545_f491;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        let pick = DriftMode::CONCRETE[x as usize % DriftMode::CONCRETE.len()];
+        self.random_drift = Some(pick);
+        pick
+    }
+
     /// The parameters this render decodes with: the transition's plan, if
     /// one is running, over the plain ones.
     fn effective_params(&self) -> MoshParams {
@@ -1354,6 +1365,8 @@ impl Datamosh {
         self.ensure_targets(cx.cx);
         let params = self.effective_params();
         let ops = self.plan(&params);
+        // After the plan: a keyframe in it rolls a new Random drift.
+        let drift_code = self.drift_pick(params.drift_mode).code();
         while self.stages.len() < ops.len() {
             self.stages.push(Stage {
                 pass: DrawPass::new(cx.cx),
@@ -1496,7 +1509,7 @@ impl Datamosh {
                         params.matrix[3],
                     );
                     d.drift = params.drift;
-                    d.drift_mode = params.drift_mode.code();
+                    d.drift_mode = drift_code;
                     d.diffusion = params.diffusion.max(0.0);
                     d.pel = params.pel.max(0.0);
                     d.refresh = params.refresh.clamp(0.0, 1.0);
@@ -1550,7 +1563,7 @@ impl Datamosh {
                         params.matrix[3],
                     );
                     d.drift = params.drift;
-                    d.drift_mode = params.drift_mode.code();
+                    d.drift_mode = drift_code;
                     d.field_on = if self.field == FieldSource::None { 0.0 } else { 1.0 };
                     d.blur_motion = params.blur_motion.max(0.0);
                     d.blur_drift = params.blur_drift.max(0.0);
