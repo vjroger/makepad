@@ -38,13 +38,14 @@ fn sane(x: f32, lo: f32, hi: f32) -> f32 {
 /// coefficients are as reproduced in Wikipedia's "Planckian locus" article.
 ///
 /// **Accuracy.** The fit is within about 1e-4 in (u, v) from 1000 K to 15000 K.
-/// Extrapolated to 20000 K it drifts by about 2e-3, which cannot be seen at that
+/// Extrapolated to 20000 K it drifts by about 5e-4 (measured against the Robertson
+/// 1968 isotemperature table and a cubic-spline locus), which cannot be seen at that
 /// blue end.
 ///
 /// **Conversion.** (u, v) goes to (x, y), then to XYZ with Y = 1, then to linear
 /// Rec.709 through the same XYZ matrix sky.rs uses.
 ///
-/// **Below about 1950 K** the locus leaves the Rec.709 gamut and blue goes
+/// **Below about 1900 K** the locus leaves the Rec.709 gamut and blue goes
 /// negative. Blue is clipped to 0 and the colour rescaled, so the luminance stays 1.
 pub fn kelvin_to_rgb(kelvin: f32) -> Vec3f {
     let t = sane(kelvin, 1000.0, 20000.0);
