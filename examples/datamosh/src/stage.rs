@@ -10,7 +10,7 @@
 //!   no vectors; the engine estimates them.
 
 use makepad_datamosh::{
-    Datamosh, MoshParams, TransitionParams, TransitionPhase, VectorFormat, VectorKind,
+    Datamosh, DriftMode, MoshParams, TransitionParams, TransitionPhase, VectorFormat, VectorKind,
 };
 use makepad_widgets::*;
 
@@ -261,6 +261,9 @@ pub struct StageSettings {
     /// Transition mode: the picture stays clean and only the transition
     /// moshes. Effect mode: the effect runs continuously.
     pub transition_mode: bool,
+    /// Ignore `params.drift_mode` and pick a pattern at random for every
+    /// transition (and every I-frame in effect mode).
+    pub random_drift: bool,
     pub picture: Source,
     pub motion: MotionChoice,
     /// Off: a keyframe every frame, the clean picture.
@@ -280,6 +283,7 @@ impl Default for StageSettings {
     fn default() -> Self {
         Self {
             transition_mode: false,
+            random_drift: false,
             picture: Source::Shapes,
             motion: MotionChoice::GridVectors,
             mosh_on: true,
@@ -407,6 +411,11 @@ pub struct MoshStage {
     /// Set when a transition changed the picture source, for the panel.
     #[rust]
     picture_changed: Option<Source>,
+    /// The demo's Random drift: the pattern currently standing in.
+    #[rust]
+    drift_pick: Option<DriftMode>,
+    #[rust]
+    rng: u32,
 }
 
 impl MoshStage {
@@ -416,7 +425,43 @@ impl MoshStage {
 
     pub fn set_settings(&mut self, settings: StageSettings) {
         self.settings = settings;
-        self.mosh.set_params(settings.params);
+        self.push_params();
+    }
+
+    /// The engine's parameters: the panel's, with the demo's own random
+    /// drift pick standing in for the pattern when Random is on.
+    fn push_params(&mut self) {
+        if self.settings.random_drift && self.drift_pick.is_none() {
+            // Just switched to Random: start with a pick (roll comes back
+            // here with it set).
+            return self.roll_drift();
+        }
+        let mut params = self.settings.params;
+        if let (true, Some(pick)) = (self.settings.random_drift, self.drift_pick) {
+            params.drift_mode = pick;
+        }
+        self.mosh.set_params(params);
+    }
+
+    /// A new random drift pattern, different from the last one.
+    fn roll_drift(&mut self) {
+        if !self.settings.random_drift {
+            return;
+        }
+        let all = DriftMode::ALL;
+        let mut x = self.rng ^ (self.time * 1000.0) as u32 ^ 0x2545_f491;
+        loop {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let pick = all[x as usize % all.len()];
+            if Some(pick) != self.drift_pick {
+                self.drift_pick = Some(pick);
+                break;
+            }
+        }
+        self.rng = x;
+        self.push_params();
     }
 
     pub fn request_iframe(&mut self) {
@@ -428,6 +473,7 @@ impl MoshStage {
         if self.transition.is_some() {
             return;
         }
+        self.roll_drift();
         let from = self.settings.picture;
         self.transition = Some(RunningTransition {
             from,
@@ -509,6 +555,7 @@ impl MoshStage {
             if self.iframe_requested {
                 self.iframe_requested = false;
                 self.mosh.keyframe();
+                self.roll_drift();
             }
             return;
         }
@@ -527,6 +574,9 @@ impl MoshStage {
         let auto =
             settings.auto_iframe > 0.0 && self.time - self.last_iframe >= settings.auto_iframe;
         if !settings.mosh_on || self.iframe_requested || auto {
+            if settings.mosh_on {
+                self.roll_drift();
+            }
             self.iframe_requested = false;
             self.last_iframe = self.time;
             self.mosh.keyframe();

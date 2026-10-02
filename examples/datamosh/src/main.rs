@@ -178,6 +178,9 @@ impl MatchEvent for App {
         slided(cx, ids!(blur_motion), &mut s.params.blur_motion);
         slided(cx, ids!(blur_drift), &mut s.params.blur_drift);
         if let Some(i) = ui.drop_down(cx, ids!(drift_mode)).selected(actions) {
+            // The last entry is the demo's Random; the rest are the
+            // engine's patterns.
+            s.random_drift = i >= DriftMode::ALL.len();
             s.params.drift_mode = DriftMode::ALL[i.min(DriftMode::ALL.len() - 1)];
         }
         slided(cx, ids!(refresh), &mut s.params.refresh);

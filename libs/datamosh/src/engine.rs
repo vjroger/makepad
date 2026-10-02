@@ -33,7 +33,7 @@
 //! order. Upstream producers that render a texture this engine reads in the
 //! same frame register with [`Datamosh::depends_on`] so they run first.
 
-use crate::params::{DriftMode, MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
+use crate::params::{MoshMode, MoshParams, MoshView, VectorFormat, VectorKind};
 use crate::transition::{TransitionFrame, TransitionMotion, TransitionParams, TransitionPhase};
 use makepad_widgets::*;
 
@@ -944,11 +944,6 @@ pub struct Datamosh {
     upstream: Vec<DrawPassId>,
     #[rust]
     rendered: bool,
-    /// What [`DriftMode::Random`] stands for until the next keyframe.
-    #[rust]
-    random_drift: Option<DriftMode>,
-    #[rust]
-    rng: u32,
 }
 
 impl Datamosh {
@@ -1189,26 +1184,6 @@ impl Datamosh {
         self.latest_motion = 0;
     }
 
-    /// The concrete pattern for `mode`: Random is rolled once per keyframe
-    /// and held until the next one.
-    fn drift_pick(&mut self, mode: DriftMode) -> DriftMode {
-        if mode != DriftMode::Random {
-            return mode;
-        }
-        if let Some(pick) = self.random_drift {
-            return pick;
-        }
-        // xorshift32, seeded off the step counter on first use.
-        let mut x = self.rng ^ self.steps.wrapping_mul(0x9e37_79b9) ^ 0x2545_f491;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.rng = x;
-        let pick = DriftMode::CONCRETE[x as usize % DriftMode::CONCRETE.len()];
-        self.random_drift = Some(pick);
-        pick
-    }
-
     /// The parameters this render decodes with: the transition's plan, if
     /// one is running, over the plain ones.
     fn effective_params(&self) -> MoshParams {
@@ -1368,8 +1343,7 @@ impl Datamosh {
         self.ensure_targets(cx.cx);
         let params = self.effective_params();
         let ops = self.plan(&params);
-        // After the plan: a keyframe in it rolls a new Random drift.
-        let drift_code = self.drift_pick(params.drift_mode).code();
+        let drift_code = params.drift_mode.code();
         while self.stages.len() < ops.len() {
             self.stages.push(Stage {
                 pass: DrawPass::new(cx.cx),

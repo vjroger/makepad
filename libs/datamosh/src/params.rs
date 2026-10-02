@@ -51,8 +51,6 @@ pub enum DriftMode {
     Zoom,
     /// Rotate and zoom together: a whirlpool.
     Spiral,
-    /// One of the others, picked at random at every keyframe.
-    Random,
 }
 
 impl DriftMode {
@@ -62,7 +60,6 @@ impl DriftMode {
         DriftMode::Rotate,
         DriftMode::Zoom,
         DriftMode::Spiral,
-        DriftMode::Random,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -72,24 +69,13 @@ impl DriftMode {
             DriftMode::Rotate => "Rotate",
             DriftMode::Zoom => "Zoom",
             DriftMode::Spiral => "Spiral",
-            DriftMode::Random => "Random",
         }
     }
 
-    /// The patterns Random picks from.
-    pub const CONCRETE: &'static [DriftMode] = &[
-        DriftMode::Horizontal,
-        DriftMode::Vertical,
-        DriftMode::Rotate,
-        DriftMode::Zoom,
-        DriftMode::Spiral,
-    ];
-
-    /// The code the shaders branch on. Random is resolved to a concrete
-    /// pattern before it gets here.
+    /// The code the shaders branch on.
     pub(crate) const fn code(self) -> f32 {
         match self {
-            DriftMode::Horizontal | DriftMode::Random => 0.0,
+            DriftMode::Horizontal => 0.0,
             DriftMode::Vertical => 1.0,
             DriftMode::Rotate => 2.0,
             DriftMode::Zoom => 3.0,
