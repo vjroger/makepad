@@ -10,13 +10,13 @@ default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
 tweaker = ["makepad-widgets/tweaker"]
-# Native Depth-Anything-3 metric depth (libs/ai, CUDA today) as a depth source.
-localai = ["dep:makepad-ai-vision"]
+# Native depth models (Depth-Anything-V2 / Video-Depth-Anything / DA3), CUDA.
+localai = ["makepad-depth-cloud/localai"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
 makepad-xr = { path = "../../xr", version = "1.0.0" }
-makepad-ai-vision = { path = "../../libs/ai/models/vision", optional = true }
+makepad-depth-cloud = { path = "../../libs/depth_cloud" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(gpusim)"] }

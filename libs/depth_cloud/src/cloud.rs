@@ -12,13 +12,25 @@
 //! Depth arrives in one of three encodings (`depth_mode`): the pipeline's
 //! normalized disparity (models, packed RGBD, depth-pass videos), or, for
 //! content a GPU renders live, that renderer's own targets with no copy and
-//! no model: a linear view-depth target ([`RenderedDepth`]). Colour is NV12 planes or the renderer's colour target.
+//! no model: a linear view-depth target ([`RenderedDepth`]). Colour is
+//! NV12 planes or the renderer's colour target.
+//!
+//! The widget plays its own source: [`DepthCloud::open`] starts a
+//! [`Pipeline`] (decode, depth, stabilize on a worker) and the widget pumps
+//! its frames, reporting [`DepthCloudAction`]s. Drop a `DepthCloud{}` into
+//! any `XrSceneView` and call `open`, or hand it live GPU targets with
+//! [`DepthCloud::set_rendered_source`].
+//!
+//! Shaping, all in the vertex shader: a depth crop band, and a mouse
+//! effector ([`CloudEffect`]: attract, repel, swirl, ripple) acting on the
+//! points around the cursor's ray at the scene's middle depth.
 //!
 //! "Edge cut" drops points whose depth neighbourhood spans more than that
 //! fraction of their own depth: the smeared "flying pixels" a depth model
 //! puts between a foreground edge and the background.
 
 use crate::depth::DepthMap;
+use crate::pipeline::{FrameStats, Pipeline, PipelineSettings, SourceSpec};
 use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 script_mod! {
@@ -64,6 +76,13 @@ script_mod! {
         // z: rendered depth units -> cloud units.
         depth_params: uniform(vec4(0.1, 100.0, 1.0, 0.0))
         color_mode: uniform(0.0)
+        // Keep points with view depth inside [x, y] (cloud units).
+        crop: uniform(vec2(0.0, 100000.0))
+        // xyz: effector position (world), w: 1 = active.
+        effector: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // x: mode (0 off, 1 attract, 2 repel, 3 swirl, 4 ripple),
+        // y: strength, z: radius, w: time.
+        effect: uniform(vec4(0.0, 0.5, 0.5, 0.0))
 
         v_color: varying(vec3f)
 
@@ -119,6 +138,10 @@ script_mod! {
                 return
             }
             let z = mix(mix(z00, z10, fx), mix(z01, z11, fx), fy)
+            if z < self.crop.x || z > self.crop.y {
+                self.cull()
+                return
+            }
 
             if self.edge_cut > 0.0 {
                 let rx = vec2(self.edge_radius * self.depth_texel.z, 0.0)
@@ -137,8 +160,31 @@ script_mod! {
 
             // Unproject through the origin pinhole (camera looks down -z, +y up).
             let ndc = vec2(cell.x * 2.0 - 1.0, 1.0 - cell.y * 2.0)
-            let world = vec4(ndc.x * self.tan_half.x * z, ndc.y * self.tan_half.y * z, -z, 1.0)
-            let view = self.draw_pass.camera_view * world
+            var wp = vec3(ndc.x * self.tan_half.x * z, ndc.y * self.tan_half.y * z, -z)
+            if self.effect.x > 0.5 && self.effector.w > 0.5 {
+                let d = wp - self.effector.xyz
+                let r = length(d)
+                let radius = max(self.effect.z, 0.0001)
+                let s = self.effect.y * exp(-(r * r) / (radius * radius))
+                if self.effect.x < 1.5 {
+                    // Attract: pulled toward the cursor.
+                    wp = wp - d * min(s, 1.0)
+                } else if self.effect.x < 2.5 {
+                    // Repel: pushed out of a sphere around it.
+                    wp = wp + d / max(r, 0.0001) * s * radius
+                } else if self.effect.x < 3.5 {
+                    // Swirl around the view axis through the cursor.
+                    let a = s * 3.0
+                    let ca = cos(a)
+                    let sa = sin(a)
+                    wp = self.effector.xyz + vec3(d.x * ca - d.y * sa, d.x * sa + d.y * ca, d.z)
+                } else {
+                    // Ripple: depth waves running out from the cursor.
+                    let wave = sin(r * 12.0 / radius - self.effect.w * 6.0)
+                    wp = wp + vec3(0.0, 0.0, wave * s * radius * 0.3)
+                }
+            }
+            let view = self.draw_pass.camera_view * vec4(wp.x, wp.y, wp.z, 1.0)
             // Camera-facing billboard covering exactly one cell at depth z.
             let half_x = self.tan_half.x * self.grid.z * z * self.point_size
             let half_y = self.tan_half.y * self.grid.w * z * self.point_size
@@ -194,6 +240,46 @@ pub struct DrawDepthCloud {
     /// Instance stream: grid cell index (exact integer in f32).
     #[live(0.0)]
     pub point_id: f32,
+}
+
+/// What the mouse does to the points around the cursor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloudEffect {
+    #[default]
+    Off,
+    Attract,
+    Repel,
+    Swirl,
+    Ripple,
+}
+
+impl CloudEffect {
+    pub const ALL: [CloudEffect; 5] = [Self::Off, Self::Attract, Self::Repel, Self::Swirl, Self::Ripple];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Attract => "Attract",
+            Self::Repel => "Repel",
+            Self::Swirl => "Swirl",
+            Self::Ripple => "Ripple",
+        }
+    }
+
+    fn mode(self) -> f32 {
+        self as u32 as f32
+    }
+}
+
+/// What the widget reports to its host.
+#[derive(Clone, Debug, Default)]
+pub enum DepthCloudAction {
+    #[default]
+    None,
+    /// A human-readable status line (source opened, model loaded, errors).
+    Status(String),
+    /// Playback statistics, a few times a second.
+    Stats(FrameStats),
 }
 
 /// How a renderer's depth target encodes depth.
@@ -266,6 +352,33 @@ pub struct DepthCloud {
     /// Bound to texture slots the current source does not use.
     #[rust]
     dummy: Option<Texture>,
+
+    /// Keep only points whose depth is inside this band (cloud units; the
+    /// near plane of a frame source sits at 1).
+    #[rust((0.0, 100000.0))]
+    pub crop: (f32, f32),
+    #[rust]
+    pub effect: CloudEffect,
+    #[rust(0.6)]
+    pub effect_strength: f32,
+    /// Effector reach in cloud units.
+    #[rust(0.35)]
+    pub effect_radius: f32,
+    /// Depth of the plane the cursor's ray meets to place the effector;
+    /// `None` = the scene's middle depth.
+    #[rust]
+    pub effect_depth: Option<f32>,
+    #[rust]
+    mouse: Option<DVec2>,
+
+    #[rust]
+    pipeline: Option<Pipeline>,
+    #[rust]
+    settings: PipelineSettings,
+    #[rust]
+    pump: NextFrame,
+    #[rust]
+    stats_at: f64,
 }
 
 impl DepthCloud {
@@ -274,6 +387,49 @@ impl DepthCloud {
     pub fn pivot_distance(depth_amount: f32) -> f32 {
         let far = depth_amount.max(1.0);
         2.0 * far / (1.0 + far)
+    }
+
+    /// Play `spec` (a video, a depth model, ...): decoding and depth run on
+    /// a worker; progress arrives as [`DepthCloudAction`]s.
+    pub fn open(&mut self, cx: &mut Cx, spec: SourceSpec) -> Result<(), String> {
+        self.close();
+        self.rendered = None;
+        self.has_depth = false;
+        self.picture_rect = spec.layout.picture_rect();
+        let pipeline = Pipeline::start(cx.task_pool(), spec, self.settings)?;
+        self.pipeline = Some(pipeline);
+        self.pump = cx.new_next_frame();
+        // The cloud draws inside its XrSceneView's own pass: redraw the whole
+        // tree so that pass re-renders too.
+        cx.redraw_all();
+        Ok(())
+    }
+
+    /// Stop playback (the worker exits on its own).
+    pub fn close(&mut self) {
+        self.pipeline = None;
+    }
+
+    pub fn settings(&self) -> PipelineSettings {
+        self.settings
+    }
+
+    /// Depth speed / accuracy and stabilization knobs, applied live.
+    pub fn set_settings(&mut self, settings: PipelineSettings) {
+        self.settings = settings;
+        if let Some(pipeline) = self.pipeline.as_mut() {
+            pipeline.set_settings(settings);
+        }
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.set_paused(paused);
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.pipeline.as_ref().is_some_and(|p| !p.failed())
     }
 
     /// Show something already rendered on the GPU (a 3D scene's colour
@@ -290,6 +446,7 @@ impl DepthCloud {
         encoding: RenderedDepth,
         scale: f32,
     ) {
+        self.close();
         self.rendered = Some(RenderedSource {
             color: color.clone(),
             depth: depth.clone(),
@@ -297,13 +454,17 @@ impl DepthCloud {
             encoding,
             scale,
         });
-        self.draw_cloud.redraw(cx);
+        // The cloud draws inside its XrSceneView's own pass: redraw the whole
+        // tree so that pass re-renders too.
+        cx.redraw_all();
     }
 
     /// Back to the frame source (models, packed RGBD, depth passes).
     pub fn clear_rendered_source(&mut self, cx: &mut Cx) {
         self.rendered = None;
-        self.draw_cloud.redraw(cx);
+        // The cloud draws inside its XrSceneView's own pass: redraw the whole
+        // tree so that pass re-renders too.
+        cx.redraw_all();
     }
 
     /// Picture pixel size of the active source, `None` when nothing to draw.
@@ -395,7 +556,9 @@ impl DepthCloud {
             }
             self.has_depth = true;
         }
-        self.draw_cloud.redraw(cx);
+        // The cloud draws inside its XrSceneView's own pass: redraw the whole
+        // tree so that pass re-renders too.
+        cx.redraw_all();
     }
 
     fn set_draw_uniforms(
@@ -423,6 +586,9 @@ impl DepthCloud {
         // Same vertical FOV as the scene camera: the front view is the picture.
         let tan_y = 1.0 / scene.projection.v[5].abs().max(0.00001);
         let far = self.depth_amount.max(1.0);
+        let effector = self.effector(scene);
+        let crop = self.crop;
+        let effect = [self.effect.mode(), self.effect_strength, self.effect_radius];
         let dv = &mut self.draw_cloud.draw_vars;
         let ((dw, dh), rect, depth_mode, params, color_mode) = match (&self.rendered, &self.textures) {
             (Some(r), _) => {
@@ -463,11 +629,105 @@ impl DepthCloud {
         dv.set_uniform(cx.cx, live_id!(depth_mode), &[depth_mode]);
         dv.set_uniform(cx.cx, live_id!(depth_params), &params);
         dv.set_uniform(cx.cx, live_id!(color_mode), &[color_mode]);
+        dv.set_uniform(cx.cx, live_id!(crop), &[crop.0, crop.1]);
+        dv.set_uniform(
+            cx.cx,
+            live_id!(effector),
+            &match effector {
+                Some(p) => [p.x, p.y, p.z, 1.0],
+                None => [0.0, 0.0, 0.0, 0.0],
+            },
+        );
+        dv.set_uniform(
+            cx.cx,
+            live_id!(effect),
+            &[effect[0], effect[1], effect[2], scene.time as f32],
+        );
+    }
+}
+
+impl DepthCloud {
+    /// Where the cursor's ray meets the effect plane, in world space.
+    fn effector(&self, scene: &SceneState3D) -> Option<Vec3f> {
+        if self.effect == CloudEffect::Off {
+            return None;
+        }
+        let abs = self.mouse?;
+        let rect = scene.viewport_rect;
+        if rect.size.x <= 1.0 || rect.size.y <= 1.0 || !rect.contains(abs) {
+            return None;
+        }
+        let ndc_x = (((abs.x - rect.pos.x) / rect.size.x) * 2.0 - 1.0) as f32;
+        let ndc_y = (1.0 - ((abs.y - rect.pos.y) / rect.size.y) * 2.0) as f32;
+        let inv_projection = scene.projection.invert();
+        let inv_view = scene.view.invert();
+        let unproject = |z: f32| {
+            let v = inv_projection.transform_vec4(vec4(ndc_x, ndc_y, z, 1.0));
+            let v = vec4(v.x / v.w, v.y / v.w, v.z / v.w, 1.0);
+            let w = inv_view.transform_vec4(v);
+            vec3(w.x / w.w, w.y / w.w, w.z / w.w)
+        };
+        let near = unproject(-1.0);
+        let far = unproject(1.0);
+        let dir = far - near;
+        let depth = self
+            .effect_depth
+            .unwrap_or_else(|| Self::pivot_distance(self.depth_amount));
+        // The plane z = -depth (the capture camera looks down -z).
+        if dir.z.abs() < 1e-6 {
+            return None;
+        }
+        let t = (-depth - near.z) / dir.z;
+        (t > 0.0).then(|| near + dir * t)
+    }
+
+    fn pump_frames(&mut self, cx: &mut Cx) {
+        let uid = self.uid;
+        let mut animate = self.effect == CloudEffect::Ripple && self.mouse.is_some();
+        if let Some(pipeline) = self.pipeline.as_mut() {
+            pipeline.flush_settings();
+            if let Some(status) = pipeline.take_status() {
+                cx.widget_action(uid, DepthCloudAction::Status(status));
+            }
+            let failed = pipeline.failed();
+            if let Some(frame) = pipeline.take_frame() {
+                let stats = frame.stats;
+                self.push_frame(cx, frame.width, frame.height, &frame.nv12, frame.depth);
+                let now = Cx::monotonic_now();
+                if now - self.stats_at > 0.25 {
+                    self.stats_at = now;
+                    cx.widget_action(uid, DepthCloudAction::Stats(stats));
+                }
+            }
+            animate |= !failed;
+        }
+        if animate {
+            // The cloud draws inside its XrSceneView's own pass: redraw the whole
+        // tree so that pass re-renders too.
+        cx.redraw_all();
+            self.pump = cx.new_next_frame();
+        }
     }
 }
 
 impl Widget for DepthCloud {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        match event {
+            Event::NextFrame(next) if next.set.contains(&self.pump) => self.pump_frames(cx),
+            Event::MouseMove(e) => {
+                self.mouse = Some(e.abs);
+                if self.effect != CloudEffect::Off {
+                    // The cloud draws inside its XrSceneView's own pass: redraw the whole
+        // tree so that pass re-renders too.
+        cx.redraw_all();
+                    if self.effect == CloudEffect::Ripple {
+                        self.pump = cx.new_next_frame();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn draw_3d(&mut self, cx: &mut Cx3d, _scope: &mut Scope) -> DrawStep {
         let Some(scene) = cx.scene_state_3d() else {

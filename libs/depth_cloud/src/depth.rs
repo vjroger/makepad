@@ -157,6 +157,9 @@ pub trait DepthEstimator {
         picture: [f32; 4],
         depth_res: usize,
     ) -> Result<RawDepth, String>;
+
+    /// Forget temporal state (a cut, a seek, a loop): video models only.
+    fn reset(&mut self) {}
 }
 
 /// What the worker builds its estimator from (the estimator itself is
@@ -173,8 +176,9 @@ pub enum DepthSource {
     /// (Blender / Unreal / C4D Z or mist pass). White = near unless
     /// `near_dark`. Exact and free: no model runs.
     PassVideo { path: String, near_dark: bool },
-    /// Native Depth-Anything-V2 family, e.g. V2-Small: the realtime tier
-    /// (`--features localai`).
+    /// Native Depth-Anything-V2 family, e.g. V2-Small, and
+    /// Video-Depth-Anything (temporal head, flicker-free), detected from the
+    /// weights (`--features localai`).
     #[cfg(feature = "localai")]
     Anything { model_path: String },
     /// Native Depth-Anything-3 metric-large (`--features localai`).
@@ -367,10 +371,19 @@ mod native {
                 Da3Precision::FullBf16 => "bf16",
                 Da3Precision::StrictF32 => "f32",
             };
+            let family = if self.model.is_temporal() {
+                "Video-Depth-Anything"
+            } else {
+                "Depth-Anything"
+            };
             format!(
-                "Depth-Anything {} ({precision}, native)",
+                "{family} {} ({precision}, native)",
                 self.model.config().variant()
             )
+        }
+
+        fn reset(&mut self) {
+            self.model.reset_stream();
         }
 
         fn estimate(

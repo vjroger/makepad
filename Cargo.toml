@@ -120,6 +120,7 @@ workspace.members = [
     "examples/xr",
     "examples/splat_bench",
     "examples/depth_cloud",
+    "libs/depth_cloud",
     "examples/cad",
     "examples/box3d",
     "examples/hello_world",

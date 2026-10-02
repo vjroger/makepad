@@ -1,49 +1,39 @@
-//! Video -> realtime depthmap -> 3D point cloud.
+//! Video -> realtime depthmap -> 3D point cloud, on the reusable
+//! `makepad-depth-cloud` widget.
 //!
 //! From the front the cloud reads as the flat video; drag to orbit and the
-//! pixels float apart by depth. Depth comes from a pluggable source, with
-//! the model input size and the depth rate as the speed / accuracy knobs.
+//! pixels float apart by depth. "Open video..." / "Open model..." (or a drop
+//! on the window) pick the inputs; the sliders trade depth speed against
+//! accuracy, crop a depth band, and shape the cloud with mouse effects.
 //!
 //! ```text
 //! makepad-example-depth-cloud [VIDEO] [--layout full|sbs|tb]
-//!     [--depth flat|ground|packed|anything|da3] [--model WEIGHTS]
+//!     [--depth flat|ground|packed|pass|anything|da3] [--model WEIGHTS]
+//!     [--depth-video PASS [--depth-near-dark]] [--scene]
 //! ```
 //!
 //! * no VIDEO: a built-in animated RGBD clip (exact depth, no model needed);
-//! * `--layout sbs|tb` + `--depth packed`: RGBD videos (picture left/top,
-//!   grayscale depth right/bottom, white = near) play with zero model cost;
-//! * `--model depth_anything_v2_vits.pth` (`--depth anything`, the default
-//!   with a model): native Depth-Anything-V2 (Small = realtime tier; also
-//!   Distill-Any-Depth and V2-Base/Large checkpoints). `--depth da3 --model
-//!   model.safetensors`: Depth-Anything-3 metric-large. Both need
-//!   `--features localai` and run on CUDA (NVIDIA, Windows/Linux).
-//!   `DEPTH_CLOUD_MODEL` also works.
-//! * `--depth ground`: a free "lower is nearer" prior, `flat`: a plane.
-//!
-//! Already-rendered content uses its own depth instead of a model:
-//! * `--depth-video PASS` (`--depth-near-dark` when near is black): a 3D
-//!   render's depth / Z / mist pass exported as a second video, frame-locked;
-//! * `--scene`: a live GPU-rendered scene whose colour and linear-depth
-//!   targets the cloud samples directly (`DepthCloud::set_rendered_source`,
-//!   the hook for any in-app renderer): no readback, no model.
-//!
-//! Controls: drag = orbit, wheel = dolly, "Front view" = back to the video.
+//! * `--model depth_anything_v2_vits.pth` or `video_depth_anything_vits.pth`:
+//!   native Depth-Anything-V2 / Video-Depth-Anything (temporal, no flicker);
+//!   `--depth da3 --model model.safetensors`: DA3 metric-large. Models need
+//!   `--features localai` and CUDA (NVIDIA, Windows/Linux);
+//! * `--layout sbs|tb`: RGBD videos with the depth packed in the frame;
+//! * `--depth-video PASS`: a render's depth pass as a second video;
+//! * `--scene`: a live GPU-rendered scene sampled directly, no model.
 
 pub use makepad_widgets;
 pub use makepad_xr;
 
-mod cloud;
-mod depth;
 mod picker;
-mod pipeline;
 mod rendered;
 
-use cloud::{DepthCloud, RenderedDepth};
-use rendered::RenderedScene;
-use depth::{DepthSource, FrameLayout};
+use makepad_depth_cloud::{
+    CloudEffect, DepthCloud, DepthCloudAction, DepthSource, FrameLayout, PipelineSettings,
+    RenderedDepth, SourceSpec, VideoInput,
+};
 use makepad_widgets::*;
 use makepad_xr::scene::XrSceneView;
-use pipeline::{Pipeline, PipelineSettings, SourceSpec, VideoInput};
+use rendered::RenderedScene;
 
 app_main!(App);
 
@@ -135,6 +125,17 @@ script_mod! {
                                 point_size := PanelSlider{text: "Point size (cells)" min: 0.3 max: 4.0 default: 1.15}
                                 edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.08}
                                 fov := PanelSlider{text: "Field of view (deg)" min: 20.0 max: 100.0 step: 1.0 default: 50.0 precision: 0}
+                                Hr{}
+
+                                Label{text: "Depth crop (0 = nearest, 1 = farthest)"}
+                                crop_near := PanelSlider{text: "Crop near" min: 0.0 max: 1.0 default: 0.0}
+                                crop_far := PanelSlider{text: "Crop far" min: 0.0 max: 1.0 default: 1.0}
+                                Hr{}
+
+                                Label{text: "Mouse effect"}
+                                effect := DropDown{labels: ["Off" "Attract" "Repel" "Swirl" "Ripple"]}
+                                effect_strength := PanelSlider{text: "Strength" min: 0.0 max: 2.0 default: 0.6}
+                                effect_radius := PanelSlider{text: "Radius" min: 0.05 max: 2.0 default: 0.35}
                             }
                         }
                     }
@@ -145,7 +146,7 @@ script_mod! {
 }
 
 enum Args {
-    Pipeline(SourceSpec),
+    Play(SourceSpec),
     /// The live GPU-rendered scene.
     Scene,
 }
@@ -199,43 +200,41 @@ impl Args {
                 path: depth_video.ok_or("--depth pass needs --depth-video <file>")?,
                 near_dark,
             },
-            "anything" => Self::native(model, false)?,
-            "da3" => Self::native(model, true)?,
+            "anything" => native(model, false)?,
+            "da3" => native(model, true)?,
             other => {
                 return Err(format!(
                     "unknown --depth {other} (flat|ground|packed|pass|anything|da3)"
                 ))
             }
         };
-        Ok(Self::Pipeline(SourceSpec {
+        Ok(Self::Play(SourceSpec {
             input,
             layout,
             depth,
         }))
     }
+}
 
-    #[cfg(feature = "localai")]
-    fn native(model: Option<String>, da3: bool) -> Result<DepthSource, String> {
-        let model_path = model.ok_or("a native depth model needs --model <weights file>")?;
-        Ok(if da3 {
-            DepthSource::Da3 { model_path }
-        } else {
-            DepthSource::Anything { model_path }
-        })
-    }
+#[cfg(feature = "localai")]
+fn native(model: Option<String>, da3: bool) -> Result<DepthSource, String> {
+    let model_path = model.ok_or("a native depth model needs --model <weights file>")?;
+    Ok(if da3 {
+        DepthSource::Da3 { model_path }
+    } else {
+        DepthSource::Anything { model_path }
+    })
+}
 
-    #[cfg(not(feature = "localai"))]
-    fn native(_model: Option<String>, _da3: bool) -> Result<DepthSource, String> {
-        Err("native depth models need a build with --features localai".into())
-    }
+#[cfg(not(feature = "localai"))]
+fn native(_model: Option<String>, _da3: bool) -> Result<DepthSource, String> {
+    Err("native depth models need a build with --features localai".into())
 }
 
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
-    #[rust]
-    pipeline: Option<Pipeline>,
     #[rust]
     settings: PipelineSettings,
     #[rust]
@@ -244,8 +243,9 @@ pub struct App {
     paused: bool,
     #[rust(4.0)]
     depth_amount: f32,
-    #[rust]
-    stats_at: f64,
+    /// Crop band as fractions of the near..far range.
+    #[rust((0.0, 1.0))]
+    crop: (f32, f32),
     #[rust]
     scene_mode: bool,
     /// Chosen through the buttons or a drop; `None` = built-in test clip.
@@ -260,11 +260,10 @@ impl App {
         self.ui.label(cx, ids!(status)).set_text(cx, text);
     }
 
-    fn with_cloud(&self, cx: &mut Cx, f: impl FnOnce(&mut Cx, &mut DepthCloud)) {
+    fn with_cloud<R>(&self, cx: &mut Cx, f: impl FnOnce(&mut Cx, &mut DepthCloud) -> R) -> Option<R> {
         let cloud = self.ui.widget(cx, ids!(cloud));
-        if let Some(mut cloud) = cloud.borrow_mut::<DepthCloud>() {
-            f(cx, &mut cloud);
-        };
+        let mut cloud = cloud.borrow_mut::<DepthCloud>()?;
+        Some(f(cx, &mut cloud))
     }
 
     fn with_scene(&self, cx: &mut Cx, f: impl FnOnce(&mut XrSceneView)) {
@@ -287,56 +286,16 @@ impl App {
         cx.redraw_all();
     }
 
-    fn pump_frame(&mut self, cx: &mut Cx) {
-        if self.scene_mode {
-            // Animate: the scene re-renders and the cloud re-reads it.
-            if !self.paused {
-                cx.redraw_all();
-            }
-            self.pump = cx.new_next_frame();
-            return;
-        }
-        let Some(pipeline) = self.pipeline.as_mut() else {
-            return;
-        };
-        pipeline.flush_settings();
-        if let Some(status) = pipeline.take_status() {
-            self.set_status(cx, &status);
-        }
-        let Some(pipeline) = self.pipeline.as_mut() else {
-            return;
-        };
-        if let Some(frame) = pipeline.take_frame() {
-            let stats = frame.stats;
-            self.with_cloud(cx, |cx, cloud| {
-                cloud.push_frame(cx, frame.width, frame.height, &frame.nv12, frame.depth)
-            });
-            let now = Cx::monotonic_now();
-            if now - self.stats_at > 0.25 {
-                self.stats_at = now;
-                let text = format!(
-                    "depth {}x{}: {:.1} ms\nshown {}  dropped {}  depth runs {}",
-                    stats.depth_width,
-                    stats.depth_height,
-                    stats.depth_ms,
-                    stats.shown,
-                    stats.dropped,
-                    stats.depth_runs
-                );
-                self.ui.label(cx, ids!(stats)).set_text(cx, &text);
-            }
-            cx.redraw_all();
-        }
-        let Some(pipeline) = self.pipeline.as_mut() else {
-            return;
-        };
-        if pipeline.failed() {
-            if let Some(status) = pipeline.take_status() {
-                self.set_status(cx, &status);
-            }
-        } else {
-            self.pump = cx.new_next_frame();
-        }
+    /// The crop band in cloud depth units: 0 = near plane, 1 = far plane.
+    fn apply_crop(&self, cx: &mut Cx) {
+        let far = self.depth_amount.max(1.0);
+        // Interpolate in disparity, like the depth mapping itself.
+        let at = |f: f32| 1.0 / (1.0 + (1.0 / far - 1.0) * f.clamp(0.0, 1.0));
+        let (lo, hi) = self.crop;
+        let near_cut = if lo <= 0.0 { 0.0 } else { at(lo) * 0.999 };
+        let far_cut = if hi >= 1.0 { 100000.0 } else { at(hi) * 1.001 };
+        self.with_cloud(cx, |_, cloud| cloud.crop = (near_cut, far_cut));
+        cx.redraw_all();
     }
 
     /// Live rendered input: the cloud samples the scene's own colour and
@@ -359,6 +318,29 @@ impl App {
         self.pump = cx.new_next_frame();
     }
 
+    fn play(&mut self, cx: &mut Cx, spec: SourceSpec) {
+        if self.scene_mode {
+            self.scene_mode = false;
+            let live = self.ui.widget(cx, ids!(live_scene));
+            if let Some(mut live) = live.borrow_mut::<RenderedScene>() {
+                live.active = false;
+            };
+        }
+        if self.paused {
+            self.paused = false;
+            self.ui.button(cx, ids!(play_pause)).set_text(cx, "Pause");
+        }
+        let settings = self.settings;
+        let result = self.with_cloud(cx, |cx, cloud| {
+            cloud.set_settings(settings);
+            cloud.open(cx, spec)
+        });
+        if let Some(Err(err)) = result {
+            self.set_status(cx, &err);
+        }
+        self.front_view(cx);
+    }
+
     /// (Re)start playback from the chosen video and model.
     fn open_chosen(&mut self, cx: &mut Cx) {
         let input = match &self.video_path {
@@ -372,45 +354,15 @@ impl App {
         let depth = if layout != FrameLayout::Full {
             DepthSource::Packed(layout)
         } else {
-            match Args::native(self.model_path.clone(), false) {
-                Ok(source) => source,
-                Err(_) => DepthSource::GroundPrior,
-            }
+            native(self.model_path.clone(), false).unwrap_or(DepthSource::GroundPrior)
         };
         let no_model = matches!(depth, DepthSource::GroundPrior);
-        self.start_pipeline(cx, SourceSpec { input, layout, depth });
+        self.play(cx, SourceSpec { input, layout, depth });
         if no_model {
             self.set_status(
                 cx,
                 "No depth model loaded: using a rough guess. Click \"Open model...\" and pick depth_anything_v2_vits.pth.",
             );
-        }
-    }
-
-    fn start_pipeline(&mut self, cx: &mut Cx, spec: SourceSpec) {
-        // Leave the live scene, drop the old worker (it stops on its own).
-        if self.scene_mode {
-            self.scene_mode = false;
-            let live = self.ui.widget(cx, ids!(live_scene));
-            if let Some(mut live) = live.borrow_mut::<RenderedScene>() {
-                live.active = false;
-            };
-            self.with_cloud(cx, |cx, cloud| cloud.clear_rendered_source(cx));
-        }
-        self.pipeline = None;
-        let picture_rect = spec.layout.picture_rect();
-        self.with_cloud(cx, |_, cloud| cloud.set_picture_rect(picture_rect));
-        self.front_view(cx);
-        if self.paused {
-            self.paused = false;
-            self.ui.button(cx, ids!(play_pause)).set_text(cx, "Pause");
-        }
-        match Pipeline::start(cx.task_pool(), spec, self.settings) {
-            Ok(pipeline) => {
-                self.pipeline = Some(pipeline);
-                self.pump = cx.new_next_frame();
-            }
-            Err(err) => self.set_status(cx, &err),
         }
     }
 
@@ -428,44 +380,64 @@ impl App {
         self.open_chosen(cx);
     }
 
-    fn update_settings(&mut self) {
-        if let Some(pipeline) = self.pipeline.as_mut() {
-            pipeline.set_settings(self.settings);
-        }
+    fn update_settings(&mut self, cx: &mut Cx) {
+        let settings = self.settings;
+        self.with_cloud(cx, |_, cloud| cloud.set_settings(settings));
     }
 }
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let spec = match Args::parse() {
-            Ok(Args::Pipeline(spec)) => spec,
-            Ok(Args::Scene) => {
-                self.start_scene(cx);
-                return;
+        match Args::parse() {
+            Ok(Args::Play(spec)) => {
+                if let VideoInput::File(path) = &spec.input {
+                    self.video_path = Some(path.clone());
+                }
+                #[cfg(feature = "localai")]
+                if let DepthSource::Anything { model_path } = &spec.depth {
+                    self.model_path = Some(model_path.clone());
+                }
+                self.play(cx, spec);
             }
+            Ok(Args::Scene) => self.start_scene(cx),
             Err(err) => {
                 log!("depth-cloud: {err}");
                 self.set_status(cx, &err);
-                return;
             }
-        };
-        if let VideoInput::File(path) = &spec.input {
-            self.video_path = Some(path.clone());
         }
-        #[cfg(feature = "localai")]
-        if let DepthSource::Anything { model_path } = &spec.depth {
-            self.model_path = Some(model_path.clone());
-        }
-        self.start_pipeline(cx, spec);
     }
 
     fn handle_next_frame(&mut self, cx: &mut Cx, e: &NextFrameEvent) {
-        if e.set.contains(&self.pump) {
-            self.pump_frame(cx);
+        // Only the live scene needs the app to drive frames: it re-renders
+        // and the cloud re-reads it. Video playback pumps inside the widget.
+        if e.set.contains(&self.pump) && self.scene_mode {
+            if !self.paused {
+                cx.redraw_all();
+            }
+            self.pump = cx.new_next_frame();
         }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let cloud_uid = self.ui.widget(cx, ids!(cloud)).widget_uid();
+        for action in actions.filter_widget_actions_cast::<DepthCloudAction>(cloud_uid) {
+            match action {
+                DepthCloudAction::Status(status) => self.set_status(cx, &status),
+                DepthCloudAction::Stats(stats) => {
+                    let text = format!(
+                        "depth {}x{}: {:.1} ms\nshown {}  dropped {}  depth runs {}",
+                        stats.depth_width,
+                        stats.depth_height,
+                        stats.depth_ms,
+                        stats.shown,
+                        stats.dropped,
+                        stats.depth_runs
+                    );
+                    self.ui.label(cx, ids!(stats)).set_text(cx, &text);
+                }
+                DepthCloudAction::None => {}
+            }
+        }
         for action in actions {
             if let Some(path) = picker::picked(action, picker::PICK_VIDEO)
                 .or_else(|| picker::picked(action, picker::PICK_MODEL))
@@ -479,24 +451,25 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(open_model)).clicked(actions) {
             picker::pick_model(cx);
         }
+
         let ui = self.ui.clone();
         let slided = |cx: &mut Cx, id: &[LiveId]| ui.slider(cx, id).slided(actions);
 
         if let Some(v) = slided(cx, ids!(depth_res)) {
             self.settings.depth_res = v.round() as usize;
-            self.update_settings();
+            self.update_settings(cx);
         }
         if let Some(v) = slided(cx, ids!(depth_every)) {
             self.settings.depth_every = v.round().max(1.0) as u32;
-            self.update_settings();
+            self.update_settings(cx);
         }
         if let Some(v) = slided(cx, ids!(range_smoothing)) {
             self.settings.range_smoothing = v as f32;
-            self.update_settings();
+            self.update_settings(cx);
         }
         if let Some(v) = slided(cx, ids!(pixel_smoothing)) {
             self.settings.pixel_smoothing = v as f32;
-            self.update_settings();
+            self.update_settings(cx);
         }
 
         let mut redraw = false;
@@ -511,7 +484,7 @@ impl MatchEvent for App {
                 camera.desktop_target = vec3f(0.0, 0.0, -pivot);
                 camera.distance += pivot - old_pivot;
             });
-            redraw = true;
+            self.apply_crop(cx);
         }
         if let Some(v) = slided(cx, ids!(points_per_row)) {
             self.with_cloud(cx, |_, cloud| cloud.points_per_row = v as f32);
@@ -533,15 +506,35 @@ impl MatchEvent for App {
             };
             redraw = true;
         }
+        if let Some(v) = slided(cx, ids!(crop_near)) {
+            self.crop.0 = v as f32;
+            self.apply_crop(cx);
+        }
+        if let Some(v) = slided(cx, ids!(crop_far)) {
+            self.crop.1 = v as f32;
+            self.apply_crop(cx);
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(effect)).changed(actions) {
+            let effect = CloudEffect::ALL.get(index).copied().unwrap_or_default();
+            self.with_cloud(cx, |_, cloud| cloud.effect = effect);
+            redraw = true;
+        }
+        if let Some(v) = slided(cx, ids!(effect_strength)) {
+            self.with_cloud(cx, |_, cloud| cloud.effect_strength = v as f32);
+            redraw = true;
+        }
+        if let Some(v) = slided(cx, ids!(effect_radius)) {
+            self.with_cloud(cx, |_, cloud| cloud.effect_radius = v as f32);
+            redraw = true;
+        }
 
         if self.ui.button(cx, ids!(front_view)).clicked(actions) {
             self.front_view(cx);
         }
         if self.ui.button(cx, ids!(play_pause)).clicked(actions) {
             self.paused = !self.paused;
-            if let Some(pipeline) = &self.pipeline {
-                pipeline.set_paused(self.paused);
-            }
+            let paused = self.paused;
+            self.with_cloud(cx, |_, cloud| cloud.set_paused(paused));
             let text = if self.paused { "Play" } else { "Pause" };
             self.ui.button(cx, ids!(play_pause)).set_text(cx, text);
         }
@@ -555,7 +548,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
-        cloud::script_mod(vm);
+        makepad_depth_cloud::script_mod(vm);
         rendered::script_mod(vm);
         self::script_mod(vm)
     }

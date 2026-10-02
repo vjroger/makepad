@@ -326,6 +326,7 @@ impl Worker {
                     if let Some(pass) = depth_pass.as_mut() {
                         pass.rewind()?;
                     }
+                    estimator.reset();
                     clock = None;
                     stabilizer.reset();
                     since_depth = u32::MAX;

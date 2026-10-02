@@ -1,0 +1,15 @@
+[package]
+name = "makepad-depth-cloud"
+version = "0.1.0"
+edition = "2021"
+description = "DepthCloud: plays video (or already-rendered content) as a 3D point cloud from realtime depth"
+license = "MIT OR Apache-2.0"
+
+[features]
+# Native depth models through libs/ai (Depth-Anything-V2, Video-Depth-Anything,
+# DA3 metric). CUDA (NVIDIA, Windows/Linux); without it the free sources work.
+localai = ["dep:makepad-ai-vision"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-ai-vision = { path = "../ai/models/vision", optional = true }
