@@ -1,0 +1,1271 @@
+//! Parameters of the procedural HDRI generator.
+//!
+//! One serialisable struct is the in-app state, the preset file format and
+//! the AI tool format at once. Every field has a documented range, and
+//! [`HdriParams::clamp`] enforces the ranges and reports what it changed, so
+//! a hand-edited file or an AI patch can never feed NaN or an unknown choice
+//! into the model.
+//!
+//! micro-serde rules this file follows:
+//! - There is no default attribute: a missing field fails to load unless its
+//!   type is `Option<..>`. Every field added after phase 1a is therefore an
+//!   `Option`, so files saved by 1a keep loading.
+//! - Rust enums serialise as `{"Variant":[]}`, which is awkward to write by
+//!   hand or from a model, so choices are lowercase strings with typed
+//!   accessors (`HdriParams::mode`, `LightParams::shape`, ...).
+//! - NaN and infinity serialise as `null` and then fail to load: clamp
+//!   before saving.
+//! - No `pub(crate)` on these structs or their fields; it breaks the derive.
+
+use makepad_draw::makepad_micro_serde::*;
+use std::collections::{HashMap, HashSet};
+
+/// Most lights a map holds; phase 1b (task B1) raises it to 16.
+pub const LIGHT_LIMIT: usize = 8;
+/// The params format this build reads and writes; clamp() pins `version` to it.
+pub const PARAMS_VERSION: u32 = 1;
+/// Accepted values of `HdriParams::mode`; the first is where unknown strings fall back to.
+pub const MODE_NAMES: &[&str] = &["sky", "studio"];
+/// Accepted values of `SunParams::mode`; the first is the fallback.
+pub const SUN_MODE_NAMES: &[&str] = &["time", "manual"];
+/// Accepted values of `LightParams::shape`; the first is the fallback. Phase 1b appends shapes.
+pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring"];
+/// Accepted values of `LightParams::blend`; the first is the fallback.
+pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
+
+/// Longest light name kept, in characters; a list row has no room for more.
+const LIGHT_NAME_LIMIT: usize = 64;
+
+/// Everything that defines one environment map.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct HdriParams {
+    /// Always PARAMS_VERSION (1).
+    pub version: u32,
+    /// "sky" | "studio": the base layer under the lights.
+    pub mode: String,
+    /// -10..=10. Scales the whole map by 2^intensity_ev.
+    pub intensity_ev: f32,
+    /// -180..=180, wrapped. Turns the content about +Y, positive
+    /// counter-clockwise seen from above (the sign of `EnvMap::procedural`
+    /// and the engine's `Ibl.rotation_deg`): content at azimuth a appears at
+    /// a - rotation_deg, so +90 moves a light at north (-Z) to west (-X).
+    pub rotation_deg: f32,
+    /// Seed of every procedural layer (clouds, stars).
+    pub seed: u32,
+    pub sky: SkyParams,
+    pub studio: StudioParams,
+    /// At most LIGHT_LIMIT. An overlay over the base layer in both modes, evaluated in list order.
+    pub lights: Vec<LightParams>,
+}
+
+/// The outdoor base layer.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct SkyParams {
+    pub sun: SunParams,
+    pub atmosphere: AtmosphereParams,
+    pub sun_disc: SunDiscParams,
+    pub clouds: CloudParams,
+    pub night: NightParams,
+}
+
+/// Where the sun is: from a date, time and place (NOAA), or set by hand.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct SunParams {
+    /// "time" (position from the date, hour and place) | "manual" (elevation_deg, azimuth_deg).
+    pub mode: String,
+    /// 1900..=2100, the range the NOAA formulas are good for.
+    pub year: i32,
+    /// 1..=12.
+    pub month: u32,
+    /// 1..=days in that month.
+    pub day: u32,
+    /// 0..=24, local clock time.
+    pub hour: f32,
+    /// -12..=14, hours east of UTC.
+    pub tz_offset: f32,
+    /// -90..=90, degrees north.
+    pub latitude: f32,
+    /// -180..=180, degrees east.
+    pub longitude: f32,
+    /// -90..=90 (manual mode).
+    pub elevation_deg: f32,
+    /// 0..360 clockwise from north, wrapped (manual mode).
+    pub azimuth_deg: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct AtmosphereParams {
+    /// 0..=10, aerosol (Mie) density; 1 = a clear day.
+    pub haze: f32,
+    /// 0..=10, air (Rayleigh) density; 1 = Earth.
+    pub air: f32,
+    /// 0..=10, ozone absorption; 1 = Earth.
+    pub ozone: f32,
+    /// Linear 0..=1, the ground below the horizon.
+    pub ground_color: [f32; 3],
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct SunDiscParams {
+    /// 0.1..=20 degrees across (the real sun is 0.53). The disc keeps its energy as it grows.
+    pub size_deg: f32,
+    /// 0..=1, limb softness.
+    pub softness: f32,
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct CloudParams {
+    /// 0..=1; 0 means no cloud layer.
+    pub coverage: f32,
+    /// 0..=1, edge sharpness.
+    pub sharpness: f32,
+    /// 0.1..=10, feature size.
+    pub scale: f32,
+    /// 500..=12000 metres, the height of the cloud layer.
+    pub altitude_m: f32,
+    /// 0..=1, high wispy cloud.
+    pub cirrus: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct NightParams {
+    /// 0..=1, star density.
+    pub stars: f32,
+    /// 0..=10.
+    pub star_brightness: f32,
+    pub moon: bool,
+    /// -90..=90.
+    pub moon_elevation_deg: f32,
+    /// 0..360 clockwise from north, wrapped.
+    pub moon_azimuth_deg: f32,
+    /// 0.1..=10 degrees across (the real moon is 0.52).
+    pub moon_size_deg: f32,
+    /// 0..=10.
+    pub moon_brightness: f32,
+    /// Linear 0..=1, airglow colour.
+    pub glow_color: [f32; 3],
+    /// 0..=10.
+    pub glow_strength: f32,
+}
+
+/// The studio base layer: a vertical gradient backdrop.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct StudioParams {
+    /// Linear 0..=10, straight up.
+    pub top: [f32; 3],
+    /// Linear 0..=10, at the horizon.
+    pub horizon: [f32; 3],
+    /// Linear 0..=10, straight down.
+    pub floor: [f32; 3],
+    /// 0.01..=1, how far the horizon colour spreads.
+    pub horizon_softness: f32,
+}
+
+/// One shaped light, placed on the sphere in its own angular frame.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct LightParams {
+    pub enabled: bool,
+    /// Up to 64 characters.
+    pub name: String,
+    /// "rect" | "disc" | "ring" (phase 1b adds more). A strip is a thin rect.
+    pub shape: String,
+    /// 0..=1 (rect only).
+    pub corner: f32,
+    /// 0..=0.95 (ring only).
+    pub inner: f32,
+    /// 0..360 clockwise from north, wrapped.
+    pub azimuth_deg: f32,
+    /// -90..=90.
+    pub elevation_deg: f32,
+    /// 0.1..=170 degrees.
+    pub width_deg: f32,
+    /// 0.1..=170 degrees.
+    pub height_deg: f32,
+    /// -180..=180, wrapped.
+    pub roll_deg: f32,
+    /// 0..=1, edge falloff.
+    pub softness: f32,
+    /// 0..=1, centre falloff.
+    pub hotspot: f32,
+    /// -10..=20.
+    pub intensity_ev: f32,
+    /// 1000..=20000.
+    pub kelvin: f32,
+    /// -1..=1: negative is green, positive magenta.
+    pub tint: f32,
+    /// "add" | "multiply" (multiply darkens everything drawn before it: flags).
+    pub blend: String,
+    /// At most one light is the key; clamp() keeps the first.
+    pub key: bool,
+    /// Explicit linear colour, 0..=1 per channel; overrides kelvin and tint when Some.
+    pub rgb: Option<[f32; 3]>,
+}
+
+/// Typed view of `HdriParams::mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Sky,
+    Studio,
+}
+
+/// Typed view of `SunParams::mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SunMode {
+    Time,
+    Manual,
+}
+
+/// Typed view of `LightParams::shape`; phase 1b adds variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightShape {
+    Rect,
+    Disc,
+    Ring,
+}
+
+/// Typed view of `LightParams::blend`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blend {
+    Add,
+    Multiply,
+}
+
+impl Mode {
+    /// The string stored in `HdriParams::mode`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Sky => "sky",
+            Mode::Studio => "studio",
+        }
+    }
+}
+
+impl SunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SunMode::Time => "time",
+            SunMode::Manual => "manual",
+        }
+    }
+}
+
+impl LightShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LightShape::Rect => "rect",
+            LightShape::Disc => "disc",
+            LightShape::Ring => "ring",
+        }
+    }
+}
+
+impl Blend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Blend::Add => "add",
+            Blend::Multiply => "multiply",
+        }
+    }
+}
+
+impl Default for HdriParams {
+    fn default() -> Self {
+        HdriParams {
+            version: PARAMS_VERSION,
+            mode: "sky".to_string(),
+            intensity_ev: 0.0,
+            rotation_deg: 0.0,
+            seed: 1,
+            sky: SkyParams::default(),
+            studio: StudioParams::default(),
+            lights: Vec::new(),
+        }
+    }
+}
+
+impl Default for SkyParams {
+    fn default() -> Self {
+        SkyParams {
+            sun: SunParams::default(),
+            atmosphere: AtmosphereParams::default(),
+            sun_disc: SunDiscParams::default(),
+            clouds: CloudParams::default(),
+            night: NightParams::default(),
+        }
+    }
+}
+
+impl Default for SunParams {
+    fn default() -> Self {
+        SunParams {
+            mode: "time".to_string(),
+            year: 2026,
+            month: 6,
+            day: 21,
+            hour: 13.0,
+            tz_offset: 0.0,
+            latitude: 45.0,
+            longitude: 0.0,
+            elevation_deg: 45.0,
+            azimuth_deg: 180.0,
+        }
+    }
+}
+
+impl Default for AtmosphereParams {
+    fn default() -> Self {
+        AtmosphereParams { haze: 1.0, air: 1.0, ozone: 1.0, ground_color: [0.18, 0.17, 0.15] }
+    }
+}
+
+impl Default for SunDiscParams {
+    fn default() -> Self {
+        SunDiscParams { size_deg: 0.53, softness: 0.2, visible: true }
+    }
+}
+
+impl Default for CloudParams {
+    fn default() -> Self {
+        CloudParams { coverage: 0.0, sharpness: 0.5, scale: 1.0, altitude_m: 2000.0, cirrus: 0.0 }
+    }
+}
+
+impl Default for NightParams {
+    fn default() -> Self {
+        NightParams {
+            stars: 0.5,
+            star_brightness: 1.0,
+            moon: true,
+            moon_elevation_deg: 30.0,
+            moon_azimuth_deg: 135.0,
+            moon_size_deg: 0.52,
+            moon_brightness: 1.0,
+            glow_color: [0.02, 0.03, 0.06],
+            glow_strength: 1.0,
+        }
+    }
+}
+
+impl Default for StudioParams {
+    fn default() -> Self {
+        StudioParams { top: [0.05; 3], horizon: [0.2; 3], floor: [0.1; 3], horizon_softness: 0.2 }
+    }
+}
+
+impl Default for LightParams {
+    fn default() -> Self {
+        LightParams {
+            enabled: true,
+            name: "Light".to_string(),
+            shape: "rect".to_string(),
+            corner: 0.2,
+            inner: 0.5,
+            azimuth_deg: 0.0,
+            elevation_deg: 30.0,
+            width_deg: 30.0,
+            height_deg: 20.0,
+            roll_deg: 0.0,
+            softness: 0.2,
+            hotspot: 0.0,
+            intensity_ev: 3.0,
+            kelvin: 6500.0,
+            tint: 0.0,
+            blend: "add".to_string(),
+            key: false,
+            rgb: None,
+        }
+    }
+}
+
+/// Case-insensitive, whitespace-tolerant choice test. The accessors use it so
+/// they read loose spellings correctly even before clamp() normalises them.
+fn is_choice(value: &str, name: &str) -> bool {
+    value.trim().eq_ignore_ascii_case(name)
+}
+
+impl HdriParams {
+    pub fn mode(&self) -> Mode {
+        if is_choice(&self.mode, "studio") {
+            Mode::Studio
+        } else {
+            Mode::Sky
+        }
+    }
+
+    /// Sanitises NaN/∞, clamps every field into its documented range, maps unknown
+    /// enum strings to the default ("sky", "time", "rect", "add"), truncates lights
+    /// to LIGHT_LIMIT, and keeps at most one key light (the first).
+    /// Returns the dotted paths it changed, e.g. "sky.clouds.coverage", "lights[2].shape".
+    ///
+    /// NaN becomes the field's default, infinities the nearest bound. Angles
+    /// wrap rather than clamp: azimuths into [0, 360), rotation and roll into
+    /// [-180, 180]. Choice strings are trimmed and lowercased; a spelling fix
+    /// counts as a change.
+    pub fn clamp(&mut self) -> Vec<String> {
+        let defaults = HdriParams::default();
+        let mut f = Fixes::default();
+        if self.version != PARAMS_VERSION {
+            self.version = PARAMS_VERSION;
+            f.push("", "version");
+        }
+        f.choice("", "mode", &mut self.mode, MODE_NAMES);
+        f.range("", "intensity_ev", &mut self.intensity_ev, -10.0, 10.0, defaults.intensity_ev);
+        f.wrap180("", "rotation_deg", &mut self.rotation_deg, defaults.rotation_deg);
+        self.sky.clamp_fields("sky", &mut f);
+        self.studio.clamp_fields("studio", &mut f);
+        if self.lights.len() > LIGHT_LIMIT {
+            self.lights.truncate(LIGHT_LIMIT);
+            f.push("", "lights");
+        }
+        let mut have_key = false;
+        for (i, light) in self.lights.iter_mut().enumerate() {
+            let prefix = format!("lights[{i}]");
+            light.clamp_fields(&prefix, &mut f);
+            // The engine takes one key light; the first one claimed wins.
+            if light.key {
+                if have_key {
+                    light.key = false;
+                    f.push(&prefix, "key");
+                }
+                have_key = true;
+            }
+        }
+        f.changed
+    }
+
+    /// Pretty JSON: the preset file format.
+    pub fn to_json(&self) -> String {
+        self.serialize_json_pretty()
+    }
+
+    /// Loads JSON leniently (keys this build does not know are skipped, so
+    /// files from newer builds load), then clamps.
+    pub fn from_json(json: &str) -> Result<HdriParams, String> {
+        let mut params = HdriParams::deserialize_json_lenient(json).map_err(|e| e.to_string())?;
+        params.clamp();
+        Ok(params)
+    }
+
+    /// Deep-merges a partial JSON object into a copy of self: objects merge key by key,
+    /// arrays and scalars replace. Unknown keys are dropped and reported as "ignored: <path>".
+    /// The merged copy is then clamped; clamped paths are reported too.
+    /// "lights" given as an array replaces the whole list; a light object missing fields
+    /// is completed from LightParams::default().
+    ///
+    /// A value of the wrong JSON kind (a string for a number, a scalar for an
+    /// object) is an error naming its path. Numbers aimed at integer fields are
+    /// rounded (a rounding counts as a clamp). `null` clears an optional field
+    /// such as a light's `rgb`; on a required field it is an error.
+    pub fn merge_json(&self, patch: &str) -> Result<(HdriParams, Vec<String>), String> {
+        let parsed = JsonValue::deserialize_json_strict(patch)
+            .map_err(|e| format!("the patch is not valid JSON: {e}"))?;
+        let patch_fields = match &parsed {
+            JsonValue::Object(fields) => fields,
+            _ => return Err("the patch must be a JSON object, e.g. {\"intensity_ev\": 1}".to_string()),
+        };
+        // Start from a clamped copy: an unclamped NaN would serialise as null
+        // and the merged tree would not load back.
+        let mut base = self.clone();
+        let mut report = base.clamp();
+        let mut tree = json_tree(&base)?;
+        match &mut tree {
+            JsonValue::Object(root) => merge_object(root, patch_fields, "", &mut report)?,
+            _ => return Err("internal: the settings did not serialise as an object".to_string()),
+        }
+        let mut merged = HdriParams::deserialize_json_lenient(&tree.serialize_json()).map_err(|e| {
+            format!(
+                "the patched settings do not fit ({}); null only clears optional fields such as a light's rgb",
+                e.msg
+            )
+        })?;
+        // The typed struct keeps every key it knows, so a patch key missing
+        // from its round trip is unknown: report it instead of dropping it silently.
+        collect_ignored(&json_tree(&merged)?, patch_fields, "", &mut report);
+        report.extend(merged.clamp());
+        // Report each path once, at its first mention.
+        let mut seen = HashSet::new();
+        report.retain(|path| seen.insert(path.clone()));
+        Ok((merged, report))
+    }
+}
+
+impl SkyParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        self.sun.clamp_fields(&join_path(prefix, "sun"), f);
+        self.atmosphere.clamp_fields(&join_path(prefix, "atmosphere"), f);
+        self.sun_disc.clamp_fields(&join_path(prefix, "sun_disc"), f);
+        self.clouds.clamp_fields(&join_path(prefix, "clouds"), f);
+        self.night.clamp_fields(&join_path(prefix, "night"), f);
+    }
+}
+
+impl SunParams {
+    pub fn mode(&self) -> SunMode {
+        if is_choice(&self.mode, "manual") {
+            SunMode::Manual
+        } else {
+            SunMode::Time
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = SunParams::default();
+        f.choice(prefix, "mode", &mut self.mode, SUN_MODE_NAMES);
+        f.int(prefix, "year", &mut self.year, 1900, 2100);
+        f.int(prefix, "month", &mut self.month, 1, 12);
+        // After the month: a day is only valid for its month (and leap year).
+        let days = crate::sky::days_in_month(self.year, self.month as u8) as u32;
+        f.int(prefix, "day", &mut self.day, 1, days);
+        f.range(prefix, "hour", &mut self.hour, 0.0, 24.0, d.hour);
+        f.range(prefix, "tz_offset", &mut self.tz_offset, -12.0, 14.0, d.tz_offset);
+        f.range(prefix, "latitude", &mut self.latitude, -90.0, 90.0, d.latitude);
+        f.range(prefix, "longitude", &mut self.longitude, -180.0, 180.0, d.longitude);
+        f.range(prefix, "elevation_deg", &mut self.elevation_deg, -90.0, 90.0, d.elevation_deg);
+        f.wrap360(prefix, "azimuth_deg", &mut self.azimuth_deg, d.azimuth_deg);
+    }
+}
+
+impl AtmosphereParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = AtmosphereParams::default();
+        f.range(prefix, "haze", &mut self.haze, 0.0, 10.0, d.haze);
+        f.range(prefix, "air", &mut self.air, 0.0, 10.0, d.air);
+        f.range(prefix, "ozone", &mut self.ozone, 0.0, 10.0, d.ozone);
+        f.color(prefix, "ground_color", &mut self.ground_color, 1.0, d.ground_color);
+    }
+}
+
+impl SunDiscParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = SunDiscParams::default();
+        f.range(prefix, "size_deg", &mut self.size_deg, 0.1, 20.0, d.size_deg);
+        f.range(prefix, "softness", &mut self.softness, 0.0, 1.0, d.softness);
+    }
+}
+
+impl CloudParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = CloudParams::default();
+        f.range(prefix, "coverage", &mut self.coverage, 0.0, 1.0, d.coverage);
+        f.range(prefix, "sharpness", &mut self.sharpness, 0.0, 1.0, d.sharpness);
+        f.range(prefix, "scale", &mut self.scale, 0.1, 10.0, d.scale);
+        f.range(prefix, "altitude_m", &mut self.altitude_m, 500.0, 12_000.0, d.altitude_m);
+        f.range(prefix, "cirrus", &mut self.cirrus, 0.0, 1.0, d.cirrus);
+    }
+}
+
+impl NightParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = NightParams::default();
+        f.range(prefix, "stars", &mut self.stars, 0.0, 1.0, d.stars);
+        f.range(prefix, "star_brightness", &mut self.star_brightness, 0.0, 10.0, d.star_brightness);
+        f.range(prefix, "moon_elevation_deg", &mut self.moon_elevation_deg, -90.0, 90.0, d.moon_elevation_deg);
+        f.wrap360(prefix, "moon_azimuth_deg", &mut self.moon_azimuth_deg, d.moon_azimuth_deg);
+        f.range(prefix, "moon_size_deg", &mut self.moon_size_deg, 0.1, 10.0, d.moon_size_deg);
+        f.range(prefix, "moon_brightness", &mut self.moon_brightness, 0.0, 10.0, d.moon_brightness);
+        f.color(prefix, "glow_color", &mut self.glow_color, 1.0, d.glow_color);
+        f.range(prefix, "glow_strength", &mut self.glow_strength, 0.0, 10.0, d.glow_strength);
+    }
+}
+
+impl StudioParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = StudioParams::default();
+        f.color(prefix, "top", &mut self.top, 10.0, d.top);
+        f.color(prefix, "horizon", &mut self.horizon, 10.0, d.horizon);
+        f.color(prefix, "floor", &mut self.floor, 10.0, d.floor);
+        f.range(prefix, "horizon_softness", &mut self.horizon_softness, 0.01, 1.0, d.horizon_softness);
+    }
+}
+
+impl LightParams {
+    pub fn shape(&self) -> LightShape {
+        if is_choice(&self.shape, "disc") {
+            LightShape::Disc
+        } else if is_choice(&self.shape, "ring") {
+            LightShape::Ring
+        } else {
+            LightShape::Rect
+        }
+    }
+
+    pub fn blend(&self) -> Blend {
+        if is_choice(&self.blend, "multiply") {
+            Blend::Multiply
+        } else {
+            Blend::Add
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = LightParams::default();
+        if self.name.chars().count() > LIGHT_NAME_LIMIT {
+            self.name = self.name.chars().take(LIGHT_NAME_LIMIT).collect();
+            f.push(prefix, "name");
+        }
+        f.choice(prefix, "shape", &mut self.shape, LIGHT_SHAPE_NAMES);
+        f.range(prefix, "corner", &mut self.corner, 0.0, 1.0, d.corner);
+        f.range(prefix, "inner", &mut self.inner, 0.0, 0.95, d.inner);
+        f.wrap360(prefix, "azimuth_deg", &mut self.azimuth_deg, d.azimuth_deg);
+        f.range(prefix, "elevation_deg", &mut self.elevation_deg, -90.0, 90.0, d.elevation_deg);
+        f.range(prefix, "width_deg", &mut self.width_deg, 0.1, 170.0, d.width_deg);
+        f.range(prefix, "height_deg", &mut self.height_deg, 0.1, 170.0, d.height_deg);
+        f.wrap180(prefix, "roll_deg", &mut self.roll_deg, d.roll_deg);
+        f.range(prefix, "softness", &mut self.softness, 0.0, 1.0, d.softness);
+        f.range(prefix, "hotspot", &mut self.hotspot, 0.0, 1.0, d.hotspot);
+        f.range(prefix, "intensity_ev", &mut self.intensity_ev, -10.0, 20.0, d.intensity_ev);
+        f.range(prefix, "kelvin", &mut self.kelvin, 1000.0, 20_000.0, d.kelvin);
+        f.range(prefix, "tint", &mut self.tint, -1.0, 1.0, d.tint);
+        f.choice(prefix, "blend", &mut self.blend, BLEND_NAMES);
+        if let Some(rgb) = self.rgb.as_mut() {
+            f.color(prefix, "rgb", rgb, 1.0, [1.0; 3]);
+        }
+    }
+}
+
+/// The dotted paths clamp() changed, in visiting order.
+#[derive(Default)]
+struct Fixes {
+    changed: Vec<String>,
+}
+
+impl Fixes {
+    fn push(&mut self, prefix: &str, field: &str) {
+        self.changed.push(join_path(prefix, field));
+    }
+
+    /// NaN becomes the field's default; everything else (infinities included) is clamped.
+    fn range(&mut self, prefix: &str, field: &str, value: &mut f32, lo: f32, hi: f32, fallback: f32) {
+        let old = *value;
+        let new = if old.is_nan() { fallback } else { old.clamp(lo, hi) };
+        if old.is_nan() || new != old {
+            *value = new;
+            self.push(prefix, field);
+        }
+    }
+
+    /// Azimuths wrap into [0, 360) instead of clamping: 370 means 10.
+    fn wrap360(&mut self, prefix: &str, field: &str, value: &mut f32, fallback: f32) {
+        let old = *value;
+        if (0.0..360.0).contains(&old) {
+            return;
+        }
+        *value = if old.is_finite() {
+            let wrapped = old.rem_euclid(360.0);
+            // rem_euclid rounds up to exactly 360 for tiny negative inputs.
+            if wrapped >= 360.0 { 0.0 } else { wrapped }
+        } else {
+            fallback
+        };
+        self.push(prefix, field);
+    }
+
+    /// Yaw and roll wrap into [-180, 180]; both ends are kept as given.
+    fn wrap180(&mut self, prefix: &str, field: &str, value: &mut f32, fallback: f32) {
+        let old = *value;
+        if (-180.0..=180.0).contains(&old) {
+            return;
+        }
+        *value = if old.is_finite() { (old + 180.0).rem_euclid(360.0) - 180.0 } else { fallback };
+        self.push(prefix, field);
+    }
+
+    fn int<T: PartialOrd + Copy>(&mut self, prefix: &str, field: &str, value: &mut T, lo: T, hi: T) {
+        let old = *value;
+        let new = if old < lo {
+            lo
+        } else if old > hi {
+            hi
+        } else {
+            old
+        };
+        if new != old {
+            *value = new;
+            self.push(prefix, field);
+        }
+    }
+
+    /// A colour: each channel from 0 to `hi` like range(), reported once.
+    fn color(&mut self, prefix: &str, field: &str, value: &mut [f32; 3], hi: f32, fallback: [f32; 3]) {
+        let mut changed = false;
+        for (channel, default) in value.iter_mut().zip(fallback) {
+            let old = *channel;
+            let new = if old.is_nan() { default } else { old.clamp(0.0, hi) };
+            if old.is_nan() || new != old {
+                *channel = new;
+                changed = true;
+            }
+        }
+        if changed {
+            self.push(prefix, field);
+        }
+    }
+
+    /// Trims and lowercases a known choice; anything else falls back to the first choice.
+    fn choice(&mut self, prefix: &str, field: &str, value: &mut String, choices: &[&str]) {
+        let normal = value.trim().to_ascii_lowercase();
+        let new = if choices.contains(&normal.as_str()) { normal } else { choices[0].to_string() };
+        if *value != new {
+            *value = new;
+            self.push(prefix, field);
+        }
+    }
+}
+
+/// `prefix.field`; the root has no prefix.
+fn join_path(prefix: &str, field: &str) -> String {
+    if prefix.is_empty() {
+        field.to_string()
+    } else {
+        format!("{prefix}.{field}")
+    }
+}
+
+/// The path with every list index blanked (`lights[3].rgb` becomes
+/// `lights[].rgb`): the form template_for() and integer_range() match on.
+fn schema_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut in_index = false;
+    for ch in path.chars() {
+        match ch {
+            '[' => {
+                in_index = true;
+                out.push('[');
+            }
+            ']' => {
+                in_index = false;
+                out.push(']');
+            }
+            _ if in_index => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// A value as a JSON tree, through its own serialiser.
+fn json_tree<T: SerJson>(value: &T) -> Result<JsonValue, String> {
+    JsonValue::deserialize_json(&value.serialize_json()).map_err(|e| format!("internal: {e}"))
+}
+
+/// The complete object a patch starts from when it creates something that is
+/// not there yet. Every light in a patched "lights" list starts from the
+/// default light, so a patch names only the fields it changes. Phase 1b adds
+/// its optional sub-objects here (e.g. "lights[].polygon").
+fn template_for(schema: &str) -> Option<JsonValue> {
+    match schema {
+        "lights[]" => json_tree(&LightParams::default()).ok(),
+        _ => None,
+    }
+}
+
+/// Integer fields, with the range their Rust type holds. micro-serde refuses
+/// `3.6` or `-1` for a `u32`, so numbers aimed at these are rounded into range
+/// before the typed parse. Phase 1b adds its integer fields here.
+fn integer_range(schema: &str) -> Option<(f64, f64)> {
+    match schema {
+        "version" | "seed" | "sky.sun.month" | "sky.sun.day" => Some((0.0, u32::MAX as f64)),
+        "sky.sun.year" => Some((i32::MIN as f64, i32::MAX as f64)),
+        _ => None,
+    }
+}
+
+/// Keys in sorted order, so reports come out the same every time.
+fn sorted_keys(map: &HashMap<String, JsonValue>) -> Vec<&String> {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    keys
+}
+
+fn kind_name(value: &JsonValue) -> &'static str {
+    match value {
+        JsonValue::Object(_) => "an object",
+        JsonValue::Array(items) if items.first().map_or(false, |item| item.is_number()) => "a list of numbers",
+        JsonValue::Array(_) => "a list",
+        JsonValue::String(_) => "a string",
+        JsonValue::Bool(_) => "true or false",
+        JsonValue::Null => "null",
+        other if other.is_number() => "a number",
+        _ => "a value",
+    }
+}
+
+/// A patch value must have the JSON kind of the value it replaces, so the
+/// error names the field instead of a position in an internal string.
+fn check_kind(existing: &JsonValue, value: &JsonValue, path: &str) -> Result<(), String> {
+    let fits = match existing {
+        JsonValue::Object(_) => value.is_object(),
+        JsonValue::Array(items) => match value.as_array() {
+            // A colour stays a list of numbers.
+            Some(new_items) => {
+                !items.first().map_or(false, |item| item.is_number())
+                    || new_items.iter().all(|item| item.is_number())
+            }
+            None => false,
+        },
+        JsonValue::String(_) => value.is_string(),
+        JsonValue::Bool(_) => value.as_bool().is_some(),
+        other if other.is_number() => value.is_number(),
+        _ => true,
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(format!("{path} must be {}", kind_name(existing)))
+    }
+}
+
+/// Rounds a number aimed at an integer field into that field's type, and
+/// reports the path when that changed it. Any other value passes through.
+fn coerce_number(value: &JsonValue, schema: &str, path: &str, report: &mut Vec<String>) -> JsonValue {
+    match (integer_range(schema), value.as_f64()) {
+        (Some((lo, hi)), Some(number)) => {
+            let fixed = number.round().clamp(lo, hi);
+            if fixed != number {
+                report.push(path.to_string());
+            }
+            if lo >= 0.0 {
+                JsonValue::U64(fixed as u64)
+            } else {
+                JsonValue::I64(fixed as i64)
+            }
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Merges `patch` into `base` key by key: objects recurse, everything else replaces.
+fn merge_object(
+    base: &mut HashMap<String, JsonValue>,
+    patch: &HashMap<String, JsonValue>,
+    prefix: &str,
+    report: &mut Vec<String>,
+) -> Result<(), String> {
+    for key in sorted_keys(patch) {
+        let value = &patch[key];
+        let path = join_path(prefix, key);
+        let schema = schema_path(&path);
+        // A list whose items have a template (the lights) is replaced whole,
+        // and each item starts from the template.
+        if let (Some(items), Some(template)) = (value.as_array(), template_for(&format!("{schema}[]"))) {
+            let mut list = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let item_path = format!("{path}[{i}]");
+                let fields = item.as_object().ok_or_else(|| format!("{item_path} must be an object"))?;
+                let mut merged = template.clone();
+                if let JsonValue::Object(target) = &mut merged {
+                    merge_object(target, fields, &item_path, report)?;
+                }
+                list.push(merged);
+            }
+            base.insert(key.clone(), JsonValue::Array(list));
+            continue;
+        }
+        match base.get_mut(key.as_str()) {
+            Some(existing) if !existing.is_null() && !value.is_null() => match (existing, value) {
+                (JsonValue::Object(target), JsonValue::Object(fields)) => {
+                    merge_object(target, fields, &path, report)?;
+                }
+                (existing, value) => {
+                    check_kind(existing, value, &path)?;
+                    *existing = coerce_number(value, &schema, &path, report);
+                }
+            },
+            _ => {
+                // Not in the current settings: an optional field that is off,
+                // or an unknown key (merge_json's typed round trip tells them
+                // apart). A null clears an optional field.
+                let fresh = match (value, template_for(&schema)) {
+                    (JsonValue::Object(fields), Some(mut template)) => {
+                        if let JsonValue::Object(target) = &mut template {
+                            merge_object(target, fields, &path, report)?;
+                        }
+                        template
+                    }
+                    _ => coerce_number(value, &schema, &path, report),
+                };
+                base.insert(key.clone(), fresh);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reports every patch key that the typed round trip (`kept`) dropped.
+fn collect_ignored(kept: &JsonValue, patch: &HashMap<String, JsonValue>, prefix: &str, report: &mut Vec<String>) {
+    for key in sorted_keys(patch) {
+        let value = &patch[key];
+        let path = join_path(prefix, key);
+        match (kept.get(key), value) {
+            (None, _) => {
+                // A null on an absent key is either an optional field that is
+                // already off or an unknown key; neither changes anything.
+                if !value.is_null() {
+                    report.push(format!("ignored: {path}"));
+                }
+            }
+            (Some(kept_value), JsonValue::Object(fields)) if kept_value.is_object() => {
+                collect_ignored(kept_value, fields, &path, report);
+            }
+            (Some(JsonValue::Array(kept_items)), JsonValue::Array(items)) => {
+                for (i, (kept_item, item)) in kept_items.iter().zip(items).enumerate() {
+                    if let (JsonValue::Object(_), JsonValue::Object(fields)) = (kept_item, item) {
+                        collect_ignored(kept_item, fields, &format!("{path}[{i}]"), report);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A studio set-up with a key light and a coloured multiply light.
+    fn studio_params() -> HdriParams {
+        let mut p = HdriParams::default();
+        p.mode = "studio".to_string();
+        p.intensity_ev = 1.5;
+        p.rotation_deg = -12.5;
+        p.seed = 42;
+        p.studio.top = [0.3, 0.3, 0.35];
+        p.lights.push(LightParams {
+            name: "Key".to_string(),
+            key: true,
+            azimuth_deg: 37.5,
+            elevation_deg: 20.0,
+            kelvin: 4500.0,
+            ..LightParams::default()
+        });
+        p.lights.push(LightParams {
+            name: "Flag".to_string(),
+            shape: "ring".to_string(),
+            blend: "multiply".to_string(),
+            rgb: Some([0.9, 0.8, 0.7]),
+            ..LightParams::default()
+        });
+        p
+    }
+
+    /// Every f32 field (colours included) set to `v`, with one light.
+    fn all_numbers(v: f32) -> HdriParams {
+        let mut p = HdriParams::default();
+        p.intensity_ev = v;
+        p.rotation_deg = v;
+        let sun = &mut p.sky.sun;
+        sun.hour = v;
+        sun.tz_offset = v;
+        sun.latitude = v;
+        sun.longitude = v;
+        sun.elevation_deg = v;
+        sun.azimuth_deg = v;
+        let atmosphere = &mut p.sky.atmosphere;
+        atmosphere.haze = v;
+        atmosphere.air = v;
+        atmosphere.ozone = v;
+        atmosphere.ground_color = [v; 3];
+        p.sky.sun_disc.size_deg = v;
+        p.sky.sun_disc.softness = v;
+        let clouds = &mut p.sky.clouds;
+        clouds.coverage = v;
+        clouds.sharpness = v;
+        clouds.scale = v;
+        clouds.altitude_m = v;
+        clouds.cirrus = v;
+        let night = &mut p.sky.night;
+        night.stars = v;
+        night.star_brightness = v;
+        night.moon_elevation_deg = v;
+        night.moon_azimuth_deg = v;
+        night.moon_size_deg = v;
+        night.moon_brightness = v;
+        night.glow_color = [v; 3];
+        night.glow_strength = v;
+        let studio = &mut p.studio;
+        studio.top = [v; 3];
+        studio.horizon = [v; 3];
+        studio.floor = [v; 3];
+        studio.horizon_softness = v;
+        p.lights.push(LightParams {
+            corner: v,
+            inner: v,
+            azimuth_deg: v,
+            elevation_deg: v,
+            width_deg: v,
+            height_deg: v,
+            roll_deg: v,
+            softness: v,
+            hotspot: v,
+            intensity_ev: v,
+            kelvin: v,
+            tint: v,
+            rgb: Some([v; 3]),
+            ..LightParams::default()
+        });
+        p
+    }
+
+    #[test]
+    fn defaults_and_a_studio_setup_pass_clamp_unchanged() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams::default());
+        let before = p.clone();
+        assert_eq!(p.clamp(), Vec::<String>::new());
+        assert_eq!(p, before);
+        let mut s = studio_params();
+        assert!(s.clamp().is_empty());
+        assert_eq!(s.mode(), Mode::Studio);
+        assert_eq!(s.lights[1].shape(), LightShape::Ring);
+        assert_eq!(s.lights[1].blend(), Blend::Multiply);
+        assert_eq!(HdriParams::default().mode(), Mode::Sky);
+        assert_eq!(HdriParams::default().sky.sun.mode(), SunMode::Time);
+    }
+
+    #[test]
+    fn every_numeric_field_is_bounded_and_reported() {
+        let mut p = all_numbers(1.0e9);
+        p.sky.sun.year = 99_999;
+        p.sky.sun.month = 99;
+        p.sky.sun.day = 99;
+        let changed = p.clamp();
+        let want = [
+            "intensity_ev", "rotation_deg",
+            "sky.sun.year", "sky.sun.month", "sky.sun.day", "sky.sun.hour", "sky.sun.tz_offset",
+            "sky.sun.latitude", "sky.sun.longitude", "sky.sun.elevation_deg", "sky.sun.azimuth_deg",
+            "sky.atmosphere.haze", "sky.atmosphere.air", "sky.atmosphere.ozone", "sky.atmosphere.ground_color",
+            "sky.sun_disc.size_deg", "sky.sun_disc.softness",
+            "sky.clouds.coverage", "sky.clouds.sharpness", "sky.clouds.scale", "sky.clouds.altitude_m",
+            "sky.clouds.cirrus",
+            "sky.night.stars", "sky.night.star_brightness", "sky.night.moon_elevation_deg",
+            "sky.night.moon_azimuth_deg", "sky.night.moon_size_deg", "sky.night.moon_brightness",
+            "sky.night.glow_color", "sky.night.glow_strength",
+            "studio.top", "studio.horizon", "studio.floor", "studio.horizon_softness",
+            "lights[0].corner", "lights[0].inner", "lights[0].azimuth_deg", "lights[0].elevation_deg",
+            "lights[0].width_deg", "lights[0].height_deg", "lights[0].roll_deg", "lights[0].softness",
+            "lights[0].hotspot", "lights[0].intensity_ev", "lights[0].kelvin", "lights[0].tint",
+            "lights[0].rgb",
+        ];
+        assert_eq!(changed, want);
+        assert_eq!(p.intensity_ev, 10.0);
+        assert_eq!((p.sky.sun.year, p.sky.sun.month, p.sky.sun.day), (2100, 12, 31));
+        assert_eq!(p.sky.clouds.altitude_m, 12_000.0);
+        assert_eq!(p.studio.top, [10.0; 3]);
+        assert_eq!(p.sky.night.glow_color, [1.0; 3]);
+        assert_eq!(p.lights[0].kelvin, 20_000.0);
+        assert_eq!(p.lights[0].inner, 0.95);
+        assert_eq!(p.lights[0].rgb, Some([1.0; 3]));
+        assert!((0.0..360.0).contains(&p.sky.sun.azimuth_deg));
+        assert!((-180.0..=180.0).contains(&p.rotation_deg));
+        assert!(p.clamp().is_empty(), "clamping twice changes nothing");
+    }
+
+    #[test]
+    fn nan_becomes_the_default_and_infinity_the_bound() {
+        let mut p = all_numbers(f32::NAN);
+        let changed = p.clamp();
+        // Every float field was NaN; the three integer date fields were not touched.
+        assert_eq!(changed.len(), 44, "{changed:?}");
+        assert_eq!(p.sky, SkyParams::default());
+        assert_eq!(p.studio, StudioParams::default());
+        assert_eq!((p.intensity_ev, p.rotation_deg), (0.0, 0.0));
+        assert_eq!(p.lights[0], LightParams { rgb: Some([1.0; 3]), ..LightParams::default() });
+        // Clean params serialise without null, so they load again.
+        let json = p.to_json();
+        assert!(!json.contains("null"), "{json}");
+        assert_eq!(HdriParams::from_json(&json), Ok(p.clone()));
+
+        let mut q = all_numbers(f32::NEG_INFINITY);
+        q.clamp();
+        assert_eq!(q.intensity_ev, -10.0);
+        assert_eq!(q.sky.clouds.altitude_m, 500.0);
+        assert_eq!(q.sky.sun_disc.size_deg, 0.1);
+        assert_eq!(q.lights[0].width_deg, 0.1);
+        assert_eq!(q.studio.top, [0.0; 3]);
+        // An infinite angle has no direction: it falls back to the default.
+        assert_eq!(q.sky.sun.azimuth_deg, SunParams::default().azimuth_deg);
+        assert_eq!(q.rotation_deg, 0.0);
+    }
+
+    #[test]
+    fn clamp_wraps_angles_instead_of_pinning_them() {
+        let mut p = HdriParams::default();
+        p.rotation_deg = 190.0;
+        p.sky.sun.azimuth_deg = 370.0;
+        p.sky.night.moon_azimuth_deg = -90.0;
+        p.lights.push(LightParams { azimuth_deg: -30.0, roll_deg: 200.0, ..LightParams::default() });
+        let changed = p.clamp();
+        assert_eq!(p.rotation_deg, -170.0);
+        assert_eq!(p.sky.sun.azimuth_deg, 10.0);
+        assert_eq!(p.sky.night.moon_azimuth_deg, 270.0);
+        assert_eq!(p.lights[0].azimuth_deg, 330.0);
+        assert_eq!(p.lights[0].roll_deg, -160.0);
+        assert_eq!(
+            changed,
+            ["rotation_deg", "sky.sun.azimuth_deg", "sky.night.moon_azimuth_deg", "lights[0].azimuth_deg", "lights[0].roll_deg"]
+        );
+        // The ends of the documented ranges stay put.
+        let mut edge = HdriParams::default();
+        edge.rotation_deg = 180.0;
+        edge.lights.push(LightParams { roll_deg: -180.0, azimuth_deg: 0.0, ..LightParams::default() });
+        assert!(edge.clamp().is_empty());
+    }
+
+    #[test]
+    fn clamp_keeps_the_date_real() {
+        let date = |year: i32, month: u32, day: u32| {
+            let mut p = HdriParams::default();
+            p.sky.sun.year = year;
+            p.sky.sun.month = month;
+            p.sky.sun.day = day;
+            let changed = p.clamp();
+            ((p.sky.sun.year, p.sky.sun.month, p.sky.sun.day), changed)
+        };
+        assert_eq!(date(2026, 6, 31).0, (2026, 6, 30));
+        assert_eq!(date(2026, 2, 29).0, (2026, 2, 28));
+        assert_eq!(date(2028, 2, 29), ((2028, 2, 29), Vec::<String>::new()));
+        assert_eq!(date(2026, 13, 5).0, (2026, 12, 5));
+        assert_eq!(date(2026, 0, 0), ((2026, 1, 1), vec!["sky.sun.month".to_string(), "sky.sun.day".to_string()]));
+        assert_eq!(date(1500, 6, 21).0, (1900, 6, 21));
+    }
+
+    #[test]
+    fn unknown_choices_fall_back_and_case_is_forgiven() {
+        let mut p = HdriParams::default();
+        p.mode = " Studio".to_string();
+        p.sky.sun.mode = "sundial".to_string();
+        p.lights.push(LightParams { shape: "hexagon".to_string(), blend: "Multiply".to_string(), ..LightParams::default() });
+        p.lights.push(LightParams { shape: "DISC".to_string(), ..LightParams::default() });
+        // The accessors already read the loose spellings before clamp().
+        assert_eq!(p.mode(), Mode::Studio);
+        assert_eq!(p.lights[1].shape(), LightShape::Disc);
+        let changed = p.clamp();
+        assert_eq!((p.mode.as_str(), p.sky.sun.mode.as_str()), ("studio", "time"));
+        assert_eq!((p.lights[0].shape.as_str(), p.lights[0].blend.as_str()), ("rect", "multiply"));
+        assert_eq!(p.lights[1].shape, "disc");
+        assert_eq!(changed, ["mode", "sky.sun.mode", "lights[0].shape", "lights[0].blend", "lights[1].shape"]);
+        assert_eq!(p.lights[0].blend(), Blend::Multiply);
+        assert_eq!(Mode::Studio.as_str(), MODE_NAMES[1]);
+        assert_eq!(SunMode::Manual.as_str(), "manual");
+        assert_eq!(LightShape::Ring.as_str(), "ring");
+        assert_eq!(Blend::Add.as_str(), BLEND_NAMES[0]);
+    }
+
+    #[test]
+    fn lights_are_capped_and_only_the_first_key_survives() {
+        let mut p = HdriParams::default();
+        for i in 0..10 {
+            p.lights.push(LightParams { name: format!("L{i}"), key: i == 0 || i == 2, ..LightParams::default() });
+        }
+        p.lights[1].name = "x".repeat(100);
+        let changed = p.clamp();
+        assert_eq!(p.lights.len(), LIGHT_LIMIT);
+        assert_eq!(p.lights[7].name, "L7", "the list is cut at the end");
+        assert!(p.lights[0].key && !p.lights[2].key);
+        assert_eq!(p.lights.iter().filter(|l| l.key).count(), 1);
+        assert_eq!(p.lights[1].name, "x".repeat(64));
+        assert_eq!(changed, ["lights", "lights[1].name", "lights[2].key"]);
+    }
+
+    #[test]
+    fn json_round_trips_and_tolerates_newer_files() {
+        let p = studio_params();
+        let json = p.to_json();
+        assert!(json.contains('\n'), "preset files are pretty-printed");
+        assert_eq!(json.matches("\"rgb\"").count(), 1, "Some(rgb) is written, None is left out");
+        assert_eq!(HdriParams::from_json(&json), Ok(p.clone()));
+        // A file from a newer build with a field this build does not know still loads.
+        let newer = json.replacen('{', "{\"future_field\": {\"x\": [1, 2]},", 1);
+        assert_eq!(HdriParams::from_json(&newer), Ok(p.clone()));
+        // Loading clamps.
+        let mut wild = HdriParams::default();
+        wild.sky.clouds.coverage = 5.0;
+        assert_eq!(HdriParams::from_json(&wild.to_json()).unwrap().sky.clouds.coverage, 1.0);
+        // Missing fields and broken JSON are errors, not silent defaults.
+        assert!(HdriParams::from_json("{\"version\": 1}").is_err());
+        assert!(HdriParams::from_json("{\"mode\": ").is_err());
+    }
+
+    #[test]
+    fn merge_changes_only_what_the_patch_names() {
+        let base = studio_params();
+        let (merged, report) = base
+            .merge_json(r#"{"sky": {"clouds": {"coverage": 0.4}}, "studio": {"top": [1, 1, 1]}}"#)
+            .unwrap();
+        let mut want = base.clone();
+        want.sky.clouds.coverage = 0.4;
+        want.studio.top = [1.0; 3];
+        assert_eq!(merged, want);
+        assert!(report.is_empty(), "{report:?}");
+        let (same, report) = base.merge_json("{}").unwrap();
+        assert_eq!(same, base);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn merge_reports_unknown_keys() {
+        let base = HdriParams::default();
+        let (merged, report) = base
+            .merge_json(r#"{"colour": "red", "sky": {"clouds": {"fluffiness": 1, "cirrus": 0.5}}}"#)
+            .unwrap();
+        assert_eq!(merged.sky.clouds.cirrus, 0.5);
+        assert_eq!(report, vec!["ignored: colour", "ignored: sky.clouds.fluffiness"]);
+        let mut want = base.clone();
+        want.sky.clouds.cirrus = 0.5;
+        assert_eq!(merged, want, "unknown keys change nothing");
+    }
+
+    #[test]
+    fn merge_clamps_and_rounds_integers() {
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"intensity_ev": 99, "seed": -5, "sky": {"sun": {"month": 3.6, "year": 2030.0}}}"#)
+            .unwrap();
+        assert_eq!(merged.intensity_ev, 10.0);
+        assert_eq!(merged.seed, 0);
+        assert_eq!(merged.sky.sun.month, 4);
+        assert_eq!(merged.sky.sun.year, 2030);
+        for path in ["intensity_ev", "seed", "sky.sun.month"] {
+            assert!(report.iter().any(|r| r == path), "{path} missing from {report:?}");
+        }
+        assert!(!report.iter().any(|r| r == "sky.sun.year"), "2030.0 is already a whole year: {report:?}");
+    }
+
+    #[test]
+    fn merge_completes_new_lights_from_the_default() {
+        let base = studio_params();
+        let (merged, report) = base
+            .merge_json(r#"{"lights": [{"shape": "disc", "azimuth_deg": 90, "rgb": [1, 0.5, 0.25]}]}"#)
+            .unwrap();
+        assert_eq!(
+            merged.lights,
+            vec![LightParams {
+                shape: "disc".to_string(),
+                azimuth_deg: 90.0,
+                rgb: Some([1.0, 0.5, 0.25]),
+                ..LightParams::default()
+            }]
+        );
+        assert!(report.is_empty(), "{report:?}");
+        let (cleared, _) = base.merge_json(r#"{"lights": []}"#).unwrap();
+        assert!(cleared.lights.is_empty(), "an array replaces the whole list");
+        let (unknown, report) = base.merge_json(r#"{"lights": [{"colour": "red"}]}"#).unwrap();
+        assert_eq!(unknown.lights, vec![LightParams::default()]);
+        assert_eq!(report, vec!["ignored: lights[0].colour"]);
+    }
+
+    #[test]
+    fn merge_refuses_malformed_patches() {
+        let base = HdriParams::default();
+        assert!(base.merge_json("[1, 2]").is_err(), "the patch must be an object");
+        assert!(base.merge_json("{\"sky\": ").is_err(), "broken JSON");
+        let err = base.merge_json(r#"{"sky": {"clouds": {"coverage": "lots"}}}"#).unwrap_err();
+        assert!(err.contains("sky.clouds.coverage"), "{err}");
+        let err = base.merge_json(r#"{"lights": [3]}"#).unwrap_err();
+        assert!(err.contains("lights[0]"), "{err}");
+        let err = base.merge_json(r#"{"sky": {"atmosphere": {"ground_color": ["a", "b", "c"]}}}"#).unwrap_err();
+        assert!(err.contains("ground_color"), "{err}");
+        assert!(base.merge_json(r#"{"intensity_ev": null}"#).is_err(), "null only clears optional fields");
+    }
+}
