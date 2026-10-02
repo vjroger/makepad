@@ -45,8 +45,11 @@ pub mod clouds;
 pub mod night;
 pub mod image;
 pub mod export;
+pub mod envmap;
 
 pub use params::*;
+// hdri::bake_env_map, load_env_map, detect_sun, remove_sun, as the spec names them.
+pub use envmap::*;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -167,10 +170,18 @@ impl Env {
     /// Key light for the engine, in world space, already x 2^intensity_ev
     /// (every layer's key goes through `key_to_world`, which turns it with the
     /// map and applies the intensity). In order: the key light (both modes);
-    /// Sky mode only: the sun while it is above the horizon, dimmed by the cloud
-    /// cover along it (unfaded: a full overcast hides a 2 degree sun too); else
-    /// the risen moon once the sun is 6 degrees down, dimmed the same way; else
-    /// None.
+    /// Sky mode only: the sun while any of its disc is above the horizon, else the
+    /// moon once the sun is 6 degrees down and it is risen, else None. Both are
+    /// dimmed by the cloud cover along them (unfaded: a full overcast hides a 2
+    /// degree sun too).
+    ///
+    /// The sun and the moon fade instead of switching, so a day cycle that runs
+    /// over sunset never jumps: the sun's key is its radiance x the part of its
+    /// disc that shows, `smoothstep(-outer, +outer, elevation)` (outer: the disc's
+    /// outer limb, soft edge included), so it is half on the horizon and `Some`
+    /// until the whole disc is down; the moon's arrives over a sun elevation of
+    /// -6 to -8 degrees, `smoothstep(6, 8, -sun elevation)`, so between the two
+    /// there is a stretch of twilight with no key at all.
     pub fn sun(&self) -> Option<EnvSun> {
         if let Some(key) = self.studio.key() {
             return Some(self.key_to_world(key));
@@ -180,7 +191,10 @@ impl Env {
         // The same cover that hides the disc in the map dims the key.
         let cover = |dir: Vec3f| self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir));
         let sun = atmo.sun_dir();
-        if sun.y > 0.0 {
+        let elevation = sun.y.clamp(-1.0, 1.0).asin();
+        let outer = atmo.sun_outer_radius();
+        let visible = smoothstep(-outer, outer, elevation);
+        if visible > 0.0 {
             // The cone's mean radiance, so radiance x cone solid angle is the
             // sun's irradiance at the ground whatever the disc's size and limb.
             // A disc under a degree wide: a surface facing it gets all of its
@@ -188,15 +202,21 @@ impl Env {
             // the cone that holds it.
             return Some(self.key_to_world(EnvSun {
                 dir: sun,
-                radiance: atmo.sun_cone_radiance() * cover(sun),
+                radiance: atmo.sun_cone_radiance() * (cover(sun) * visible),
                 cos_radius: atmo.sun_cos_radius(),
                 facing: 1.0,
-                cos_cover: atmo.sun_outer_radius().cos(),
+                // The two cosines are separately rounded: the min keeps a tiny soft
+                // edge from putting the covering cone's above the cone's own.
+                cos_cover: outer.cos().min(atmo.sun_cos_radius()),
             }));
         }
         // After dark the risen moon takes over, once the sun is 6 degrees down.
         let moon = self.night.as_ref()?.moon_key()?;
-        Some(self.key_to_world(EnvSun { radiance: moon.radiance * cover(moon.dir), ..moon }))
+        let arrived = smoothstep(6.0, 8.0, -elevation.to_degrees());
+        if !(arrived > 0.0) {
+            return None;
+        }
+        Some(self.key_to_world(EnvSun { radiance: moon.radiance * (cover(moon.dir) * arrived), ..moon }))
     }
 
     /// World-space sun direction in Sky mode (also below the horizon), None
@@ -688,6 +708,190 @@ mod tests {
         refine_hot_spots(&mut same, &coded, &[]);
         refine_hot_spots(&mut same, &coded, &[(vec3f(0.0, 1.0, 0.0), 1.0)]);
         assert_eq!(same, plain);
+    }
+
+    /// f(0..n) on every core, the results in index order: the sweeps below build
+    /// an Env (and an atmosphere) per sample.
+    fn sweep<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+        let next = AtomicUsize::new(0);
+        let found = Mutex::new(Vec::with_capacity(n));
+        let cores = std::thread::available_parallelism().map_or(4, |c| c.get()).min(16);
+        std::thread::scope(|scope| {
+            for _ in 0..cores {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let v = f(i);
+                    found.lock().unwrap().push((i, v));
+                });
+            }
+        });
+        let mut found = found.into_inner().unwrap();
+        found.sort_by_key(|(i, _)| *i);
+        found.into_iter().map(|(_, v)| v).collect()
+    }
+
+    fn lum(v: Vec3f) -> f32 {
+        crate::sky::luminance(v)
+    }
+
+    /// The default clear sky with the sun held at `elevation_deg` (manual mode).
+    fn sun_at(elevation_deg: f32) -> HdriParams {
+        let mut p = HdriParams::default();
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.elevation_deg = elevation_deg;
+        p.sky.sun.azimuth_deg = 200.0;
+        p
+    }
+
+    /// What the sun's key would be with nothing fading it (a clear sky): the
+    /// atmosphere's cone radiance, and the disc's outer limb in radians.
+    fn unfaded_sun(p: &HdriParams) -> (Vec3f, f32) {
+        let atmo = atmosphere::Atmosphere::new(atmosphere::sun_direction(&p.sky.sun), &p.sky.atmosphere, &p.sky.sun_disc);
+        (atmo.sun_cone_radiance(), atmo.sun_outer_radius())
+    }
+
+    /// The moon's key with nothing fading it: Some only once the sun is under -6 degrees.
+    fn unfaded_moon(p: &HdriParams) -> Option<EnvSun> {
+        let sun = atmosphere::sun_direction(&p.sky.sun);
+        night::NightSky::new(&p.sky.night, p.seed, sun, night::star_hours(&p.sky.sun), p.sky.sun.latitude).moon_key()
+    }
+
+    #[test]
+    fn the_suns_key_fades_out_with_the_visible_part_of_its_disc() {
+        // The default disc is 0.53 degrees across with a 0.2 soft limb: its outer limb
+        // is 0.29 degrees from its centre, so the key is full 0.29 degrees up, half
+        // on the horizon and gone 0.29 degrees down, along a smoothstep.
+        let reference = lum(unfaded_sun(&sun_at(0.0)).0);
+        let samples = sweep(91, |i| {
+            let e = 0.45 - 0.01 * i as f32;
+            let p = sun_at(e);
+            let (full, outer) = unfaded_sun(&p);
+            (e, outer.to_degrees(), lum(full), Env::new(&p).sun())
+        });
+        let mut last: Option<(f32, f32)> = None;
+        let mut half = None;
+        for &(e, outer_deg, full, key) in &samples {
+            let want = smoothstep(-outer_deg, outer_deg, e);
+            match key {
+                None => assert!(want <= 1.0e-3 && e < 0.0, "no key at {e} deg, where {want} of the disc shows"),
+                Some(key) => {
+                    assert!(key.validate().is_ok(), "{e} deg: {key:?}");
+                    let got = lum(key.radiance);
+                    assert!((got - full * want).abs() <= 2.0e-3 * full + 1.0e-3 * reference, "{e} deg: radiance {got} vs {full} x {want}");
+                    // A fade, not a switch: no step over 0.01 degrees of elevation
+                    // reaches a tenth of the key on the horizon, and the key only
+                    // falls as the sun sinks.
+                    if let Some((prev_e, prev)) = last {
+                        assert!((got - prev).abs() < 0.1 * reference, "{prev_e} -> {e} deg: {prev} -> {got}");
+                        assert!(got <= prev * 1.0001, "{prev_e} -> {e} deg: the key rose from {prev} to {got}");
+                    }
+                    last = Some((e, got));
+                    if e.abs() < 0.005 {
+                        half = Some(got / full);
+                    }
+                }
+            }
+        }
+        // Full above the limb, nothing below it, half on the horizon.
+        let top = &samples[0];
+        assert!((lum(top.3.expect("the sun is up").radiance) - top.2).abs() < 1.0e-3 * top.2, "full at {} deg", top.0);
+        assert!(samples.last().unwrap().3.is_none(), "gone at {} deg", samples.last().unwrap().0);
+        assert!((half.expect("a sample on the horizon") - 0.5).abs() < 0.01, "{half:?}");
+    }
+
+    #[test]
+    fn the_moon_key_fades_in_as_the_sun_sinks_from_6_to_8_degrees() {
+        // The sun is under -6 degrees and the moon is up; the moon's key waits for
+        // -6 and takes -6 to -8 to arrive, so the key goes from nothing to the moon
+        // by degrees instead of switching on.
+        let reference = lum(unfaded_moon(&sun_at(-8.0)).expect("night, moon up").radiance);
+        let samples = sweep(111, |i| {
+            let e = -5.81 - 0.02 * i as f32;
+            let p = sun_at(e);
+            (e, unfaded_moon(&p), Env::new(&p).sun())
+        });
+        let mut last: Option<(f32, f32)> = None;
+        for &(e, moon, key) in &samples {
+            let want = smoothstep(6.0, 8.0, -e);
+            if e > -6.0 {
+                assert!(key.is_none() && moon.is_none(), "{e} deg: the twilight sky still outshines the moon, {key:?}");
+                continue;
+            }
+            let moon = moon.expect("the moon is a key under -6 degrees");
+            match key {
+                None => assert!(want <= 1.0e-3, "no key at {e} deg, where the moon has {want} of its way in"),
+                Some(key) => {
+                    assert!(key.validate().is_ok(), "{e} deg: {key:?}");
+                    assert!(key.dir.dot(moon.dir) > 0.99999, "{e} deg: the key points at the moon");
+                    let got = lum(key.radiance);
+                    let full = lum(moon.radiance);
+                    assert!((got - full * want).abs() <= 2.0e-3 * full, "{e} deg: radiance {got} vs {full} x {want}");
+                    if let Some((prev_e, prev)) = last {
+                        assert!((got - prev).abs() < 0.1 * reference, "{prev_e} -> {e} deg: {prev} -> {got}");
+                        assert!(got >= prev * 0.9999, "{prev_e} -> {e} deg: the key fell from {prev} to {got}");
+                    }
+                    last = Some((e, got));
+                }
+            }
+        }
+        // Gone at -6, the moon itself from -8 down.
+        assert!(samples.iter().filter(|s| s.0 > -6.0).all(|s| s.2.is_none()));
+        let (e, moon, key) = samples.last().unwrap();
+        assert!((lum(key.expect("full moon").radiance) - lum(moon.unwrap().radiance)).abs() < 1.0e-3 * reference, "{e} deg");
+    }
+
+    #[test]
+    fn the_key_has_no_jump_over_an_evening() {
+        // 21 June at 45 N, every two minutes from 16:00 to 23:00: the sun sets about
+        // 19:45, the moon (up, 30 degrees) takes over from 20:28 and has all of its
+        // light by 20:44. Two minutes is as long as the sun takes to cross its own
+        // limb, so a sample can step from nearly full to nearly nothing there: what
+        // the sweep pins is that every sample is the sun's unfaded key times its
+        // visible part, or the moon's times its fade, and that the key goes through
+        // the middle of its fade at a sample, where a switch would not.
+        let hours = |i: usize| 16.0 + i as f32 / 30.0;
+        let samples = sweep(211, |i| {
+            let mut p = HdriParams::default();
+            p.sky.sun.hour = hours(i);
+            let (full, outer) = unfaded_sun(&p);
+            let sun = atmosphere::sun_direction(&p.sky.sun);
+            let e = sun.y.asin();
+            (p.sky.sun.hour, e.to_degrees(), lum(full), smoothstep(-outer, outer, e), unfaded_moon(&p), Env::new(&p).sun())
+        });
+        let peak = samples.iter().map(|s| lum(s.5.map_or(Vec3f::default(), |k| k.radiance))).fold(0.0, f32::max);
+        let mut state = 0; // 0 sun, 1 dark, 2 moon
+        let mut mid_fade = false;
+        let mut last: Option<f32> = None;
+        for &(hour, e, full, weight, moon, key) in &samples {
+            let got = key.map_or(0.0, |k| lum(k.radiance));
+            assert!(got.is_finite(), "{hour} h");
+            if weight > 0.0 {
+                assert_eq!(state, 0, "{hour} h: the sun is back after dusk");
+                assert!(key.is_some(), "{hour} h: the sun shows");
+                assert!((got - full * weight).abs() <= 2.0e-3 * full, "{hour} h ({e} deg): {got} vs {full} x {weight}");
+                mid_fade |= weight > 0.05 && weight < 0.95;
+            } else if let Some(moon) = moon.filter(|_| e < -6.0) {
+                let fade = smoothstep(6.0, 8.0, -e);
+                state = 2;
+                assert_eq!(key.is_some(), fade > 0.0, "{hour} h ({e} deg)");
+                assert!((got - lum(moon.radiance) * fade).abs() <= 2.0e-3 * lum(moon.radiance), "{hour} h ({e} deg): {got} vs the moon's {} x {fade}", lum(moon.radiance));
+                mid_fade |= fade > 0.05 && fade < 0.95;
+            } else {
+                state = state.max(1);
+                assert!(key.is_none(), "{hour} h ({e} deg): a key in the dark");
+            }
+            // No gross jump from one sample to the next, at the coarse step.
+            if let Some(prev) = last {
+                assert!((got - prev).abs() < 0.05 * peak, "{hour} h: {prev} -> {got}");
+            }
+            last = Some(got);
+        }
+        assert_eq!(state, 2, "the evening ends in moonlight");
+        assert!(mid_fade, "a sample falls inside a fade");
+        assert!(samples.iter().filter(|s| s.5.is_none()).count() > 10, "the key is out for a while between sunset and the moon");
     }
 
     /// The engine's key light and the generator's are one type: a

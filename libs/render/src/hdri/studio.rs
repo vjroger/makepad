@@ -179,7 +179,9 @@ impl Studio {
     ///
     /// The key's cone covers the larger of width and height, and its radiance is the
     /// light's emission spread over that cone ([`EnvSun`]'s one meaning), integrated
-    /// here once per map by [`key_emission`].
+    /// here once per map by [`key_emission`], which also gives the share a surface
+    /// facing the key receives (`facing`) and the cone that holds the whole reach
+    /// (`cos_cover`).
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
@@ -189,15 +191,16 @@ impl Studio {
             let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
             // 2 pi (1 - cos r), written without the cancellation.
             let cone = 4.0 * std::f32::consts::PI * (0.5 * radius).sin().powi(2);
+            let integral = key_emission(&prepared[i..], KEY_GRID);
             EnvSun {
                 dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg),
-                radiance: key_emission(&prepared[i..], KEY_GRID) / cone,
+                radiance: integral.emission / cone,
                 cos_radius: radius.cos(),
-                // Placeholders until key_emission returns the light's own
-                // share and reach (task C2): a facing surface gets it all
-                // and the cone it is averaged over covers it.
-                facing: 1.0,
-                cos_cover: radius.cos(),
+                facing: integral.facing,
+                // The reach box's cone can only be wider than the nominal one
+                // (it holds the half-size on both sides); the min keeps rounding
+                // from putting it above.
+                cos_cover: integral.cos_cover.min(radius.cos()),
             }
         });
         Studio {
@@ -246,32 +249,53 @@ impl Studio {
     /// The key light in the map's own frame (unrotated, unscaled). Its cone covers the
     /// larger of width and height, and its radiance is the light's whole emission over
     /// that cone, not its peak colour: a thin strip or a ring that fills a tenth of its
-    /// cone hands over about a tenth of its colour.
+    /// cone hands over about a tenth of its colour. `facing` is the share of that
+    /// emission a surface facing the key receives (a wide softbox's is below 1) and
+    /// `cos_cover` the cone around the key's centre that holds its reach box.
     pub fn key(&self) -> Option<EnvSun> {
         self.key
     }
 }
 
-/// The key light's whole emission, ∫ L dΩ, exactly as `apply_lights` paints it.
+/// What one pass over the key light gives.
+struct KeyIntegral {
+    /// The key's whole emission, ∫ L dΩ per channel.
+    emission: Vec3f,
+    /// ∫ L cosθ dΩ / ∫ L dΩ in luminance, θ measured from the key's centre: the
+    /// share of the emission a surface facing the key receives. 1 for a key that
+    /// draws nothing.
+    facing: f32,
+    /// The cosine of the half-angle of the cone around the key's centre that holds
+    /// the whole reach box, corners and soft edge included.
+    cos_cover: f32,
+}
+
+/// The key light's whole emission, ∫ L dΩ, exactly as `apply_lights` paints it, with
+/// its cosine-weighted share and the cone that covers its reach.
 /// - `lights[0]` is the key: its shape, corner, ring, soft edge, hotspot and roll all
 ///   come in through its own `mask`.
 /// - Every Multiply light after it scales it as it does in the map. An Add light after
 ///   it is a light of its own, and a light before it touches only what came before.
 ///
 /// A midpoint grid of n x n points over the key's reach box in its own tangent plane,
-/// where dΩ = dx dy / (1 + x² + y²)^(3/2). Outside that box the mask is exactly zero,
-/// so nothing is missed.
-fn key_emission(lights: &[PreparedLight], n: usize) -> Vec3f {
+/// where dΩ = dx dy / (1 + x² + y²)^(3/2) and the cosine of the angle from the centre
+/// is 1 / sqrt(1 + x² + y²). Outside that box the mask is exactly zero, so nothing is
+/// missed, and the farthest point of the box is its corner: the covering cone's
+/// cosine is 1 / sqrt(1 + rx² + ry²), no smaller than `project`'s 0.05 limit, past
+/// which nothing is drawn.
+fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
     let Some((key, after)) = lights.split_first() else {
-        return Vec3f::default();
+        return KeyIntegral { emission: Vec3f::default(), facing: 1.0, cos_cover: 1.0 };
     };
     let flags: Vec<&PreparedLight> = after.iter().filter(|l| l.blend == Blend::Multiply).collect();
     let n = n.max(1);
     let cell = vec2f(2.0 * key.reach.x / n as f32, 2.0 * key.reach.y / n as f32);
     let mut sum = [0.0f64; 3];
+    let mut weighted = [0.0f64; 3];
     for j in 0..n {
         let y = -key.reach.y + (j as f32 + 0.5) * cell.y;
         let mut row = Vec3f::default();
+        let mut row_weighted = Vec3f::default();
         for i in 0..n {
             let x = -key.reach.x + (i as f32 + 0.5) * cell.x;
             // `project`'s limit: past a dot of 0.05 with the centre nothing is drawn,
@@ -284,7 +308,8 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> Vec3f {
             if !(m > 0.0) {
                 continue;
             }
-            let mut w = Vec3f::all(m / (r2 * r2.sqrt()));
+            let cos = 1.0 / r2.sqrt();
+            let mut w = Vec3f::all(m * cos / r2);
             if !flags.is_empty() {
                 let dir = (key.frame.center + key.frame.right * x + key.frame.up * y).normalize();
                 for flag in &flags {
@@ -296,13 +321,24 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> Vec3f {
                 }
             }
             row += w;
+            row_weighted += w * cos;
         }
         sum[0] += row.x as f64;
         sum[1] += row.y as f64;
         sum[2] += row.z as f64;
+        weighted[0] += row_weighted.x as f64;
+        weighted[1] += row_weighted.y as f64;
+        weighted[2] += row_weighted.z as f64;
     }
     let area = (cell.x * cell.y) as f64;
-    key.color * vec3f((sum[0] * area) as f32, (sum[1] * area) as f32, (sum[2] * area) as f32)
+    let scaled = |s: [f64; 3]| key.color * vec3f((s[0] * area) as f32, (s[1] * area) as f32, (s[2] * area) as f32);
+    let emission = scaled(sum);
+    // Luminance weighs the channels as the eye does: a coloured gel's key still
+    // gets one share.
+    let (total, cosine) = (luminance(emission), luminance(scaled(weighted)));
+    let facing = if total > 0.0 { (cosine / total).clamp(0.0, 1.0) } else { 1.0 };
+    let cos_cover = (1.0 / (1.0 + key.reach.x * key.reach.x + key.reach.y * key.reach.y).sqrt()).max(0.05);
+    KeyIntegral { emission, facing, cos_cover }
 }
 
 /// One enabled light, reduced to what the per-pixel evaluation needs.
@@ -949,7 +985,7 @@ mod tests {
         let studio = Studio::new(&black_studio(), lights);
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let i = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).expect("a key light");
-        key_emission(&studio.lights[i..], n)
+        key_emission(&studio.lights[i..], n).emission
     }
 
     #[test]
@@ -977,6 +1013,128 @@ mod tests {
         let cone = std::f32::consts::TAU * (1.0 - sun.cos_radius);
         let want = light_color(&key) * solid;
         assert!((sun.radiance * cone - want).length() < 1.0e-3 * want.length(), "{:?} vs {want:?}", sun.radiance * cone);
+    }
+
+    /// A baked map's cosine-weighted share, Σ L cosθ dΩ / Σ L dΩ in luminance, θ
+    /// measured from `dir`: what a surface facing `dir` receives of the map's
+    /// whole emission.
+    fn map_facing(map: &EnvMap, dir: Vec3f) -> f32 {
+        use std::f64::consts::{PI, TAU};
+        let (w, h) = (map.width, map.height);
+        let (mut all, mut weighted) = (0.0f64, 0.0f64);
+        for y in 0..h {
+            let (top, bottom) = (PI * y as f64 / h as f64, PI * (y + 1) as f64 / h as f64);
+            let cell = TAU / w as f64 * (top.cos() - bottom.cos());
+            for x in 0..w {
+                let t = map.data[y * w + x];
+                let l = luminance(vec3f(t[0], t[1], t[2])) as f64 * cell;
+                let d = vec(ibl::equirect_uv_to_dir([(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32]));
+                all += l;
+                weighted += l * d.dot(dir) as f64;
+            }
+        }
+        (weighted / all) as f32
+    }
+
+    #[test]
+    fn the_key_faces_with_the_share_of_its_emission_the_map_delivers() {
+        // facing is ∫ L cosθ dΩ / ∫ L dΩ over the key's reach, from the same pass
+        // as its radiance: checked against the key as the map draws it.
+        let mut cases: Vec<(String, HdriParams)> = ["Three-point", "Top softbox", "Rim pair", "Overcast dome", "Ring light"]
+            .iter()
+            .map(|name| (name.to_string(), crate::hdri::presets::preset(name).unwrap()))
+            .collect();
+        for (name, lights) in awkward_keys() {
+            cases.push((name.to_string(), studio_params(lights)));
+        }
+        let mut off = Vec::new();
+        for (name, p) in cases {
+            let key = Env::new(&p).sun().expect("a key light");
+            assert!(key.validate().is_ok(), "{name}: {key:?}");
+            let want = map_facing(&Env::new(&the_key_alone(&p)).bake_par(1024, on_all_cores), key.dir);
+            if (key.facing - want).abs() > 0.01 {
+                off.push(format!("{name}: facing {:.4}, the map's {want:.4}", key.facing));
+            }
+        }
+        assert!(off.is_empty(), "the key's facing share vs the map's:\n{}", off.join("\n"));
+    }
+
+    #[test]
+    fn the_built_in_keys_face_as_the_spec_measured() {
+        // The numbers the EnvSun doc quotes. The dome is a 110 degree disc, the
+        // softbox 70 degrees wide: a surface facing them gets less than the
+        // whole of radiance x solid angle.
+        for (name, facing) in [("Overcast dome", 0.78), ("Top softbox", 0.93), ("Rim pair", 0.95), ("Three-point", 0.98), ("Ring light", 0.98)] {
+            let key = Env::new(&crate::hdri::presets::preset(name).unwrap()).sun().expect("a key light");
+            assert!((key.facing - facing).abs() < 0.01, "{name}: facing {} vs {facing}", key.facing);
+        }
+        // A key a fraction of a degree wide faces fully.
+        let tiny = LightParams { key: true, width_deg: 0.2, height_deg: 0.2, ..Default::default() };
+        let key = Studio::new(&black_studio(), std::slice::from_ref(&tiny)).key().expect("a key light");
+        assert!(key.facing > 0.9999 && key.facing <= 1.0, "{}", key.facing);
+        // A key that draws nothing (a black light) has no direction to weigh: it faces fully.
+        let dark = LightParams { key: true, rgb: Some([0.0; 3]), ..Default::default() };
+        let key = Studio::new(&black_studio(), std::slice::from_ref(&dark)).key().expect("a key light");
+        assert_eq!((key.radiance, key.facing), (Vec3f::default(), 1.0));
+        assert!(key.validate().is_ok(), "{key:?}");
+    }
+
+    #[test]
+    fn nothing_of_the_key_is_drawn_outside_its_covering_cone() {
+        // cos_cover is the cone of the key's reach box: its corners and its soft
+        // edge lie inside it, so remove_sun fills all of the key. The map is black
+        // outside the cone, exactly, on a one degree grid over the sphere and on
+        // rings just past its edge.
+        for (name, lights) in key_light_lists() {
+            let alone = the_key_alone(&studio_params(lights));
+            let env = Env::new(&alone);
+            let key = env.sun().expect("a key light");
+            assert!(key.validate().is_ok(), "{name}: {key:?}");
+            assert!(key.cos_cover < key.cos_radius, "{name}: the reach box is wider than the cone, {key:?}");
+            let mut lit = 0;
+            for iy in 0..180 {
+                for ix in 0..360 {
+                    let d = dir_from_az_el(ix as f32 + 0.5, iy as f32 - 89.5);
+                    let seen = env.radiance(d) != Vec3f::default();
+                    lit += seen as usize;
+                    assert!(!seen || d.dot(key.dir) >= key.cos_cover, "{name}: lit at {:?}, outside the cone", az_el_from_dir(d));
+                }
+            }
+            assert!(lit > 0, "{name}");
+            // Rings of directions a hair and a few percent past the cone's edge.
+            let side = Vec3f::cross(key.dir, if key.dir.y.abs() < 0.9 { vec3f(0.0, 1.0, 0.0) } else { vec3f(1.0, 0.0, 0.0) }).normalize();
+            let up = Vec3f::cross(key.dir, side);
+            let edge = key.cos_cover.acos();
+            for scale in [1.0005f32, 1.01, 1.05] {
+                let theta = (edge * scale).min(std::f32::consts::FRAC_PI_2);
+                for i in 0..720 {
+                    let phi = std::f32::consts::TAU * i as f32 / 720.0;
+                    let d = key.dir * theta.cos() + (side * phi.cos() + up * phi.sin()) * theta.sin();
+                    assert_eq!(env.radiance(d), Vec3f::default(), "{name}: lit {scale} x the cone's edge away, at ring angle {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hard_rect_keys_covering_cone_ends_at_its_corner() {
+        // Square corners, no soft edge: the farthest lit point is the corner of the
+        // box, tan(25) by tan(8) in the tangent plane, and the cone ends there.
+        let light = LightParams { key: true, corner: 0.0, softness: 0.0, width_deg: 50.0, height_deg: 16.0, roll_deg: 25.0, ..Default::default() };
+        let p = the_key_alone(&studio_params(vec![light.clone()]));
+        let env = Env::new(&p);
+        let key = env.sun().expect("a key light");
+        let frame = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
+        let (tx, ty) = (25f32.to_radians().tan(), 8f32.to_radians().tan());
+        let at = |x: f32, y: f32| (frame.center + frame.right * x + frame.up * y).normalize();
+        let corner = at(tx * 0.999, ty * 0.999);
+        assert!(luminance(env.radiance(corner)) > 0.0, "the corner is lit");
+        let corner_deg = corner.dot(key.dir).acos().to_degrees();
+        let cover_deg = key.cos_cover.acos().to_degrees();
+        assert!(cover_deg >= corner_deg && cover_deg < corner_deg + 0.05, "cone {cover_deg} deg, corner {corner_deg} deg");
+        // A hair past the box's long side the map is black.
+        let wide = (frame.center + frame.right * (tx * 1.001) + frame.up * (ty * 0.999)).normalize();
+        assert_eq!(env.radiance(wide), Vec3f::default());
     }
 
     #[test]
