@@ -1,1 +1,368 @@
-//! Seeded CPU noise for the layers. Task A2 replaces this file.
+//! Seeded, deterministic CPU noise shared by the HDRI layers: the 2D cloud
+//! layer now, and volumetric clouds, gobos and imperfections in phase 1b.
+//!
+//! Everything here is a pure function of its inputs. The same coordinates
+//! and seed give the same bits on every platform, because only integer
+//! hashing, floor and f32 arithmetic are used (no transcendental functions).
+//! That is what keeps a preset's clouds identical from one run, and one
+//! machine, to the next.
+//!
+//! The patterns follow the repository's own: the multiply-xorshift integer
+//! hash of `libs/rtsmap/src/rng.rs`, and the quintic fade and gradient table
+//! of `libs/model/src/surface_pattern.rs`, rewritten for f32, three
+//! dimensions and a seed.
+
+use makepad_draw::*;
+
+/// Most octaves an fbm sums. Past 12 the finest octave is below f32
+/// resolution for typical coordinates and only costs time.
+const FBM_MAX_OCTAVES: u32 = 12;
+
+/// An orthonormal matrix (unit rows, mutually perpendicular) that turns the
+/// 3D fbm's octaves against each other, so their lattices never line up.
+const OCTAVE_TURN: [[f32; 3]; 3] = [[0.0, 0.8, 0.6], [-0.8, 0.36, -0.48], [-0.6, -0.48, 0.64]];
+
+/// A 32-bit integer hash with full avalanche ("lowbias32" from Chris Wellons'
+/// hash prospector): every input bit flips about half the output bits, so
+/// neighbouring lattice cells get unrelated values. It is a bijection, so
+/// distinct inputs never collide.
+pub fn hash_u32(x: u32) -> u32 {
+    let mut x = x;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x
+}
+
+/// The seed folded through the hash once. The golden-ratio xor keeps seed 0
+/// from starting the chain at hash(0) = 0.
+fn seed_key(seed: u32) -> u32 {
+    hash_u32(seed ^ 0x9e37_79b9)
+}
+
+/// Chains one lattice coordinate into a running hash. Chaining (rather than
+/// xoring all the coordinates together) keeps (1, 2) and (2, 1) unrelated.
+fn mix_in(h: u32, coordinate: i32) -> u32 {
+    hash_u32(h ^ coordinate as u32)
+}
+
+/// The top 24 bits as a float in [0, 1): exact in f32, and never 1.
+fn unit(h: u32) -> f32 {
+    (h >> 8) as f32 * (1.0 / 16_777_216.0)
+}
+
+/// Perlin's quintic fade 6t^5 - 15t^4 + 10t^3: zero first and second
+/// derivatives at the lattice, so the noise shows no creases along cell edges.
+fn fade(t: f32) -> f32 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// Lattice cell and position inside it. `floor`, not truncation, so negative
+/// coordinates land in the right cell.
+fn cell(v: f32) -> (i32, f32) {
+    let floor = v.floor();
+    (floor as i32, v - floor)
+}
+
+/// A uniform value in [0, 1) for a lattice point and seed.
+pub fn hash01(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
+    unit(mix_in(mix_in(mix_in(seed_key(seed), ix), iy), iz))
+}
+
+/// 2D value noise in [0, 1]: hashed lattice values blended with the quintic
+/// fade. At integer points it equals `hash01(ix, iy, 0, seed)`.
+pub fn value2(x: f32, y: f32, seed: u32) -> f32 {
+    let (ix, fx) = cell(x);
+    let (iy, fy) = cell(y);
+    let (tx, ty) = (fade(fx), fade(fy));
+    let s = seed_key(seed);
+    // The x step of the chain is shared by the two corners in each column.
+    let (hx0, hx1) = (mix_in(s, ix), mix_in(s, ix.wrapping_add(1)));
+    let corner = |hx: u32, j: i32| unit(mix_in(mix_in(hx, j), 0));
+    let iy1 = iy.wrapping_add(1);
+    let bottom = mix_f32(corner(hx0, iy), corner(hx1, iy), tx);
+    let top = mix_f32(corner(hx0, iy1), corner(hx1, iy1), tx);
+    mix_f32(bottom, top, ty)
+}
+
+/// 3D value noise in [0, 1]. At integer points it equals `hash01(ix, iy, iz, seed)`.
+pub fn value3(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    let (ix, fx) = cell(x);
+    let (iy, fy) = cell(y);
+    let (iz, fz) = cell(z);
+    let (tx, ty, tz) = (fade(fx), fade(fy), fade(fz));
+    let s = seed_key(seed);
+    let (ix1, iy1, iz1) = (ix.wrapping_add(1), iy.wrapping_add(1), iz.wrapping_add(1));
+    let (hx0, hx1) = (mix_in(s, ix), mix_in(s, ix1));
+    // x-then-y prefixes of the chain, each shared by the two z corners.
+    let (h00, h10, h01, h11) = (mix_in(hx0, iy), mix_in(hx1, iy), mix_in(hx0, iy1), mix_in(hx1, iy1));
+    let corner = |hxy: u32, k: i32| unit(mix_in(hxy, k));
+    let near = mix_f32(
+        mix_f32(corner(h00, iz), corner(h10, iz), tx),
+        mix_f32(corner(h01, iz), corner(h11, iz), tx),
+        ty,
+    );
+    let far = mix_f32(
+        mix_f32(corner(h00, iz1), corner(h10, iz1), tx),
+        mix_f32(corner(h01, iz1), corner(h11, iz1), tx),
+        ty,
+    );
+    mix_f32(near, far, tz)
+}
+
+/// Dot product of the offset (x, y, z) with one of Perlin's 12 cube-edge
+/// gradients (improved noise, 2002), picked by the hash's top four bits. The
+/// last four codes repeat edges so 16 codes cover the 12 edges evenly enough.
+fn grad3(h: u32, x: f32, y: f32, z: f32) -> f32 {
+    match h >> 28 {
+        0 => x + y,
+        1 => -x + y,
+        2 => x - y,
+        3 => -x - y,
+        4 => x + z,
+        5 => -x + z,
+        6 => x - z,
+        7 => -x - z,
+        8 => y + z,
+        9 => -y + z,
+        10 => y - z,
+        11 => -y - z,
+        12 => x + y,
+        13 => -x + y,
+        14 => -y + z,
+        _ => -y - z,
+    }
+}
+
+/// 3D gradient (Perlin) noise in [-1, 1], zero at every lattice point.
+pub fn perlin3(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    let (ix, fx) = cell(x);
+    let (iy, fy) = cell(y);
+    let (iz, fz) = cell(z);
+    let (u, v, w) = (fade(fx), fade(fy), fade(fz));
+    let s = seed_key(seed);
+    let g = |dx: i32, dy: i32, dz: i32| {
+        let h = mix_in(mix_in(mix_in(s, ix.wrapping_add(dx)), iy.wrapping_add(dy)), iz.wrapping_add(dz));
+        grad3(h, fx - dx as f32, fy - dy as f32, fz - dz as f32)
+    };
+    let near = mix_f32(mix_f32(g(0, 0, 0), g(1, 0, 0), u), mix_f32(g(0, 1, 0), g(1, 1, 0), u), v);
+    let far = mix_f32(mix_f32(g(0, 0, 1), g(1, 0, 1), u), mix_f32(g(0, 1, 1), g(1, 1, 1), u), v);
+    // This gradient set can peak a little above 1 in rare spots; the clamp
+    // makes the documented range hold for fbm remaps downstream.
+    mix_f32(near, far, w).clamp(-1.0, 1.0)
+}
+
+/// 3D Worley (cellular) noise: the distance to the nearest of one hashed
+/// feature point per cell (F1), capped at 1.
+pub fn worley3(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    let (ix, fx) = cell(x);
+    let (iy, fy) = cell(y);
+    let (iz, fz) = cell(z);
+    let s = seed_key(seed);
+    let mut nearest = f32::MAX;
+    // Feature points two cells away are more than 1 away and the result is
+    // capped at 1, so searching the 3x3x3 block around our cell is exact.
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let h = mix_in(mix_in(mix_in(s, ix.wrapping_add(dx)), iy.wrapping_add(dy)), iz.wrapping_add(dz));
+                // Three independent coordinates from the one cell hash.
+                let px = dx as f32 + unit(h) - fx;
+                let py = dy as f32 + unit(hash_u32(h ^ 0x68e3_1da4)) - fy;
+                let pz = dz as f32 + unit(hash_u32(h ^ 0xb529_7a4d)) - fz;
+                nearest = nearest.min(px * px + py * py + pz * pz);
+            }
+        }
+    }
+    nearest.sqrt().min(1.0)
+}
+
+/// Each octave gets its own seed, so octaves are decorrelated and not
+/// just scaled copies of one another.
+fn octave_seed(seed: u32, octave: u32) -> u32 {
+    seed.wrapping_add(octave.wrapping_mul(0x9e37_79b9))
+}
+
+/// 2D value-noise fbm in [0, 1]: lacunarity 2, gain 0.5, each octave turned
+/// about 37 degrees and shifted. `octaves` is clamped to 1..=12.
+pub fn fbm2(x: f32, y: f32, octaves: u32, seed: u32) -> f32 {
+    let octaves = octaves.clamp(1, FBM_MAX_OCTAVES);
+    let (mut px, mut py) = (x, y);
+    let (mut amplitude, mut sum, mut total) = (1.0f32, 0.0f32, 0.0f32);
+    for octave in 0..octaves {
+        sum += amplitude * value2(px, py, octave_seed(seed, octave));
+        total += amplitude;
+        amplitude *= 0.5;
+        // Turn by a 3-4-5 triangle's angle, double the frequency and shift,
+        // so no two octaves share lattice lines (they would show as a grid).
+        let (rx, ry) = (0.8 * px - 0.6 * py, 0.6 * px + 0.8 * py);
+        px = rx * 2.0 + 17.13;
+        py = ry * 2.0 + 5.71;
+    }
+    (sum / total).clamp(0.0, 1.0)
+}
+
+/// 3D value-noise fbm in [0, 1], as `fbm2` with an orthonormal turn per octave.
+pub fn fbm3(x: f32, y: f32, z: f32, octaves: u32, seed: u32) -> f32 {
+    let octaves = octaves.clamp(1, FBM_MAX_OCTAVES);
+    let mut p = [x, y, z];
+    let (mut amplitude, mut sum, mut total) = (1.0f32, 0.0f32, 0.0f32);
+    for octave in 0..octaves {
+        sum += amplitude * value3(p[0], p[1], p[2], octave_seed(seed, octave));
+        total += amplitude;
+        amplitude *= 0.5;
+        let m = &OCTAVE_TURN;
+        let q = [
+            m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2],
+            m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2],
+            m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2],
+        ];
+        p = [q[0] * 2.0 + 17.13, q[1] * 2.0 + 5.71, q[2] * 2.0 + 11.37];
+    }
+    (sum / total).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A spread of points over several cells, negative coordinates included.
+    fn points() -> Vec<(f32, f32, f32)> {
+        let mut out = Vec::with_capacity(1600);
+        for i in 0..40 {
+            for j in 0..40 {
+                let (i, j) = (i as f32, j as f32);
+                out.push((-3.7 + i * 0.173, 2.1 - j * 0.219, 0.37 * i - 0.11 * j));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_hash_is_pinned_and_collision_free() {
+        // Pinned values: changing the hash would silently change every preset's clouds.
+        assert_eq!(hash_u32(0), 0);
+        assert_eq!(hash_u32(1), 0x6889_90c0);
+        assert_eq!(hash_u32(2), 0xd113_2181);
+        assert_eq!(hash_u32(0xdead_beef), 0xe628_c683);
+        assert_eq!(hash01(0, 0, 0, 1), 0.044_623_494);
+        assert_eq!(hash01(-3, 7, 2, 42), 0.947_568_95);
+        let mut seen = std::collections::HashSet::new();
+        assert!((0..100_000u32).all(|i| seen.insert(hash_u32(i))), "the hash is a bijection");
+    }
+
+    #[test]
+    fn hash01_is_uniform_enough() {
+        let mut bins = [0usize; 10];
+        let mut sum = 0.0f64;
+        for i in 0..64 {
+            for j in 0..64 {
+                let h = hash01(i, j, 0, 3);
+                assert!((0.0..1.0).contains(&h), "{h}");
+                bins[(h * 10.0) as usize] += 1;
+                sum += h as f64;
+            }
+        }
+        let mean = sum / 4096.0;
+        assert!((mean - 0.5).abs() < 0.02, "mean {mean}");
+        assert!(bins.iter().all(|&n| (330..=490).contains(&n)), "{bins:?}");
+    }
+
+    #[test]
+    fn noise_is_deterministic_and_exact_on_the_lattice() {
+        for &(x, y, z) in &points() {
+            assert_eq!(value2(x, y, 9).to_bits(), value2(x, y, 9).to_bits());
+            assert_eq!(value3(x, y, z, 9).to_bits(), value3(x, y, z, 9).to_bits());
+            assert_eq!(perlin3(x, y, z, 9).to_bits(), perlin3(x, y, z, 9).to_bits());
+            assert_eq!(worley3(x, y, z, 9).to_bits(), worley3(x, y, z, 9).to_bits());
+            assert_eq!(fbm2(x, y, 5, 9).to_bits(), fbm2(x, y, 5, 9).to_bits());
+            assert_eq!(fbm3(x, y, z, 5, 9).to_bits(), fbm3(x, y, z, 5, 9).to_bits());
+        }
+        // Value noise passes through the hashed lattice values exactly...
+        assert_eq!(value2(3.0, -2.0, 9), hash01(3, -2, 0, 9));
+        assert_eq!(value3(3.0, -2.0, 5.0, 9), hash01(3, -2, 5, 9));
+        // ...and gradient noise is zero on the lattice.
+        for (x, y, z) in [(0.0, 0.0, 0.0), (1.0, -2.0, 3.0), (-5.0, 4.0, 2.0)] {
+            assert_eq!(perlin3(x, y, z, 3), 0.0);
+        }
+    }
+
+    #[test]
+    fn noise_stays_in_its_documented_range() {
+        let pts = points();
+        let mut perlin_peak = 0.0f32;
+        let mut value_sum = 0.0f64;
+        let mut fbm = Vec::with_capacity(pts.len());
+        for &(x, y, z) in &pts {
+            let (v2, v3) = (value2(x, y, 7), value3(x, y, z, 7));
+            assert!((0.0..=1.0).contains(&v2) && (0.0..=1.0).contains(&v3), "{v2} {v3}");
+            let p = perlin3(x, y, z, 7);
+            assert!((-1.0..=1.0).contains(&p), "{p}");
+            perlin_peak = perlin_peak.max(p.abs());
+            let (f2, f3) = (fbm2(x, y, 5, 7), fbm3(x, y, z, 5, 7));
+            assert!((0.0..=1.0).contains(&f2) && (0.0..=1.0).contains(&f3), "{f2} {f3}");
+            value_sum += v2 as f64;
+            fbm.push(f2 as f64);
+        }
+        let (mut near, mut far) = (1.0f32, 0.0f32);
+        for &(x, y, z) in &pts[..400] {
+            let w = worley3(x, y, z, 7);
+            assert!((0.0..=1.0).contains(&w), "{w}");
+            near = near.min(w);
+            far = far.max(w);
+        }
+        let mean = value_sum / pts.len() as f64;
+        assert!((0.4..0.6).contains(&mean), "value noise mean {mean}");
+        assert!(perlin_peak > 0.5, "gradient noise is not flat: {perlin_peak}");
+        assert!(near < 0.3 && far > 0.6, "worley spans near and far: {near}..{far}");
+        let fbm_mean = fbm.iter().sum::<f64>() / fbm.len() as f64;
+        let fbm_std = (fbm.iter().map(|v| (v - fbm_mean).powi(2)).sum::<f64>() / fbm.len() as f64).sqrt();
+        assert!((0.4..0.6).contains(&fbm_mean) && fbm_std > 0.05, "fbm mean {fbm_mean} std {fbm_std}");
+        // Octave counts outside 1..=12 are clamped, not a panic or a NaN.
+        assert!(fbm2(0.3, 0.7, 0, 1).is_finite() && fbm2(0.3, 0.7, 1000, 1).is_finite());
+        assert!(fbm3(0.3, 0.7, 0.1, 0, 1).is_finite());
+    }
+
+    #[test]
+    fn noise_is_continuous_across_cell_seams() {
+        let e = 1.0e-4;
+        let fields: [(&str, &dyn Fn(f32) -> f32); 6] = [
+            ("value2", &|x| value2(x, 0.37, 5)),
+            ("value3", &|x| value3(0.21, x, 0.63, 5)),
+            ("perlin3", &|x| perlin3(0.41, 0.77, x, 5)),
+            ("worley3", &|x| worley3(x, 0.3, 0.6, 5)),
+            ("fbm2", &|x| fbm2(x, 0.37, 5, 5)),
+            ("fbm3", &|x| fbm3(0.2, x, 0.5, 5, 5)),
+        ];
+        for (name, f) in fields.iter() {
+            for k in [-2.0f32, -1.0, 0.0, 1.0, 2.0, 7.0] {
+                let jump = (f(k - e) - f(k + e)).abs();
+                assert!(jump < 2.0e-3, "{name} jumps by {jump} at {k}");
+            }
+            // A fine walk across five cells never steps further than the slope allows.
+            let mut prev = f(-2.5);
+            for i in 1..5000 {
+                let v = f(-2.5 + i as f32 * 1.0e-3);
+                assert!((v - prev).abs() < 5.0e-3, "{name} steps by {} at step {i}", (v - prev).abs());
+                prev = v;
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_seed_gives_a_new_pattern() {
+        let pts = &points()[..400];
+        let differs = |f: &dyn Fn(f32, f32, f32, u32) -> f32| {
+            pts.iter().filter(|&&(x, y, z)| f(x, y, z, 1) != f(x, y, z, 2)).count()
+        };
+        assert!(differs(&|x, y, _, s| value2(x, y, s)) > 390);
+        assert!(differs(&|x, y, z, s| value3(x, y, z, s)) > 390);
+        assert!(differs(&|x, y, z, s| perlin3(x, y, z, s)) > 390);
+        assert!(differs(&|x, y, z, s| worley3(x, y, z, s)) > 390);
+        assert!(differs(&|x, y, _, s| fbm2(x, y, 4, s)) > 390);
+        assert!(differs(&|x, y, z, s| fbm3(x, y, z, 4, s)) > 390);
+        assert_ne!(hash01(1, 2, 3, 1), hash01(1, 2, 3, 2));
+    }
+}
