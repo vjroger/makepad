@@ -1215,6 +1215,9 @@ impl Datamosh {
         let mut params = self.params;
         if let Some(frame) = self.transition {
             params.mode = MoshMode::Decode;
+            // Outside the cut the picture is clean: no blur either.
+            params.blur_motion *= frame.blur;
+            params.blur_drift *= frame.blur;
             if frame.phase == TransitionPhase::Mosh {
                 params.refresh = frame.refresh;
                 params.heal = frame.heal;

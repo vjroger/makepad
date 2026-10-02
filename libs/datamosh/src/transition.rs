@@ -101,6 +101,9 @@ pub struct TransitionFrame {
     /// Output mix: 1 shows the mosh, 0 the clean incoming clip. Applied
     /// per display frame.
     pub wet: f32,
+    /// Envelope on the output motion blurs: fades in over the start of the
+    /// transition and out with `wet` at the end, 0 before and after.
+    pub blur: f32,
 }
 
 impl TransitionParams {
@@ -113,6 +116,7 @@ impl TransitionParams {
             heal: 0.0,
             residual: 0.0,
             wet: 0.0,
+            blur: 0.0,
         };
         if !(progress > 0.0) {
             return clean(TransitionPhase::Before);
@@ -122,6 +126,7 @@ impl TransitionParams {
         }
         let hold = self.hold.clamp(0.0, 0.99);
         let healing = ((progress - hold) / (1.0 - hold)).clamp(0.0, 1.0);
+        let wet = 1.0 - smoothstep(1.0 - self.fade_out.clamp(1e-4, 1.0), 1.0, progress);
         TransitionFrame {
             phase: TransitionPhase::Mosh,
             // Ease in: the first refreshed blocks are rare islands of the
@@ -129,7 +134,8 @@ impl TransitionParams {
             refresh: self.refresh_peak.clamp(0.0, 1.0) * healing * healing,
             heal: smoothstep(0.8, 1.0, healing) * 0.5,
             residual: self.residual,
-            wet: 1.0 - smoothstep(1.0 - self.fade_out.clamp(1e-4, 1.0), 1.0, progress),
+            wet,
+            blur: smoothstep(0.0, 0.15, progress) * wet,
         }
     }
 }
