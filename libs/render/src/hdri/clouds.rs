@@ -199,15 +199,19 @@ impl CloudLayer {
     }
 
     /// Cloud radiance for a sample: sun irradiance x phase x self-shadow,
-    /// plus the sky's ambient.
+    /// plus the sky's ambient, greyed more the more of the sky is cloud.
     pub fn shade(&self, s: &CloudSample, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
         // A broad lobe for the body, a narrow forward one for the silver
         // lining that rims a cloud standing in front of the sun.
         let phase = 0.75 * hg_phase(s.cos_sun, 0.2) + 0.25 * hg_phase(s.cos_sun, 0.85);
         // Clouds are white: the underside sees the blue dome but scatters it
-        // back half greyed.
+        // back half greyed. And the dome it sees is blue only through the
+        // gaps, other cloud everywhere else: the more of the sky is cloud the
+        // less blue is left to carry, and a closed deck has none (a full
+        // overcast is grey, not the clear sky's blue turned down).
         let grey = crate::sky::luminance(ambient);
-        let sky = ambient.mix(vec3f(grey, grey, grey), 0.5);
+        let greyed = 0.5 + 0.5 * self.coverage;
+        let sky = ambient.mix(vec3f(grey, grey, grey), greyed);
         sun_irradiance * (SUN_GAIN * phase * s.light) + sky * AMBIENT_GAIN
     }
 
@@ -449,6 +453,31 @@ mod tests {
     }
 
     #[test]
+    fn the_more_of_the_dome_is_cloud_the_less_blue_the_underside_has() {
+        // A cloud sees the blue dome through the gaps and other cloud
+        // everywhere else, so a closed deck has no blue to carry.
+        let ambient = vec3f(0.1, 0.2, 0.4);
+        let underside = |coverage: f32| {
+            let layer = CloudLayer::new(&clouds(coverage, 0.0), 1, sun()).unwrap();
+            layer.shade(&CloudSample { alpha: 1.0, light: 0.0, cos_sun: 0.0 }, Vec3f::default(), ambient)
+        };
+        let blue = |coverage: f32| {
+            let c = underside(coverage);
+            c.z / c.x
+        };
+        let (scattered, broken, mostly, closed) = (blue(0.1), blue(0.4), blue(0.7), blue(1.0));
+        assert!(scattered > broken && broken > mostly && mostly > closed, "{scattered} {broken} {mostly} {closed}");
+        // Scattered cloud keeps the half-greyed underside it always had...
+        assert!(scattered > 1.8, "{scattered}");
+        // ...and a closed deck is the grey of the dome's luminance, nothing else.
+        let grey = crate::sky::luminance(ambient);
+        let c = underside(1.0);
+        for channel in [c.x, c.y, c.z] {
+            assert!((channel - grey).abs() < 1.0e-5, "{c:?} against {grey}");
+        }
+    }
+
+    #[test]
     fn cirrus_is_a_thin_fully_lit_veil() {
         let layer = CloudLayer::new(&clouds(0.0, 1.0), 5, sun()).unwrap();
         let mut most = 0.0f32;
@@ -518,6 +547,18 @@ mod env_tests {
         let zenith = vec3f(0.0, 1.0, 0.0);
         let change = (overcast.radiance(zenith) - clear.radiance(zenith)).length();
         assert!(change > 0.01 * luminance(clear.radiance(zenith)), "the deck shows overhead");
+    }
+
+    #[test]
+    fn the_overcast_preset_is_a_grey_deck() {
+        // Linear blue over red of the deck, away from the horizon haze: the
+        // clear dome's blue is 4 to 1 here, and a deck under a deck is grey.
+        let env = Env::new(&crate::hdri::presets::preset("Overcast").expect("the Overcast preset"));
+        for (az, el) in [(0.0f32, 60.0f32), (0.0, 30.0), (90.0, 30.0), (200.0, 45.0), (300.0, 20.0)] {
+            let c = env.radiance(dir_from_az_el(az, el));
+            let blue = c.z / c.x;
+            assert!((0.85..1.1).contains(&blue), "({az}, {el}): {c:?} has blue over red {blue}");
+        }
     }
 
     /// A manual sun due south at `el` degrees.
