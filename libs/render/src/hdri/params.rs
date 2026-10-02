@@ -1143,6 +1143,78 @@ mod tests {
     }
 
     #[test]
+    fn every_choice_name_round_trips_through_its_accessor() {
+        // Each listed name reads back through its typed accessor as a variant whose
+        // as_str is that name, and clamp() keeps it as it is. An unknown string reads
+        // as the list's first name, and every variant is listed. A name added to a
+        // list but not to its accessor (or the other way round) fails here.
+        let light = |shape: &str, blend: &str| HdriParams {
+            lights: vec![LightParams { shape: shape.to_string(), blend: blend.to_string(), ..LightParams::default() }],
+            ..Default::default()
+        };
+        let mut seen = Vec::new();
+        for name in MODE_NAMES {
+            let mut p = HdriParams { mode: name.to_string(), ..Default::default() };
+            seen.push(p.mode().as_str());
+            assert!(p.clamp().is_empty() && p.mode == *name, "mode {name}");
+        }
+        assert_eq!(seen, MODE_NAMES);
+        seen.clear();
+        for name in SUN_MODE_NAMES {
+            let mut p = HdriParams::default();
+            p.sky.sun.mode = name.to_string();
+            seen.push(p.sky.sun.mode().as_str());
+            assert!(p.clamp().is_empty() && p.sky.sun.mode == *name, "sun mode {name}");
+        }
+        assert_eq!(seen, SUN_MODE_NAMES);
+        seen.clear();
+        for name in LIGHT_SHAPE_NAMES {
+            let mut p = light(name, BLEND_NAMES[0]);
+            seen.push(p.lights[0].shape().as_str());
+            assert!(p.clamp().is_empty() && p.lights[0].shape == *name, "shape {name}");
+        }
+        assert_eq!(seen, LIGHT_SHAPE_NAMES);
+        seen.clear();
+        for name in BLEND_NAMES {
+            let mut p = light(LIGHT_SHAPE_NAMES[0], name);
+            seen.push(p.lights[0].blend().as_str());
+            assert!(p.clamp().is_empty() && p.lights[0].blend == *name, "blend {name}");
+        }
+        assert_eq!(seen, BLEND_NAMES);
+
+        let unknown = light("?", "?");
+        assert_eq!(HdriParams { mode: "?".to_string(), ..Default::default() }.mode().as_str(), MODE_NAMES[0]);
+        let mut sun = SunParams::default();
+        sun.mode = "?".to_string();
+        assert_eq!(sun.mode().as_str(), SUN_MODE_NAMES[0]);
+        assert_eq!(unknown.lights[0].shape().as_str(), LIGHT_SHAPE_NAMES[0]);
+        assert_eq!(unknown.lights[0].blend().as_str(), BLEND_NAMES[0]);
+
+        // Every variant has its name listed. The matches stop compiling when a
+        // variant is added, until it is added to the arrays beside them too.
+        for m in [Mode::Sky, Mode::Studio] {
+            match m {
+                Mode::Sky | Mode::Studio => assert!(MODE_NAMES.contains(&m.as_str()), "{m:?}"),
+            }
+        }
+        for m in [SunMode::Time, SunMode::Manual] {
+            match m {
+                SunMode::Time | SunMode::Manual => assert!(SUN_MODE_NAMES.contains(&m.as_str()), "{m:?}"),
+            }
+        }
+        for s in [LightShape::Rect, LightShape::Disc, LightShape::Ring] {
+            match s {
+                LightShape::Rect | LightShape::Disc | LightShape::Ring => assert!(LIGHT_SHAPE_NAMES.contains(&s.as_str()), "{s:?}"),
+            }
+        }
+        for b in [Blend::Add, Blend::Multiply] {
+            match b {
+                Blend::Add | Blend::Multiply => assert!(BLEND_NAMES.contains(&b.as_str()), "{b:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn lights_are_capped_and_only_the_first_key_survives() {
         let mut p = HdriParams::default();
         for i in 0..10 {
