@@ -338,20 +338,33 @@ pub struct StageSettings {
 impl Default for StageSettings {
     fn default() -> Self {
         Self {
-            transition_mode: false,
-            mixer: Mixer::default(),
+            transition_mode: true,
+            // Zoom (slot 7 of 11) at strength 0, 1 px blocks, dirty 0.1.
+            mixer: Mixer {
+                drift: 0.636,
+                block: 0.0,
+                dirty: 0.1,
+            },
             picture: Source::Shapes,
             motion: MotionChoice::GridVectors,
             mosh_on: true,
             freeze: false,
             source_fps: 30.0,
-            auto_iframe: 8.0,
+            auto_iframe: 4.0,
             params: MoshParams {
-                drift: 3.0,
+                drift: 0.0,
+                drift_mode: DriftMode::Zoom,
+                block_size: 1.0,
+                entropy: 0.1,
                 ..MoshParams::default()
             },
-            transition: TransitionParams::default(),
-            transition_secs: 3.0,
+            transition: TransitionParams {
+                hold: 0.9,
+                fade_out: 0.58,
+                residual: 0.1,
+                ..TransitionParams::default()
+            },
+            transition_secs: 1.2,
         }
     }
 }
@@ -582,19 +595,27 @@ impl MoshStage {
     }
 
     /// Tell the engine what this display frame is: a transition frame, a
-    /// clean frame, or a mosh step (only when the sources advanced).
-    fn feed(&mut self, advanced: bool) {
+    /// clean frame, or a mosh step (only when the sources advanced, by
+    /// `frames` source frames).
+    fn feed(&mut self, frames: u32) {
+        let advanced = frames > 0;
         let Some(sources) = self.sources.as_ref() else {
             return;
         };
         let settings = self.settings;
         if let Some(tr) = self.transition.as_mut() {
-            let progress = ((self.time - tr.start) / settings.transition_secs.max(0.1)) as f32;
+            let secs = settings.transition_secs.max(0.1);
+            let progress = ((self.time - tr.start) / secs) as f32;
+            // The decoder steps once per source frame: the frames still to
+            // come before the end.
+            let fps = settings.source_fps.max(1.0);
+            let steps_left =
+                (((tr.start + secs) * fps).floor() - (self.time * fps).floor()).max(0.0) as f32;
             let from = Self::source_tex(sources, tr.from);
             let to = Self::source_tex(sources, tr.to);
             let phase =
                 self.mosh
-                    .drive_transition(&from, &to, progress, &settings.transition, advanced);
+                    .drive_transition(&from, &to, progress, &settings.transition, steps_left, frames);
             if phase == TransitionPhase::After {
                 tr.landed = true;
             }
@@ -606,7 +627,7 @@ impl MoshStage {
             let from = Self::source_tex(sources, settings.picture);
             let to = Self::source_tex(sources, settings.picture.other());
             self.mosh
-                .drive_transition(&from, &to, 0.0, &settings.transition, advanced);
+                .drive_transition(&from, &to, 0.0, &settings.transition, 0.0, frames);
             return;
         }
         self.mosh.end_transition();
@@ -696,13 +717,16 @@ impl Widget for MoshStage {
         let fps = self.settings.source_fps.max(1.0);
         let t = (self.time * fps).floor() / fps;
         let advanced = self.src_time != Some(t);
+        let mut frames = 0;
         if advanced {
             self.prev_src_time = self.src_time.unwrap_or(t);
             self.src_time = Some(t);
             let prev = self.prev_src_time;
+            // A slow display frame can cover several source frames.
+            frames = (((t - prev) * fps).round() as u32).max(1);
             self.render_sources(cx, t, prev);
         }
-        self.feed(advanced);
+        self.feed(frames);
         self.mosh.render(cx);
 
         let main = Self::fit(rect, SRC_W as f64 / SRC_H as f64);

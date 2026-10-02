@@ -42,15 +42,15 @@ script_mod! {
                         H4{text: "Demo"}
                         demo := DropDown{
                             labels: ["Effect (continuous mosh)" "Transition (clean A, mosh, clean B)"]
-                            selected_item: 0
+                            selected_item: 1
                         }
 
                         Hr{}
                         H4{text: "Mixer (the few sliders a VJ mixer has)"}
-                        mix_drift := Knob{text: "Drift: 0 none .. patterns +/- .. top random" min: 0.0 max: 1.0 default: 0.0 precision: 3}
-                        drift_label := Label{text: "drift: none"}
-                        mix_block := Knob{text: "Block size" min: 0.0 max: 1.0 default: 0.667 precision: 3}
-                        mix_dirty := Knob{text: "Dirty: damage, incoming residual, 1 - hold" min: 0.0 max: 1.0 default: 0.4 precision: 3}
+                        mix_drift := Knob{text: "Drift: 0 none .. patterns +/- .. top random" min: 0.0 max: 1.0 default: 0.636 precision: 3}
+                        drift_label := Label{text: "drift: Zoom"}
+                        mix_block := Knob{text: "Block size" min: 0.0 max: 1.0 default: 0.0 precision: 3}
+                        mix_dirty := Knob{text: "Dirty: damage, incoming residual, 1 - hold" min: 0.0 max: 1.0 default: 0.1 precision: 3}
 
                         Hr{}
                         H4{text: "Sources"}
@@ -74,7 +74,7 @@ script_mod! {
                         }
                         freeze := CheckBox{text: "Freeze motion (repeat the last P-frame)"}
                         iframe := Button{text: "I-frame now"}
-                        auto_iframe := Knob{text: "Auto I-frame every (s, 0 = never)" min: 0.0 max: 20.0 step: 0.5 default: 8.0 precision: 1}
+                        auto_iframe := Knob{text: "Auto I-frame every (s, 0 = never)" min: 0.0 max: 20.0 step: 0.5 default: 4.0 precision: 1}
                         mode := DropDown{
                             labels: ["Decode" "Remap" "Remap live"]
                             selected_item: 0
@@ -88,7 +88,7 @@ script_mod! {
                         diffusion := Knob{text: "Diffusion (px)" min: 0.0 max: 8.0 default: 0.0 precision: 1}
                         blur_motion := Knob{text: "Motion blur: vectors (steps)" min: 0.0 max: 4.0 default: 0.0 precision: 2}
                         blur_drift := Knob{text: "Motion blur: drift (steps)" min: 0.0 max: 8.0 default: 0.0 precision: 2}
-                        drift := Knob{text: "Drift strength (px per step)" min: -8.0 max: 8.0 default: 3.0 precision: 1}
+                        drift := Knob{text: "Drift strength (px per step)" min: -8.0 max: 8.0 default: 0.0 precision: 1}
                         refresh := Knob{text: "Intra refresh" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         heal := Knob{text: "Heal" min: 0.0 max: 0.25 default: 0.0 precision: 3}
                         residual := Knob{text: "Residual" min: 0.0 max: 1.0 default: 0.0 precision: 2}
@@ -101,9 +101,9 @@ script_mod! {
                             labels: ["Incoming motion" "Outgoing motion"]
                             selected_item: 0
                         }
-                        transition_secs := Knob{text: "Duration (s)" min: 0.5 max: 8.0 default: 3.0 precision: 1}
+                        transition_secs := Knob{text: "Duration (s)" min: 0.5 max: 8.0 default: 1.2 precision: 1}
                         refresh_peak := Knob{text: "Refresh at the end" min: 0.02 max: 1.0 default: 0.3 precision: 2}
-                        fade_out := Knob{text: "Fade out (end of transition)" min: 0.0 max: 1.0 default: 0.25 precision: 2}
+                        fade_out := Knob{text: "Fade out (end of transition)" min: 0.0 max: 1.0 default: 0.58 precision: 2}
                     }
                 }
             }

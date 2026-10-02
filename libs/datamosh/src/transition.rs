@@ -19,6 +19,11 @@
 //! - the final `fade_out` of the transition dissolves the output into the
 //!   clean incoming clip on every display frame (not only on source
 //!   frames), so it lands on B exactly, with nothing left to snap;
+//! - throughout, B is read through the inverse of the drift the decoder
+//!   still has to apply (with its vectors and residual when its motion
+//!   drives the mosh), so everything of B in the mosh lines up with the
+//!   clip that fades in, and it lands on its own framing; see
+//!   [`crate::Datamosh::drive_transition`];
 //! - `progress >= 1` ([`TransitionPhase::After`]): B's keyframe, clean.
 //!
 //! This module is the plan only (pure, no GPU); [`crate::Datamosh::drive_transition`]

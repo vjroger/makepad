@@ -448,11 +448,83 @@ script_mod! {
             let s11 = self.tex_ref.sample_nearest(b + self.inv_frame)
             return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y)
         }
+        // LANDING: while a transition runs, the incoming clip is read through
+        // the inverse of the `land` steps of drift the decoder still has to
+        // apply, so it moves exactly as the reference does and reaches its
+        // own framing when `land` reaches 0. A step reads from `x - drift(x)`;
+        // for the radial patterns that is `rel * (1 - q)`, rel from the frame
+        // centre in pixels and q the pattern's complex rate.
+        radial_q: fn() -> vec2 {
+            let r = self.drift / (0.5 * min(self.frame_size.x, self.frame_size.y))
+            if self.drift_mode > 3.5 {
+                return vec2(r, r) * 0.7071
+            }
+            if self.drift_mode > 2.5 {
+                return vec2(r, 0.0)
+            }
+            return vec2(0.0, r)
+        }
+        // (1 - q)^e as a complex number.
+        step_pow: fn(q: vec2, e: float) -> vec2 {
+            let z = vec2(1.0 - q.x, 0.0 - q.y)
+            let s = pow(max(length(z), 0.000001), e)
+            let th = atan2(z.y, z.x) * e
+            return vec2(cos(th), sin(th)) * s
+        }
+        cmul: fn(a: vec2, b: vec2) -> vec2 {
+            return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x)
+        }
+        // Where the incoming clip is read for screen position uv.
+        landing: fn(uv: vec2) -> vec2 {
+            let n = self.land
+            if self.drift_mode > 1.5 {
+                let rel = (uv - vec2(0.5, 0.5)) * self.frame_size
+                return vec2(0.5, 0.5) + self.cmul(rel, self.step_pow(self.radial_q(), 0.0 - n)) * self.inv_frame
+            }
+            if self.drift_mode > 0.5 {
+                return uv + vec2(0.0, self.drift * n) * self.inv_frame
+            }
+            return uv + vec2(self.drift * n, 0.0) * self.inv_frame
+        }
+        // 1 where the landed incoming clip has a picture: inside its frame.
+        // Outside it there is nothing to refresh, heal or dissolve into, so
+        // the mosh carries on there until the frame has grown over it.
+        landed_inside: fn(uv: vec2) -> float {
+            return step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0)
+        }
+        // A vector of the incoming clip (uv) as it moves the landed picture
+        // on screen: through the inverse Jacobian of the warp the reference
+        // is aligned with before this step (`land + land_steps` steps). The
+        // slides have an identity Jacobian.
+        land_vector: fn(v: vec2) -> vec2 {
+            if self.land_motion < 0.5 {
+                return v
+            }
+            if self.drift_mode < 1.5 {
+                return v
+            }
+            return self.cmul(v * self.frame_size, self.step_pow(self.radial_q(), self.land + self.land_steps)) * self.inv_frame
+        }
+        // The drift of `land_steps` source frames at uv, exact, in pixels.
+        land_drift: fn(uv: vec2) -> vec2 {
+            let k = self.land_steps
+            if self.drift_mode > 1.5 {
+                let rel = (uv - vec2(0.5, 0.5)) * self.frame_size
+                return rel - self.cmul(rel, self.step_pow(self.radial_q(), k))
+            }
+            if self.drift_mode > 0.5 {
+                return vec2(0.0, self.drift * k)
+            }
+            return vec2(self.drift * k, 0.0)
+        }
         pixel: fn() {
             let px = self.pos * self.frame_size
             let bs = max(self.block, 1.0)
             let cell = floor(px / bs)
-            let fresh = self.tex_picture.sample(self.pos).xyz
+            let lp = self.landing(self.pos)
+            let inb = self.landed_inside(lp)
+            let fresh = self.tex_picture.sample(lp).xyz
+            let heal = self.heal * inb
             // I-FRAME: the reference becomes the picture (Decode) or the
             // identity mapping onto the keyframe just copied (Remap).
             if self.keyframe > 0.5 {
@@ -461,11 +533,15 @@ script_mod! {
                 }
                 return vec4(fresh.x, fresh.y, fresh.z, 0.0)
             }
-            // One vector per macroblock, read at the block's centre.
+            // One vector per macroblock, read at the block's centre (where
+            // the landed incoming clip has it, when its motion drives).
             let center = (cell + vec2(0.5, 0.5)) * bs * self.inv_frame
-            let f = self.tex_field.sample(mix(self.pos, center, step(1.5, bs)))
-            let raw = vec2(f.x, f.y) * self.field_on
-            let cost = f.z * self.field_on
+            let at = mix(self.pos, center, step(1.5, bs))
+            let la = mix(at, self.landing(at), self.land_motion)
+            let f = self.tex_field.sample(la)
+            let field_in = self.field_on * self.landed_inside(la)
+            let raw = vec2(f.x, f.y) * field_in
+            let cost = f.z * field_in
             let seed = self.seed
             let r1 = self.rand(cell + vec2(seed * 1.37 + 0.11, 17.0))
             let r2 = self.rand(cell + vec2(29.0, seed * 2.11 + 0.37))
@@ -473,18 +549,23 @@ script_mod! {
             let r4 = self.rand(cell * 1.7 + vec2(seed * 3.17 + 3.0, 9.0))
             let r5 = self.rand(cell * 0.61 + vec2(53.0, seed * 0.57 + 13.0))
             let mm = self.motion_mat
-            let mut m = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain
-            m = m + self.drift_at(center) * self.inv_frame
+            let mut m = self.land_vector(vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain)
+            // While a transition lands the drift is exact (per pixel, not
+            // rounded, once per source frame this step covers), so the
+            // reference moves exactly as the landing warp.
+            let drift = mix(self.drift_at(center), self.land_drift(self.pos), self.land_on) * self.inv_frame
+            m = m + drift * (1.0 - self.land_on)
             m = m + (vec2(r1, r2) - vec2(0.5, 0.5)) * self.diffusion * self.inv_frame
             // The decoder's sub-pixel precision.
             if self.pel > 0.5 {
                 let q = self.frame_size * self.pel
                 m = round(m * q) / q
             }
+            m = m + drift * self.land_on
             let src = self.pos - m
             let move_px = length(m * self.frame_size)
             // Intra refresh: this block is sent again from the picture.
-            let refreshed = 1.0 - step(self.refresh, r3)
+            let refreshed = (1.0 - step(self.refresh, r3)) * inb
             let damage_in = clamp(move_px / bs, 0.0, 1.0) * 0.06 + cost * 0.5
             if self.remap > 0.5 {
                 // Nearest texel of the coordinate map plus the sub-texel
@@ -502,7 +583,7 @@ script_mod! {
                 if r4 < self.entropy * smoothstep(0.1, 1.5, damage) * 0.25 {
                     uv = uv + (vec2(r1, r5) - vec2(0.5, 0.5)) * bs * self.inv_frame
                 }
-                uv = mix(uv, self.pos, self.heal)
+                uv = mix(uv, self.pos, heal)
                 uv = mix(uv, self.pos, refreshed)
                 return vec4(uv.x, uv.y, damage * (1.0 - refreshed), 1.0)
             }
@@ -511,8 +592,9 @@ script_mod! {
             // The P-frame residual as the motion source's encoder would
             // have coded it: against ITS previous frame, along the
             // unmodified block vector.
-            let res = self.tex_mcur.sample(self.pos).xyz - self.tex_mprev.sample(self.pos - raw).xyz
-            col = col + res * self.residual
+            let rp = mix(self.pos, lp, self.land_motion)
+            let res = self.tex_mcur.sample(rp).xyz - self.tex_mprev.sample(rp - raw).xyz
+            col = col + res * (self.residual * self.landed_inside(rp))
             let damage = min(prev.w * 0.985 + damage_in, 4.0)
             // Codec damage in pixel space: one DCT basis pattern stamped
             // on the block, the ringing and block breakup of a starved
@@ -526,9 +608,9 @@ script_mod! {
                 col = col + vec3(1.0, 1.0 - r2 * 0.3, 1.0 - r1 * 0.3) * (basis * amp)
             }
             col = clamp(col, vec3(-0.25, -0.25, -0.25), vec3(1.25, 1.25, 1.25))
-            col = mix(col, fresh, self.heal)
+            col = mix(col, fresh, heal)
             col = mix(col, fresh, refreshed)
-            let keep = (1.0 - refreshed) * (1.0 - self.heal)
+            let keep = (1.0 - refreshed) * (1.0 - heal)
             return vec4(col.x, col.y, col.z, damage * keep)
         }
     }
@@ -580,9 +662,67 @@ script_mod! {
             let remapped = mix(self.tex_key.sample(at).xyz, self.tex_picture.sample(at).xyz, self.live_on)
             return mix(vec3(r.x, r.y, r.z), remapped, self.remap)
         }
+        // LANDING: while a transition runs, the incoming clip is read through
+        // the inverse of the `land` steps of drift the decoder still has to
+        // apply, so it moves exactly as the reference does and reaches its
+        // own framing when `land` reaches 0. A step reads from `x - drift(x)`;
+        // for the radial patterns that is `rel * (1 - q)`, rel from the frame
+        // centre in pixels and q the pattern's complex rate.
+        radial_q: fn() -> vec2 {
+            let r = self.drift / (0.5 * min(self.frame_size.x, self.frame_size.y))
+            if self.drift_mode > 3.5 {
+                return vec2(r, r) * 0.7071
+            }
+            if self.drift_mode > 2.5 {
+                return vec2(r, 0.0)
+            }
+            return vec2(0.0, r)
+        }
+        // (1 - q)^e as a complex number.
+        step_pow: fn(q: vec2, e: float) -> vec2 {
+            let z = vec2(1.0 - q.x, 0.0 - q.y)
+            let s = pow(max(length(z), 0.000001), e)
+            let th = atan2(z.y, z.x) * e
+            return vec2(cos(th), sin(th)) * s
+        }
+        cmul: fn(a: vec2, b: vec2) -> vec2 {
+            return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x)
+        }
+        // Where the incoming clip is read for screen position uv.
+        landing: fn(uv: vec2) -> vec2 {
+            let n = self.land
+            if self.drift_mode > 1.5 {
+                let rel = (uv - vec2(0.5, 0.5)) * self.frame_size
+                return vec2(0.5, 0.5) + self.cmul(rel, self.step_pow(self.radial_q(), 0.0 - n)) * self.inv_frame
+            }
+            if self.drift_mode > 0.5 {
+                return uv + vec2(0.0, self.drift * n) * self.inv_frame
+            }
+            return uv + vec2(self.drift * n, 0.0) * self.inv_frame
+        }
+        // 1 where the landed incoming clip has a picture: inside its frame.
+        // Outside it there is nothing to refresh, heal or dissolve into, so
+        // the mosh carries on there until the frame has grown over it.
+        landed_inside: fn(uv: vec2) -> float {
+            return step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0)
+        }
+        // A vector of the incoming clip (uv) as it moves the landed picture
+        // on screen: through the inverse Jacobian of the warp the reference
+        // is aligned with before this step (`land + land_steps` steps). The
+        // slides have an identity Jacobian.
+        land_vector: fn(v: vec2) -> vec2 {
+            if self.land_motion < 0.5 {
+                return v
+            }
+            if self.drift_mode < 1.5 {
+                return v
+            }
+            return self.cmul(v * self.frame_size, self.step_pow(self.radial_q(), self.land + self.land_steps)) * self.inv_frame
+        }
         pixel: fn() {
             let r = self.tex_ref.sample_nearest(self.pos)
-            let pic = self.tex_picture.sample(self.pos).xyz
+            let lp = self.landing(self.pos)
+            let pic = self.tex_picture.sample(lp).xyz
             if self.view_mode > 1.5 {
                 let k = clamp(mix(r.w, r.z, self.remap) * 0.5, 0.0, 1.0)
                 return vec4(k, k * k, k * k * k, 1.0)
@@ -601,11 +741,13 @@ script_mod! {
                 let bs = max(self.block, 1.0)
                 let cell = floor(self.pos * self.frame_size / bs)
                 let center = mix(self.pos, (cell + vec2(0.5, 0.5)) * bs * self.inv_frame, step(1.5, bs))
-                let f = self.tex_field.sample(center)
-                let raw = vec2(f.x, f.y) * self.field_on
+                let la = mix(center, self.landing(center), self.land_motion)
+                let f = self.tex_field.sample(la)
+                let raw = vec2(f.x, f.y) * (self.field_on * self.landed_inside(la))
                 let mm = self.motion_mat
-                let mv = vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain
-                let streak = mv * self.blur_motion + self.drift_at(center) * self.inv_frame * self.blur_drift
+                let mv = self.land_vector(vec2(raw.x * mm.x + raw.y * mm.y, raw.x * mm.z + raw.y * mm.w) * self.gain)
+                let drift = mix(self.drift_at(center), self.drift_at(self.pos), self.land_on) * self.inv_frame
+                let streak = mv * self.blur_motion + drift * self.blur_drift
                 let mut sum = vec3(0.0, 0.0, 0.0)
                 let mut k = 0.0
                 loop {
@@ -615,7 +757,7 @@ script_mod! {
                 }
                 mosh = sum / 12.0
             }
-            let c = mix(pic, mosh, self.wet)
+            let c = mix(pic, mosh, mix(1.0, self.wet, self.landed_inside(lp)))
             return vec4(clamp(c.x, 0.0, 1.0), clamp(c.y, 0.0, 1.0), clamp(c.z, 0.0, 1.0), 1.0)
         }
     }
@@ -757,6 +899,19 @@ pub struct DrawMoshStep {
     pub keyframe: f32,
     #[live]
     pub field_on: f32,
+    /// Steps of drift the incoming clip is read ahead of (see `landing`).
+    #[live]
+    pub land: f32,
+    /// 1 while a transition lands: exact drift, the picture through the warp.
+    #[live]
+    pub land_on: f32,
+    /// 1 when the incoming clip's motion drives the mosh: its vectors and
+    /// residual are read through the warp too.
+    #[live]
+    pub land_motion: f32,
+    /// Source frames this step covers while landing (drift steps).
+    #[live]
+    pub land_steps: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -795,6 +950,19 @@ pub struct DrawMoshOutput {
     /// Streak length along the drift, in steps.
     #[live]
     pub blur_drift: f32,
+    /// Steps of drift the incoming clip is read ahead of (see `landing`).
+    #[live]
+    pub land: f32,
+    /// 1 while a transition lands: exact drift, the picture through the warp.
+    #[live]
+    pub land_on: f32,
+    /// 1 when the incoming clip's motion drives the mosh: its vectors and
+    /// residual are read through the warp too.
+    #[live]
+    pub land_motion: f32,
+    /// Source frames this step covers while landing (drift steps).
+    #[live]
+    pub land_steps: f32,
 }
 
 /// One offscreen stage: its pass and its draw list.
@@ -938,6 +1106,15 @@ pub struct Datamosh {
     /// The running transition's plan, when one is driving the decoder.
     #[rust]
     transition: Option<TransitionFrame>,
+    /// Decoder steps the running transition still has to take.
+    #[rust]
+    steps_left: f32,
+    /// Whether the incoming clip's motion drives the running transition.
+    #[rust]
+    incoming_motion: bool,
+    /// Motion-clip frames the running transition's next step covers.
+    #[rust]
+    step_frames: u32,
     /// Passes that render textures this frame reads; linked under the
     /// first stage so they run before it.
     #[rust]
@@ -1030,10 +1207,19 @@ impl Datamosh {
     }
 
     /// Schedule one display frame of a datamosh transition from `from` to
-    /// `to` at `progress` (0 = the cut, 1 = done). `advanced` is whether the
-    /// clip whose motion drives the mosh has a new frame this display
-    /// frame; call this every display frame of the transition, before and
-    /// after it too, so the motion history is warm when the cut comes.
+    /// `to` at `progress` (0 = the cut, 1 = done). `frames` is how many
+    /// frames the clip whose motion drives the mosh advanced since the last
+    /// call (0: none, no step); call this every display frame of the
+    /// transition, before and after it too, so the motion history is warm
+    /// when the cut comes.
+    ///
+    /// `steps_left` is how many motion-clip frames the transition still
+    /// has after this one. The incoming clip is read through the inverse of
+    /// that much drift (and, when its motion drives, so are its vectors and
+    /// residual), and each step applies the drift once per frame it covers,
+    /// so all of the incoming clip in the mosh moves exactly with the
+    /// drift, lines up with the clip that fades in, and lands on its own
+    /// framing.
     ///
     /// While it runs the decoder is in [`MoshMode::Decode`] with the plan's
     /// refresh, heal and residual; the rest of [`MoshParams`] (block size,
@@ -1044,15 +1230,19 @@ impl Datamosh {
         to: &Texture,
         progress: f32,
         transition: &TransitionParams,
-        advanced: bool,
+        steps_left: f32,
+        frames: u32,
     ) -> TransitionPhase {
         let frame = transition.frame(progress);
+        self.steps_left = steps_left.max(0.0);
+        self.incoming_motion = transition.motion == TransitionMotion::Incoming;
         let motion = match transition.motion {
             TransitionMotion::Incoming => to,
             TransitionMotion::Outgoing => from,
         };
-        if advanced {
+        if frames > 0 {
             self.push_motion_frame(motion);
+            self.step_frames = frames;
         }
         // The whole transition decodes colours, before the cut included:
         // the reference must already hold the outgoing picture when the
@@ -1203,6 +1393,21 @@ impl Datamosh {
         params
     }
 
+    /// The landing this render reads the incoming clip with: steps left,
+    /// whether it is on, whether the incoming clip's motion drives, and the
+    /// frames this render's step covers.
+    fn landing(&self) -> (f32, f32, f32, f32) {
+        match self.transition {
+            Some(frame) if frame.phase == TransitionPhase::Mosh => (
+                self.steps_left,
+                1.0,
+                if self.incoming_motion { 1.0 } else { 0.0 },
+                self.step_frames.max(1) as f32,
+            ),
+            _ => (0.0, 0.0, 0.0, 1.0),
+        }
+    }
+
     /// Turn what was queued since the last render into this render's pass
     /// list, advancing the bookkeeping the ops will make true.
     fn plan(&mut self, params: &MoshParams) -> Vec<Op> {
@@ -1342,6 +1547,7 @@ impl Datamosh {
         }
         self.ensure_targets(cx.cx);
         let params = self.effective_params();
+        let (land, land_on, land_motion, land_steps) = self.landing();
         let ops = self.plan(&params);
         let drift_code = params.drift_mode.code();
         while self.stages.len() < ops.len() {
@@ -1497,6 +1703,10 @@ impl Datamosh {
                     d.seed = (self.steps % 1024) as f32;
                     d.remap = if params.mode.is_remap() { 1.0 } else { 0.0 };
                     d.keyframe = if keyframe { 1.0 } else { 0.0 };
+                    d.land = land;
+                    d.land_on = land_on;
+                    d.land_motion = land_motion;
+                    d.land_steps = land_steps;
                     d.field_on = if self.field == FieldSource::None {
                         0.0
                     } else {
@@ -1544,6 +1754,10 @@ impl Datamosh {
                     d.field_on = if self.field == FieldSource::None { 0.0 } else { 1.0 };
                     d.blur_motion = params.blur_motion.max(0.0);
                     d.blur_drift = params.blur_drift.max(0.0);
+                    d.land = land;
+                    d.land_on = land_on;
+                    d.land_motion = land_motion;
+                    d.land_steps = land_steps;
                     d.view_mode = match params.view {
                         MoshView::Output => 0.0,
                         MoshView::Vectors => 1.0,
