@@ -235,3 +235,117 @@ fn a_landed_environment_lights_the_rig_in_both_lanes() {
     assert_eq!(renderer.env_sun_rig(&world, stock.to_hdr()).color, Vec3f::default(), "no key: no direct light, never the analytic colour");
     assert!(renderer.env_sun_dir(&world).is_none(), "the shadows stay on the rig's own direction");
 }
+
+/// A prepared environment colours the host's fog and feeds the rig; an
+/// authored `Fog`, an MR stage and a missing preparation leave it alone.
+#[test]
+fn a_prepared_environment_colours_the_host_fog_only() {
+    use makepad_render_material::ibl::{sh9, EnvMap};
+    let mut r = Renderer::default();
+    r.set_hdr_output(true);
+    // 128 wide: sh9's midpoint quadrature is 0.4 % high at 32 wide (1.5 %
+    // at 16), outside the 2e-3 asserts below.
+    let map = EnvMap::constant(128, [1.0, 1.0, 1.0]);
+    r.feed_environment_numbers_for_tests(sh9(&map), 1.0, vec3f(0.5, 0.6, 0.7));
+    let mut world = World::new();
+    world.environment.ibl = Some(makepad_scene::Ibl {
+        source: makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)),
+        intensity: 1.0,
+        rotation_deg: 0.0,
+    });
+    // HDR lane: the band at the map's own scale × Ibl.intensity 1, exactly
+    // (HDR_SKY_GAIN is the analytic sky's and never reaches the
+    // environment's fog).
+    assert_eq!(r.env_fog_color(&world, true), Some(vec3f(0.5, 0.6, 0.7)));
+    assert!(r.env_fog_color(&world, false).is_none(), "MR: the room supplies the horizon");
+    // Legacy lane: the fog is the legacy dome's own horizon, i.e. the band
+    // through the dome's tone map at the dome's exposure (metered mean
+    // 1.0 × intensity 1, no exposure_ev: EXPOSURE_KEY / 1.0).
+    r.set_hdr_output(false);
+    assert_eq!(
+        r.env_fog_color(&world, true),
+        Some(crate::sun::legacy_dome_rgb(vec3f(0.5, 0.6, 0.7), crate::sky::EXPOSURE_KEY)),
+        "the legacy fog meets the legacy dome"
+    );
+    // At intensity 2 the dome shows twice the radiance and meters twice the
+    // mean: the legacy fog is the band × 2 at EXPOSURE_KEY / 2, as the dome.
+    world.environment.ibl.as_mut().unwrap().intensity = 2.0;
+    assert_eq!(
+        r.env_fog_color(&world, true),
+        Some(crate::sun::legacy_dome_rgb(vec3f(0.5, 0.6, 0.7) * 2.0, crate::sky::EXPOSURE_KEY / 2.0))
+    );
+    world.environment.ibl.as_mut().unwrap().intensity = 1.0;
+    r.set_hdr_output(true);
+    world.environment.fog = makepad_scene::Fog::Exp2 { color: vec3f(1.0, 1.0, 1.0), density: 0.01 };
+    assert!(r.env_fog_color(&world, true).is_none(), "an authored fog keeps its colour");
+    world.environment.fog = makepad_scene::Fog::Host;
+    // The same preparation feeds the rig: a white map, no sun -> fill only,
+    // E/π = 1.0 at the map's own scale.
+    let rig = r.env_sun_rig(&world, SunLight::default().to_hdr());
+    assert_eq!(rig.color, Vec3f::default());
+    assert!((rig.sky.x - 1.0).abs() < 2.0e-3, "{:?}", rig.sky);
+    // Intensity is the gain, so fill and fog move together.
+    world.environment.ibl.as_mut().unwrap().intensity = 2.0;
+    assert_eq!(r.env_fog_color(&world, true), Some(vec3f(0.5, 0.6, 0.7) * 2.0));
+    assert!((r.env_sun_rig(&world, SunLight::default().to_hdr()).sky.x - 2.0).abs() < 2.0e-3);
+    // A non-finite intensity is no environment at all.
+    world.environment.ibl.as_mut().unwrap().intensity = f32::NAN;
+    assert!(r.env_fog_color(&world, true).is_none());
+    assert_eq!(r.env_sun_rig(&world, SunLight::default()), SunLight::default());
+    // The meter counts the environment's sun: the preparation metered the
+    // lighting copy (cone filled, 1.0 here), env_lighting adds the sun's
+    // share of the sphere mean, L (1 - cos r) / 2 = 1e4 x 1e-4 / 2 = 0.5.
+    world.environment.ibl.as_mut().unwrap().intensity = 1.0;
+    world.environment.sun = Some(makepad_scene::EnvSun {
+        dir: vec3f(0.0, 1.0, 0.0),
+        radiance: vec3f(1.0e4, 1.0e4, 1.0e4),
+        cos_radius: 0.9999,
+        facing: 1.0,
+        cos_cover: 0.9999,
+    });
+    let metered = r.env_lighting(&world).unwrap().mean_luminance;
+    assert!(metered > 1.4 && metered < 1.6, "1.0 + 0.5, got {metered}");
+    assert!(crate::sun::env_exposure(&r.env_lighting(&world).unwrap()) < crate::sun::env_exposure(&crate::sun::EnvLighting { mean_luminance: 1.0, ..r.env_lighting(&world).unwrap() }), "a sunny map meters darker than its sky alone");
+    // And the rig lights with that sun (declared here; a procedural hdri
+    // preset's baked sun arrives the same way through `env_sun`).
+    assert_eq!(r.env_sun(&world), world.environment.sun);
+    assert!(r.env_sun_rig(&world, SunLight::default().to_hdr()).color.x > 0.0);
+}
+
+/// The fog is the dome's horizon, so it takes what the dome takes: the
+/// background's own intensity (the shader multiplies it in after the IBL's)
+/// in both lanes; and with no preparation landed there is no environment
+/// fog at all, whatever the world names.
+#[test]
+fn the_host_fog_takes_the_backgrounds_intensity_and_waits_for_the_preparation() {
+    let mut world = World::new();
+    world.environment.ibl = Some(makepad_scene::Ibl {
+        source: makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)),
+        intensity: 2.0,
+        rotation_deg: 0.0,
+    });
+    let mut r = Renderer::default();
+    r.set_hdr_output(true);
+    assert!(r.env_fog_color(&world, true).is_none(), "nothing prepared yet: the host's fog stands");
+    let sh = makepad_render_material::ibl::sh9(&makepad_render_material::ibl::EnvMap::constant(32, [1.0, 1.0, 1.0]));
+    r.feed_environment_numbers_for_tests(sh, 1.0, vec3f(0.5, 0.6, 0.7));
+    let band = vec3f(0.5, 0.6, 0.7);
+    // A background that is not the environment shows no intensity of its own.
+    assert_eq!(r.env_fog_color(&world, true), Some(band * 2.0));
+    world.environment.background = makepad_scene::Background::Environment { blur: 0.0, intensity: 0.5 };
+    assert_eq!(r.env_fog_color(&world, true), Some(band * 0.5 * 2.0), "HDR: the dome's radiance x Ibl.intensity x the background's");
+    // Legacy: the same radiance through the dome's tone map, metered on the
+    // map's mean x Ibl.intensity alone (what draw_environment_background
+    // passes; the background's intensity is not part of the meter).
+    r.set_hdr_output(false);
+    assert_eq!(
+        r.env_fog_color(&world, true),
+        Some(crate::sun::legacy_dome_rgb(band * 0.5 * 2.0, crate::sky::EXPOSURE_KEY / 2.0))
+    );
+    // The sky's exposure compensation moves the dome's exposure, so the fog's.
+    world.sky = Some(makepad_scene::SkyConfig { exposure_ev: 1.0, ..Default::default() });
+    assert_eq!(
+        r.env_fog_color(&world, true),
+        Some(crate::sun::legacy_dome_rgb(band * 0.5 * 2.0, crate::sky::EXPOSURE_KEY / 2.0 * 2.0))
+    );
+}

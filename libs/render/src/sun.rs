@@ -640,6 +640,35 @@ pub fn env_exposure(env: &EnvLighting) -> f32 {
     hdr_exposure_for_key(mean * gain)
 }
 
+/// The CPU twin of the legacy (display-referred) lane's environment dome
+/// (renderer/ibl.rs, `DrawEnvBackground`'s legacy branch, itself the
+/// analytic dome's steps from shaders/sky_dome.rs): Reinhard on the
+/// LUMINANCE at `exposure`, normalised by the largest channel when that
+/// exceeds 1, gamma 1/2.2. A fog colour run through it matches the dome
+/// drawn behind it. Negative and non-finite input reads as black.
+pub fn legacy_dome_rgb(c: Vec3f, exposure: f32) -> Vec3f {
+    let clean = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let c = vec3f(clean(c.x), clean(c.y), clean(c.z));
+    let lum = c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
+    let yt = lum * clean(exposure);
+    let reinhard = if yt.is_finite() { yt / (1.0 + yt) } else { 1.0 };
+    let l = c * (reinhard / lum.max(1.0e-6));
+    let m = l.x.max(l.y).max(l.z).max(1.0);
+    vec3f((l.x / m).powf(0.4545454), (l.y / m).powf(0.4545454), (l.z / m).powf(0.4545454))
+}
+
+/// The fog colour a `Fog::Host` world takes from its environment under HDR
+/// output: the map's horizon band, linear × the lane's gain (`Ibl.intensity`:
+/// the environment's own scale, as the dome draws it; never HDR_SKY_GAIN),
+/// and the composite exposes it together with the dome. The legacy lane
+/// goes through [`legacy_dome_rgb`] at the dome's exposure instead
+/// (renderer/env_sun.rs).
+pub fn env_fog_color(horizon_rgb: Vec3f, env: &EnvLighting) -> Vec3f {
+    let clean = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let gain = if env.gain.is_finite() { env.gain.max(0.0) } else { 0.0 };
+    vec3f(clean(horizon_rgb.x), clean(horizon_rgb.y), clean(horizon_rgb.z)) * gain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,5 +1334,31 @@ mod tests {
         }
         let steady = env_sun_rig_with(&env_world(None, 0.0), None, Some(&lighting), SunLight::default().to_hdr(), true);
         assert_eq!((rigs[0].sky, rigs[0].ground), (steady.sky, steady.ground), "the fill of the map, whoever aims the light");
+    }
+
+    #[test]
+    fn the_environments_horizon_becomes_the_host_fog() {
+        let env = grey_lighting(1.0); // gain = Ibl.intensity 1
+        let horizon = vec3f(0.9, 0.7, 0.5);
+        assert_eq!(env_fog_color(horizon, &env), horizon, "HDR: linear at the map's own scale, the composite exposes it with the dome");
+        // The gain is Ibl.intensity alone (no HDR_SKY_GAIN): the fog moves with the dome.
+        assert_eq!(env_fog_color(horizon, &EnvLighting { gain: 2.0, ..env }), horizon * 2.0);
+        // A negative or non-finite texel never gets through.
+        let bad = env_fog_color(vec3f(-1.0, f32::NAN, 0.5), &env);
+        assert_eq!((bad.x, bad.y), (0.0, 0.0));
+        assert!(bad.z > 0.0);
+        // The legacy lane's fog is the legacy dome's own tone map
+        // (renderer/ibl.rs, DrawEnvBackground): a white map of 1.0 at the
+        // dome's exposure 0.12 lands at (0.12 / 1.12)^(1/2.2) = 0.36.
+        let t = legacy_dome_rgb(vec3f(1.0, 1.0, 1.0), 0.12);
+        assert!((t.x - (0.12f32 / 1.12).powf(0.4545454)).abs() < 1.0e-5 && t.x == t.z, "{t:?}");
+        // Reinhard on the luminance keeps the hue order and the ratios.
+        let warm = legacy_dome_rgb(horizon, 0.12);
+        assert!(warm.x > warm.y && warm.y > warm.z && warm.z > 0.0 && warm.x < 1.0, "{warm:?}");
+        // A blinding texel normalises to 1, never above; bad input is black.
+        let hot = legacy_dome_rgb(vec3f(1.0e9, 1.0e9, 1.0e9), 0.12);
+        assert!(hot.x <= 1.0 && hot.x > 0.999, "{hot:?}");
+        assert_eq!(legacy_dome_rgb(vec3f(-1.0, f32::NAN, 0.0), 0.12), Vec3f::default());
+        assert_eq!(legacy_dome_rgb(vec3f(1.0, 1.0, 1.0), f32::NAN), Vec3f::default(), "no exposure, no light");
     }
 }

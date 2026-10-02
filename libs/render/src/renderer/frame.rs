@@ -413,8 +413,14 @@ impl Renderer {
             }
             _ => (vec3(0.75, 0.87, 0.96), 0.0),
         };
-        // The world environment's fog, when it names one.
-        let (fog_color, fog_density) = crate::world_lights::world_fog(world).unwrap_or((fog_color, fog_density));
+        // The world environment's fog, when it names one. Under `Fog::Host`
+        // a prepared environment lends its horizon band as the COLOUR (the
+        // haze, the water's horizon and the stock lanes' `sky_env` horizon
+        // then agree with the dome); the density stays the host's.
+        let (fog_color, fog_density) = match crate::world_lights::world_fog(world) {
+            Some(fog) => fog,
+            None => (self.env_fog_color(world, shows_environment).unwrap_or(fog_color), fog_density),
+        };
         // HDR lane: per-pixel exponential height fog (clustered.rs
         // scene_fog) with the game's density at the base height.
         // A world's linear or exp2 fog is fogged with distance as it says.
