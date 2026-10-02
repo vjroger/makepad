@@ -266,6 +266,12 @@ impl Worker {
             }
             VideoInput::Synthetic => Box::new(SyntheticSource::default()),
         };
+        let mut depth_pass: Option<Box<dyn FrameSource>> = match spec.depth.depth_pass_video() {
+            Some(path) => Some(Box::new(FileSource(
+                VideoFileDecoder::open(path).map_err(|e| format!("depth pass {path}: {e}"))?,
+            ))),
+            None => None,
+        };
         self.status(format!("loading depth source {:?}", spec.depth));
         let mut estimator = spec.depth.build()?;
         self.status(format!("depth: {}", estimator.label()));
@@ -307,11 +313,19 @@ impl Worker {
                 None => {
                     // Loop the clip.
                     source.rewind()?;
+                    if let Some(pass) = depth_pass.as_mut() {
+                        pass.rewind()?;
+                    }
                     clock = None;
                     stabilizer.reset();
                     since_depth = u32::MAX;
                     continue;
                 }
+            };
+            // The depth pass advances with the picture, dropped frames included.
+            let pass_frame = match depth_pass.as_mut() {
+                Some(pass) => pass.next_frame()?,
+                None => None,
             };
             let (wall0, pts0) = *clock.get_or_insert((now, frame.pts_100ns));
             let due = wall0 + (frame.pts_100ns - pts0) as f64 * 1e-7;
@@ -323,11 +337,15 @@ impl Worker {
             drops_in_row = 0;
 
             let mut depth = None;
-            if since_depth >= self.settings.depth_every.max(1) {
+            let depth_frame = match (&depth_pass, &pass_frame) {
+                (None, _) => Some(&frame),
+                (Some(_), pass) => pass.as_ref(),
+            };
+            if let Some(depth_frame) = depth_frame.filter(|_| since_depth >= self.settings.depth_every.max(1)) {
                 let view = FrameView {
-                    width: frame.width,
-                    height: frame.height,
-                    nv12: &frame.nv12,
+                    width: depth_frame.width,
+                    height: depth_frame.height,
+                    nv12: &depth_frame.nv12,
                 };
                 let started = Cx::monotonic_now();
                 match estimator.estimate(&view, picture, self.settings.depth_res) {

@@ -9,6 +9,11 @@
 //! cell of the video and the cloud reads as the flat video; billboards are
 //! sized to one cell at their depth, so the front view has no gaps.
 //!
+//! Depth arrives in one of three encodings (`depth_mode`): the pipeline's
+//! normalized disparity (models, packed RGBD, depth-pass videos), or, for
+//! content a GPU renders live, that renderer's own targets with no copy and
+//! no model: a linear view-depth target ([`RenderedDepth`]). Colour is NV12 planes or the renderer's colour target.
+//!
 //! "Edge cut" drops points whose depth neighbourhood spans more than that
 //! fraction of their own depth: the smeared "flying pixels" a depth model
 //! puts between a foreground edge and the background.
@@ -36,8 +41,11 @@ script_mod! {
         // NV12 colour planes (R8 luma, RG8 interleaved chroma at half size).
         tex_y: texture_2d(float)
         tex_uv: texture_2d(float)
-        // Normalized disparity: 1 = near plane, 0 = far plane, < 0 = none.
+        // depth_mode 0: normalized disparity (1 = near, 0 = far, < 0 = none);
+        // 1: linear view depth of a rendered source (<= 0 = none).
         tex_depth: texture_2d(float)
+        // A renderer's colour target (color_mode 1).
+        tex_color: texture_2d(float)
 
         // x,y: points per row / rows; z,w: their reciprocals.
         grid: uniform(vec4(256.0, 144.0, 0.00390625, 0.0069444))
@@ -52,6 +60,10 @@ script_mod! {
         point_size: uniform(1.0)
         edge_cut: uniform(0.08)
         edge_radius: uniform(1.5)
+        depth_mode: uniform(0.0)
+        // z: rendered depth units -> cloud units.
+        depth_params: uniform(vec4(0.1, 100.0, 1.0, 0.0))
+        color_mode: uniform(0.0)
 
         v_color: varying(vec3f)
 
@@ -64,8 +76,19 @@ script_mod! {
             return 1.0 / (self.inv_range.y + (self.inv_range.x - self.inv_range.y) * n)
         }
 
+        // View depth at `uv` in cloud units; negative = no point there.
         depth_tap: fn(uv: vec2) -> float {
-            return self.tex_depth.sample_nearest(uv, 0.0).x
+            let d = self.tex_depth.sample_nearest(uv, 0.0).x
+            if self.depth_mode < 0.5 {
+                if d < 0.0 {
+                    return -1.0
+                }
+                return self.depth_at(d)
+            }
+            if d <= 0.0 {
+                return -1.0
+            }
+            return d * self.depth_params.z
         }
 
         vertex: fn() {
@@ -86,29 +109,27 @@ script_mod! {
             let t00 = vec2((base.x + 0.5) * self.depth_texel.z, (base.y + 0.5) * self.depth_texel.w)
             let tx = vec2(self.depth_texel.z, 0.0)
             let ty = vec2(0.0, self.depth_texel.w)
-            let n00 = self.depth_tap(t00)
-            let n10 = self.depth_tap(t00 + tx)
-            let n01 = self.depth_tap(t00 + ty)
-            let n11 = self.depth_tap(t00 + tx + ty)
-            let n_lo = min(min(n00, n10), min(n01, n11))
-            if n_lo < 0.0 {
+            let z00 = self.depth_tap(t00)
+            let z10 = self.depth_tap(t00 + tx)
+            let z01 = self.depth_tap(t00 + ty)
+            let z11 = self.depth_tap(t00 + tx + ty)
+            let z_lo = min(min(z00, z10), min(z01, z11))
+            if z_lo < 0.0 {
                 self.cull()
                 return
             }
-            let n = mix(mix(n00, n10, fx), mix(n01, n11, fx), fy)
-            let z = self.depth_at(n)
+            let z = mix(mix(z00, z10, fx), mix(z01, z11, fx), fy)
 
             if self.edge_cut > 0.0 {
                 let rx = vec2(self.edge_radius * self.depth_texel.z, 0.0)
                 let ry = vec2(0.0, self.edge_radius * self.depth_texel.w)
-                let na = self.depth_tap(cell + rx)
-                let nb = self.depth_tap(cell - rx)
-                let nc = self.depth_tap(cell + ry)
-                let nd = self.depth_tap(cell - ry)
-                let lo = min(n_lo, min(min(na, nb), min(nc, nd)))
-                let hi = max(max(max(n00, n10), max(n01, n11)), max(max(na, nb), max(nc, nd)))
-                let z_near = self.depth_at(hi)
-                if lo < 0.0 || self.depth_at(lo) - z_near > self.edge_cut * z_near {
+                let za = self.depth_tap(cell + rx)
+                let zb = self.depth_tap(cell - rx)
+                let zc = self.depth_tap(cell + ry)
+                let zd = self.depth_tap(cell - ry)
+                let lo = min(z_lo, min(min(za, zb), min(zc, zd)))
+                let hi = max(max(max(z00, z10), max(z01, z11)), max(max(za, zb), max(zc, zd)))
+                if lo < 0.0 || hi - lo > self.edge_cut * lo {
                     self.cull()
                     return
                 }
@@ -124,11 +145,16 @@ script_mod! {
             let corner = vec4(view.x + quad.x * half_x, view.y + quad.y * half_y, view.z, view.w)
             self.vertex_pos = self.draw_pass.camera_projection * corner
 
-            // NV12, BT.709 limited range.
             let cuv = vec2(
                 self.picture_rect.x + cell.x * self.picture_rect.z,
                 self.picture_rect.y + cell.y * self.picture_rect.w
             )
+            if self.color_mode > 0.5 {
+                let c = self.tex_color.sample_lod(cuv, 0.0)
+                self.v_color = vec3(c.x, c.y, c.z)
+                return
+            }
+            // NV12, BT.709 limited range.
             let yv = self.tex_y.sample_lod(cuv, 0.0).x
             let chroma = self.tex_uv.sample_lod(cuv, 0.0)
             let y = (yv * 255.0 - 16.0) / 219.0
@@ -168,6 +194,24 @@ pub struct DrawDepthCloud {
     /// Instance stream: grid cell index (exact integer in f32).
     #[live(0.0)]
     pub point_id: f32,
+}
+
+/// How a renderer's depth target encodes depth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RenderedDepth {
+    /// View-space distance along the camera axis, in scene units (an R32F
+    /// target written by the scene's own shaders or a depth pass; 0 = empty).
+    /// Portable to every backend.
+    Linear,
+}
+
+/// Live GPU targets of something already rendered: used as-is, no copy.
+struct RenderedSource {
+    color: Texture,
+    depth: Texture,
+    size: (usize, usize),
+    encoding: RenderedDepth,
+    scale: f32,
 }
 
 struct CloudTextures {
@@ -217,6 +261,11 @@ pub struct DepthCloud {
     picture_rect: [f32; 4],
     #[rust]
     instance_ids: Vec<f32>,
+    #[rust]
+    rendered: Option<RenderedSource>,
+    /// Bound to texture slots the current source does not use.
+    #[rust]
+    dummy: Option<Texture>,
 }
 
 impl DepthCloud {
@@ -225,6 +274,40 @@ impl DepthCloud {
     pub fn pivot_distance(depth_amount: f32) -> f32 {
         let far = depth_amount.max(1.0);
         2.0 * far / (1.0 + far)
+    }
+
+    /// Show something already rendered on the GPU (a 3D scene's colour
+    /// target and its depth): the cheap path, no model and no readback.
+    /// `size` is the targets' pixel size; `scale` maps scene depth units to
+    /// cloud units (about 1 = the near end of the interesting range).
+    /// Replaces the frame source.
+    pub fn set_rendered_source(
+        &mut self,
+        cx: &mut Cx,
+        color: &Texture,
+        depth: &Texture,
+        size: (usize, usize),
+        encoding: RenderedDepth,
+        scale: f32,
+    ) {
+        self.rendered = Some(RenderedSource {
+            color: color.clone(),
+            depth: depth.clone(),
+            size: (size.0.max(2), size.1.max(2)),
+            encoding,
+            scale,
+        });
+        self.draw_cloud.redraw(cx);
+    }
+
+    /// Picture pixel size of the active source, `None` when nothing to draw.
+    fn picture_size(&self) -> Option<(f32, f32)> {
+        if let Some(rendered) = &self.rendered {
+            return Some((rendered.size.0 as f32, rendered.size.1 as f32));
+        }
+        let textures = self.textures.as_ref().filter(|_| self.has_depth)?;
+        let (fw, fh) = textures.frame_size;
+        Some((fw as f32 * self.picture_rect[2], fh as f32 * self.picture_rect[3]))
     }
 
     pub fn set_picture_rect(&mut self, rect: [f32; 4]) {
@@ -309,18 +392,52 @@ impl DepthCloud {
         self.draw_cloud.redraw(cx);
     }
 
-    fn set_draw_uniforms(&mut self, cx: &mut CxDraw, scene: &SceneState3D, cols: usize, rows: usize) {
-        let Some(textures) = self.textures.as_ref() else {
-            return;
-        };
-        let (fw, fh) = textures.frame_size;
-        let (dw, dh) = textures.depth_size;
-        let rect = self.picture_rect;
-        let aspect = (fw as f32 * rect[2]) / (fh as f32 * rect[3]).max(1.0);
-        // Same vertical FOV as the scene camera: the front view is the video.
+    fn set_draw_uniforms(
+        &mut self,
+        cx: &mut CxDraw,
+        scene: &SceneState3D,
+        cols: usize,
+        rows: usize,
+        aspect: f32,
+    ) {
+        let dummy = self
+            .dummy
+            .get_or_insert_with(|| {
+                Texture::new_with_format(
+                    cx.cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width: 2,
+                        height: 2,
+                        data: Some(vec![0; 4]),
+                        updated: TextureUpdated::Full,
+                    },
+                )
+            })
+            .clone();
+        // Same vertical FOV as the scene camera: the front view is the picture.
         let tan_y = 1.0 / scene.projection.v[5].abs().max(0.00001);
         let far = self.depth_amount.max(1.0);
         let dv = &mut self.draw_cloud.draw_vars;
+        let ((dw, dh), rect, depth_mode, params, color_mode) = match (&self.rendered, &self.textures) {
+            (Some(r), _) => {
+                dv.set_texture(0, &dummy);
+                dv.set_texture(1, &dummy);
+                dv.set_texture(2, &r.depth);
+                dv.set_texture(3, &r.color);
+                let mode = match r.encoding {
+                    RenderedDepth::Linear => 1.0,
+                };
+                (r.size, [0.0, 0.0, 1.0, 1.0], mode, [0.0, 0.0, r.scale, 0.0], 1.0)
+            }
+            (None, Some(t)) => {
+                dv.set_texture(0, &t.y);
+                dv.set_texture(1, &t.uv);
+                dv.set_texture(2, &t.depth);
+                dv.set_texture(3, &dummy);
+                (t.depth_size, self.picture_rect, 0.0, [0.0, 0.0, 1.0, 0.0], 0.0)
+            }
+            (None, None) => return,
+        };
         dv.set_uniform(
             cx.cx,
             live_id!(grid),
@@ -337,9 +454,9 @@ impl DepthCloud {
         dv.set_uniform(cx.cx, live_id!(point_size), &[self.point_size]);
         dv.set_uniform(cx.cx, live_id!(edge_cut), &[self.edge_cut]);
         dv.set_uniform(cx.cx, live_id!(edge_radius), &[self.edge_radius]);
-        dv.set_texture(0, &textures.y);
-        dv.set_texture(1, &textures.uv);
-        dv.set_texture(2, &textures.depth);
+        dv.set_uniform(cx.cx, live_id!(depth_mode), &[depth_mode]);
+        dv.set_uniform(cx.cx, live_id!(depth_params), &params);
+        dv.set_uniform(cx.cx, live_id!(color_mode), &[color_mode]);
     }
 }
 
@@ -350,21 +467,17 @@ impl Widget for DepthCloud {
         let Some(scene) = cx.scene_state_3d() else {
             return DrawStep::done();
         };
-        let Some(textures) = self.textures.as_ref() else {
+        let Some((pw, ph)) = self.picture_size() else {
             return DrawStep::done();
         };
-        if !self.has_depth {
-            return DrawStep::done();
-        }
-        let (fw, fh) = textures.frame_size;
-        let aspect = (fw as f32 * self.picture_rect[2]) / (fh as f32 * self.picture_rect[3]).max(1.0);
+        let aspect = pw / ph.max(1.0);
         let cols = (self.points_per_row.round() as usize).clamp(8, 2048);
         let rows = ((cols as f32 / aspect.max(0.01)).round() as usize).clamp(1, 2048);
         let count = cols * rows;
         if self.instance_ids.len() != count {
             self.instance_ids = (0..count).map(|i| i as f32).collect();
         }
-        self.set_draw_uniforms(cx, &scene, cols, rows);
+        self.set_draw_uniforms(cx, &scene, cols, rows, aspect);
         if let Some(mut instances) = cx.begin_many_instances(&self.draw_cloud.draw_vars) {
             instances.instances.extend_from_slice(&self.instance_ids);
             let area = cx.end_many_instances(instances);

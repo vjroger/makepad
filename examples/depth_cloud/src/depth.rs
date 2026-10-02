@@ -169,6 +169,10 @@ pub enum DepthSource {
     GroundPrior,
     /// Depth packed in the frame itself (RGBD side-by-side / top-bottom).
     Packed(FrameLayout),
+    /// A rendered depth pass as its own video, frame-locked to the picture
+    /// (Blender / Unreal / C4D Z or mist pass). White = near unless
+    /// `near_dark`. Exact and free: no model runs.
+    PassVideo { path: String, near_dark: bool },
     /// Native Depth-Anything-V2 family, e.g. V2-Small: the realtime tier
     /// (`--features localai`).
     #[cfg(feature = "localai")]
@@ -187,6 +191,14 @@ impl DepthSource {
                 rect: layout
                     .depth_rect()
                     .ok_or("packed depth needs a side-by-side or top-bottom layout")?,
+                invert: false,
+                label: "packed RGBD",
+            }),
+            // Reads the depth-pass frame the worker hands it (`depth_pass_video`).
+            Self::PassVideo { near_dark, .. } => Box::new(PackedDepth {
+                rect: [0.0, 0.0, 1.0, 1.0],
+                invert: *near_dark,
+                label: "depth-pass video",
             }),
             #[cfg(feature = "localai")]
             Self::Anything { model_path } => Box::new(native::AnythingDepth::load(model_path)?),
@@ -238,13 +250,26 @@ impl DepthEstimator for GroundPrior {
 }
 
 /// Grayscale depth packed next to the picture: white = near.
+impl DepthSource {
+    /// The separate depth video the worker decodes alongside the picture.
+    pub fn depth_pass_video(&self) -> Option<&str> {
+        match self {
+            Self::PassVideo { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// Grayscale depth read straight from frame luma (packed or a depth pass).
 struct PackedDepth {
     rect: [f32; 4],
+    invert: bool,
+    label: &'static str,
 }
 
 impl DepthEstimator for PackedDepth {
     fn label(&self) -> String {
-        "packed RGBD".into()
+        self.label.into()
     }
 
     fn estimate(
@@ -258,10 +283,16 @@ impl DepthEstimator for PackedDepth {
         }
         let (sw, sh) = frame.rect_px(self.rect);
         let (w, h) = fit_dims(sw, sh, depth_res.min(sw.max(sh) as usize), 1);
+        let mut values = frame.luma(self.rect, w, h);
+        if self.invert {
+            for v in &mut values {
+                *v = 1.0 - *v;
+            }
+        }
         Ok(RawDepth {
             width: w,
             height: h,
-            values: frame.luma(self.rect, w, h),
+            values,
             kind: DepthKind::Disparity,
         })
     }

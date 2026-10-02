@@ -20,6 +20,13 @@
 //!   `DEPTH_CLOUD_MODEL` also works.
 //! * `--depth ground`: a free "lower is nearer" prior, `flat`: a plane.
 //!
+//! Already-rendered content uses its own depth instead of a model:
+//! * `--depth-video PASS` (`--depth-near-dark` when near is black): a 3D
+//!   render's depth / Z / mist pass exported as a second video, frame-locked;
+//! * `--scene`: a live GPU-rendered scene whose colour and linear-depth
+//!   targets the cloud samples directly (`DepthCloud::set_rendered_source`,
+//!   the hook for any in-app renderer): no readback, no model.
+//!
 //! Controls: drag = orbit, wheel = dolly, "Front view" = back to the video.
 
 pub use makepad_widgets;
@@ -28,8 +35,10 @@ pub use makepad_xr;
 mod cloud;
 mod depth;
 mod pipeline;
+mod rendered;
 
-use cloud::DepthCloud;
+use cloud::{DepthCloud, RenderedDepth};
+use rendered::RenderedScene;
 use depth::{DepthSource, FrameLayout};
 use makepad_widgets::*;
 use makepad_xr::scene::XrSceneView;
@@ -53,6 +62,7 @@ script_mod! {
                         height: Fill
                         flow: Right
 
+                        live_scene := RenderedScene{}
                         scene := XrSceneView{
                             width: Fill
                             height: Fill
@@ -112,8 +122,10 @@ script_mod! {
     }
 }
 
-struct Args {
-    spec: SourceSpec,
+enum Args {
+    Pipeline(SourceSpec),
+    /// The live GPU-rendered scene.
+    Scene,
 }
 
 impl Args {
@@ -122,12 +134,17 @@ impl Args {
         let mut layout = None;
         let mut depth = None;
         let mut model = std::env::var("DEPTH_CLOUD_MODEL").ok();
+        let mut depth_video = None;
+        let mut near_dark = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--layout" => layout = args.next(),
                 "--depth" => depth = args.next(),
                 "--model" => model = args.next(),
+                "--depth-video" => depth_video = args.next(),
+                "--depth-near-dark" => near_dark = true,
+                "--scene" => return Ok(Self::Scene),
                 // Platform / Studio flags (`--remote`, `--stdin-loop`, ...).
                 other if other.starts_with("--") => {}
                 other => video = Some(other.to_string()),
@@ -143,7 +160,9 @@ impl Args {
             (Some("full"), _) | (None, _) => FrameLayout::Full,
             (Some(other), _) => return Err(format!("unknown --layout {other} (full|sbs|tb)")),
         };
-        let default_depth = if layout != FrameLayout::Full {
+        let default_depth = if depth_video.is_some() {
+            "pass"
+        } else if layout != FrameLayout::Full {
             "packed"
         } else if model.is_some() {
             "anything"
@@ -154,21 +173,23 @@ impl Args {
             "flat" => DepthSource::Flat,
             "ground" => DepthSource::GroundPrior,
             "packed" => DepthSource::Packed(layout),
+            "pass" => DepthSource::PassVideo {
+                path: depth_video.ok_or("--depth pass needs --depth-video <file>")?,
+                near_dark,
+            },
             "anything" => Self::native(model, false)?,
             "da3" => Self::native(model, true)?,
             other => {
                 return Err(format!(
-                    "unknown --depth {other} (flat|ground|packed|anything|da3)"
+                    "unknown --depth {other} (flat|ground|packed|pass|anything|da3)"
                 ))
             }
         };
-        Ok(Self {
-            spec: SourceSpec {
-                input,
-                layout,
-                depth,
-            },
-        })
+        Ok(Self::Pipeline(SourceSpec {
+            input,
+            layout,
+            depth,
+        }))
     }
 
     #[cfg(feature = "localai")]
@@ -203,6 +224,8 @@ pub struct App {
     depth_amount: f32,
     #[rust]
     stats_at: f64,
+    #[rust]
+    scene_mode: bool,
 }
 
 impl App {
@@ -238,6 +261,14 @@ impl App {
     }
 
     fn pump_frame(&mut self, cx: &mut Cx) {
+        if self.scene_mode {
+            // Animate: the scene re-renders and the cloud re-reads it.
+            if !self.paused {
+                cx.redraw_all();
+            }
+            self.pump = cx.new_next_frame();
+            return;
+        }
         let Some(pipeline) = self.pipeline.as_mut() else {
             return;
         };
@@ -281,6 +312,26 @@ impl App {
         }
     }
 
+    /// Live rendered input: the cloud samples the scene's own colour and
+    /// linear-depth targets on the GPU.
+    fn start_scene(&mut self, cx: &mut Cx) {
+        let live = self.ui.widget(cx, ids!(live_scene));
+        let targets = live.borrow_mut::<RenderedScene>().map(|mut scene| {
+            scene.active = true;
+            scene.targets(cx)
+        });
+        if let Some((color, depth, size)) = targets {
+            // Scene depth 2..8 units -> cloud units around 1..4.
+            self.with_cloud(cx, |cx, cloud| {
+                cloud.set_rendered_source(cx, &color, &depth, size, RenderedDepth::Linear, 0.5)
+            });
+        }
+        self.set_status(cx, "live rendered scene: GPU depth, no model");
+        self.front_view(cx);
+        self.scene_mode = true;
+        self.pump = cx.new_next_frame();
+    }
+
     fn update_settings(&mut self) {
         if let Some(pipeline) = self.pipeline.as_mut() {
             pipeline.set_settings(self.settings);
@@ -291,7 +342,11 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         let spec = match Args::parse() {
-            Ok(args) => args.spec,
+            Ok(Args::Pipeline(spec)) => spec,
+            Ok(Args::Scene) => {
+                self.start_scene(cx);
+                return;
+            }
             Err(err) => {
                 log!("depth-cloud: {err}");
                 self.set_status(cx, &err);
@@ -365,6 +420,10 @@ impl MatchEvent for App {
         }
         if let Some(v) = slided(cx, ids!(fov)) {
             self.with_scene(cx, |scene| scene.camera_mut().fov_y = v as f32);
+            let live = self.ui.widget(cx, ids!(live_scene));
+            if let Some(mut live) = live.borrow_mut::<RenderedScene>() {
+                live.fov_y = v as f32;
+            };
             redraw = true;
         }
 
@@ -390,6 +449,7 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
         cloud::script_mod(vm);
+        rendered::script_mod(vm);
         self::script_mod(vm)
     }
 
