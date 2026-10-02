@@ -109,6 +109,18 @@ const EXR_MAGIC: [u8; 4] = [0x76, 0x2f, 0x31, 0x01];
 /// The most texels a file may decode to (16 B each, so 1 GiB): the same cap `ibl::load_hdr` has.
 const MAX_PIXELS: usize = 64 * 1024 * 1024;
 
+/// The texel count of a `width` x `height` image, checked against `MAX_PIXELS` before anything
+/// sized by it is allocated. Every reader goes through here: the 8-bit path widens each 4-byte
+/// texel to 16 bytes, so an unchecked 16384 x 16384 PNG (the image cache's own ceiling) would ask
+/// for a 4 GiB `Vec` on top of its 1 GiB decode. The error has no prefix; callers add theirs.
+fn checked_texels(width: usize, height: usize) -> Result<usize, String> {
+    match width.checked_mul(height) {
+        Some(0) => Err(format!("{width}x{height} has no texels")),
+        Some(count) if count <= MAX_PIXELS => Ok(count),
+        _ => Err(format!("{width}x{height} is over the 64 Mpx limit")),
+    }
+}
+
 /// Reads an OpenEXR through makepad-openexr. It takes the first part with R, G and B channels or,
 /// failing that, a luminance-only Y part read as grey; samples may be half, float or uint. The
 /// image is the part's data window, whatever its origin; the display window is ignored. The
@@ -136,10 +148,7 @@ pub fn read_exr(bytes: &[u8]) -> Result<EnvMap, String> {
     let mut part = parts.swap_remove(index);
     let width = part.width().map_err(|e| format!("EXR: {e}"))?;
     let height = part.height().map_err(|e| format!("EXR: {e}"))?;
-    let count = width
-        .checked_mul(height)
-        .filter(|&n| n > 0 && n <= MAX_PIXELS)
-        .ok_or_else(|| format!("EXR: size {width}x{height} is out of range"))?;
+    let count = checked_texels(width, height).map_err(|e| format!("EXR: {e}"))?;
     let planes = if rgb_part.is_some() {
         [take_channel(&mut part, "R"), take_channel(&mut part, "G"), take_channel(&mut part, "B")]
     } else {
@@ -184,7 +193,8 @@ fn take_channel(part: &mut ExrPart, name: &str) -> Vec<f32> {
 /// - Radiance (`#?`) through `ibl::load_hdr`, with a fresh 1 GiB `DecodeBudget` (the app has no
 ///   document budget to charge; `load_hdr`'s own size caps still apply);
 /// - anything else `decode_image_from_data` knows (PNG, JPEG, WebP, GIF, BMP, QOI, ICO). Its
-///   8-bit sRGB values are linearised with the exact sRGB curve, and alpha is dropped.
+///   8-bit sRGB values are linearised with the exact sRGB curve, and alpha is dropped. Animated
+///   files are refused, and so is anything over the 64 Mpx cap (as for EXR).
 pub fn decode_image(bytes: &[u8]) -> Result<EnvMap, String> {
     if bytes.starts_with(&EXR_MAGIC) {
         return read_exr(bytes);
@@ -193,13 +203,18 @@ pub fn decode_image(bytes: &[u8]) -> Result<EnvMap, String> {
         return ibl::load_hdr(bytes, &mut DecodeBudget::default()).map_err(|e| format!("HDR: {e}"));
     }
     let buffer = decode_image_from_data(bytes).map_err(|e| format!("image: {e}"))?;
-    let count = buffer.width * buffer.height;
-    if count == 0 || buffer.data.len() < count {
+    // An animated GIF, APNG or WebP comes back as one buffer holding every frame in a grid (the
+    // atlas), so its width and height cover all the frames: it would load as a nonsense map.
+    if buffer.animation.is_some() {
+        return Err("image: animated images are not supported (use a still image)".to_string());
+    }
+    let count = checked_texels(buffer.width, buffer.height).map_err(|e| format!("image: {e}"))?;
+    if buffer.data.len() < count {
         return Err(format!("image: decoded {}x{} but got {} texels", buffer.width, buffer.height, buffer.data.len()));
     }
     // 256 entries cover every 8-bit value, so each texel costs three table reads instead of three powf.
     let linear: [f32; 256] = std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0));
-    // The image cache packs 0xAARRGGBB. An animation's later frames sit past `count`; ignored.
+    // The image cache packs 0xAARRGGBB.
     let data = buffer.data[..count]
         .iter()
         .map(|&packed| {
@@ -446,6 +461,49 @@ mod tests {
         // A broken .hdr reports as HDR, not as an unknown image.
         let error = decode_image(b"#?RADIANCE\nFORMAT=32-bit_rle_xyze\n\n-Y 1 +X 1\n\0\0\0\0").unwrap_err();
         assert!(error.starts_with("HDR:"), "{error}");
+    }
+
+    #[test]
+    fn checked_texels_enforces_the_64_mpx_cap_on_every_path() {
+        // The cap itself (8192 x 8192 = 64 Mpx) is allowed; one more texel or row is not. A
+        // 64 Mpx image is too heavy to build here, so the shared check is what is pinned.
+        assert_eq!(checked_texels(8192, 8192), Ok(MAX_PIXELS));
+        assert_eq!(checked_texels(16384, 4096), Ok(MAX_PIXELS));
+        assert_eq!(checked_texels(1, 1), Ok(1));
+        let over = checked_texels(8192, 8193).unwrap_err();
+        assert_eq!(over, "8192x8193 is over the 64 Mpx limit");
+        // What a 16384 x 16384 PNG (the largest the image cache decodes) would ask for.
+        assert!(checked_texels(16384, 16384).unwrap_err().contains("64 Mpx"));
+        // A product that overflows usize is over the cap, not a wrap to something small.
+        assert!(checked_texels(usize::MAX, 2).unwrap_err().contains("64 Mpx"));
+        // Empty images are not images.
+        assert!(checked_texels(0, 512).unwrap_err().contains("no texels"));
+        assert!(checked_texels(512, 0).unwrap_err().contains("no texels"));
+    }
+
+    /// A 1x1 GIF of `frames` identical frames: palette entry 0 is orange (255, 128, 0).
+    fn gif_1x1(frames: usize) -> Vec<u8> {
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]); // 1x1, a 2-entry global palette
+        gif.extend_from_slice(&[255, 128, 0, 0, 0, 0]);
+        for _ in 0..frames {
+            gif.extend_from_slice(&[0x21, 0xf9, 4, 0, 10, 0, 0, 0]); // graphic control: 100 ms
+            gif.extend_from_slice(&[0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0]); // 1x1 image at the origin
+            gif.extend_from_slice(&[2, 2, 0x44, 0x01, 0]); // LZW, minimum code size 2: clear, pixel 0, end
+        }
+        gif.push(0x3b);
+        gif
+    }
+
+    #[test]
+    fn decode_image_loads_a_still_gif_and_rejects_an_animated_one() {
+        let env = decode_image(&gif_1x1(1)).unwrap();
+        assert_eq!((env.width, env.height), (1, 1));
+        assert_eq!(texel(&env, 0, 0), [1.0, srgb_to_linear(128.0 / 255.0), 0.0, 1.0]);
+        // An animation's buffer is its whole frame atlas (here 4096x1: Cx::max_texture_width wide),
+        // so it would otherwise load as one big map. It is refused by name, whatever its shape.
+        let error = decode_image(&gif_1x1(2)).unwrap_err();
+        assert!(error.contains("animated"), "{error}");
     }
 
     #[test]
