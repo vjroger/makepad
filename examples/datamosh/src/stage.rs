@@ -446,9 +446,9 @@ impl MoshStage {
             params.drift = 0.0;
         } else if let (true, Some((mode, sign))) = (self.settings.random_drift, self.drift_pick) {
             params.drift_mode = mode;
-            // Random with the amount at 0 would pick patterns nobody sees.
-            let amount = if params.drift == 0.0 { 3.0 } else { params.drift.abs() };
-            params.drift = amount * sign;
+            // The slider sets the strength; Random picks only the pattern
+            // and its direction.
+            params.drift = params.drift.abs() * sign;
         }
         self.mosh.set_params(params);
     }
