@@ -2481,6 +2481,28 @@ pub struct DrawSlider {
     cap_time: f32,
 }
 
+/// One step of a field's place after the pointer `to`: critically damped at
+/// nine radians a second, so it settles in about a third of a second with
+/// no overshoot; `snap` takes it straight there (a held control, or a field
+/// that is down and has nothing to glide from). Answers the new velocity.
+pub(crate) fn field_follow(shown: &mut Option<(f64, f64)>, v: (f64, f64), to: (f64, f64), snap: bool, dt: f64) -> (f64, f64) {
+    let Some(s) = shown.as_mut() else {
+        *shown = Some(to);
+        return (0.0, 0.0);
+    };
+    if snap {
+        *s = to;
+        return (0.0, 0.0);
+    }
+    let (k, c) = (81.0, 18.0);
+    let ax = k * (to.0 - s.0) - c * v.0;
+    let ay = k * (to.1 - s.1) - c * v.1;
+    let v = (v.0 + ax * dt, v.1 + ay * dt);
+    s.0 += v.0 * dt;
+    s.1 += v.1 * dt;
+    v
+}
+
 /// The cap's motion: a head that is the value (or travels to it on a spring
 /// after a jump), a tail that follows the head on a viscous spring, and a
 /// press spring, each stepped on the frames after a kick until all are at
@@ -2507,6 +2529,12 @@ pub struct CapMotion {
     hover_v: f64,
     hover_target: f64,
     pointer: Option<(f64, f64)>,
+    /// Where the field is drawn: the pointer followed on a critically
+    /// damped spring, so the field glides after the pointer instead of
+    /// jumping with each pointer event; held at the pointer while the cap
+    /// is held, and taken straight to it while the field is down.
+    shown: Option<(f64, f64)>,
+    shown_v: (f64, f64),
     time: f64,
 }
 
@@ -2562,6 +2590,10 @@ impl CapMotion {
         self.hover = self.hover.max(0.0);
         if self.field() > 0.001 {
             self.time += dt;
+        }
+        if let Some(p) = self.pointer {
+            let snap = dragging || self.field() < 0.001;
+            self.shown_v = field_follow(&mut self.shown, self.shown_v, p, snap, dt);
         }
         self.travel
             || dragging
@@ -2888,7 +2920,7 @@ impl Slider {
             self.draw_bg.cap_squash_along = sqa;
             self.draw_bg.cap_squash_across = sqx;
             if self.cap_field_reach > 0.0 {
-                let (pa, pc) = self.cap_motion.pointer.unwrap_or((0.0, 0.0));
+                let (pa, pc) = self.cap_motion.shown.or(self.cap_motion.pointer).unwrap_or((0.0, 0.0));
                 self.draw_bg.cap_field = self.cap_motion.field() as f32;
                 self.draw_bg.cap_pointer_along = pa as f32;
                 self.draw_bg.cap_pointer_across = pc as f32;

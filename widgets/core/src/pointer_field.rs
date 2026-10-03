@@ -81,6 +81,12 @@ pub struct PointerField {
     hover_v: f64,
     target: f64,
     pointer: Option<(f64, f64)>,
+    /// Where the field is drawn: the pointer followed on a critically
+    /// damped spring, so it glides after the pointer instead of jumping
+    /// with each pointer event; held at the pointer while the control is
+    /// pressed, and taken straight to it while the field is down.
+    shown: Option<(f64, f64)>,
+    shown_v: (f64, f64),
     time: f64,
     next_frame: Option<NextFrame>,
     last_time: Option<f64>,
@@ -144,6 +150,10 @@ impl PointerField {
         if self.strength(press) > 0.001 {
             self.time += dt;
         }
+        if let Some(p) = self.pointer {
+            let snap = press > 0.5 || self.strength(press) < 0.001;
+            self.shown_v = crate::slider::field_follow(&mut self.shown, self.shown_v, p, snap, dt);
+        }
         let active = self.hover_v.abs() > 1e-3
             || (self.hover - self.target).abs() > 1e-3
             || self.strength(press) > 0.001;
@@ -158,10 +168,11 @@ impl PointerField {
         (0.7 * self.hover + press).clamp(0.0, 1.0)
     }
 
-    /// What the material reads: the strength, the pointer along and across
-    /// the control from its centre, and the clock.
+    /// What the material reads: the strength, the field's place along and
+    /// across the control from its centre (the pointer, followed), and the
+    /// clock.
     pub fn read(&self, press: f64) -> (f32, f32, f32, f32) {
-        let (a, c) = self.pointer.unwrap_or((0.0, 0.0));
+        let (a, c) = self.shown.or(self.pointer).unwrap_or((0.0, 0.0));
         (self.strength(press) as f32, a as f32, c as f32, self.time as f32)
     }
 
