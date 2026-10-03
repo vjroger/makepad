@@ -2524,11 +2524,22 @@ pub struct CapMotion {
     next_frame: Option<NextFrame>,
     last_time: Option<f64>,
     /// The pointer's field: a hover spring toward 1 while the pointer is
-    /// near, the pointer in the cap's frame, and the clock the field runs.
+    /// near, the pointer in the TRACK's frame (along from the track's
+    /// start, across from its middle, in points; the cap moves under it,
+    /// so it is taken into the cap's frame only when the cap is drawn, at
+    /// the value the cap is drawn at), the track's extent it was read
+    /// against, and the clock the field runs.
     hover: f64,
     hover_v: f64,
     hover_target: f64,
     pointer: Option<(f64, f64)>,
+    extent: f64,
+    /// The release wave, when the widget asks for one (`wave_len` its
+    /// length in seconds, 0 for none): where the cap was let go (the
+    /// track's frame) and how long ago.
+    wave_len: f64,
+    up_at: Option<(f64, f64)>,
+    since_up: f64,
     /// Where the field is drawn: the pointer followed on a critically
     /// damped spring, so the field glides after the pointer instead of
     /// jumping with each pointer event; held at the pointer while the cap
@@ -2595,7 +2606,15 @@ impl CapMotion {
             let snap = dragging || self.field() < 0.001;
             self.shown_v = field_follow(&mut self.shown, self.shown_v, p, snap, dt);
         }
-        self.travel
+        let wave = self.wave_running();
+        if wave {
+            self.since_up += dt;
+            if self.reported_field() <= 0.001 {
+                self.time += dt;
+            }
+        }
+        wave
+            || self.travel
             || dragging
             || self.tail_v.abs() > 0.5
             || gap.abs() > 0.05
@@ -2685,6 +2704,59 @@ impl CapMotion {
             self.next_frame = Some(cx.new_next_frame());
         }
         true
+    }
+
+    /// The cap is let go: with a release wave asked for, the wave starts at
+    /// the pointer's place now (the track's frame).
+    pub(crate) fn release(&mut self, cx: &mut Cx, wave_len: f64) {
+        self.wave_len = wave_len.max(0.0);
+        if self.wave_len <= 0.0 {
+            self.up_at = None;
+            return;
+        }
+        self.up_at = self.shown.or(self.pointer);
+        self.since_up = 0.0;
+        if self.next_frame.is_none() {
+            self.last_time = None;
+            self.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// A pressed cap has no wave from its last release any more.
+    pub(crate) fn press(&mut self) {
+        self.up_at = None;
+    }
+
+    fn wave_running(&self) -> bool {
+        self.wave_len > 0.0 && self.up_at.is_some() && self.since_up < self.wave_len
+    }
+
+    /// The field the material is handed. Usually the hover and the press
+    /// (`field`); for a widget with a release wave, the press while held
+    /// and then the wave, 1 when the cap is let go and falling away to 0
+    /// over the wave's length, eased so it lingers, with no field from the
+    /// hover alone.
+    pub(crate) fn reported_field(&self) -> f64 {
+        if self.wave_len <= 0.0 {
+            return self.field();
+        }
+        let held = self.press.clamp(0.0, 1.0);
+        let wave = if self.wave_running() {
+            let k = 1.0 - (self.since_up / self.wave_len).clamp(0.0, 1.0);
+            k * k
+        } else {
+            0.0
+        };
+        held.max(wave)
+    }
+
+    /// Where the field is, the track's frame: the release's place while a
+    /// release wave runs, else the pointer followed.
+    pub(crate) fn place(&self) -> Option<(f64, f64)> {
+        if self.wave_running() {
+            return self.up_at;
+        }
+        self.shown.or(self.pointer)
     }
 
     /// Whether the motion drives the cap right now: a frame is pending.
@@ -2810,6 +2882,13 @@ pub struct Slider {
     /// tracks nothing.
     #[live]
     cap_field_reach: f64,
+    /// Above zero (seconds), with a pointer field: the field is the press
+    /// while the cap is held and, when it is let go, a wave from where it
+    /// was let go that dies away over this long, its place held there; the
+    /// hover alone raises no field. For a material that answers a touch
+    /// like water. Zero, the default, keeps the field of the hover.
+    #[live]
+    cap_release_wave: f64,
     #[rust]
     cap_motion: CapMotion,
 
@@ -2920,8 +2999,14 @@ impl Slider {
             self.draw_bg.cap_squash_along = sqa;
             self.draw_bg.cap_squash_across = sqx;
             if self.cap_field_reach > 0.0 {
-                let (pa, pc) = self.cap_motion.shown.or(self.cap_motion.pointer).unwrap_or((0.0, 0.0));
-                self.draw_bg.cap_field = self.cap_motion.field() as f32;
+                // The pointer and the release are kept in the track's frame;
+                // the cap is where it is drawn now.
+                let cap_at = fader_cap_center(drawn, self.cap_motion.extent, self.cap_size, self.track_inset);
+                let (pa, pc) = match self.cap_motion.place() {
+                    Some((a, c)) => (a - cap_at, c),
+                    None => (0.0, 0.0),
+                };
+                self.draw_bg.cap_field = self.cap_motion.reported_field() as f32;
                 self.draw_bg.cap_pointer_along = pa as f32;
                 self.draw_bg.cap_pointer_across = pc as f32;
                 self.draw_bg.cap_time = self.cap_motion.time as f32;
@@ -3063,6 +3148,7 @@ impl Slider {
         };
         let cap_at = fader_cap_center(self.relative_value, extent, self.cap_size, self.track_inset);
         let rel = (along - cap_at, across);
+        let at = (along, across);
         // The distance to the cap's edge goes to the arbiter: only the
         // nearest two controls on the window carry a field at once.
         let dist = ((rel.0 * rel.0 + rel.1 * rel.1).sqrt() - self.cap_size * 0.5).max(0.0);
@@ -3070,10 +3156,11 @@ impl Slider {
         let near = dist < self.cap_field_reach + self.cap_size * 0.5 && granted;
         let target = if near { 1.0 } else { 0.0 };
         let moved = match self.cap_motion.pointer {
-            Some(p) => (p.0 - rel.0).abs() > 0.01 || (p.1 - rel.1).abs() > 0.01,
+            Some(p) => (p.0 - at.0).abs() > 0.01 || (p.1 - at.1).abs() > 0.01,
             None => true,
         };
-        self.cap_motion.pointer = Some(rel);
+        self.cap_motion.pointer = Some(at);
+        self.cap_motion.extent = extent;
         if target != self.cap_motion.hover_target || (moved && self.cap_motion.field() > 0.001) {
             self.cap_motion.hover_target = target;
             self.cap_motion_kick(cx, false);
@@ -3272,6 +3359,7 @@ impl Widget for Slider {
                 self.dragging = Some(self.relative_value);
                 self.drag_from = None;
                 self.drag_travelled = self.relative_value;
+                self.cap_motion.press();
                 self.cap_motion_kick(cx, false);
                 cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
@@ -3293,6 +3381,9 @@ impl Widget for Slider {
                 self.dragging = None;
                 self.drag_from = None;
                 self.cap_motion_kick(cx, false);
+                if self.cap_field_reach > 0.0 {
+                    self.cap_motion.release(cx, self.cap_release_wave);
+                }
                 // A TAP on the label puts the control back to its DSL
                 // default.
                 //
