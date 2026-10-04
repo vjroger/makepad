@@ -336,7 +336,8 @@ impl ScriptCode {
         }
         let end = end?;
         let text: String = chars[start..end].iter().collect();
-        let (row, col) = body.tokenizer.token_index_to_row_col(k as u32)?;
+        // Where the `fn` keyword is written (its first character).
+        let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
         let loc = match &body.source {
             ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
             _ => ScriptLoc { file: "generated".into(), line: row, col },
@@ -379,16 +380,9 @@ impl ScriptCode {
                         _ => LiveId(0),
                     };
                     if op == id!(:) || op == id!(:=) || op == id!(+:) {
-                        let (row, col) = body.tokenizer.token_index_to_row_col(k as u32)?;
-                        // A token's position may sit a character into it: back
-                        // to the identifier's first character.
-                        let chars: Vec<char> = body.effective_code.chars().collect();
-                        let pos = tokens[k].pos().min(chars.len());
-                        let mut start = pos;
-                        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
-                            start -= 1;
-                        }
-                        let col = col.saturating_sub((pos - start) as u32);
+                        // (The identifier's first character: a token's
+                        // position may sit a character into it.)
+                        let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
                         return Some(match &body.source {
                             ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
                             _ => ScriptLoc { file: "generated".into(), line: row, col },
@@ -612,6 +606,28 @@ impl<'a> ScriptVm<'a> {
     /// sites of the calls it is inside, innermost first, at most `max`. A
     /// native reads where it was called from, and through which calls (a
     /// host that records what code drew what).
+    /// The loops running now on this thread, outermost first: each loop
+    /// variable's name and value (`for li in 0..n` gives `li` and the
+    /// iteration's number; a key or index variable too). For a host that
+    /// records which iteration drew something (an editor's traced frame).
+    pub fn loop_values(&self, out: &mut Vec<(LiveId, f64)>) {
+        out.clear();
+        let thread = self.bx.threads.cur_ref();
+        let Some(&scope) = thread.scopes.last() else { return };
+        for frame in thread.loops.iter() {
+            let Some(values) = &frame.values else { continue };
+            for id in std::iter::once(values.value_id).chain(values.index_id).chain(values.key_id) {
+                if let Some(v) = self.bx.heap.scope_value_opt(scope, id).and_then(|v| v.as_number()) {
+                    out.push((id, v));
+                }
+            }
+        }
+    }
+
+    /// Where the running code is: the instruction now, then each caller's
+    /// call, innermost first (at most `max`). A caller's frame keeps where
+    /// it returns to, the instruction after its call; its site is the call
+    /// itself, so a caller maps to the line it called from.
     pub fn call_sites(&self, out: &mut Vec<ScriptIp>, max: usize) {
         out.clear();
         let thread = self.bx.threads.cur_ref();
@@ -621,7 +637,7 @@ impl<'a> ScriptVm<'a> {
                 break;
             }
             if let Some(ip) = frame.return_ip {
-                out.push(ip);
+                out.push(ScriptIp { body: ip.body, index: ip.index.saturating_sub(1) });
             }
         }
     }
@@ -1454,6 +1470,11 @@ impl<'a> ScriptVm<'a> {
                 }
             } else {
                 // its a direct value-to-stack
+                if let Some(trace) = &mut self.bx.literal_trace {
+                    if trace.ran_seen.first(body_index as u16, ip_index as u32) {
+                        trace.ran.insert((body_index as u16, ip_index as u32));
+                    }
+                }
                 self.bx.threads.cur().push_stack_value(opcode);
                 self.bx.threads.cur().trap.goto_next();
                 if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
@@ -1920,6 +1941,28 @@ impl<'a> ScriptVm<'a> {
         self.eval_body(body_id, ScriptObject::ZERO)
     }
 
+    /// [`Self::eval`] with `parent` behind the module's own scope: a name the
+    /// module does not define is read from `parent` and its scopes (another
+    /// body's [`Self::end_scope_of`]), so code compiled later reads a loaded
+    /// document's bindings as if written in it. A host uses it to compile
+    /// functions over a document after it has run.
+    pub fn eval_in_scope(&mut self, script_mod: ScriptMod, parent: ScriptObject) -> ScriptValue {
+        let body_id = self.add_script_mod(script_mod);
+        let scope = self.bx.code.bodies.borrow()[body_id as usize].scope.obj;
+        self.bx.heap.objects[scope].proto = parent.into();
+        self.eval_body(body_id, ScriptObject::ZERO)
+    }
+
+    /// The scope the last body evaluated from `file` ended in (its top-level
+    /// `let`s, `use`d names and the scopes they shadow), once it has run.
+    pub fn end_scope_of(&self, file: &str) -> Option<ScriptObject> {
+        let bodies = self.bx.code.bodies.borrow();
+        bodies.iter().rev().find_map(|body| match &body.source {
+            ScriptSource::Mod(m) if m.file == file => Some(body.end_scope.as_ref().map(|s| s.as_object()).unwrap_or_else(|| body.scope.as_object())),
+            _ => None,
+        })
+    }
+
     pub fn eval_with_source(&mut self, script_mod: ScriptMod, source: ScriptObject) -> ScriptValue {
         let body_id = self.add_script_mod(script_mod);
         self.eval_body(body_id, source)
@@ -2154,6 +2197,10 @@ pub struct ScriptVmBase {
     pub injected_globals: std::collections::HashMap<LiveId, ScriptValue>,
     pub is_reload: bool,
     pub debug_trace: bool,
+    /// Edit mode, while a program loads: the literal immediates that ran
+    /// (`crate::literal::LoadTrace`), so an editor knows which literals fed
+    /// load-time values. None (always, outside edit mode): nothing recorded.
+    pub literal_trace: Option<Box<crate::literal::LoadTrace>>,
     pub silence_errors: bool,
     /// Whether script-directed debug output (the `~` LOG operator and
     /// `ScriptVm::log`) may reach the host log. Raw Makepad hosts keep it on;
@@ -2200,6 +2247,7 @@ impl ScriptVmBase {
             injected_globals: Default::default(),
             is_reload: false,
             debug_trace: false,
+            literal_trace: None,
             silence_errors: false,
             allow_debug_output: true,
             bail_on_uncaught_error: false,
@@ -2242,6 +2290,7 @@ impl ScriptVmBase {
             injected_globals: Default::default(),
             is_reload: false,
             debug_trace: false,
+            literal_trace: None,
             silence_errors: false,
             allow_debug_output: true,
             bail_on_uncaught_error: false,

@@ -75,9 +75,9 @@ mod imp {
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::{dvec2, Vec2d};
-    use crate::texture::{
-        ReadbackChannelOrder, ReadbackOrigin, ReadbackRequest, ReadbackTicket, TextureReadback,
-    };
+    use crate::texture::{ReadbackRequest, ReadbackTicket, TextureReadback};
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+    use crate::texture::{ReadbackChannelOrder, ReadbackOrigin};
     use crate::window::WindowId;
     use makepad_studio_protocol::{
         KeyEvent, RemoteMouseDown, RemoteMouseMove,
@@ -128,6 +128,8 @@ mod imp {
         })
     }
 
+    // For `deliver_grab_pixels`, the raw pixel path Metal takes.
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     fn raw_grab_order(order: ReadbackChannelOrder) -> GrabOrder {
         match order {
             ReadbackChannelOrder::Rgba => GrabOrder::Rgba,
@@ -135,6 +137,7 @@ mod imp {
         }
     }
 
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     fn raw_grab_origin(origin: ReadbackOrigin) -> GrabOrigin {
         match origin {
             ReadbackOrigin::TopLeft => GrabOrigin::TopLeft,
@@ -1790,7 +1793,7 @@ mod imp {
                     let audio = config
                         .audio
                         .then(|| Arc::new(Mutex::new(capture::AudioQueue::new(virtual_clock))));
-                    let tap = audio.clone().map(|queue| {
+                    let tap = audio.clone().and_then(|queue| {
                         let counters = counters.clone();
                         crate::audio_output_tap::add_audio_output_tap(move |info, buffer| {
                             capture::tap_audio(&queue, &counters, info.sample_rate, buffer)
@@ -2127,7 +2130,6 @@ mod imp {
         y: f64,
     ) -> (bool, crate::event::DragResponse) {
         use crate::event::{DragEvent, DragItem, DragResponse, DropEvent, Event};
-        use crate::thread::lock_from_ui;
         use std::sync::Arc;
 
         let items = Arc::new(vec![DragItem::FilePath {
@@ -2153,7 +2155,7 @@ mod imp {
         cx.drag_drop.cycle_drag();
         cx.call_event_handler(&Event::DragEnd);
         cx.drag_drop.cycle_drag();
-        let result = (*lock_from_ui(&handled), *lock_from_ui(&response));
+        let result = (*handled.lock().unwrap_or_else(|e| e.into_inner()), *response.lock().unwrap_or_else(|e| e.into_inner()));
         result
     }
 
@@ -2566,7 +2568,6 @@ mod imp {
             use crate::draw_list::{CxRectArea, DrawList};
             use crate::event::{DragHit, DragItem, DragResponse, DragState, Event};
             use crate::makepad_math::Rect;
-            use crate::thread::lock_from_ui;
             use std::{
                 cell::{Cell, RefCell},
                 rc::Rc,
@@ -2588,7 +2589,7 @@ mod imp {
                         assert!(
                             matches!(hit.items.as_slice(), [DragItem::FilePath { path, internal_id: None }] if path == "/not-read-by-platform/reference.png")
                         );
-                        *lock_from_ui(&hit.response) = DragResponse::Copy;
+                        *hit.response.lock().unwrap_or_else(|e| e.into_inner()) = DragResponse::Copy;
                     }
                     DragHit::Drop(hit) => assert_eq!(hit.abs, dvec2(20.0, 30.0)),
                     DragHit::DragEnd | DragHit::NoHit => assert!(matches!(event, Event::DragEnd)),

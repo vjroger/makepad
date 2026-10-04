@@ -281,10 +281,28 @@ Add `wait=1` to input requests to wait for the resulting frame.
 Read [App remote control](docs/agents/app-remote.md) for routes and examples,
 or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 
+## Drag and drop, and pointer feedback
+
+The user's rules for every drag in every app (stated repeatedly; the dock's
+tab drag is the reference):
+
+- The cursor holds what it drags: a chip, image or label of the item rides
+  the pointer from the press to the drop.
+- Near a drop target the app shows how the drop would look BEFORE it
+  happens. In a design case (placing a widget, docking a panel) the layout
+  reflows as if the item had been dropped: other elements move or scale to
+  make room, and a ghost occupies that space until the drop or the leave.
+- The one exception is a list reorder, where an insertion line between the
+  rows is the right feedback.
+- The pointer is a hand while it hovers anything that can be dragged.
+- The panel's controls are responsive: rows of buttons and inputs wrap or
+  resize when the panel narrows; tab rows fall back to icons.
+
 ## Threading and realtime ownership
 
-- The UI thread never takes a `Mutex`, `RwLock`, or `Condvar` another thread
-  can hold, and never waits on a channel.
+- The UI thread never waits on a channel or a `Condvar`, and takes a lock
+  another thread can hold only when every holder keeps it briefly (see the
+  spin rule below).
 - UI-to-worker/audio commands use bounded, non-blocking sends. Report a
   full queue and retain/retry the command on a subsequent frame.
 - Workers/audio publish snapshots through atomics, a triple buffer, or a
@@ -295,9 +313,13 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 - A realtime audio callback owns its state, does not allocate on its hot
   path, and never takes a lock the UI or a worker can hold.
 - Use one mechanism on native and wasm. Do not retain a desktop shared-lock
-  path alongside a wasm workaround. UI/audio threads must not use
-  `Atomics.wait` or spin-wait fallbacks.
-- `lock_from_ui` is allowed only for state provably touched by the UI alone.
+  path alongside a wasm workaround. The UI thread and the audio worklet never
+  block or wait on long work. Brief spins on short locks (held only for a
+  few field updates, never across I/O, parsing, evaluation or a job) are
+  allowed; on wasm the optimiser's `waits` pass turns a contended
+  `Atomics.wait` on those threads into such a spin, so plain `.lock()` is
+  the one mechanism. Anything longer goes to a worker and returns through a
+  channel.
 - Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
   the pool TaskHandle API, or a long-lived platform worker fed by a channel.
 

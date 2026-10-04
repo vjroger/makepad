@@ -74,6 +74,11 @@ pub mod linux_display;
 #[path = "os/linux/input.rs"]
 pub mod linux_input;
 
+// Wide-desktop geometry for the direct backend: pure, unit tested anywhere.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/wide_desktop.rs"]
+pub mod linux_wide_desktop;
+
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[path = "os/linux/gpu.rs"]
 pub mod linux_gpu;
@@ -100,6 +105,7 @@ pub mod memory_watchdog;
 pub mod perf_monitor;
 pub mod gpu_frame_timer;
 pub mod sploded;
+pub mod pick;
 pub mod permission;
 mod screen;
 mod texture;
@@ -309,6 +315,7 @@ pub use {
             DrawShaderInputPacking, DrawShaderInputs,
         },
         gpu_info::GpuPerformance,
+        gpu_info::{gpu_working_set_bytes, max_gpu_buffer_bytes, set_gpu_working_set_bytes, set_max_gpu_buffer_bytes},
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
             TextInputConfig,
@@ -333,7 +340,7 @@ pub use {
             unregister_media_playback_session, MediaPlaybackSessionId,
         },
         script::vm::*,
-        screen::{fit_window_rect_to_screens, screens, ScreenGeom, MIN_WINDOW_SIZE},
+        screen::{fit_window_rect_to_screens, linux_screen_names, screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         storage::{
             StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,
@@ -391,4 +398,8 @@ pub use {
 /// The compiled-shader handle the const-table API is keyed by
 /// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
 pub use crate::draw_shader::DrawShaderId;
+pub use crate::pick::{PickError, PickImage, PickTicket};
+/// Edit mode's literal-site map (`Cx::set_live_literals`,
+/// `set_literal_source`, `patch_literal`).
+pub use makepad_script_std::makepad_script::literal::{LiteralOrigin, LiteralReach, LiteralSite, LiteralValue};
 pub use crate::collect::{ScanEvent, Scanner};

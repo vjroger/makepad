@@ -22,6 +22,11 @@ script_mod! {
     //   * plain: roughness and metal per texel (wet asphalt, steel).
     mod.draw.DrawSceneCity = mod.std.set_type_default() do #(DrawSceneCity::script_shader(vm)){
         ..mod.draw.DrawScenePbr
+        // x = night factor (0 day .. 1 night: window hours, lamp emission),
+        // y = the stream clock. One per frame, so a uniform: as an instance
+        // lane it took the lane one output register past what D3D11's
+        // `vs_5_0` allows.
+        city: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
         c_hash: fn(p: vec2) -> float {
             return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453)
@@ -300,7 +305,7 @@ script_mod! {
                     lit = lit + glow * min(1.0, cap / max(glow.x, 0.0001))
                 }
             }
-            return self.csm_debug_view(self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.scene_fog(self.v_fog, pos, self.fog_density)), 1.0), pos, n), pos, n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, pos, self.fog_density), 1.0), pos, n), pos, n)
         }
 
         fragment: fn() {

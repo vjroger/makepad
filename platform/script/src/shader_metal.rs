@@ -25,10 +25,69 @@ impl ShaderOutput {
         self.metal_create_io_fragment_struct(vm, &mut out);
         self.metal_create_sampler_decls(&mut out);
         self.metal_create_helpers(&mut out);
+        self.metal_create_pick_helpers(&mut out);
         self.create_functions(&mut out);
         self.metal_create_vertex_fn(vm, &mut out);
         self.metal_create_fragment_main_fn(vm, &mut out);
         out
+    }
+
+    /// The pick variant of the same draw shader ([`Self::pick`]): every
+    /// 2D texture it samples has a pick twin (bound after its textures)
+    /// read at the same place, and the fragment writes the id of what is
+    /// drawn there into every colour target instead of its colour: the id
+    /// the most opaque of its samples found, else the draw's own
+    /// (`_pk.x`), where its colour covers (alpha over 0.1); nothing
+    /// elsewhere. `_pk.y` says which textures' twins hold ids.
+    pub fn metal_draw_source_pick(&mut self, vm: &ScriptVm) -> String {
+        self.pick_emit = true;
+        let out = self.metal_draw_source(vm);
+        self.pick_emit = false;
+        out
+    }
+
+    /// The textures with a pick twin: (index among the shader's textures,
+    /// name).
+    fn metal_pick_textures(&self) -> Vec<(usize, LiveId)> {
+        self.io
+            .iter()
+            .filter(|io| matches!(io.kind, ShaderIoKind::Texture(_)))
+            .enumerate()
+            .filter(|(k, io)| *k < 32 && matches!(io.kind, ShaderIoKind::Texture(TextureType::Texture2d)))
+            .map(|(k, io)| (k, io.name))
+            .collect()
+    }
+
+    fn metal_create_pick_helpers(&self, out: &mut String) {
+        if !self.pick {
+            return;
+        }
+        if !self.pick_emit {
+            writeln!(out, "#define _MP_PS(b, tw, e, uv) (e)").ok();
+            return;
+        }
+        writeln!(out, "#define _MP_PS(b, tw, e, uv) _mp_pick_sample(_io, b, _io.tw, (e), (uv))").ok();
+        // How much a colour shows: its alpha, or its light where it adds
+        // (premultiplied, alpha 0).
+        writeln!(out, "inline float _mp_pick_cover(float4 c) {{ return max(c.w, max(c.x, max(c.y, c.z))); }}").ok();
+        writeln!(out, "inline float4 _mp_pick_sample(thread Io &io, uint b, texture2d<float> tw, float4 c, float2 uv) {{").ok();
+        writeln!(out, "    float w = _mp_pick_cover(c);").ok();
+        writeln!(out, "    if ((io._pick_mask & (1u << b)) != 0u && w > io._pick_w) {{").ok();
+        writeln!(out, "        float2 sz = float2(tw.get_width(), tw.get_height());").ok();
+        // The texel under the place, else one beside it: a filtered
+        // sample sees its neighbours too.
+        writeln!(out, "        int2 q = int2(clamp(uv, float2(0.0), float2(0.99999)) * sz);").ok();
+        writeln!(out, "        int2 hi = int2(sz) - 1;").ok();
+        writeln!(out, "        uint id = 0u;").ok();
+        writeln!(out, "        for (int k = 0; k < 5 && id == 0u; k++) {{").ok();
+        writeln!(out, "            int2 o = k == 0 ? int2(0) : (k == 1 ? int2(1, 0) : (k == 2 ? int2(-1, 0) : (k == 3 ? int2(0, 1) : int2(0, -1))));").ok();
+        writeln!(out, "            float4 e = tw.read(uint2(clamp(q + o, int2(0), hi)));").ok();
+        writeln!(out, "            id = uint(e.x * 255.0 + 0.5) | (uint(e.y * 255.0 + 0.5) << 8) | (uint(e.z * 255.0 + 0.5) << 16);").ok();
+        writeln!(out, "        }}").ok();
+        writeln!(out, "        if (id != 0u) {{ io._pick_w = w; io._pick_id = id; }}").ok();
+        writeln!(out, "    }}").ok();
+        writeln!(out, "    return c;").ok();
+        writeln!(out, "}}").ok();
     }
 
     pub fn metal_create_helpers(&self, out: &mut String) {
@@ -146,7 +205,9 @@ impl ShaderOutput {
                         TextureType::TextureDepthArray => "depth2d_array<float>",
                         TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
-                    writeln!(out, "    {} {};", metal_type, io.name).ok();
+                    // `t_`: a texture is named by the document (a pass
+                    // `half`), and MSL reserves type names.
+                    writeln!(out, "    {} t_{};", metal_type, io.name).ok();
                 }
                 ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    sampler {};", io.name).ok();
@@ -171,6 +232,14 @@ impl ShaderOutput {
                     have_vb = true;
                 }
             }
+        }
+        if self.pick_emit {
+            for (_, name) in self.metal_pick_textures() {
+                writeln!(out, "    texture2d<float> {}__pick;", name).ok();
+            }
+            writeln!(out, "    uint _pick_mask;").ok();
+            writeln!(out, "    uint _pick_id;").ok();
+            writeln!(out, "    float _pick_w;").ok();
         }
         writeln!(out, "}};").ok();
     }
@@ -198,110 +267,106 @@ impl ShaderOutput {
         writeln!(out, "}};").ok();
     }
 
+    /// The instance record is read from the instance buffer as 32-bit
+    /// words at the offsets of [`ShaderOutput::instance_record`] (the layout
+    /// the draw list writes), decoded into `IoInstance`.
     pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
-        writeln!(out, "struct IoInstanceRaw {{").ok();
-
-        // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
-        // Use packed types to match CPU-side repr(C) struct alignment
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    for col in 0..4 {
-                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
-                    }
-                } else {
-                    write!(out, "    ").ok();
-                    if matches!(pod_ty.ty, ScriptPodTy::Struct { .. }) {
-                        self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    } else {
-                        self.backend
-                            .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                    }
-                    writeln!(out, " {};", io.name).ok();
-                }
-            }
-        }
-
-        // 2. Output Rust instance fields last (already in correct order from pre_collect_rust_instance_io)
-        // Use packed types to match CPU-side repr(C) struct alignment
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    for col in 0..4 {
-                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
-                    }
-                } else {
-                    write!(out, "    ").ok();
-                    if matches!(pod_ty.ty, ScriptPodTy::Struct { .. }) {
-                        self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    } else {
-                        self.backend
-                            .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                    }
-                    writeln!(out, " {};", io.name).ok();
-                }
-            }
-        }
-
-        writeln!(out, "}};").ok();
-
+        let (fields, stride) = self.instance_record(vm);
         writeln!(out, "struct IoInstance {{").ok();
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
-            }
-        }
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
-            }
+        for (index, _) in &fields {
+            let io = &self.io[*index];
+            write!(out, "    ").ok();
+            self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+            writeln!(out, " {};", io.name).ok();
         }
         writeln!(out, "}};").ok();
-
-        writeln!(
-            out,
-            "inline IoInstance _mp_decode_instance(constant IoInstanceRaw &raw) {{"
-        )
-        .ok();
+        writeln!(out, "#define MP_INSTANCE_WORDS {}u", stride.max(1)).ok();
+        writeln!(out, "inline IoInstance _mp_decode_instance(constant uint *w) {{").ok();
         writeln!(out, "    IoInstance out_instance;").ok();
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    writeln!(
-                        out,
-                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
-                        io.name
-                    )
-                    .ok();
-                } else {
-                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
-                }
-            }
-        }
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    writeln!(
-                        out,
-                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
-                        io.name
-                    )
-                    .ok();
-                } else {
-                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
-                }
-            }
+        for (index, offset) in &fields {
+            let io = &self.io[*index];
+            let inline = crate::pod::ScriptPodTypeInline { self_ref: io.ty, data: vm.bx.heap.pod_type_ref(io.ty).clone() };
+            let mut at = *offset;
+            let expr = self.metal_value_from_words(vm, &inline, &mut at);
+            writeln!(out, "    out_instance.{} = {};", io.name, expr).ok();
         }
         writeln!(out, "    return out_instance;").ok();
         writeln!(out, "}}").ok();
+    }
+
+    /// (columns, rows) of a matrix type.
+    fn metal_mat_shape(ty: &ScriptPodTy) -> (usize, usize) {
+        match ty {
+            ScriptPodTy::Mat(m) => match m {
+                ScriptPodMat::Mat2x2f => (2, 2),
+                ScriptPodMat::Mat3x2f => (3, 2),
+                ScriptPodMat::Mat4x2f => (4, 2),
+                ScriptPodMat::Mat2x3f => (2, 3),
+                ScriptPodMat::Mat3x3f => (3, 3),
+                ScriptPodMat::Mat4x3f => (4, 3),
+                ScriptPodMat::Mat2x4f => (2, 4),
+                ScriptPodMat::Mat3x4f => (3, 4),
+                ScriptPodMat::Mat4x4f => (4, 4),
+            },
+            _ => (1, 1),
+        }
+    }
+
+    /// A value of `ty` from the instance words `w[at..]`, tight: scalars
+    /// one word each, a matrix its columns in order, a struct its fields.
+    fn metal_value_from_words(&self, vm: &ScriptVm, ty: &crate::pod::ScriptPodTypeInline, at: &mut usize) -> String {
+        let mut ty_name = String::new();
+        self.backend.pod_type_name(ty, &mut ty_name);
+        match &ty.data.ty {
+            ScriptPodTy::Struct { fields, .. } => {
+                let parts: Vec<String> = fields.iter().map(|f| self.metal_value_from_words(vm, &f.ty, at)).collect();
+                format!("{}{{{}}}", ty_name, parts.join(", "))
+            }
+            ScriptPodTy::Packed(p) => {
+                let w = format!("w[{}]", *at);
+                *at += ty.data.ty.slots();
+                match p {
+                    crate::pod::ScriptPodPacked::F16x2 => format!("float2(as_type<half2>({w}))"),
+                    crate::pod::ScriptPodPacked::F16x4 => format!("float4(as_type<half2>({w}), as_type<half2>(w[{}]))", *at - ty.data.ty.slots() + 1),
+                    crate::pod::ScriptPodPacked::U16x2 => format!("float2(as_type<ushort2>({w}))"),
+                    crate::pod::ScriptPodPacked::I16x2 => format!("float2(as_type<short2>({w}))"),
+                    crate::pod::ScriptPodPacked::U16x2Norm => format!("float2(as_type<ushort2>({w})) / 65535.0"),
+                    crate::pod::ScriptPodPacked::I16x2Norm => format!("max(float2(as_type<short2>({w})) / 32767.0, float2(-1.0))"),
+                    crate::pod::ScriptPodPacked::U8x4Norm => format!("float4(as_type<uchar4>({w})) / 255.0"),
+                    crate::pod::ScriptPodPacked::I8x4Norm => format!("max(float4(as_type<char4>({w})) / 127.0, float4(-1.0))"),
+                }
+            }
+            leaf => {
+                let slots = leaf.slots();
+                let word = |k: usize| -> String {
+                    match leaf {
+                        ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => format!("w[{k}]"),
+                        ScriptPodTy::Bool => format!("(w[{k}] != 0u)"),
+                        ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => format!("as_type<int>(w[{k}])"),
+                        ScriptPodTy::Vec(v) if Self::is_integer_word(leaf) => match v {
+                            crate::pod::ScriptPodVec::Vec2i | crate::pod::ScriptPodVec::Vec3i | crate::pod::ScriptPodVec::Vec4i => format!("as_type<int>(w[{k}])"),
+                            crate::pod::ScriptPodVec::Vec2b | crate::pod::ScriptPodVec::Vec3b | crate::pod::ScriptPodVec::Vec4b => format!("(w[{k}] != 0u)"),
+                            _ => format!("w[{k}]"),
+                        },
+                        _ => format!("as_type<float>(w[{k}])"),
+                    }
+                };
+                let words: Vec<String> = (*at..*at + slots).map(word).collect();
+                *at += slots;
+                if slots == 1 && !matches!(leaf, ScriptPodTy::Vec(_) | ScriptPodTy::Mat(_)) {
+                    words[0].clone()
+                } else if matches!(leaf, ScriptPodTy::Mat(_)) {
+                    // Columns in order, as the CPU writes them (a column
+                    // padded to the record's column stride).
+                    let (cols, rows) = Self::metal_mat_shape(leaf);
+                    let col_stride = (slots / cols).max(rows);
+                    let cols: Vec<String> = words.chunks(col_stride).map(|c| format!("float{}({})", rows, c[..rows.min(c.len())].join(", "))).collect();
+                    format!("{}({})", ty_name, cols.join(", "))
+                } else {
+                    format!("{}({})", ty_name, words.join(", "))
+                }
+            }
+        }
     }
 
     pub fn metal_create_uniform_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -444,7 +509,7 @@ impl ShaderOutput {
 
         writeln!(out, "vertex IoVarying vertex_main(").ok();
         writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
+        writeln!(out, "    constant uint *i_raw [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform *u [[buffer(2)]],").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -497,7 +562,7 @@ impl ShaderOutput {
                     };
                     writeln!(
                         out,
-                        "    {} {} [[texture({})]],",
+                        "    {} t_{} [[texture({})]],",
                         metal_type, io.name, tex_idx
                     )
                     .ok();
@@ -517,9 +582,14 @@ impl ShaderOutput {
 
         writeln!(out, "    Io _io;").ok();
         writeln!(out, "    _io._mp_iter = 0u;").ok();
+        if self.pick_emit {
+            writeln!(out, "    _io._pick_mask = 0u;").ok();
+            writeln!(out, "    _io._pick_id = 0u;").ok();
+            writeln!(out, "    _io._pick_w = 0.0;").ok();
+        }
         writeln!(
             out,
-            "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
+            "    IoInstance _inst = _mp_decode_instance(i_raw + iid * MP_INSTANCE_WORDS);"
         )
         .ok();
         writeln!(out, "    constant char *_geom_bytes = (constant char *)vb;").ok();
@@ -547,7 +617,10 @@ impl ShaderOutput {
                 ShaderIoKind::UniformBuffer => {
                     writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
                 }
-                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) => {
+                    writeln!(out, "    _io.t_{} = t_{};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
                 }
                 _ => (),
@@ -586,10 +659,23 @@ impl ShaderOutput {
             .iter()
             .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
 
-        writeln!(out, "fragment IoFb fragment_main(").ok();
+        let has_outputs = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::FragmentOutput(_)));
+        let pick = self.pick_emit && has_outputs;
+        if pick {
+            writeln!(out, "struct IoPk {{").ok();
+            for io in &self.io {
+                if let ShaderIoKind::FragmentOutput(index) = io.kind {
+                    writeln!(out, "    float4 fb{} [[color({})]];", index, index).ok();
+                }
+            }
+            writeln!(out, "}};").ok();
+            writeln!(out, "fragment IoPk fragment_main(").ok();
+        } else {
+            writeln!(out, "fragment IoFb fragment_main(").ok();
+        }
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
         writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
+        writeln!(out, "    constant uint *i_raw [[buffer(1)]],").ok();
         write!(out, "    constant IoUniform *u [[buffer(2)]]").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -644,7 +730,7 @@ impl ShaderOutput {
                     writeln!(out, ",").ok();
                     write!(
                         out,
-                        "    {} {} [[texture({})]]",
+                        "    {} t_{} [[texture({})]]",
                         metal_type, io.name, tex_idx
                     )
                     .ok();
@@ -659,13 +745,30 @@ impl ShaderOutput {
             }
         }
 
+        let ntex = self.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_))).count();
+        if self.pick_emit {
+            for (k, name) in self.metal_pick_textures() {
+                writeln!(out, ",").ok();
+                write!(out, "    texture2d<float> {}__pick [[texture({})]]", name, ntex + k).ok();
+            }
+            writeln!(out, ",").ok();
+            write!(out, "    constant uint4 *_pk [[buffer(30)]]").ok();
+        }
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
         writeln!(out, "    _io._mp_iter = 0u;").ok();
+        if self.pick_emit {
+            writeln!(out, "    _io._pick_mask = _pk->y;").ok();
+            writeln!(out, "    _io._pick_id = 0u;").ok();
+            writeln!(out, "    _io._pick_w = 0.0;").ok();
+            for (_, name) in self.metal_pick_textures() {
+                writeln!(out, "    _io.{0}__pick = {0}__pick;", name).ok();
+            }
+        }
         writeln!(
             out,
-            "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);"
+            "    IoInstance _inst = _mp_decode_instance(i_raw + v._iid * MP_INSTANCE_WORDS);"
         )
         .ok();
         writeln!(out, "    _io.vb = vb;").ok();
@@ -681,7 +784,10 @@ impl ShaderOutput {
                 ShaderIoKind::UniformBuffer => {
                     writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
                 }
-                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) => {
+                    writeln!(out, "    _io.t_{} = t_{};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
                 }
                 _ => (),
@@ -693,7 +799,30 @@ impl ShaderOutput {
         writeln!(out, "    _iof.v = &v;").ok();
         writeln!(out, "    _iof.fb = &_iofb;").ok();
         writeln!(out, "    io_fragment(_io, _iof);").ok();
-        writeln!(out, "    return _iofb;").ok();
+        if pick {
+            // The coverage: the first colour target's alpha (a data target
+            // of one channel covers).
+            let first = self.io.iter().filter_map(|io| match io.kind {
+                ShaderIoKind::FragmentOutput(index) => Some((index, io.ty)),
+                _ => None,
+            }).min_by_key(|(index, _)| *index);
+            let alpha = match first {
+                Some((index, ty)) if ty == vm.bx.code.builtins.pod.pod_vec4f => format!("_mp_pick_cover(_iofb.fb{})", index),
+                _ => "1.0".to_string(),
+            };
+            writeln!(out, "    uint _pid = _io._pick_w > 0.0 ? _io._pick_id : _pk->x;").ok();
+            writeln!(out, "    if ({} < 0.1 || _pid == 0u) discard_fragment();", alpha).ok();
+            writeln!(out, "    float4 _pc = float4(float(_pid & 255u), float((_pid >> 8) & 255u), float((_pid >> 16) & 255u), 255.0) / 255.0;").ok();
+            writeln!(out, "    IoPk _pko;").ok();
+            for io in &self.io {
+                if let ShaderIoKind::FragmentOutput(index) = io.kind {
+                    writeln!(out, "    _pko.fb{} = _pc;", index).ok();
+                }
+            }
+            writeln!(out, "    return _pko;").ok();
+        } else {
+            writeln!(out, "    return _iofb;").ok();
+        }
         writeln!(out, "}}").ok();
     }
 

@@ -853,11 +853,7 @@ pub fn sh9_irradiance(c: &[[f32; 3]; 9], n: [f32; 3]) -> [f32; 3] {
 /// The render lane's IBL texture (see `builtin.rs`): one meta row holding
 /// the nine SH9 irradiance coefficients (texels 0..8) and `(levels,
 /// level_height, intensity, rotation)` in texel 9, then the prefiltered
-/// atlas rows. RGBA f32, row-major, for `TextureFormat::VecRGBAf32`. The
-/// meta row comes first because a backend may allocate the texture taller
-/// than its rows (D3D11 gives every RGBA f32 texture glyph-atlas headroom)
-/// and the shader's `size()` is the allocation: rows are addressed from
-/// the top.
+/// atlas rows. RGBA f32, row-major, for `TextureFormat::VecRGBAf32`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IblTexture {
     pub width: usize,
@@ -877,16 +873,28 @@ pub fn ibl_texture(env: &EnvMap, intensity: f32, rotation_deg: f32) -> IblTextur
 /// by `key` (a name for this one map's content): every scene lighting with
 /// the same map shares one CPU prefilter, which takes a large part of a
 /// second (more on a browser's UI thread). A host can run it ahead of the
-/// first draw, behind its loader.
+/// first draw, behind its loader, on a worker: the store is taken with
+/// `try_lock` and a spin (held for a map lookup), never a wait, which a
+/// browser's main thread may not do.
 pub fn prefiltered(key: u64, env: &EnvMap) -> std::sync::Arc<(EnvAtlas, [[f32; 3]; 9])> {
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-    static KEPT: Mutex<Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>> = Mutex::new(None);
-    if let Some(kept) = KEPT.lock().unwrap().as_ref().and_then(|kept| kept.get(&key)) {
+    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+    type Kept = Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>;
+    static KEPT: Mutex<Kept> = Mutex::new(None);
+    fn kept() -> MutexGuard<'static, Kept> {
+        loop {
+            match KEPT.try_lock() {
+                Ok(guard) => return guard,
+                Err(TryLockError::Poisoned(error)) => return error.into_inner(),
+                Err(TryLockError::WouldBlock) => std::hint::spin_loop(),
+            }
+        }
+    }
+    if let Some(kept) = kept().as_ref().and_then(|kept| kept.get(&key)) {
         return kept.clone();
     }
     let made = Arc::new((prefilter(env, 256, 6), sh9(env)));
-    KEPT.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, made.clone());
+    kept().get_or_insert_with(HashMap::new).insert(key, made.clone());
     made
 }
 
@@ -1182,31 +1190,26 @@ mod tests {
     }
 
     /// The shader's reads of the lane texture (builtin.rs `mat_ibl_meta` and
-    /// `mat_ibl_level`) on the CPU, from a texture the backend allocated
-    /// `rows` tall: `size()` is the allocation, sampling is nearest at
-    /// normalized coordinates, and rows past the data are undefined (NaN).
+    /// `mat_ibl_level`) on the CPU: `size()` is the texture's size and
+    /// sampling is nearest at normalized coordinates.
     struct ShaderReads<'a> {
         t: &'a IblTexture,
-        rows: usize,
     }
 
     impl ShaderReads<'_> {
         fn nearest(&self, u: f32, v: f32) -> [f32; 4] {
             let x = ((u * self.t.width as f32).floor().max(0.0) as usize).min(self.t.width - 1);
-            let y = ((v * self.rows as f32).floor().max(0.0) as usize).min(self.rows - 1);
-            if y >= self.t.height {
-                return [f32::NAN; 4];
-            }
+            let y = ((v * self.t.height as f32).floor().max(0.0) as usize).min(self.t.height - 1);
             let o = (y * self.t.width + x) * 4;
             [self.t.data[o], self.t.data[o + 1], self.t.data[o + 2], self.t.data[o + 3]]
         }
 
         fn meta(&self, i: f32) -> [f32; 4] {
-            self.nearest((i + 0.5) / self.t.width as f32, 0.5 / self.rows as f32)
+            self.nearest((i + 0.5) / self.t.width as f32, 0.5 / self.t.height as f32)
         }
 
         fn level(&self, uv: [f32; 2], k: f32) -> [f32; 3] {
-            let (w, rows) = (self.t.width as f32, self.rows as f32);
+            let (w, rows) = (self.t.width as f32, self.t.height as f32);
             let h = self.meta(9.0)[1];
             let px = uv[0] * w - 0.5;
             let py = (uv[1] * h - 0.5).max(0.0).min(h - 1.0);
@@ -1224,12 +1227,12 @@ mod tests {
     }
 
     #[test]
-    fn the_shader_reads_the_same_texels_from_a_padded_texture() {
+    fn the_shader_reads_the_texels_pack_ibl_wrote() {
         let env = EnvMap::procedural(&EnvPreset::Sunset, 64, 1.0, 0.0);
         let atlas = prefilter(&env, 32, 4);
         let sh = sh9(&env);
         let t = pack_ibl(&atlas, &sh, 2.0, 90.0);
-        let exact = ShaderReads { t: &t, rows: t.height };
+        let exact = ShaderReads { t: &t };
         assert_eq!(exact.meta(9.0), [atlas.levels as f32, atlas.level_height as f32, 2.0, 90f32.to_radians()]);
         for k in 0..atlas.levels {
             for (x, y) in [(0, 0), (5, 3), (atlas.width - 1, atlas.level_height - 1)] {
@@ -1237,21 +1240,6 @@ mod tests {
                 let want = atlas.data[(k * atlas.level_height + y) * atlas.width + x];
                 let got = exact.level(uv, k as f32);
                 assert!((0..3).all(|c| (got[c] - want[c]).abs() <= 1e-4 * want[c].abs().max(1.0)), "level {k} ({x}, {y}): {got:?} vs {want:?}");
-            }
-        }
-        // D3D11 allocates float textures with glyph-atlas headroom (3x, at
-        // least 512 rows, in steps of 128); rows past the data are never
-        // uploaded.
-        let headroom = ((t.height * 3).max(512) + 127) / 128 * 128;
-        for rows in [t.height + 3, headroom] {
-            let padded = ShaderReads { t: &t, rows };
-            for i in 0..10 {
-                assert_eq!(padded.meta(i as f32), exact.meta(i as f32), "meta texel {i} over {rows} rows");
-            }
-            for k in 0..atlas.levels {
-                for uv in [[0.0, 0.0], [0.13, 0.27], [0.5, 0.5], [0.71, 0.93], [0.999, 1.0]] {
-                    assert_eq!(padded.level(uv, k as f32), exact.level(uv, k as f32), "level {k} at {uv:?} over {rows} rows");
-                }
             }
         }
     }

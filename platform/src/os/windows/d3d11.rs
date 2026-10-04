@@ -1,7 +1,7 @@
 use crate::{
     cx::Cx,
     draw_list::DrawListId,
-    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+    draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId, GpuTimeRecorder},
     draw_shader::{
         CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
         UniformBufferBindings,
@@ -46,15 +46,16 @@ use crate::{
                     D3D11_BIND_INDEX_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
                     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
                     D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_OP_MAX, D3D11_BOX, D3D11_BUFFER_DESC,
+                    D3D11_BUFFER_SRV, D3D11_BUFFER_SRV_0, D3D11_BUFFER_SRV_1,
                     D3D11_CLEAR_DEPTH, D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL,
                     D3D11_COMPARISON_ALWAYS, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
                     D3D11_CREATE_DEVICE_FLAG, D3D11_CULL_BACK, D3D11_CULL_NONE,
                     D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
                     D3D11_DEPTH_STENCIL_VIEW_DESC, D3D11_DEPTH_WRITE_MASK_ALL,
                     D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
-                    D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
+                    D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC,
                     D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP, D3D11_MAPPED_SUBRESOURCE,
-                    D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
+                    D3D11_MAP_WRITE_DISCARD, D3D11_QUERY, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
                     D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
                     D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
@@ -341,7 +342,7 @@ impl Cx {
                             };
                             uploaded
                         } else {
-                            draw_item.os.inst_vbuf.update_with_f32_vertex_data(
+                            draw_item.os.inst_vbuf.update_with_f32_instance_data(
                                 d3d11_cx,
                                 draw_item.instances.as_deref().unwrap(),
                             );
@@ -512,17 +513,15 @@ impl Cx {
                         .context
                         .IASetIndexBuffer(geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
 
+                    // Instances are read by the vertex shader from the
+                    // instance buffer's word view (`instance_buffer_slot`).
                     let geom_slots = sh.mapping.geometries.total_slots;
-                    let inst_slots = sh.mapping.instances.total_slots;
-                    let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
-                    let offsets = [0u32, 0u32];
-                    let buffers = [
-                        Some(geom_vbuf.clone()),
-                        draw_item.os.inst_vbuf.buffer.clone(),
-                    ];
+                    let strides = [(geom_slots * 4) as u32];
+                    let offsets = [0u32];
+                    let buffers = [Some(geom_vbuf.clone())];
                     d3d11_cx.context.IASetVertexBuffers(
                         0,
-                        2,
+                        1,
                         Some(buffers.as_ptr()),
                         Some(strides.as_ptr()),
                         Some(offsets.as_ptr()),
@@ -672,6 +671,10 @@ impl Cx {
                                 .VSSetShaderResources(i as u32, Some(&clear_srvs));
                         }
                     }
+                }
+                if let Some(slot) = shp.instance_buffer_slot {
+                    let view = draw_item.os.inst_vbuf.word_view(d3d11_cx);
+                    unsafe { d3d11_cx.context.VSSetShaderResources(slot, Some(&[view])) };
                 }
                 //if self.passes[pass_id].debug{
                 // println!("DRAWING {} {}", geometry.indices.len(), instances);
@@ -956,6 +959,7 @@ impl Cx {
         // Serialize with FFmpeg D3D11VA when sharing Makepad's device (ZC video).
         let mut presented = false;
         crate::gpu_texture::with_media_d3d11_lock(|| {
+            self.d3d_gpu_time_begin(pass_id, d3d11_cx);
             self.setup_pass_render_targets(
                 pass_id,
                 &d3d11_window.render_target_view,
@@ -967,6 +971,7 @@ impl Cx {
             let zbias_step = self.passes[pass_id].zbias_step;
 
             self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
+            self.passes[pass_id].os.gpu_timer.end(d3d11_cx);
             self.textures.1.serials.submit();
             // Read the frame back BEFORE it flips: the chain is FLIP_DISCARD, so
             // the back buffer's contents are undefined the moment `Present` takes
@@ -1016,6 +1021,7 @@ impl Cx {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
+        self.d3d_gpu_time_begin(pass_id, d3d11_cx);
         if let Some(texture_id) = texture_id {
             let cxtexture = &self.textures[texture_id];
             let render_target_view = cxtexture.os.render_target_view.clone();
@@ -1033,6 +1039,7 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, &d3d11_cx);
+        self.passes[pass_id].os.gpu_timer.end(d3d11_cx);
         let serial = self.textures.1.serials.submit();
         self.readback_pass_submitted(pass_id, serial);
         if !self.textures.1.readbacks.slots.is_empty() {
@@ -2497,8 +2504,10 @@ impl CxOsTexture {
 
 impl CxOsPass {
     /// Forgets the pipeline state objects; `setup_pass_render_targets` recreates them on the
-    /// next paint because each is created only when its slot is `None`.
+    /// next paint because each is created only when its slot is `None`. The GPU timing queries
+    /// go too, results in flight with them; a timed pass makes new ones on its next paint.
     fn forget_gpu_objects(&mut self) {
+        self.gpu_timer = D3dGpuTimer::default();
         self.pass_uniforms = D3d11Buffer::default();
         self.blend_state = None;
         self.blend_state_max = None;
@@ -2797,6 +2806,8 @@ pub struct CxOsUniformBuffer {
 pub struct D3d11Buffer {
     pub last_size: usize,
     pub buffer: Option<ID3D11Buffer>,
+    /// The buffer as 32-bit words, and the buffer it was made for.
+    pub word_view: Option<(ID3D11Buffer, ID3D11ShaderResourceView)>,
     pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
     pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
@@ -2834,7 +2845,8 @@ impl D3d11Buffer {
             let desc = D3D11_BUFFER_DESC {
                 Usage: D3D11_USAGE_DEFAULT,
                 ByteWidth: (capacity * 4).try_into().ok()?,
-                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                // Read by the vertex shader by instance id.
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
                 CPUAccessFlags: 0,
                 MiscFlags: 0,
                 StructureByteStride: 0,
@@ -2980,6 +2992,7 @@ impl D3d11Buffer {
         // just let the old buffer go.
         if len_slots == 0 {
             self.buffer = None;
+            self.word_view = None;
             self.last_size = 0;
             self.retained_publication = None;
             return;
@@ -3012,6 +3025,55 @@ impl D3d11Buffer {
             data.len(),
             data.as_ptr() as *const _,
         );
+    }
+
+    /// An instance buffer, read by the vertex shader by instance id.
+    pub fn update_with_f32_instance_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
+        self.update_with_data(
+            d3d11_cx,
+            D3D11_BIND_SHADER_RESOURCE,
+            data.len(),
+            data.as_ptr() as *const _,
+        );
+    }
+
+    /// A view of the buffer as 32-bit words, for a vertex shader that reads
+    /// its instance records from it (`hlsl_instance_buffer_register`). Made
+    /// again when the buffer was replaced.
+    fn word_view(&mut self, d3d11_cx: &D3d11Cx) -> Option<ID3D11ShaderResourceView> {
+        let buffer = self.buffer.as_ref()?;
+        if let Some((viewed, view)) = &self.word_view {
+            if viewed.as_raw() == buffer.as_raw() {
+                return Some(view.clone());
+            }
+        }
+        let mut desc = D3D11_BUFFER_DESC::default();
+        unsafe { buffer.GetDesc(&mut desc) };
+        let view_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_UINT,
+            ViewDimension: D3D_SRV_DIMENSION(1), // BUFFER
+            Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D11_BUFFER_SRV {
+                    Anonymous1: D3D11_BUFFER_SRV_0 { FirstElement: 0 },
+                    Anonymous2: D3D11_BUFFER_SRV_1 {
+                        NumElements: desc.ByteWidth / 4,
+                    },
+                },
+            },
+        };
+        let mut view = None;
+        if let Err(e) = unsafe {
+            d3d11_cx
+                .device
+                .CreateShaderResourceView(buffer, Some(&view_desc), Some(&mut view))
+        } {
+            d3d11_cx.note_error("CreateShaderResourceView(instances)", &e);
+            self.word_view = None;
+            return None;
+        }
+        let view = view?;
+        self.word_view = Some((buffer.clone(), view.clone()));
+        Some(view)
     }
 
     pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
@@ -3307,7 +3369,10 @@ impl CxTexture {
             let can_reuse = self.os.texture.is_some()
                 && self.os.vec_alloc_width == width
                 && self.os.vec_alloc_dxgi == dxgi_format.0
-                && self.os.vec_alloc_height >= height
+                // Only an append-rows texture keeps spare rows; every other
+                // texture stays exactly its size, so size() is what was uploaded.
+                && (self.os.vec_alloc_height == height
+                    || (self.append_rows && self.os.vec_alloc_height > height))
                 && safe_to_reuse;
 
             if can_reuse {
@@ -3339,10 +3404,11 @@ impl CxTexture {
                 return;
             }
 
-            // (Re)allocate. For the append-only glyph atlases (RGBAf32), add ~1.5x height headroom
-            // (rounded up) so subsequent growth reuses the texture instead of recreating it. Other
-            // formats (images/data) are sampled by normalized UV, so they MUST be exact-sized.
-            let cap_height = if matches!(dxgi_format, DXGI_FORMAT_R32G32B32A32_FLOAT) {
+            // (Re)allocate. An append-rows texture (the SLUG glyph atlas) gets height headroom so
+            // subsequent growth reuses the texture instead of recreating it. Every other texture
+            // (images, data textures, other RGBA f32 tables) is sampled by normalized UV or by
+            // size(), so it MUST be exact-sized.
+            let cap_height = if self.append_rows {
                 // Generous headroom for the append-only glyph atlas: 3x the needed height with a
                 // sizable minimum, rounded up. This makes the texture large enough to hold a
                 // typical room's full glyph set after the first allocation, so growth-driven
@@ -3903,7 +3969,9 @@ impl CxOsPass {
                     DepthBiasClamp: 0.0,
                     DepthClipEnable: TRUE,
                     FillMode: D3D11_FILL_SOLID,
-                    FrontCounterClockwise: FALSE,
+                    // Counter-clockwise is front, as on Metal, Vulkan and GL and as
+                    // the renderer's geometry and glTF meshes are wound.
+                    FrontCounterClockwise: TRUE,
                     MultisampleEnable: FALSE,
                     ScissorEnable: FALSE,
                     SlopeScaledDepthBias: 0.0,
@@ -3986,6 +4054,203 @@ pub struct CxOsPass {
     raster_state_backface_cull: Option<ID3D11RasterizerState>,
     depth_stencil_state_write: Option<ID3D11DepthStencilState>,
     depth_stencil_state_no_write: Option<ID3D11DepthStencilState>,
+    gpu_timer: D3dGpuTimer,
+}
+
+/// Timed paints of one pass that may await the GPU at once. The swap chain lets the CPU run
+/// `main_window_latency()` (2) frames ahead and the loop polls before each repaint, so a pass
+/// painted once a frame normally finds a free set; a paint that finds none goes untimed and
+/// counts as dropped.
+const GPU_TIME_RING: usize = 4;
+
+/// Not in the vendored bindings, so spelled out from `d3d11.h`.
+const D3D11_QUERY_TIMESTAMP: D3D11_QUERY = D3D11_QUERY(2);
+const D3D11_QUERY_TIMESTAMP_DISJOINT: D3D11_QUERY = D3D11_QUERY(3);
+const D3D11_ASYNC_GETDATA_DONOTFLUSH: u32 = 1;
+
+/// `D3D11_QUERY_DATA_TIMESTAMP_DISJOINT`: the tick rate of the timestamps the disjoint query
+/// brackets, and whether that rate held (a nonzero `disjoint` means it did not).
+#[repr(C)]
+#[derive(Default)]
+struct TimestampDisjoint {
+    frequency: u64,
+    disjoint: i32,
+}
+
+/// `ID3D11DeviceContext::GetData` with `D3D11_ASYNC_GETDATA_DONOTFLUSH`, through the vtable
+/// like `is_gpu_done`: the generated wrapper folds `S_FALSE` ("not yet") into `Ok`, and that is
+/// the answer a poll that never waits has to tell apart.
+unsafe fn get_query_data<T>(
+    context: &ID3D11DeviceContext,
+    query: &ID3D11Query,
+    out: &mut T,
+) -> windows_core::HRESULT {
+    unsafe {
+        (Interface::vtable(context).GetData)(
+            Interface::as_raw(context),
+            Interface::as_raw(query),
+            (out as *mut T).cast(),
+            std::mem::size_of::<T>() as u32,
+            D3D11_ASYNC_GETDATA_DONOTFLUSH,
+        )
+    }
+}
+
+/// One timed paint: a disjoint query around a start and an end timestamp.
+struct D3dGpuTimeSet {
+    disjoint: ID3D11Query,
+    start: ID3D11Query,
+    end: ID3D11Query,
+}
+
+impl D3dGpuTimeSet {
+    fn new(d3d11_cx: &D3d11Cx) -> Option<Self> {
+        let create = |kind| -> windows_core::Result<ID3D11Query> {
+            let mut query = None;
+            unsafe {
+                d3d11_cx.device.CreateQuery(
+                    &D3D11_QUERY_DESC {
+                        Query: kind,
+                        MiscFlags: 0,
+                    },
+                    Some(&mut query),
+                )?;
+            }
+            query.ok_or_else(windows::core::Error::empty)
+        };
+        let set = || -> windows_core::Result<Self> {
+            Ok(Self {
+                disjoint: create(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
+                start: create(D3D11_QUERY_TIMESTAMP)?,
+                end: create(D3D11_QUERY_TIMESTAMP)?,
+            })
+        };
+        set()
+            .map_err(|err| d3d11_cx.note_error("ID3D11Device::CreateQuery (GPU timing)", &err))
+            .ok()
+    }
+
+    /// `None` while the GPU has not finished the paint. Otherwise its duration in seconds, or
+    /// `Some(None)` when it has none: the clock was disjoint (its rate changed or it was reset
+    /// during the paint), or the device failed the read.
+    fn read(&self, context: &ID3D11DeviceContext) -> Option<Option<f64>> {
+        let mut clock = TimestampDisjoint::default();
+        let mut start = 0u64;
+        let mut end = 0u64;
+        unsafe {
+            // The disjoint query ends last, so it is asked first: while it is pending, so is
+            // every set encoded after it.
+            let hr = get_query_data(context, &self.disjoint, &mut clock);
+            if hr == S_FALSE {
+                return None;
+            }
+            if hr.is_err() {
+                return Some(None);
+            }
+            for (query, stamp) in [(&self.start, &mut start), (&self.end, &mut end)] {
+                let hr = get_query_data(context, query, stamp);
+                if hr == S_FALSE {
+                    return None;
+                }
+                if hr.is_err() {
+                    return Some(None);
+                }
+            }
+        }
+        let valid = clock.disjoint == 0 && clock.frequency != 0 && end >= start;
+        Some(valid.then(|| (end - start) as f64 / clock.frequency as f64))
+    }
+}
+
+/// The pass's GPU timing on D3D11 (`DrawPass::set_gpu_timing_enabled`): at most
+/// `GPU_TIME_RING` query sets, made on first use and reused, polled without waiting. Empty
+/// for a pass that never opted in.
+#[derive(Default)]
+struct D3dGpuTimer {
+    /// Encoded paints and the tag each was encoded under, oldest first.
+    in_flight: std::collections::VecDeque<(D3dGpuTimeSet, u64)>,
+    free: Vec<D3dGpuTimeSet>,
+    /// The paint being encoded, between `begin` and `end`.
+    open: Option<(D3dGpuTimeSet, u64)>,
+}
+
+/// A clone starts empty: the queries in flight belong to the pass that encoded them.
+impl Clone for D3dGpuTimer {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl D3dGpuTimer {
+    fn begin(&mut self, recorder: &GpuTimeRecorder, d3d11_cx: &D3d11Cx) {
+        if self.free.is_empty() && self.in_flight.len() >= GPU_TIME_RING {
+            self.poll(&d3d11_cx.context, recorder);
+        }
+        let set = match self.free.pop() {
+            Some(set) => Some(set),
+            None if self.in_flight.len() < GPU_TIME_RING => D3dGpuTimeSet::new(d3d11_cx),
+            None => None,
+        };
+        let Some(set) = set else {
+            // Every set is still on the GPU: skip timing this paint rather than wait.
+            recorder.record_dropped();
+            return;
+        };
+        unsafe {
+            d3d11_cx.context.Begin(&set.disjoint);
+            d3d11_cx.context.End(&set.start);
+        }
+        // The tag names what is encoded now; by completion the owner may have retagged.
+        self.open = Some((set, recorder.current_tag()));
+    }
+
+    fn end(&mut self, d3d11_cx: &D3d11Cx) {
+        if let Some((set, tag)) = self.open.take() {
+            unsafe {
+                d3d11_cx.context.End(&set.end);
+                d3d11_cx.context.End(&set.disjoint);
+            }
+            self.in_flight.push_back((set, tag));
+        }
+    }
+
+    /// Records every finished paint, oldest first, and stops at the first the GPU has not
+    /// finished: the immediate context completes in order.
+    fn poll(&mut self, context: &ID3D11DeviceContext, recorder: &GpuTimeRecorder) {
+        while let Some((set, tag)) = self.in_flight.front() {
+            let Some(seconds) = set.read(context) else {
+                break;
+            };
+            match seconds {
+                Some(seconds) => recorder.record_seconds_tagged(*tag, seconds),
+                None => recorder.record_dropped(),
+            }
+            let (set, _) = self.in_flight.pop_front().unwrap();
+            self.free.push(set);
+        }
+    }
+}
+
+impl Cx {
+    /// Opens the timestamp bracket around a paint of a pass that opted into GPU timing. A
+    /// pass that did not creates no queries.
+    fn d3d_gpu_time_begin(&mut self, pass_id: DrawPassId, d3d11_cx: &D3d11Cx) {
+        let pass = &mut self.passes[pass_id];
+        if let Some(query) = &pass.gpu_time_query {
+            pass.os.gpu_timer.begin(&query.recorder, d3d11_cx);
+        }
+    }
+
+    fn d3d_poll_gpu_times(&mut self, context: &ID3D11DeviceContext) {
+        for item in &mut self.passes.0.pool {
+            let pass = &mut item.item;
+            match &pass.gpu_time_query {
+                Some(query) => pass.os.gpu_timer.poll(context, &query.recorder),
+                // Timing switched off: its queries go with it.
+                None => pass.os.gpu_timer = D3dGpuTimer::default(),
+            }
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -4034,6 +4299,7 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Hlsl;
             output.const_table = vm.host.cx().shader_const_table_mode();
+            output.live_literals = crate::makepad_script::literal::live();
             output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);
@@ -4089,22 +4355,7 @@ impl DrawVars {
             // b0 = live uniforms, b1 = const table, b2 = draw call, b3 = pass, b4 = draw list, b5 = user
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
-            let mut out = String::new();
-            output.create_struct_defs(vm, &mut out);
-            output.hlsl_create_uniform_buffer_cbuffers(vm, &mut out);
-            output.hlsl_create_uniform_struct(vm, &mut out);
-            output.hlsl_create_scope_uniform_cbuffer(vm, &mut out);
-            output.hlsl_create_instance_struct(vm, &mut out);
-            output.hlsl_create_varying_struct(vm, &mut out);
-            output.hlsl_create_vertex_buffer_struct(vm, &mut out);
-            output.hlsl_create_vertex_input_struct(vm, &mut out);
-            output.hlsl_create_io_structs(vm, &mut out);
-            output.hlsl_create_fragment_output_struct(vm, &mut out);
-            output.hlsl_create_texture_samplers(vm, &mut out);
-            output.hlsl_create_helpers(vm, &mut out);
-            output.create_functions(&mut out);
-            output.hlsl_create_vertex_fn(vm, &mut out);
-            output.hlsl_create_fragment_fn(vm, &mut out);
+            let out = output.hlsl_draw_source(vm);
 
             let source = vm.bx.heap.new_object_ref(io_self);
 
@@ -4114,7 +4365,7 @@ impl DrawVars {
             // Cache 3: Check if this exact code has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
+                if let Some(shader_id) = cx.draw_shaders.code_hit(&code, pipe, &output.table_consts) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
@@ -4407,6 +4658,9 @@ pub struct CxOsDrawShader {
     pub dyn_uniform_buffer_id: Option<u32>,
     pub custom_uniform_buffer_ids: Vec<u32>,
     pub scope_uniform_buffer_id: Option<u32>,
+    /// The t register the vertex shader reads its instance records from by
+    /// instance id; None when they arrive as input elements.
+    pub instance_buffer_slot: Option<u32>,
 }
 
 impl CxOsDrawShader {
@@ -4576,15 +4830,8 @@ impl CxOsDrawShader {
             .iter()
             .map(|geom| slot_chunks(geom.slots).len())
             .sum();
-        let inst_desc_count: usize = mapping
-            .instances
-            .inputs
-            .iter()
-            .map(|inst| slot_chunks(inst.slots).len())
-            .sum();
-        let total_desc_count = geom_desc_count + inst_desc_count;
-        layout_desc.reserve(total_desc_count);
-        strings.reserve(mapping.geometries.inputs.len() + mapping.instances.inputs.len());
+        layout_desc.reserve(geom_desc_count);
+        strings.reserve(mapping.geometries.inputs.len());
 
         let mut geom_sem_index = 0usize;
         for geom in &mapping.geometries.inputs {
@@ -4616,35 +4863,11 @@ impl CxOsDrawShader {
             geom_sem_index += 1;
         }
 
-        let mut inst_sem_index = 0usize;
-        for inst in &mapping.instances.inputs {
-            strings.push(format!("INST{}\0", index_to_semantic(inst_sem_index)));
-            let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
-            let mut slot_offset = 0usize;
-            for (semantic_chunk_index, chunk_slots) in
-                slot_chunks(inst.slots).into_iter().enumerate()
-            {
-                layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
-                    SemanticName: semantic_name,
-                    SemanticIndex: semantic_chunk_index as u32,
-                    Format: slots_to_dxgi_format(chunk_slots, inst.attr_format),
-                    InputSlot: 1,
-                    AlignedByteOffset: (inst.byte_offset + slot_offset * 4) as u32,
-                    InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
-                    InstanceDataStepRate: 1,
-                });
-                layout_debug.push(format!(
-                    "{}{} slot={} slots={} byte_off={}",
-                    strings.last().unwrap().trim_end_matches('\0'),
-                    semantic_chunk_index,
-                    1,
-                    chunk_slots,
-                    (inst.offset + slot_offset) * 4
-                ));
-                slot_offset += chunk_slots;
-            }
-            inst_sem_index += 1;
-        }
+        // Instance records have no input elements: the vertex shader reads
+        // them by instance id from the instance buffer at the word offsets
+        // of `ShaderOutput::instance_record`, the layout the draw list
+        // writes (`DrawShaderInputs`).
+        let instance_buffer_slot = makepad_script::shader_hlsl::hlsl_instance_buffer_register(hlsl);
 
         if mapping.flags.debug_layout {
             crate::log!(
@@ -4759,6 +4982,7 @@ impl CxOsDrawShader {
             dyn_uniform_buffer_id,
             custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
+            instance_buffer_slot,
         })
     }
 }
@@ -4852,6 +5076,8 @@ impl Cx {
         }
     }
 
+    /// The loop's GPU completion poll, run around every repaint whether or
+    /// not anything painted; it also collects finished pass timings.
     pub(crate) fn poll_texture_lifetimes(&mut self) {
         // The adapter draws attached blocks here (no per-publication
         // backing): dropped blocks release from this poll, contract §3.3.
@@ -4906,5 +5132,6 @@ impl Cx {
             }
             state.retired.retain(|retired| retired.serial > completed);
         }
+        self.d3d_poll_gpu_times(&context);
     }
 }

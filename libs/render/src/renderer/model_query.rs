@@ -35,7 +35,7 @@ impl Renderer {
         self.static_models
             .iter()
             .find(|(k, _)| k == id)
-            .map(|(_, m)| m.collider_parts.as_slice())
+            .map(|(_, m)| m.collider_parts.boxes())
     }
 
     /// Model-space bounds of a loaded prop, for building its collider.
@@ -191,6 +191,16 @@ impl Renderer {
             .find(|(k, _)| k == id)
             .and_then(|(_, m)| m.anim_parts.iter().find(|p| p.def.name == part))
             .map(|p| p.def.as_ref())
+    }
+
+    /// A loaded level's liquid surfaces (water, slime, lava), which the
+    /// model does not draw: the host gives them to the water renderer.
+    pub fn model_liquids(&self, id: &str) -> Vec<crate::model::LiquidSurface> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| m.liquids.as_ref().clone())
+            .unwrap_or_default()
     }
 
     /// Every part name a loaded model exposes, in file order.

@@ -10,7 +10,7 @@ fn triangle() -> StaticModel {
         min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
         parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
         ground_ao: None, draw_layers: Vec::new(), detail_png: None, detail_scale: [1.0, 1.0],
-        prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None,
+        prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, liquids: Vec::new(), liquid_ranges: Vec::new(),
         pbr: Default::default(),
     }
 }
@@ -46,7 +46,7 @@ fn preparation_retains_geometry_and_derives_collision_off_ui() {
     assert_eq!(prepared.main.indices, [0, 1, 2]);
     assert_eq!(prepared.mesh_indices.as_ref(), &prepared.main.indices);
     assert_eq!(prepared.positions.len(), 3);
-    assert!(!prepared.collider_parts.is_empty());
+    assert!(!prepared.collider_parts.boxes().is_empty());
     assert_eq!(prepared.upload_bytes(), (3 * crate::model::MODEL_VERTEX_FLOATS + 3) * 4 + 12);
     let other_pane = prepared.clone();
     assert_eq!(other_pane.main.indices, prepared.main.indices);

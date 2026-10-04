@@ -1,8 +1,9 @@
 //! Image-based lighting for Splash materials (KERNELS.md §3.3.3). Opt-in:
 //! `World::environment.ibl` names an environment; the renderer prepares it
 //! off the UI thread (hdri/prepare.rs: render-material's lane texture, a
-//! full-resolution dome, and the numbers the sun rig, the exposure and the
-//! fog take from the map) and binds the lane texture on the detail slot of
+//! meta row with SH9, then the prefiltered atlas; a full-resolution dome;
+//! and the numbers the sun rig, the exposure and the fog take from the
+//! map) and binds the lane texture on the detail slot of
 //! the materials compiled with IBL once it lands. Until then, and without
 //! an environment, nothing is bound and every stock lane keeps its
 //! analytic sky reflection. `Background::Environment` draws the dome as the

@@ -8,7 +8,7 @@ use super::*;
 /// Preetham luminance at the legacy 0.1 exposure sits near a sunlit white
 /// wall; a clear sky is a few times dimmer than that, and keeping it there
 /// is what keeps its blue through the tone map.
-const HDR_SKY_GAIN: f32 = 0.4;
+pub(super) const HDR_SKY_GAIN: f32 = 0.4;
 /// HDR lane height fog: the base height the game's fog density applies at,
 /// and the scale height it thins over (e^-1 every this many metres up).
 const HDR_FOG_BASE: f32 = 0.0;
@@ -47,8 +47,9 @@ impl Renderer {
     /// rig starts from (`resolve_sun`, aimed by a world's own Sun, else the
     /// environment's key) and the direction the switches read.
     /// - N1: the switches (a streamed city's night factor with its windows
-    ///   and headlights, the lamps' photocell, and later the analytic sky
-    ///   unless the light is the sun: `frame_sky`) read the daylight sun
+    ///   and headlights, the lamps' photocell, the vehicle lamps'
+    ///   `lamp_level`, and later the analytic sky unless the light is the
+    ///   sun: `frame_sky`) read the daylight sun
     ///   (`daylight_dir`): the environment's own sun when it reports one,
     ///   never a moon key's direction.
     /// - I1c: the lamps are railed against the rig the frame lights with, the
@@ -62,8 +63,9 @@ impl Renderer {
         self.stream_lights(camera_pos, daylight.y);
         let lamps = self.env_lamp_rig(world, sun);
         self.build_frame_lights(&lamps);
-        crate::entity_lights::append_entity_lights_with_model_headlights(
-            world, &mut self.frame_lights, &self.model_headlight_owners,
+        let level = makepad_scene::light::lamp_level(daylight.y, world.sky.as_ref().map_or(0.0, |s| s.fog));
+        self.frame_vehicle_lamps = crate::entity_lights::append_entity_lights_with_model_headlights(
+            world, &mut self.frame_lights, &self.model_headlight_owners, level, camera_pos, &mut self.vehicle_lamp_radius,
         );
         (sun, daylight)
     }
@@ -257,6 +259,8 @@ impl Renderer {
         // The daylight switches and the lamps (N1, I1c), and the sun the
         // frame's rig starts from.
         let (sun, daylight) = self.frame_lamps(world, camera_pos);
+        stats.stream_lights = self.frame_stream_lights;
+        stats.vehicle_lamps = self.frame_vehicle_lamps;
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.
@@ -496,6 +500,27 @@ impl Renderer {
             (true, makepad_scene::Fog::Linear { start, end, .. }) if world.environment.validate().is_ok() => [*start, *end, 1.0, 1.0],
             (true, makepad_scene::Fog::Exp2 { .. }) if world.environment.validate().is_ok() => [0.0, 0.0, 2.0, 1.0],
             (true, _) => [HDR_FOG_BASE, 1.0 / HDR_FOG_SCALE_HEIGHT, 0.0, 1.0],
+        };
+        // Under water: every shader already fogs, so the whole view turns
+        // into the water's colour by swapping the fog for the water's own
+        // (exp2, as far as the water is clear) — no extra pass.
+        let underwater = world.water.as_deref()
+            .filter(|_| shows_environment)
+            .and_then(|w| super::water::eye_under_water(w, camera_pos, world.water_time));
+        let (fog_color, fog_density) = match underwater {
+            Some(v) => {
+                let c = super::water::in_scatter(&v.look, &sun);
+                if self.hdr_output {
+                    self.clustered.fog_ctl = [0.0, 0.0, 2.0, 1.0];
+                }
+                (c, 0.6 / v.look.clarity.max(0.5))
+            }
+            None => (fog_color, fog_density),
+        };
+        self.clustered.uw = if shows_environment {
+            super::water::water_column(world.water.as_deref(), camera_pos, world.water_time, &sun)
+        } else {
+            [[0.0; 4]; 3]
         };
         self.clustered.fog_eye = [camera_pos.x, camera_pos.y, camera_pos.z, 0.0];
         apply_sun(cx.cx, draws, &sun, fog_color);
@@ -1542,7 +1567,7 @@ impl Renderer {
         // when a host lends no models_draw: the sky lane owns its shader.
         self.draw_sky_faces(cx, camera_pos, frustum, &mut stats);
 
-        self.draw_water(cx, draws, world, &sun, (fog_color, fog_density), frustum, shows_environment, camera_pos);
+        self.draw_water(cx, draws, world, &sun, sky_frame.as_ref(), (fog_color, fog_density), frustum, shows_environment, camera_pos);
 
         // 4. Alpha pass, one batch per shape: static sensors from the slab,
         // then blob shadows (box batch) and dynamic sensors — drawn after all

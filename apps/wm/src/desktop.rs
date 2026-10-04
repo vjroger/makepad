@@ -1,42 +1,55 @@
 pub use makepad_widgets::desktop_style::DesktopStyle;
+use makepad_widgets::tween::{Easing, QuickTo};
 use makepad_widgets::*;
 
+/// Seconds of a theme switch.
+const STYLE_SECS: f64 = 0.65;
+
+/// Weight 1 on `style`, 0 elsewhere.
+fn one_hot(style: usize) -> [f64; 8] {
+    let mut w = [0.0; 8];
+    if let Some(x) = w.get_mut(style) {
+        *x = 1.0;
+    }
+    w
+}
+
+/// The crossfade between desktop styles: one weight per `DesktopStyle`
+/// (indexed by its discriminant), moved together by one smoothstep tween
+/// (GSAP `quickTo` with a restart on every select).
 #[derive(Clone, Debug)]
 pub struct StyleTween {
     pub target: DesktopStyle,
     pub dark: bool,
     pub weights: [f64; 8],
-    from: [f64; 8],
-    elapsed: f64,
+    q: QuickTo<[f64; 8]>,
 }
 impl Default for StyleTween {
     fn default() -> Self {
         Self {
             target: DesktopStyle::Macos,
             dark: false,
-            weights: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            from: [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            elapsed: 1.0,
+            weights: one_hot(DesktopStyle::Macos as usize),
+            q: QuickTo::at(one_hot(DesktopStyle::Macos as usize)),
         }
     }
 }
 impl StyleTween {
+    /// Heads for `style` from the visible mix, over the full duration (even
+    /// when it is the current target: the appearance toggle restarts it).
     pub fn select(&mut self, style: DesktopStyle) {
-        self.from = self.weights;
         self.target = style;
-        self.elapsed = 0.0;
+        self.q
+            .restart(one_hot(style as usize), STYLE_SECS, Easing::SmoothStep);
     }
+    /// Advances by `dt` seconds; `false` once landed (exactly on the target).
     pub fn step(&mut self, dt: f64) -> bool {
-        self.elapsed = (self.elapsed + dt / 0.65).min(1.0);
-        let t = self.elapsed * self.elapsed * (3.0 - 2.0 * self.elapsed);
-        for i in 0..self.weights.len() {
-            self.weights[i] = self.from[i]
-                + ((if i == self.target as usize { 1.0 } else { 0.0 }) - self.from[i]) * t;
-        }
-        self.elapsed < 1.0
+        let moving = self.q.step(dt);
+        self.weights = self.q.value();
+        moving
     }
     pub fn active(&self) -> bool {
-        self.elapsed < 1.0
+        !self.q.is_settled()
     }
     // Desktop-only geometry arrays have no contribution in phone modes.
     pub fn value<const N: usize>(&self, values: [f64; N]) -> f64 {
@@ -50,12 +63,17 @@ impl StyleTween {
     }
     /// The same mix taken at the tween's start.
     pub fn from_value<const N: usize>(&self, values: [f64; N]) -> f64 {
-        self.from.iter().zip(values).map(|(w, v)| w * v).sum()
+        self.q
+            .from_value()
+            .iter()
+            .zip(values)
+            .map(|(w, v)| w * v)
+            .sum()
     }
     /// The eased progress of the running tween, 1 once settled: the
-    /// weights move from `from` to the target along this curve.
+    /// weights move from the start mix to the target along this curve.
     pub fn progress(&self) -> f64 {
-        self.elapsed * self.elapsed * (3.0 - 2.0 * self.elapsed)
+        Easing::SmoothStep.map(self.q.progress())
     }
     pub fn reserved_height(&self) -> f64 {
         self.target_value([0.0, 0.0, 54.0, 34.0, 0.0])
@@ -80,6 +98,20 @@ mod tests {
         for (index, weight) in t.weights.iter().enumerate() {
             let expected = if index == DesktopStyle::Windows2000 as usize { 1.0 } else { 0.0 };
             assert_eq!(*weight, expected, "style weight at index {index}");
+        }
+    }
+    /// Every desktop style's shelf (the macOS dock, the Windows taskbars)
+    /// stands aside while the main screen shows a fullscreen window and
+    /// returns when it ends; the mobile styles have none either way.
+    #[test]
+    fn the_dock_hides_under_a_fullscreen_main_screen() {
+        for style in [DesktopStyle::Macos, DesktopStyle::Windows, DesktopStyle::Windows2000, DesktopStyle::NextStep] {
+            assert!(dock_visible(style, false), "{style:?}");
+            assert!(!dock_visible(style, true), "{style:?}");
+        }
+        for style in [DesktopStyle::Ios, DesktopStyle::Android] {
+            assert!(!dock_visible(style, false), "{style:?}");
+            assert!(!dock_visible(style, true), "{style:?}");
         }
     }
 }
@@ -525,7 +557,7 @@ fn mac_icon_box(cell: Rect, hover: f64) -> Rect {
 fn dock_app_ids(state: &WmState) -> Vec<String> {
     let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
         .into_iter().filter(|app| !app.disabled).map(|app| app.id).collect();
-    for client in state.layout.clients_on(state.layout.active) {
+    for client in state.dock_clients() {
         if let Some(client) = state.clients.get(&client) {
             let id=format!("apps.{}",client.app);
             if !apps.contains(&id) {apps.push(id);}
@@ -533,12 +565,36 @@ fn dock_app_ids(state: &WmState) -> Vec<String> {
     }
     apps
 }
+/// The rect the dock lays out in: the main screen's on a multi-screen
+/// desktop (where the desk reserves its height), else `full`, the whole
+/// window as before. The shelf's drawing, hits and magnification, the
+/// compositor's blur footprint and the minimize warp's target all go
+/// through here, so they agree.
+fn dock_screen(state: &WmState, full: Rect) -> Rect {
+    match state.screens.main_rect() {
+        Some(r) if !state.style.target.mobile() => rect(r.x, r.y, r.w, r.h),
+        _ => full,
+    }
+}
+/// Whether the shelf (the macOS dock, the Windows and Windows 2000
+/// taskbars, the NeXT dock: one widget for every desktop style) is drawn,
+/// takes hits and is sampled by the compositor: a desktop (not mobile)
+/// style, unless the main screen, where it sits, shows a fullscreen
+/// window, whose own bottom edge it would otherwise cover. It comes back
+/// when the fullscreen ends; a maximized window keeps it.
+pub fn dock_visible(style: DesktopStyle, main_fullscreen: bool) -> bool {
+    !style.mobile() && !main_fullscreen
+}
+/// `dock_visible` for the WM's current style and screens.
+pub fn dock_shown(state: &WmState) -> bool {
+    dock_visible(state.style.target, state.screens.main_fullscreen())
+}
 pub fn dock_bounds(state: &WmState, size: Vec2d) -> Rect {
-    shelf_layout(rect(0.0,0.0,size.x,size.y), &state.style, dock_app_ids(state).len()).bar
+    shelf_layout(dock_screen(state, rect(0.0,0.0,size.x,size.y)), &state.style, dock_app_ids(state).len()).bar
 }
 pub fn dock_icon_bounds(state: &WmState, size: Vec2d, app: &str) -> Rect {
     let apps=dock_app_ids(state);
-    let dock=shelf_layout(rect(0.0,0.0,size.x,size.y), &state.style, apps.len()).bar;
+    let dock=shelf_layout(dock_screen(state, rect(0.0,0.0,size.x,size.y)), &state.style, apps.len()).bar;
     let slot=apps.iter().position(|id| id==&format!("apps.{app}")).map(|i|i+1).unwrap_or(0);
     let cell=(dock.size.x-20.0)/(apps.len()+1) as f64;
     mac_icon_box(rect(dock.pos.x+10.0+slot as f64*cell,dock.pos.y+6.0,cell,dock.size.y-12.0), 0.0)
@@ -551,8 +607,8 @@ impl Widget for DesktopShelf {
         self.hits.clear();
         self.bounds = Rect::default();
         if let Some(state) = scope.data.get_mut::<WmState>() {
-            self.active_window = state.layout.focused_client()
-                .filter(|c| !state.layout.desktop.minimized(*c));
+            self.active_window = state.layout().focused_client()
+                .filter(|c| !state.layout().desktop.minimized(*c));
             self.window_apps = state
                 .clients
                 .iter()
@@ -572,14 +628,13 @@ impl Widget for DesktopShelf {
                 script_apply_eval!(cx,self.glass,{draw_bg +: {tint_color: #(tint) tint_alpha: #(tint_alpha)}});
             }
             let opacity = (1.0 - t.weights[0]) as f32;
-            if opacity > 0.001 && !style.mobile() {
+            if opacity > 0.001 && dock_shown(state) {
                 let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
                     .into_iter()
                     .filter(|a| !a.disabled)
                     .collect();
                 let clients: Vec<_> = state
-                    .layout
-                    .clients_on(state.layout.active)
+                    .dock_clients()
                     .into_iter()
                     .filter_map(|c| {
                         state
@@ -603,7 +658,7 @@ impl Widget for DesktopShelf {
                     }
                 }
                 let n = (apps.len() + 1).max(1) as f64;
-                let layout = shelf_layout(screen, t, apps.len());
+                let layout = shelf_layout(dock_screen(state, screen), t, apps.len());
                 let r = layout.bar;
                 self.bounds = layout.next.map_or(r, |next| union_rect(r, next));
                 // Window-backed Gaussian blur, sampled from the live desktop.
@@ -695,7 +750,7 @@ impl Widget for DesktopShelf {
                                 ShelfHit::Window(*c),
                                 app_icon(app),
                                 title,
-                                !state.layout.desktop.minimized(*c),
+                                !state.layout_of(*c).desktop.minimized(*c),
                                 style,
                                 opacity,
                             );

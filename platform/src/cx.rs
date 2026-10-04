@@ -219,6 +219,7 @@ pub struct Cx {
     pub perf_monitor: PerfMonitor,
     /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
+    pub(crate) pick: crate::pick::CxPick,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
     /// its siblings, stamped onto every draw call at creation, and used as the
@@ -1066,6 +1067,7 @@ impl Cx {
             performance_stats: Default::default(),
             perf_monitor: Default::default(),
             sploded: Default::default(),
+            pick: Default::default(),
             nesting_depth: 0,
             nesting_depth_max: 0,
 
@@ -1264,6 +1266,23 @@ impl Cx {
         #[cfg(not(target_arch = "wasm32"))]
         {
             false
+        }
+    }
+
+    /// Of the draw shaders [`Cx::draw_shaders_pending`] waits for, how many
+    /// are compiling (the browser's parallel compile), and how many are
+    /// built and wait for their first draw (first draws spread,
+    /// [`Cx::spread_first_draws`]): a host drawing ahead of showing gives
+    /// the first time to draw again, the second a draw that uses them.
+    pub fn draw_shaders_compiling_and_waiting(&self) -> (usize, usize) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let waiting = self.os.webgl_shaders_waiting.min(self.os.webgl_shaders_pending);
+            (self.os.webgl_shaders_pending - waiting, waiting)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (0, 0)
         }
     }
 

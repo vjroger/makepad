@@ -8,6 +8,7 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvg;
+use crate::pointer_field::{FieldArbiter, PointerField};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -54,6 +55,8 @@ script_mod! {
             disabled: instance(0.0)
             /** loading mix: fades the label out under the spinner 0..1 step 0.01 */
             loading: instance(0.0)
+            /** latched mix: the label of a button shown on, lit as a held one is 0..1 step 0.01 */
+            active: instance(0.0)
 
             // A button face is a box with one line of text in it: center the
             // ink, not the line box, or the label reads as sitting high.
@@ -84,8 +87,8 @@ script_mod! {
             material_glow_ink: uniform(theme.color_material_glow)
 
             /** ink mix order: focus, hover, down, disabled; lit toward the
-             * glow ink while held under an illuminating material; then
-             * faded out while loading */
+             * glow ink while held or latched under an illuminating
+             * material; then faded out while loading */
             get_color: fn() {
                 let ink = self.color
                     .mix(self.color_focus, self.focus)
@@ -95,7 +98,7 @@ script_mod! {
                 // Lit ink is one mix on a value already computed once per
                 // pixel: the glow's halo comes from the face, never from
                 // sampling the glyph again.
-                let lit = self.material_ink_glow * self.down * (1.0 - self.disabled)
+                let lit = self.material_ink_glow * max(self.down, self.active) * (1.0 - self.disabled)
                 let glow = self.material_glow_ink.rgb * self.material_ink_lift
                 return vec4(mix(ink.rgb, glow, lit), ink.a * (1.0 - self.loading))
             }
@@ -120,8 +123,18 @@ script_mod! {
             disabled: instance(0.0)
             /** loading mix: fades the spinner arc in over the face 0..1 step 0.01 */
             loading: instance(0.0)
+            /** latched mix: a button shown on, as a toggle holds it. Under a material it stays where a press leaves it and keeps the light a press gives it; without one it draws nothing 0..1 step 0.01 */
+            active: instance(0.0)
             /** the spinner's clock, ramped 0..1 once a second by the time track 0..1 step 0.01 */
             anim_time: instance(0.0)
+            /** the pointer's field over the face, 0..1, written by the widget while cap_field_reach is above zero */
+            cap_field: instance(0.0)
+            /** the pointer along the face from its centre, in points, while the field is up */
+            cap_pointer_along: instance(0.0)
+            /** the pointer across the face from its centre, in points, while the field is up */
+            cap_pointer_across: instance(0.0)
+            /** a clock in seconds while the field is up */
+            cap_time: instance(0.0)
 
             /** spinner arc ink while loading */
             loading_color: uniform(theme.color_label_inner)
@@ -281,7 +294,12 @@ script_mod! {
                 let on = 1.0 - self.disabled
                 if own.a > 0.5 {
                     let d = (host.rgb - own.rgb) * inside * on
-                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(res.a, res.a, res.a))
+                    // Not capped at res.a: a sheet's face is not held to
+                    // premultiplied colour (the light it throws past its
+                    // edge, and a glass face, carry colour above their
+                    // alpha), and capping cut every glow at the rect and
+                    // emptied the outline face.
+                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
                     // Where the sheet's face lets the ground through (glass,
                     // a face that is only its frame), the host's colour is
                     // the body under it, as far as the host moved it: a lit
@@ -302,10 +320,16 @@ script_mod! {
              * of it the cap only DEEPENS, near zero the glow carries the
              * press; disabled moulds it flat into the ground, which also
              * takes its shadow away. hover stays at 1 while held, so a held
-             * face starts from its lifted height. */
+             * face starts from its lifted height. A latched face is a held
+             * one the pointer has left. */
             material_elev: fn() -> float {
                 let raise = self.material_relief.z
-                return (raise + raise * 0.25 * self.hover + self.down * self.material_press) * (1.0 - self.disabled)
+                return (raise + raise * 0.25 * self.hover + self.material_held() * self.material_press) * (1.0 - self.disabled)
+            }
+
+            /** how far the face is held: by a press, or by a latch */
+            material_held: fn() -> float {
+                return max(self.down, self.active)
             }
 
             /** signed distance to the face box with its four corner radii,
@@ -354,7 +378,7 @@ script_mod! {
                 let off = Material.cast_offset(elev, self.material_light)
                 // A shadow wider than the margin it falls into would only be
                 // cut off: its blur stays within reach of the quad's edge.
-                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(m, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, m, length(off)), self.material_shadow.z, self.material_shadow.w)
                 var under = Material.cast(
                     d,
                     self.material_sd(p - off, c, h, r_tl, r_tr, r_br, r_bl),
@@ -366,13 +390,13 @@ script_mod! {
                 // The halo of a held face under an illuminating material.
                 let glow = self.material_inner.w
                 if glow > 0.001 {
-                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * self.down * (1.0 - self.disabled)
+                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * self.material_held() * (1.0 - self.disabled)
                     under = vec4(self.material_glow_ink.rgb * a3, a3) + under * (1.0 - a3)
                 }
                 let qc = self.rect_size * 0.5
                 let rq = min((r_tl + r_tr + r_br + r_bl) * 0.5 + m, min(qc.x, qc.y))
                 let edge = -Material.sd_box(p, qc, qc, rq)
-                return under * smoothstep(0.0, max(m, 1.0), edge)
+                return under * Material.window(edge, m)
             }
 
             /** the face lit by the material: convex at rest, dished as far
@@ -401,7 +425,7 @@ script_mod! {
                 )
                 let glow = self.material_inner.w
                 if glow > 0.001 {
-                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.down * (1.0 - self.disabled))
+                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.material_held() * (1.0 - self.disabled))
                 }
                 return vec4(o, fill.a)
             }
@@ -1431,6 +1455,16 @@ pub struct Button {
     #[live]
     pub loading: bool,
 
+    /// How far from the face, in points, the pointer's field reaches, for
+    /// a material whose face answers the pointer's approach: the draw gets
+    /// `cap_field`, `cap_pointer_along`, `cap_pointer_across` and
+    /// `cap_time` while it is above zero. Only the nearest two faces on a
+    /// window carry a field at once. Zero (the default) keeps it off.
+    #[live]
+    pub cap_field_reach: f64,
+    #[rust]
+    field: PointerField,
+
     /// Text a click puts on the clipboard; set, it makes this a copy button
     /// that shows `copied_text` for `copied_secs` and raises
     /// `CopyButtonAction::Copied`.
@@ -1704,6 +1738,10 @@ impl Widget for Button {
             self.draw_bg.redraw(cx);
         }
 
+        if self.cap_field_reach > 0.0 {
+            self.field_event(cx, event);
+        }
+
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
         }
@@ -1879,6 +1917,39 @@ fn is_activation_key(key_code: KeyCode) -> bool {
 }
 
 impl Button {
+    /// The pointer's field: its frame steps, the pointer read against the
+    /// face (points from the face's centre; the distance to the face's
+    /// edge goes to the arbiter, so faces of every size compete alike),
+    /// and the leave. The material gets the values on the drawn area.
+    fn field_event(&mut self, cx: &mut Cx, event: &Event) {
+        let press = if self.animator_in_state(cx, ids!(hover.down)) { 1.0 } else { 0.0 };
+        if self.field.tick(cx, event, press) {
+            let (f, a, c, t) = self.field.read(press);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_field), &[f]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_pointer_along), &[a]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_pointer_across), &[c]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_time), &[t]);
+        }
+        match event {
+            Event::MouseMove(e) => {
+                let rect = self.draw_bg.area().rect(cx);
+                if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                    return;
+                }
+                let centre = rect.pos + rect.size * 0.5;
+                let rel = (e.abs.x - centre.x, e.abs.y - centre.y);
+                let dx = (rel.0.abs() - rect.size.x * 0.5).max(0.0);
+                let dy = (rel.1.abs() - rect.size.y * 0.5).max(0.0);
+                let dist = (dx * dx + dy * dy).sqrt();
+                let granted = FieldArbiter::report(e.abs, self.widget_uid().0, dist);
+                let near = dist < self.cap_field_reach && granted;
+                self.field.pointer(cx, rel, near);
+            }
+            Event::MouseLeave(_) => self.field.leave(cx),
+            _ => (),
+        }
+    }
+
     /// The label the face shows right now.
     fn shown_label(&self) -> &str {
         if self.copied && !self.copied_text.is_empty() {

@@ -73,14 +73,20 @@ impl Renderer {
         let baked = aomesh
             .and_then(StaticModel::from_aomesh)
             .or_else(|| Self::load_aomesh(id));
+        let has = |needle: &[u8]| glb.windows(needle.len()).any(|w| w == needle);
         let model = match baked {
-            Some(mut body) if glb.windows(b"vehicle_wheel".len()).any(|w| w == b"vehicle_wheel") => {
+            Some(mut body) if has(b"vehicle_wheel") || has(b"emissiveTexture") => {
                 // The AO sidecar intentionally serializes only the flattened
                 // body stream. Driven parts stay in the original GLB because
                 // their per-frame pose makes baked AO invalid. Reattach those
-                // definitions without giving up the body's baked chart.
+                // definitions without giving up the body's baked chart; the
+                // GLB's material maps (a car's glowing lamp lenses) come
+                // along, sampled through the same base UVs the bake kept.
                 let mut source = StaticModel::parse_glb(glb)?;
                 body.driven_parts = std::mem::take(&mut source.driven_parts);
+                if body.pbr.surface.is_none() && source.pbr.surface.is_some() {
+                    body.pbr = source.pbr.clone();
+                }
                 body
             }
             Some(body) => body,
@@ -157,13 +163,13 @@ impl Renderer {
         UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
             prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,
             authored_collisions:prepared.authored_collisions,collider_parts:prepared.collider_parts,occluder_parts:prepared.occluder_parts,positions:prepared.positions,indices:prepared.mesh_indices,
-            extra_draws,anim_parts,driven_parts,sky}
+            extra_draws,anim_parts,driven_parts,sky,liquids:prepared.liquids}
     }
     pub(super) fn uploaded_static_model(uploaded:UploadedStaticPreview)->LoadedModel {
         LoadedModel{lods:uploaded.lods.into_iter().map(|(distance,model)|(distance,Self::uploaded_static_model(model))).collect(),morph:uploaded.morph,prepared_sdf:Some(uploaded.sdf),emitters:uploaded.emitters,geometry:uploaded.geometry,texture:uploaded.texture,detail:uploaded.detail,detail_scale:uploaded.detail_scale,
             extra_draws:uploaded.extra_draws,material:uploaded.material,wants_pbr:uploaded.wants_pbr,prelit:uploaded.prelit,triangles:uploaded.triangles,
             min:uploaded.min,max:uploaded.max,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
-            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
+            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,liquids:uploaded.liquids,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
             lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
     }
 
@@ -264,6 +270,7 @@ impl Renderer {
         let anim_defs = std::mem::take(&mut model.anim_parts);
         let driven_defs = std::mem::take(&mut model.driven_parts);
         let sky_def = model.sky.take();
+        let liquids = std::mem::take(&mut model.liquids);
         let triangles = model.triangle_count();
         let (min, max) = (model.min, model.max);
         // Triangle-derived voxel boxes are the collider truth: measured
@@ -271,11 +278,7 @@ impl Renderer {
         // blob (see model.rs real_asset_tests). Primitive curation only as
         // the degenerate-mesh fallback — and always as the OCCLUDER set,
         // where few clean boxes beat many exact ones.
-        let occluder_parts = model.collider_parts();
-        let collider_parts = {
-            let v = model.voxel_collider_boxes();
-            if v.is_empty() { occluder_parts.clone() } else { v }
-        };
+        let occluder_parts = std::sync::Arc::new(model.collider_parts());
         let stride = crate::model::MODEL_VERTEX_FLOATS;
         // The light baker's raycaster triangles, captured BEFORE the GPU
         // upload consumes the packed stream. Only `lm_source` holders use
@@ -345,7 +348,9 @@ impl Renderer {
             (idx, verts)
         };
         let geometry = Geometry::new(cx);
-        let multi = model.draw_layers.len() > 1;
+        // A level with liquids draws through its layers even when one is
+        // left: the merged stream would draw the liquids too.
+        let multi = model.draw_layers.len() > 1 || (!model.draw_layers.is_empty() && !model.liquid_ranges.is_empty());
         if multi {
             geometry.update(
                 cx,
@@ -709,6 +714,7 @@ impl Renderer {
             std::rc::Rc::new(g)
         });
 
+        let (mesh_positions, mesh_indices) = (std::sync::Arc::new(lm_positions), std::sync::Arc::new(lm_indices));
         self.static_models.push((
             id.to_string(),
             LoadedModel {
@@ -728,13 +734,14 @@ impl Renderer {
                 min,
                 max,
                 authored_collisions: Default::default(),
-                collider_parts: std::sync::Arc::new(collider_parts),
-                occluder_parts: std::sync::Arc::new(occluder_parts),
+                collider_parts: super::prepared::Colliders::from_mesh(mesh_positions.clone(), mesh_indices.clone(), min, max, occluder_parts.clone()),
+                occluder_parts,
                 anim_parts,
                 driven_parts,
                 sky,
-                mesh_positions: std::sync::Arc::new(lm_positions),
-                mesh_indices: std::sync::Arc::new(lm_indices),
+                liquids: std::sync::Arc::new(liquids),
+                mesh_positions,
+                mesh_indices,
                 lm_source,
                 bake_geometry,
             },

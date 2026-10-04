@@ -115,6 +115,13 @@ pub struct ScreenInstance {
 /// Per-frame render counters, handed back for the host's profiler.
 #[derive(Default, Clone, Copy)]
 pub struct RenderStats {
+    /// Vehicle lamps (headlights, taillights) lit this frame: only the
+    /// nearest cars' after dark (`entity_lights`).
+    pub vehicle_lamps: usize,
+    /// Lights the streamed city brings itself (street lamps, the stand-in
+    /// cars' headlights), near the camera after dark, budgeted by the
+    /// renderer (`stream_lights`, `MAX_ASSET_FRAME_LIGHTS`).
+    pub stream_lights: usize,
     /// Extra triangles actually submitted for material fur this frame.
     pub fur_triangles: usize,
     /// Grass patches drawn (one instance each) and their blade budget.
@@ -245,10 +252,8 @@ pub struct Renderer {
     /// and mesh revision — re-uploaded per chunk when a dig remeshes it.
     /// Drawn through the SAME terrain shader/lightmap path as the tiles.
     voxel_tiles: Vec<VoxelTile>,
-    /// One flat grid per `game.water` volume (W1), displaced in the vertex
-    /// shader by the sim's wave sum. Rebuilt when `WaterView::rev` moves.
-    water_tiles: Vec<WaterTile>,
-    water_rev: Option<u64>,
+    /// The water surface's mesh and textures (renderer/water.rs).
+    water: water::WaterGpu,
     /// REST meshes for GPU-skinned rigs — geometry plus the rig's rest-pose
     /// AO chart atlas — keyed by rig id and uploaded ONCE
     /// ([`Self::upload_skin_rig`]). Skinning happens in the vertex shader
@@ -509,6 +514,14 @@ pub struct Renderer {
     host_asset_lights:Vec<crate::lightmap::LmLight>,
     /// Cars whose installed exterior supplies its own punctual fixtures.
     model_headlight_owners: Vec<u64>,
+    /// The vehicle-lamp radius, eased between frames (`entity_lights`).
+    vehicle_lamp_radius: f32,
+    /// Lights `stream_lights` queued this frame, and how many of them the
+    /// frame budget kept.
+    stream_light_count: usize,
+    frame_stream_lights: usize,
+    /// The vehicle lamps `frame_lamps` lit this frame (`RenderStats::vehicle_lamps`).
+    frame_vehicle_lamps: usize,
     asset_light_error:Option<String>,
     /// This frame's eye, for ranking lights past the authored budget.
     light_eye: Vec3f,
@@ -637,6 +650,8 @@ mod vfx_draw;
 pub(crate) mod ibl;
 mod env_sun;
 mod items;
+mod water;
+pub use water::{eye_under_water, pack_wave_uniforms};
 pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
 // The names `IblSource::Procedural` indexes, for hosts that name an
 // environment as the engine does (Scene3D's `@hdri_golden_hour`).
@@ -660,8 +675,7 @@ impl Default for Renderer {
             terrain_tiles: Vec::new(),
             terrain_revision: 0,
             voxel_tiles: Vec::new(),
-            water_tiles: Vec::new(),
-            water_rev: None,
+            water: Default::default(),
             skin_rig_geometries: Vec::new(),
             skin_material_draws: Default::default(),
             skin_lods:Default::default(),
@@ -768,6 +782,10 @@ impl Default for Renderer {
             host_lights: Vec::new(),
             host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),light_daylight:SunLight::default().dir,camera_relative:false,
             model_headlight_owners: Vec::new(),
+            vehicle_lamp_radius: 0.0,
+            stream_light_count: 0,
+            frame_stream_lights: 0,
+            frame_vehicle_lamps: 0,
             lamp_cache: Vec::new(),
             lamp_cache_rev: None,
             light_grid: LightGrid::default(),
@@ -821,7 +839,7 @@ mod chunk_tests;
 #[cfg(test)]
 mod light_tests;
 #[cfg(test)]
-mod water_sheet_tests;
+mod water_tests;
 #[cfg(test)]
 mod shadow_sdf_sidecar_tests;
 /// The rigid-part state machine: a door's whole behaviour, tested without a

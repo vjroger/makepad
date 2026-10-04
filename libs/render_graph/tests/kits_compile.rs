@@ -37,6 +37,8 @@ fn every_kit_builds_passes_that_compile_everywhere() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.with_vm(|vm| {
         makepad_draw::script_mod(vm);
+        // The passes' shared stdlib (`use mod.shared.*` in program and accum).
+        makepad_render_graph::pass_stdlib(vm);
         makepad_render_graph::program::script_mod(vm);
         makepad_render_graph::accum::script_mod(vm);
         // A host module with the kits' types (the host's own markers).
@@ -121,6 +123,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "mrt".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         };
         mrt.validate().unwrap();
         compile_pass(vm, &mrt);
@@ -133,6 +136,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "grad".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
             ..mrt.clone()
         };
         compile_pass(vm, &grad);
@@ -155,6 +159,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "bad".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
         assert!(compile_value(vm, "bad", code).is_err());
@@ -177,6 +182,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "short".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         };
         short.validate().unwrap();
         compile_pass(vm, &short);
