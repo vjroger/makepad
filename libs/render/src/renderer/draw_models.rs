@@ -273,14 +273,19 @@ impl Renderer {
             let stock = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id);
             let shader = if stock.is_some() { self.lane_shaders(cx.cx, variants::ModelLane::Pbr, stock).0 } else { None };
             self.pbr_ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
+            // Likewise shiny stock models leave the PBR lane for the
+            // engine's IBL program only once its variant for this frame's
+            // features can draw (renderer/stock_ibl.rs).
+            self.confirm_stock_ibl(cx.cx);
         }
         let custom_name = match &draw {
             ModelDraw::Custom(name, _) => Some((*name).to_string()),
             _ => None,
         };
         // Shiny stock models under an environment leave the PBR lane for
-        // the engine's IBL program (renderer/stock_ibl.rs): decided once a
-        // frame, read here by every lane so exactly one of them draws them.
+        // the engine's IBL program (renderer/stock_ibl.rs): decided in the
+        // diffuse pass above, read here by every lane so exactly one of
+        // them draws them.
         let stock_ibl_on = self.stock_ibl_active();
         let stock_ibl_lane = custom_name.as_deref() == Some(stock_ibl::STOCK_IBL_MATERIAL);
         self.bind_model_lane(cx, &mut draw, eye, fog, sun);

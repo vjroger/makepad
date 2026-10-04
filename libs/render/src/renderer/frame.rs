@@ -198,8 +198,10 @@ impl Renderer {
     ) -> RenderStats {
         // Image-based lighting for the materials that ask for it (before
         // the items choose their materials), then whether shiny stock
-        // models take the engine's IBL program this frame (once, before
-        // any lane walks them), then the world's generic items ride the
+        // models take the engine's IBL program this frame (installed here;
+        // each list's diffuse pass decides again from the program's
+        // variant for this frame's features, before any lane walks that
+        // list), then the world's generic items ride the
         // placed models for this frame. An aux draw resolves nothing and a
         // fork's draws resolve nothing (they draw the live renderer's,
         // mirrored); the stock decision then reads the texture that is

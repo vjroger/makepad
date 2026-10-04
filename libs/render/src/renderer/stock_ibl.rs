@@ -12,13 +12,17 @@
 //! does for every IBL material (draw_models.rs).
 //!
 //! The program is built on first use, once, and stays installed. Whether
-//! this frame routes through it is decided once per frame, after the
-//! environment is resolved (`draw_scene_scoped`, after `resolve_ibl_for`)
-//! and before any lane walks the models, from the IBL texture (the bound
-//! preparation's; a fork's is the live renderer's, mirrored) and the
-//! pipeline of the program's variant for this frame's features. Without an
-//! environment nothing is built and both lanes take exactly the instances
-//! they took before.
+//! this frame routes through it is decided after the environment is
+//! resolved (`prepare_stock_ibl`, in `draw_scene_scoped` after
+//! `resolve_ibl_for`), from the IBL texture (the bound preparation's; a
+//! fork's is the live renderer's, mirrored) and the shader on the
+//! program's draw, and decided again in each model list's diffuse pass,
+//! before any lane walks that list (`confirm_stock_ibl`, beside
+//! `pbr_ready`): only there are this frame's features known, and the lanes
+//! draw through the program's variant for them, a shader of its own, so the
+//! models leave the PBR lane only once that variant's pipeline is ready.
+//! Without an environment nothing is built and both lanes take exactly the
+//! instances they took before.
 use super::*;
 use crate::custom_material::DrawSceneCustom;
 use makepad_render_material::{HookMask, HookSet, MaterialDesc};
@@ -73,10 +77,14 @@ impl Renderer {
     /// shiny stock models draw through the program this frame: the PBR lane
     /// is enabled, an IBL texture is bound (the bound preparation's, which
     /// stays while the next prepares; a fork's, mirrored from the live
-    /// renderer) and the program's pipeline is ready. Otherwise they stay on
-    /// the PBR lane, as `pbr_ready` keeps them on the diffuse lane while that
-    /// pipeline compiles. Without an environment the program is never built:
-    /// the short-circuit is the no-change guarantee.
+    /// renderer) and the shader on the program's draw is ready. Without an
+    /// environment the program is never built: the short-circuit is the
+    /// no-change guarantee. The shader on the draw is the variant the last
+    /// list decided from (the stock shader before the first), not
+    /// necessarily the one this frame's lanes draw through: this frame's
+    /// features are known only once the lights are clustered, later in the
+    /// frame. So each list's diffuse pass decides again (`confirm_stock_ibl`)
+    /// before any lane walks that list.
     pub(super) fn prepare_stock_ibl(&mut self, cx: &mut Cx) {
         self.stock_ibl.active = self.pbr_materials_enabled
             && self.ibl_texture().is_some()
@@ -84,14 +92,41 @@ impl Renderer {
             && self.stock_ibl_shader_ready(cx);
     }
 
-    /// This frame's decision (`prepare_stock_ibl`), read by the lanes.
+    /// Decide again in a model list's diffuse pass, beside `pbr_ready`
+    /// (draw_models.rs) and before any lane walks the list, now that the
+    /// frame's features are known: the PBR lane is enabled, an IBL texture
+    /// is bound, the program is installed and its variant for this frame's
+    /// features (`CustomMaterial::shaders`, built on first use: a shader of
+    /// its own, whose pipeline Metal compiles apart) is ready. Otherwise the
+    /// models stay on the PBR lane, as `pbr_ready` keeps them on the
+    /// diffuse lane while the PBR lane's variant compiles. The variant goes
+    /// on the program's draw, where the program's own pass puts it too, so
+    /// `stock_ibl_ready` (`items_ready`) reads the shader the lane draws
+    /// through. Installs nothing: a program `prepare_stock_ibl` did not
+    /// install is no route.
+    pub(super) fn confirm_stock_ibl(&mut self, cx: &mut Cx) {
+        if !self.pbr_materials_enabled || self.ibl_texture().is_none() {
+            self.stock_ibl.active = false;
+            return;
+        }
+        let (features, hdr) = (self.lane_features(), self.hdr_output);
+        self.stock_ibl.active = self.custom_draws.get_mut(STOCK_IBL_MATERIAL).is_some_and(|m| {
+            let full = m.shaders(cx, features).0;
+            m.draw.draw_vars.draw_shader_id = full;
+            full.is_some_and(|id| cx.draw_shader_ready(id, hdr))
+        });
+    }
+
+    /// This frame's decision (`prepare_stock_ibl`, then the list's diffuse
+    /// pass: `confirm_stock_ibl`), read by the lanes.
     pub(super) fn stock_ibl_active(&self) -> bool {
         self.stock_ibl.active
     }
 
     /// Whether a locked-time host has nothing to wait for on this path: no
-    /// environment, the PBR lane off, no program installed, or the
-    /// program's pipeline ready (`items_ready`). Not installed is nothing
+    /// environment, the PBR lane off, no program installed, or the pipeline
+    /// of the shader on the program's draw ready, the variant the lanes
+    /// last drew through (`items_ready`). Not installed is nothing
     /// to wait for, as for the items' materials and the PBR lane there: the
     /// scene draw that binds an environment installs the program before any
     /// lane walks the models, so after a draw it is missing only when it did
@@ -104,12 +139,12 @@ impl Renderer {
             || self.stock_ibl_shader_ready(cx)
     }
 
-    /// Whether the program's shader can draw: the one on its draw, which is
-    /// the variant for the features its last draw had (renderer/variants.rs;
-    /// `draw_models_inner` sets it) and the stock shader before its first
-    /// draw. The lane filter reads a host's material the same way
-    /// (`wanted_custom`, draw_models.rs), and so does `items_ready` for the
-    /// items' programs.
+    /// Whether the shader on the program's draw can draw: the variant the
+    /// last diffuse pass decided from (`confirm_stock_ibl` puts it there,
+    /// the program's own pass the same one), so within a list the shader
+    /// the lanes draw through, and the stock shader before the first
+    /// diffuse pass. Read before the walk it is the last list's variant, a
+    /// first estimate only (`prepare_stock_ibl`).
     fn stock_ibl_shader_ready(&self, cx: &Cx) -> bool {
         self.custom_draws
             .get(STOCK_IBL_MATERIAL)
@@ -253,5 +288,69 @@ mod tests {
         renderer.pbr_materials_enabled = true;
         renderer.prepare_stock_ibl(&mut cx);
         assert!(renderer.stock_ibl_active() && renderer.custom_material(STOCK_IBL_MATERIAL).is_some());
+    }
+
+    /// The lanes draw the program through its variant for this frame's
+    /// features, a shader of its own (`CustomMaterial::shaders`), not the
+    /// one `prepare_stock_ibl` reads off the draw before the walk (the
+    /// stock shader, or last walk's variant). A list's diffuse pass decides
+    /// again from that variant and puts it on the draw, so the lanes,
+    /// `stock_ibl_ready` and `items_ready` read one shader. On Metal a
+    /// decision read off the other shader routed the models while their
+    /// variant compiled: the PBR lane had left them and the variant's draw
+    /// was left out of the frame.
+    #[test]
+    fn each_list_decides_from_this_frames_variant_and_puts_it_on_the_draw() {
+        use makepad_draw::makepad_platform::thread::ShutdownMode;
+        use makepad_render_material::ibl::EnvMap;
+        use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
+        let mut cx = headless();
+        cx.task_pool().close(ShutdownMode::CancelPending);
+        let mut renderer = Renderer::default();
+        let on_draw = |r: &Renderer| r.custom_material(STOCK_IBL_MATERIAL).and_then(|m| m.draw.draw_vars.draw_shader_id);
+
+        // No environment: the diffuse pass builds nothing and routes nothing.
+        renderer.confirm_stock_ibl(&mut cx);
+        assert!(!renderer.stock_ibl_active());
+        assert!(renderer.custom_draws.is_empty(), "no environment, no program");
+
+        renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
+        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
+        renderer.prepare_stock_ibl(&mut cx);
+        let stock = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("an environment builds the program");
+        assert_eq!(on_draw(&renderer), Some(stock), "before its first walk the draw holds the stock shader");
+
+        renderer.confirm_stock_ibl(&mut cx);
+        let features = renderer.lane_features();
+        let variant = renderer.custom_draws.get_mut(STOCK_IBL_MATERIAL).unwrap().shaders(&mut cx, features).0.expect("a variant for this frame's features");
+        assert_ne!(variant, stock, "premise: this frame's variant is a shader of its own");
+        assert_eq!(on_draw(&renderer), Some(variant), "the variant the lanes draw through is on the draw");
+        let active = renderer.stock_ibl_active();
+        assert_eq!(active, cx.draw_shader_ready(variant, renderer.hdr_output), "the decision is that variant's pipeline");
+        // Every backend but Metal compiles synchronously (window_snapshot.rs).
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(active, "an environment and a ready variant: the frame routes");
+        assert_eq!(renderer.stock_ibl_ready(&cx), active, "items_ready waits on the shader the lanes draw through");
+
+        // The next frame's first decision reads the variant off the draw;
+        // another list's diffuse pass finds it built and decides the same.
+        renderer.prepare_stock_ibl(&mut cx);
+        assert_eq!(renderer.stock_ibl_active(), active);
+        renderer.confirm_stock_ibl(&mut cx);
+        assert_eq!(on_draw(&renderer), Some(variant), "one variant per feature set, built once");
+        assert_eq!(renderer.stock_ibl_active(), active);
+
+        // The PBR lane off, or the environment gone: the diffuse pass does
+        // not route either.
+        renderer.pbr_materials_enabled = false;
+        renderer.confirm_stock_ibl(&mut cx);
+        assert!(!renderer.stock_ibl_active(), "the PBR lane off: no routing");
+        renderer.pbr_materials_enabled = true;
+        renderer.resolve_ibl(&mut cx, &Environment::default());
+        assert!(renderer.ibl_texture().is_none());
+        renderer.confirm_stock_ibl(&mut cx);
+        assert!(!renderer.stock_ibl_active(), "no environment: no routing");
     }
 }
