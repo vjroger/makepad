@@ -349,7 +349,7 @@ fn a_moon_key_lights_the_scene_while_the_lamps_and_the_sky_follow_the_sun() {
     assert!(rig.dir.dot(moon.dir) > 0.999 && rig.color.x > 0.0, "and lights: {rig:?}");
     assert!(daylight.dot(sun_dir) > 0.9999, "the switches read the sun: {daylight:?}");
     assert_eq!(r.frame_lights[0].color, street_lamp().color, "the photocell is fully on");
-    let sky = analytic_sky_frame(&world, daylight, true, true, false).expect("the analytic sky");
+    let sky = r.frame_sky(&world, &crate::world_lights::apply_world_sun(&world, rig), daylight, true).expect("the analytic sky");
     assert!(sky.zenith.w > 0.95, "the analytic sky reads night: {}", sky.zenith.w);
     // The moon's own direction says day: what the switches must not read.
     assert_eq!(Renderer::lamp_photocell(moon.dir), 0.0);
@@ -378,6 +378,94 @@ fn a_studio_map_leaves_the_daylight_switches_on_the_worlds_sun() {
     let (_, daylight) = r.frame_lamps(&world, Vec3f::default());
     assert!(daylight.y > 0.5);
     assert_eq!(r.frame_lights[0].color, Vec3f::default(), "day by the world's clock: lamps off");
+}
+
+/// N1, one sun in the sky: the analytic sky the frame draws (a host
+/// background) puts its sun where the light comes from whenever the light
+/// is the sun: a world's own Sun, or a key that is the map's own sun, also
+/// when an authored `SunConfig.dir` aims it (a look, or a host's eased
+/// clock: the sandbox authors its eased sun while the map's report steps on
+/// its quarter-hour grid a preparation late, and a disc drawn there would
+/// not be where the shadows come from). A moon key or none, aimed or not,
+/// leaves the sky on the map's own sun, so a moonlit night stays night;
+/// without an environment the sky is the rig's, as before plan 2.
+#[test]
+fn the_frames_analytic_sky_puts_its_sun_where_the_light_is_when_the_key_is_the_sun() {
+    // The frame's chain: the switches and the lamps, the lane's rig, the
+    // world's own lights, then the sky. (light, the sky's sun, night blend)
+    let frame_sky = |r: &mut Renderer, world: &World| {
+        let (sun, daylight) = r.frame_lamps(world, Vec3f::default());
+        let rig = crate::world_lights::apply_world_sun(world, r.lane_rig(world, sun));
+        let sky = r.frame_sky(world, &rig, daylight, true).expect("the analytic sky");
+        (rig.dir, vec3f(sky.sun_true.x, sky.sun_true.y, sky.sun_true.z), sky.zenith.w)
+    };
+    let preset = |name: &str| {
+        let env = crate::hdri::Env::new(&crate::hdri::presets::preset(name).unwrap());
+        (env.sun(), env.sun_dir().expect("a sky has its sun"))
+    };
+    let sky_world = |key: Option<makepad_scene::EnvSun>, daylight: Vec3f| {
+        let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), key);
+        world.environment.daylight_sun = Some(daylight);
+        world.sky = Some(makepad_scene::SkyConfig::default());
+        world.sun.latitude = 52.0;
+        world.sun.time_of_day = Some(14.0);
+        world
+    };
+    let aimed = crate::hdri::dir_from_az_el(120.0, 20.0);
+
+    // Golden hour: the key is the map's sun. Aimed elsewhere by an authored
+    // direction, the light and the sky's sun go there together.
+    let (key, sun_dir) = preset("Golden hour");
+    let mut r = lamp_renderer(true, true, 0.5, key, Some(sun_dir));
+    let mut world = sky_world(key, sun_dir);
+    world.sun.dir = Some(aimed);
+    let (light, sky, _) = frame_sky(&mut r, &world);
+    assert!(sun_dir.dot(aimed) < 0.9, "premise: the map's sun is elsewhere");
+    assert!(light.dot(aimed) > 0.9999, "premise: the authored direction aims the light: {light:?}");
+    assert!(sky.dot(aimed) > 0.9999, "the sky's sun is the light's: {sky:?}, not the map's {sun_dir:?}");
+    // Not aimed: the key aims the light, and the sky takes the light's own
+    // direction (on the rig's grid), not the report's.
+    world.sun.dir = None;
+    let (light, sky, _) = frame_sky(&mut r, &world);
+    assert!(light.dot(sun_dir) > 0.9999, "the key aims the light: {light:?}");
+    assert!((sky - light).length() < 1.0e-6, "the sky's sun is the light's: {sky:?} vs {light:?}");
+    // A world's own Sun steers the sky as it steers the rig.
+    let own = vec3f(0.3, 0.6, -0.5).normalize();
+    world.lights.push(makepad_scene::Light::Sun { dir: own, color: vec3f(1.0, 1.0, 1.0), lux: 1.0, shadow: Default::default() });
+    let (light, sky, _) = frame_sky(&mut r, &world);
+    assert!(light.dot(own) > 0.9999 && sky.dot(own) > 0.9999, "{light:?} {sky:?}");
+
+    // Moonlit night: the moon is the key, the map's sun is 30 degrees down.
+    // Aimed or not, the light is the moon's and the sky is the night's.
+    let (moon, sun_dir) = preset("Moonlit night");
+    let mut r = lamp_renderer(true, true, 0.02, moon, Some(sun_dir));
+    let mut world = sky_world(moon, sun_dir);
+    for dir in [None, Some(aimed)] {
+        world.sun.dir = dir;
+        let (light, sky, night) = frame_sky(&mut r, &world);
+        assert!(light.dot(dir.unwrap_or(moon.unwrap().dir)) > 0.9999, "{dir:?}: the light: {light:?}");
+        assert!(sky.dot(sun_dir) > 0.9999 && night > 0.95, "{dir:?}: the sky is the night's: {sky:?} at {night}");
+    }
+
+    // Blue hour: no key at all. The sky stays on the map's sun.
+    let (none, sun_dir) = preset("Blue hour");
+    assert!(none.is_none(), "premise: no key at blue hour: {none:?}");
+    let mut r = lamp_renderer(true, true, 0.05, None, Some(sun_dir));
+    let mut world = sky_world(None, sun_dir);
+    world.sun.dir = Some(aimed);
+    let (_, sky, _) = frame_sky(&mut r, &world);
+    assert!(sky.dot(sun_dir) > 0.9999, "the map's sun: {sky:?}");
+
+    // No environment: the rig's own direction, as before plan 2.
+    let mut world = World::new();
+    world.sky = Some(makepad_scene::SkyConfig::default());
+    world.sun.latitude = 52.0;
+    world.sun.time_of_day = Some(14.0);
+    let mut r = Renderer::default();
+    r.set_hdr_output(true);
+    let (light, sky, _) = frame_sky(&mut r, &world);
+    assert_eq!(light, crate::sun::resolve_sun(&world.sun).dir);
+    assert!((sky - light).length() < 1.0e-6, "{sky:?} vs {light:?}");
 }
 
 /// I1c: the frame's lamps are railed against the rig the frame lights

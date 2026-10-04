@@ -270,7 +270,10 @@ pub struct Environment {
     /// street lamps' photocell, a streamed city's night factor and its lit
     /// windows and headlights, the analytic sky), while `sun` lights the
     /// scene and casts its shadows: under a moonlit sky the moon is the key
-    /// and the lamps are on. `None` (a studio, a loaded file, an environment
+    /// and the lamps are on. While the key IS this sun (within a degree), the
+    /// light is the sun, and the analytic sky draws it where the light is
+    /// aimed (`SunConfig.dir` included), so the disc sits where the shadows
+    /// come from. `None` (a studio, a loaded file, an environment
     /// that knows no sun): those switches follow the world's own sun
     /// (`World::sun`), as they do without an environment. The renderer
     /// reads it, like `sun`, from the preparation that is bound, once the

@@ -549,12 +549,35 @@ pub fn env_sun_dir_with(world: &makepad_scene::World, env_sun: Option<makepad_sc
 /// stop it, as it stops the key's direction: that direction aims a light (a
 /// look, or a host's own clock), while this says whether the environment
 /// shows day or night, and a moonlit map is night whatever aims its moon.
-/// `None` when the world names no IBL or the map knows no sun of its own:
-/// the switches then follow the world's own sun.
+/// (Where the analytic sky draws its sun when the key IS the sun is the
+/// light's business: [`env_key_is_its_sun`].) `None` when the world names no
+/// IBL or the map knows no sun of its own: the switches then follow the
+/// world's own sun.
 pub fn env_daylight_dir_with(world: &makepad_scene::World, daylight: Option<Vec3f>) -> Option<Vec3f> {
     let ibl = world.environment.ibl.filter(|i| i.rotation_deg.is_finite())?;
     let dir = crate::hdri::rotate_y(daylight?, ibl.rotation_deg);
     (dir.is_finite() && dir.length() > 1.0e-6).then(|| dir.normalize())
+}
+
+/// How close to the map's own sun a key must point to BE that sun
+/// ([`env_key_is_its_sun`]). A generated sun key and the sky's report are
+/// one direction (`hdri::Env::sun` and `sun_dir`), while a moon keys only
+/// once the sun is 6 degrees down and the moon is up (hdri/night.rs
+/// `moon_key`), so it is never this close.
+const KEY_IS_SUN_DEG: f32 = 1.0;
+
+/// Whether the environment's key (`key`, as the bound preparation holds it)
+/// is its own sun (`daylight`, `Environment.daylight_sun`), both in the
+/// map's frame: then the light IS the sun, and wherever it is aimed (the
+/// key's own direction, or an authored `SunConfig.dir`: a look, or a host's
+/// eased clock while the map's report steps on its bake grid) is where the
+/// analytic sky draws the sun, as for a world's own Sun, so the disc sits
+/// where the shadows come from. A moon key, no key, or a map that reports
+/// no sun of its own: `false`, and the sky follows the report (N1).
+pub fn env_key_is_its_sun(key: Option<makepad_scene::EnvSun>, daylight: Option<Vec3f>) -> bool {
+    let (Some(key), Some(sun)) = (key, daylight) else { return false };
+    // NaN or a zero direction compares false.
+    key.dir.normalize().dot(sun.normalize()) >= KEY_IS_SUN_DEG.to_radians().cos()
 }
 
 /// The rig with the environment's light folded in, in the lane's units:
@@ -1218,6 +1241,30 @@ mod tests {
         // Without an environment the rig's own strength stays, bit for bit.
         let stock = SunLight::default();
         assert_eq!(env_sun_rig(&env_world(Some(disc(toward, 6000.0)), 0.0), None, stock, false).shadow_alpha, stock.shadow_alpha);
+    }
+
+    /// N1, one sun in the sky: a key is its map's own sun exactly when the
+    /// generator's sun is the key (every sky preset whose sun is up, faded or
+    /// clouded), never the moon (keyed only once the sun is 6 degrees down)
+    /// and never without a report (a studio). Within a degree is the sun;
+    /// a NaN or zero direction or a missing half is not.
+    #[test]
+    fn a_key_is_its_maps_sun_only_when_the_generators_sun_is_the_key() {
+        let horizon = -(1.0f32.to_radians().sin());
+        for name in crate::hdri::presets::PRESET_NAMES {
+            let env = crate::hdri::Env::new(&crate::hdri::presets::preset(name).unwrap());
+            let (key, daylight) = (env.sun(), env.sun_dir());
+            let want = key.is_some() && daylight.is_some_and(|d| d.y > horizon);
+            assert_eq!(env_key_is_its_sun(key, daylight), want, "{name}: {key:?} {daylight:?}");
+        }
+        let sun = crate::hdri::dir_from_az_el(200.0, 30.0);
+        let key = |dir: Vec3f| Some(makepad_scene::EnvSun { dir, radiance: vec3f(1.0, 1.0, 1.0), cos_radius: 0.9999, facing: 1.0, cos_cover: 0.9999 });
+        assert!(env_key_is_its_sun(key(crate::hdri::dir_from_az_el(200.5, 30.0)), Some(sun)), "0.43 degrees off");
+        assert!(!env_key_is_its_sun(key(crate::hdri::dir_from_az_el(200.0, 32.0)), Some(sun)), "2 degrees off");
+        assert!(env_key_is_its_sun(key(sun * 3.0), Some(sun * 0.5)), "lengths do not count");
+        assert!(!env_key_is_its_sun(key(vec3f(f32::NAN, 1.0, 0.0)), Some(sun)));
+        assert!(!env_key_is_its_sun(key(sun), Some(Vec3f::default())));
+        assert!(!env_key_is_its_sun(key(sun), None) && !env_key_is_its_sun(None, Some(sun)));
     }
 
     /// K3: the legacy lane holds a white wall at white whichever hemisphere

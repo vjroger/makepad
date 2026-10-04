@@ -47,9 +47,10 @@ impl Renderer {
     /// rig starts from (`resolve_sun`, aimed by a world's own Sun, else the
     /// environment's key) and the direction the switches read.
     /// - N1: the switches (a streamed city's night factor with its windows
-    ///   and headlights, the lamps' photocell, and later the analytic sky)
-    ///   read the daylight sun (`daylight_dir`): the environment's own sun
-    ///   when it reports one, never a moon key's direction.
+    ///   and headlights, the lamps' photocell, and later the analytic sky
+    ///   unless the light is the sun: `frame_sky`) read the daylight sun
+    ///   (`daylight_dir`): the environment's own sun when it reports one,
+    ///   never a moon key's direction.
     /// - I1c: the lamps are railed against the rig the frame lights with, the
     ///   environment's light folded in (`env_lamp_rig`), which in the legacy
     ///   lane is the rig the bake snapshots.
@@ -84,6 +85,25 @@ impl Renderer {
             sun
         };
         self.env_sun_rig(world, sun)
+    }
+
+    /// The analytic sky the frame draws and fogs with (`None` where the
+    /// world keeps its painted gradient), given the frame's final rig `sun`
+    /// (the world's own Sun and Sky applied) and its daylight direction.
+    /// - When the light is the sun (a world's own Sun, or an environment
+    ///   whose key is its own sun: `env_key_is_its_sun`), the sky's sun is
+    ///   the light's direction, wherever it is aimed: an authored
+    ///   `SunConfig.dir` (a look, a host's eased clock) moves the disc and
+    ///   the gradient with the light and its shadows, not on the map's bake
+    ///   grid a preparation late.
+    /// - Otherwise day or night is the daylight switches' (N1): under a
+    ///   moonlit map, or between the sun's fade and the moon's rise, the sky
+    ///   follows the map's own sun while the moon (or nothing) lights.
+    /// Without an environment both are the rig's direction, as before.
+    pub(super) fn frame_sky(&self, world: &World, sun: &SunLight, daylight: Vec3f, shows_environment: bool) -> Option<crate::sky::SkyFrame> {
+        let light_is_the_sun = crate::world_lights::world_sun_dir(world).is_some() || self.env_key_is_its_sun(world);
+        let sky_dir = if light_is_the_sun { sun.dir } else { daylight };
+        analytic_sky_frame(world, sky_dir, shows_environment, self.hdr_output, self.sky_clock)
     }
 
     /// Encode the whole 3D scene for one view. `draw_list` is the host's
@@ -412,11 +432,9 @@ impl Renderer {
         // horizon colour stays customisable either way: it only ever tinted
         // the FOG, and in analytic mode the fog instead comes from the
         // model's own tone-mapped horizon so sky and haze agree.
-        // Day or night is the daylight switches' (N1): under a moonlit map
-        // the sky is a night sky while the moon lights the frame. A world's
-        // own Sun steers it, as it steers the rig.
-        let sky_dir = if crate::world_lights::world_sun_dir(world).is_some() { sun.dir } else { daylight };
-        let sky_frame = analytic_sky_frame(world, sky_dir, shows_environment, self.hdr_output, self.sky_clock);
+        // Its sun sits where the light is when the light is the sun, else
+        // where the daylight switches say (N1: `frame_sky`).
+        let sky_frame = self.frame_sky(world, &sun, daylight, shows_environment);
 
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {

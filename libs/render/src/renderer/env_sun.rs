@@ -76,9 +76,10 @@ impl Renderer {
 
     /// N1: the direction the frame's "is it day?" switches read (the street
     /// lamps' photocell, a streamed city's night factor with its lit windows
-    /// and headlights, the analytic sky): a world's own Sun, else the
-    /// environment's own sun (the bound map's, even while the moon or no key
-    /// at all lights the frame), else the world's own sun (`resolve_sun`):
+    /// and headlights, and the analytic sky unless the light is the sun:
+    /// `frame_sky`): a world's own Sun, else the environment's own sun (the
+    /// bound map's, even while the moon or no key at all lights the frame),
+    /// else the world's own sun (`resolve_sun`):
     /// a map that knows no sun of its own (a studio, a loaded file) leaves
     /// the switches there, as without an environment. Never the key's
     /// direction: a moon key lights the frame and casts its shadows, but a
@@ -88,6 +89,13 @@ impl Renderer {
         crate::world_lights::world_sun_dir(world)
             .or_else(|| self.env_daylight_dir(world))
             .unwrap_or_else(|| crate::sun::resolve_sun(&world.sun).dir)
+    }
+
+    /// The bound preparation's key is its map's own sun
+    /// (`sun::env_key_is_its_sun`), for a world that names a prepared
+    /// environment: the light the frame aims is then the sun the sky shows.
+    pub(super) fn env_key_is_its_sun(&self, world: &World) -> bool {
+        self.env_lighting(world).is_some() && crate::sun::env_key_is_its_sun(self.ibl_sun(), self.ibl_daylight_sun())
     }
 
     /// I1c: the rig the frame's lamps are railed against: the frame's own,
