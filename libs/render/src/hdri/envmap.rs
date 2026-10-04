@@ -3,10 +3,14 @@
 //! a photographed sky gives up its sun as an `EnvSun` for the renderer's
 //! directional light.
 //!
-//! The renderer lights the world from the map with the sun's cone filled
-//! (prepare.rs), because the directional light already carries that
-//! energy; `load_env_map(.., true)` fills it too, so a loaded file lights
-//! the same way whichever path registers it.
+//! The renderer lights the world from the map without its key (prepare.rs),
+//! because the directional light already carries that energy. A generated
+//! map leaves exactly the key's own light out ([`bake_generated_env_map`]:
+//! the same map baked without it, N3), so the lights around a wide studio
+//! key stay; a sun found in a file has no such map, so its covering cone is
+//! filled with the sky around it ([`remove_sun`]). `load_env_map(.., true)`
+//! fills it too, so a loaded file lights the same way whichever path
+//! registers it.
 
 use makepad_render_material::ibl::{self, EnvMap};
 use super::*;
@@ -40,6 +44,33 @@ pub fn bake_env_map_with_daylight(
     let env = Env::new(params);
     let (sun, daylight) = (env.sun(), env.sun_dir());
     (env.bake_par(width, run), sun, daylight)
+}
+
+/// A generated map with everything the engine takes from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneratedEnvMap {
+    /// The map as the dome shows it, key and all ([`bake_env_map`]'s).
+    pub map: EnvMap,
+    /// The same map without exactly its key's own light
+    /// ([`Env::bake_keyless_par`]), the source of the renderer's lighting copy
+    /// while the key is the one the world lights with; `None` without a key.
+    pub keyless: Option<EnvMap>,
+    /// The key ([`Env::sun`]), world space, x 2^intensity_ev.
+    pub sun: Option<EnvSun>,
+    /// The sky's own sun for the daylight switches ([`Env::sun_dir`]).
+    pub daylight: Option<Vec3f>,
+}
+
+/// [`bake_env_map_with_daylight`] and the map without its key: what a host
+/// hands the renderer for a generated map
+/// (`Renderer::register_generated_environment`; a procedural preset the
+/// renderer bakes itself goes the same way). `run` spreads the rows of the
+/// bake and then of the key's reach, so it is called twice.
+pub fn bake_generated_env_map(params: &HdriParams, width: usize, run: impl Fn(usize, &(dyn Fn(usize) + Sync))) -> GeneratedEnvMap {
+    let env = Env::new(params);
+    let map = env.bake_par(width, &run);
+    let keyless = env.bake_keyless_par(&map, &run);
+    GeneratedEnvMap { map, keyless, sun: env.sun(), daylight: env.sun_dir() }
 }
 
 /// Loads an equirect as an engine environment map (EXR, Radiance .hdr, or
@@ -285,7 +316,7 @@ fn row_solid_angle(y: usize, w: usize, h: usize) -> f32 {
 /// The rows a cone of `radius` (radians) around `dir` can reach: the rows
 /// within its polar angle +- radius. Every column of those rows still needs
 /// the angle test, because near a pole the cone wraps all the way round.
-fn rows_near(dir: Vec3f, radius: f32, h: usize) -> std::ops::Range<usize> {
+pub(super) fn rows_near(dir: Vec3f, radius: f32, h: usize) -> std::ops::Range<usize> {
     let pi = std::f32::consts::PI;
     let theta = dir.y.clamp(-1.0, 1.0).acos();
     let lo = (((theta - radius) / pi) * h as f32).floor().max(0.0) as usize;

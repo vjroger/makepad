@@ -133,6 +133,16 @@ impl Env {
     /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
     /// over it; Studio: backdrop), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
+        self.radiance_with(dir, None)
+    }
+
+    /// [`Self::radiance`] with the key's own term left out (`Some`): the key
+    /// light skipped, the sun's disc not drawn, or the share of the moon's disc
+    /// the key carries taken off it. Everything else (the sky around a disc,
+    /// the light it puts on the clouds, every other light) is drawn as before,
+    /// so this is the map without exactly its key's light (N3). `None` is
+    /// `radiance`, bit for bit.
+    fn radiance_with(&self, dir: Vec3f, without: Option<KeyTerm>) -> Vec3f {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
@@ -142,11 +152,14 @@ impl Env {
                 // The sun's and the moon's discs are blocked by the unfaded
                 // cover, like their keys in `sun`; the rest of the sky by the
                 // visible deck, which thins into the haze at the horizon.
-                let mut discs = atmo.sun_disc(d);
+                let mut discs = if without == Some(KeyTerm::Sun) { Vec3f::default() } else { atmo.sun_disc(d) };
                 if let Some(night) = &self.night {
                     let g = self.params.sky.atmosphere.ground_color;
                     c += night.stars(d) + night.glow(d) + night.ground(d, vec3f(g[0], g[1], g[2]));
-                    discs += night.moon(d);
+                    discs += match without {
+                        Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
+                        _ => night.moon(d),
+                    };
                 }
                 // Clouds are in front of everything in the sky: the stars, the
                 // moon and the sun's disc.
@@ -165,7 +178,8 @@ impl Env {
             }
             None => self.studio.backdrop(d),
         };
-        self.studio.apply_lights(d, base) * self.scale
+        let lit = if without == Some(KeyTerm::Light) { self.studio.apply_lights_without_key(d, base) } else { self.studio.apply_lights(d, base) };
+        lit * self.scale
     }
 
     /// Key light for the engine, in world space, already x 2^intensity_ev
@@ -192,8 +206,15 @@ impl Env {
     /// a time, and its key steps by up to 17 % of the 16:00 key at 45 N on 21 June
     /// under the default clear sky (the last step into sunset is 1.4 %).
     pub fn sun(&self) -> Option<EnvSun> {
+        self.key().map(|(_, key)| key)
+    }
+
+    /// [`Self::sun`] with the term of the map it is: the choice is made here
+    /// once, so the key the engine lights with and the light a lookup without
+    /// it leaves out are always the same one.
+    fn key(&self) -> Option<(KeyTerm, EnvSun)> {
         if let Some(key) = self.studio.key() {
-            return Some(self.key_to_world(key));
+            return Some((KeyTerm::Light, self.key_to_world(key)));
         }
         // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
@@ -209,7 +230,7 @@ impl Env {
             // A disc under a degree wide: a surface facing it gets all of its
             // emission (facing 1), and its outer limb, soft edge included, is
             // the cone that holds it.
-            return Some(self.key_to_world(EnvSun {
+            return Some((KeyTerm::Sun, self.key_to_world(EnvSun {
                 dir: sun,
                 radiance: atmo.sun_cone_radiance() * (cover(sun) * visible),
                 cos_radius: atmo.sun_cos_radius(),
@@ -217,7 +238,7 @@ impl Env {
                 // The two cosines are separately rounded: the min keeps a tiny soft
                 // edge from putting the covering cone's above the cone's own.
                 cos_cover: outer.cos().min(atmo.sun_cos_radius()),
-            }));
+            })));
         }
         // After dark the risen moon takes over, once the sun is 6 degrees down.
         let moon = self.night.as_ref()?.moon_key()?;
@@ -225,7 +246,9 @@ impl Env {
         if !(arrived > 0.0) {
             return None;
         }
-        Some(self.key_to_world(EnvSun { radiance: moon.radiance * (cover(moon.dir) * arrived), ..moon }))
+        // The map draws the whole disc while the key carries `arrived` of it:
+        // that share is the key's own light.
+        Some((KeyTerm::Moon(arrived), self.key_to_world(EnvSun { radiance: moon.radiance * (cover(moon.dir) * arrived), ..moon })))
     }
 
     /// World-space sun direction in Sky mode (also below the horizon), None
@@ -298,6 +321,73 @@ impl Env {
         }
         map
     }
+
+    /// The map without exactly its key's own light (N3), from `map`, this
+    /// env's bake ([`Self::bake`] / [`Self::bake_par`] at any width): the key
+    /// light skipped, the sun's disc hidden, or the share of the moon's disc
+    /// the key carries taken off. The engine's directional light carries that
+    /// light, so the lighting it takes from the map (the SH, the specular
+    /// atlas, the meter, the fog band) is made from this copy, while the dome
+    /// shows `map`. Every other light stays as the map draws it: a wide studio
+    /// key's neighbours, the moon beside a sun, the sky's own glow around the
+    /// disc. `None` when the map has no key, or `map` is not a whole map.
+    ///
+    /// Sampled as the map is, so the two differ by the key's light and nothing
+    /// else: a bake through the lookup without the key whose texels on and
+    /// around the discs (the key's own included) are area-averaged as the
+    /// map's are. Only the texels the key can reach are evaluated again (its
+    /// covering cone, plus the refinement's reach around a disc), the rows
+    /// spread by `run` as for [`Self::bake_par`], then the discs' texels are
+    /// refined again; outside the cone the key draws nothing, so the map's
+    /// texels are the answer there. A cancelled `run` skips rows, as a
+    /// cancelled bake does; the caller drops the copy with the bake.
+    pub fn bake_keyless_par(&self, map: &EnvMap, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) -> Option<EnvMap> {
+        let (term, key) = self.key()?;
+        let (w, h) = (map.width, map.height);
+        if w < 2 || h < 1 || map.data.len() != w * h {
+            return None;
+        }
+        let without = Some(term);
+        let radiance = |d: Vec3f| self.radiance_with(d, without);
+        // The key's reach: its covering cone (a disc's outer limb, a light's
+        // reach box) and two texels past it, which holds the refinement's 1.5
+        // around a disc.
+        let step = std::f32::consts::PI / h as f32;
+        let cone = key.cos_cover.min(key.cos_radius).clamp(-1.0, 1.0).acos();
+        let reach = (cone + 2.0 * step).min(std::f32::consts::PI);
+        let mut keyless = map.clone();
+        rebake_cone(&mut keyless, key.dir.normalize(), reach, &radiance, run);
+        refine_hot_spots(&mut keyless, &radiance, &self.hot_spots());
+        Some(keyless)
+    }
+}
+
+#[cfg(test)]
+impl Env {
+    /// A whole bake through the lookup without the key, made the way `bake`
+    /// makes the map (every texel, then the discs' texels refined): what
+    /// `bake_keyless_par`, which evaluates only the key's reach again, must
+    /// equal.
+    fn bake_without_key(&self, width: usize) -> Option<EnvMap> {
+        let (term, _) = self.key()?;
+        let radiance = |d: Vec3f| self.radiance_with(d, Some(term));
+        let mut map = bake_with(width, &radiance);
+        refine_hot_spots(&mut map, &radiance, &self.hot_spots());
+        Some(map)
+    }
+}
+
+/// The term of the map that is its key ([`Env::sun`]), for a lookup without
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum KeyTerm {
+    /// The studio key light (in either mode).
+    Light,
+    /// The sun's disc.
+    Sun,
+    /// The moon's disc, of which the key carries this share (its fade-in
+    /// after dusk): that share is the key's light, the rest stays the sky's.
+    Moon(f32),
 }
 
 /// Unit direction for an azimuth (degrees clockwise from north) and an
@@ -400,6 +490,40 @@ fn bake_par_with(
         run(height, &bake_row);
     }
     EnvMap { width, height, data }
+}
+
+/// Evaluates again, through `radiance`, every texel of `map` whose centre lies
+/// within `reach` (radians) of `centre`, with the arithmetic of the bakes
+/// (texel centres, `texel`'s clean-up), so a texel comes out as a bake through
+/// `radiance` would make it. The rows the cone touches are spread by `run` as
+/// for [`bake_par_with`]; a row it skips keeps the map's texels.
+fn rebake_cone(
+    map: &mut EnvMap,
+    centre: Vec3f,
+    reach: f32,
+    radiance: &(dyn Fn(Vec3f) -> Vec3f + Sync),
+    run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
+) {
+    let (width, height) = (map.width, map.height);
+    let cos_reach = reach.cos();
+    let near = envmap::rows_near(centre, reach, height);
+    let first = near.start;
+    let rows: Vec<Mutex<&mut [[f32; 4]]>> = map.data.chunks_exact_mut(width).skip(first).take(near.len()).map(Mutex::new).collect();
+    let bake_row = |i: usize| {
+        if let Some(Ok(mut row)) = rows.get(i).map(|row| row.lock()) {
+            // bake_par_with's texel-centre arithmetic, through the same
+            // functions, so the bits match a bake's.
+            let v = ((first + i) as f32 + 0.5) / height as f32;
+            for (x, out) in row.iter_mut().enumerate() {
+                let d = ibl::equirect_uv_to_dir([(x as f32 + 0.5) / width as f32, v]);
+                if vec(d).dot(centre) >= cos_reach {
+                    let c = texel(radiance(vec(d)));
+                    *out = [c[0], c[1], c[2], 1.0];
+                }
+            }
+        }
+    };
+    run(rows.len(), &bake_row);
 }
 
 /// Re-evaluates the texels on and around each hot spot as the mean of
@@ -926,6 +1050,31 @@ mod tests {
                 assert!((g / w - 1.0).abs() < 1.0e-6, "{size_deg} deg: {g} for {w}");
             }
         }
+    }
+
+    /// N3: while the moon fades in after dusk its key carries `arrived` of the
+    /// disc's light, so the map without its key keeps the rest of the disc:
+    /// the lookup takes exactly that share off the disc and nothing beside
+    /// it, and the keyless bake, which evaluates only the disc's reach again,
+    /// is a whole bake through that lookup.
+    #[test]
+    fn a_moon_on_its_way_in_leaves_the_share_its_key_carries() {
+        let env = Env::new(&sun_at(-7.0));
+        let (term, key) = env.key().expect("the moon is arriving");
+        let KeyTerm::Moon(share) = term else { panic!("the moon is the key: {term:?}") };
+        assert!((share - smoothstep(6.0, 8.0, 7.0)).abs() < 1.0e-3, "half way in: {share}");
+        let d = key.dir.normalize();
+        let all = env.radiance(d);
+        let without = env.radiance_with(d, Some(KeyTerm::Moon(1.0)));
+        let kept = env.radiance_with(d, Some(term));
+        let disc = all - without;
+        assert!(disc.y > without.y, "premise: the disc outshines the twilight behind it: {all:?} {without:?}");
+        assert!(((all - kept) - disc * share).length() <= 1.0e-4 * disc.length(), "{all:?} - {kept:?} vs {share} x {disc:?}");
+        let beside = rotate_y(d, 5.0);
+        assert_eq!(env.radiance_with(beside, Some(term)), env.radiance(beside), "nothing beside the disc changes");
+        // The keyless bake against a whole bake through the same lookup.
+        let map = env.bake(64);
+        assert_eq!(env.bake_keyless_par(&map, |n, f| (0..n).for_each(f)), env.bake_without_key(64));
     }
 
     /// N1: the environment's own sun for the daylight switches is the sky's

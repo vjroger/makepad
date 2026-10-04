@@ -171,6 +171,8 @@ pub struct Studio {
     soft_deg: f32,
     lights: Vec<PreparedLight>,
     key: Option<EnvSun>,
+    /// The key's place in `lights`: the light a lookup without the key skips.
+    key_index: Option<usize>,
 }
 
 impl Studio {
@@ -186,7 +188,8 @@ impl Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l)).collect();
-        let key = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).map(|i| {
+        let key_index = enabled.iter().position(|l| l.key && l.blend() == Blend::Add);
+        let key = key_index.map(|i| {
             let l = enabled[i];
             let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
             let integral = key_emission(&prepared[i..], KEY_GRID);
@@ -211,6 +214,7 @@ impl Studio {
             soft_deg: sane(studio.horizon_softness, 0.01, 1.0) * 90.0,
             lights: prepared,
             key,
+            key_index,
         }
     }
 
@@ -232,8 +236,23 @@ impl Studio {
     /// - **Multiply** scales everything drawn so far by its colour: fully at the core,
     ///   not at all outside. That is how a black flag cuts a softbox or the sky.
     pub fn apply_lights(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
+        self.apply_lights_skipping(dir, base, None)
+    }
+
+    /// [`Self::apply_lights`] without the key light (N3: the map without its
+    /// key is the source of the engine's lighting copy). Skipping it is
+    /// exactly the map with the key disabled: every other light, the flags
+    /// after the key included, draws as before.
+    pub fn apply_lights_without_key(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
+        self.apply_lights_skipping(dir, base, self.key_index)
+    }
+
+    fn apply_lights_skipping(&self, dir: Vec3f, base: Vec3f, skip: Option<usize>) -> Vec3f {
         let mut c = base;
-        for light in &self.lights {
+        for (i, light) in self.lights.iter().enumerate() {
+            if skip == Some(i) {
+                continue;
+            }
             let Some(p) = project(&light.frame, dir) else { continue };
             let m = light.mask(p);
             if !(m > 0.0) {
@@ -1100,9 +1119,10 @@ mod tests {
     #[test]
     fn nothing_of_the_key_is_drawn_outside_its_covering_cone() {
         // cos_cover is the cone of the key's reach box: its corners and its soft
-        // edge lie inside it, so remove_sun fills all of the key. The map is black
-        // outside the cone, exactly, on a one degree grid over the sphere and on
-        // rings just past its edge.
+        // edge lie inside it, so the keyless bake, which evaluates only that cone
+        // again (N3), and remove_sun's fill both take all of the key. The map is
+        // black outside the cone, exactly, on a one degree grid over the sphere
+        // and on rings just past its edge.
         for (name, lights) in key_light_lists() {
             let alone = the_key_alone(&studio_params(lights));
             let env = Env::new(&alone);

@@ -27,8 +27,9 @@ impl Renderer {
     /// the map's frame; `sun::env_sun_dir_with` turns it by
     /// `Ibl.rotation_deg`.
     ///
-    /// The meter. renderer/ibl.rs meters the LIGHTING copy (the key's
-    /// covering cone filled), so the key's share of the sphere mean is added
+    /// The meter. renderer/ibl.rs meters the LIGHTING copy (the map without
+    /// its key: exactly for a generated map, the covering cone filled for a
+    /// file's sun), so the key's share of the sphere mean is added
     /// back here: its emission `L·2π(1 − cos r)` (`EnvSun`'s meaning: L is
     /// the cone's average) over the sphere's 4π, times the share a surface
     /// facing it receives (`facing`; the same product the directional light's

@@ -20,7 +20,8 @@
 //! polls a token between its stages and stops, and whatever it still
 //! returns is rejected when it is taken.
 use super::*;
-use crate::hdri::prepare::{prepare_ibl_until, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
+use crate::hdri::envmap::GeneratedEnvMap;
+use crate::hdri::prepare::{prepare_ibl_until, KeyRemoval, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
 use makepad_draw::makepad_platform::thread::{CancellationToken, Lane, SubmitError, TaskHandle, TaskPool};
 use makepad_render_material::ibl::{EnvMap, EnvPreset};
 use makepad_scene::{Background, EnvSun, Environment, IblSource, TextureRef};
@@ -169,12 +170,12 @@ pub(super) enum EnvScope {
     Aux,
 }
 
-/// What a preparation is for: the source, the sun filled in its lighting
-/// copy, and the map's own sun the world reports for the daylight switches
-/// (`Environment.daylight_sun`: it changes nothing in the preparation, but it
-/// is the map's, so it binds with it and the switches follow the sky that is
-/// drawn). Intensity and rotation are not here: they are meta texels the
-/// shader reads, rewritten in place when they change.
+/// What a preparation is for: the source, the sun its lighting copy is
+/// made without, and the map's own sun the world reports for the daylight
+/// switches (`Environment.daylight_sun`: it changes nothing in the
+/// preparation, but it is the map's, so it binds with it and the switches
+/// follow the sky that is drawn). Intensity and rotation are not here: they
+/// are meta texels the shader reads, rewritten in place when they change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PrepareKey {
     source: IblSource,
@@ -197,6 +198,28 @@ struct IblJobResult {
     baked_daylight: Option<Vec3f>,
 }
 
+/// A host-registered environment: the map the dome shows and, for a
+/// generated map, the same map without exactly its key's light, which the
+/// lighting copy is made from while the world declares a key (N3; without
+/// it the declared key's covering cone is filled, as for a file's sun).
+#[derive(Clone)]
+struct RegisteredMap {
+    map: Arc<EnvMap>,
+    keyless: Option<Arc<EnvMap>>,
+}
+
+impl RegisteredMap {
+    /// The same allocations: registering them again is no change.
+    fn same(&self, other: &RegisteredMap) -> bool {
+        let keyless = match (&self.keyless, &other.keyless) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        Arc::ptr_eq(&self.map, &other.map) && keyless
+    }
+}
+
 /// The Heavy job in flight. Kept until it ends, also once cancelled, so
 /// no second job ever runs beside it.
 struct IblJob {
@@ -205,9 +228,9 @@ struct IblJob {
     key: PrepareKey,
     /// The registered map it prepares (`None` for a procedural index): its
     /// result is adopted only while this is still the map registered under
-    /// the handle (`Arc::ptr_eq`). Holding it also keeps the allocation from
-    /// being reused by a new map while the job runs.
-    map: Option<Arc<EnvMap>>,
+    /// the handle (`RegisteredMap::same`). Holding it also keeps the
+    /// allocation from being reused by a new map while the job runs.
+    map: Option<RegisteredMap>,
     /// Set on a change of map; the job polls it between its stages.
     cancel: CancellationToken,
 }
@@ -215,7 +238,7 @@ struct IblJob {
 #[derive(Default)]
 pub(super) struct IblState {
     /// Host-registered HDR environments, by the handle documents name.
-    maps: HashMap<TextureRef, Arc<EnvMap>>,
+    maps: HashMap<TextureRef, RegisteredMap>,
     /// What `texture`'s meta row holds: (source, intensity bits, rotation bits).
     key: Option<(IblSource, u32, u32)>,
     /// The lane texture (meta row 0, then the atlas: plan 1a task A7) and
@@ -242,8 +265,8 @@ pub(super) struct IblState {
     sh: Option<[[f32; 3]; 9]>,
     mean_luminance: f32,
     horizon_rgb: Vec3f,
-    /// The sun filled in the bound lighting copy: the declared one, else a
-    /// procedural hdri preset's baked one.
+    /// The sun the bound lighting copy was made without: the declared one,
+    /// else a procedural hdri preset's baked one.
     filled_sun: Option<EnvSun>,
     /// The bound map's own sun for the daylight switches: the one the world
     /// reported, else a procedural hdri preset's.
@@ -297,12 +320,12 @@ fn rows_until_cancelled<'a>(run: RowRunner<'a>, cancel: &'a CancellationToken) -
     }
 }
 
-/// The closed-pool path prepares on the UI thread: the source is shrunk to
-/// the small dome's width before anything else reads it, so the sanity scan,
-/// the dome, the lighting copy, its sun removal, the meter and the band all
-/// run on the small map. A malformed map (fewer texels than its size says)
-/// is left to the preparation's own sanity check: `resized` would index
-/// past its data.
+/// The closed-pool path prepares on the UI thread: the source (and a
+/// generated map's keyless copy) is shrunk to the small dome's width before
+/// anything else reads it, so the sanity scan, the dome, the lighting copy,
+/// its key removal, the meter and the band all run on the small map. A
+/// malformed map (fewer texels than its size says) is left to the
+/// preparation's own sanity check: `resized` would index past its data.
 fn shrunk_for_sync(map: Arc<EnvMap>) -> Arc<EnvMap> {
     let well_formed = map.height >= 1 && map.data.len() >= map.width * map.height;
     if well_formed && map.width > SYNC_DOME_WIDTH {
@@ -334,34 +357,31 @@ pub fn hdri_procedural_name(preset: &str) -> String {
     out
 }
 
-/// The environment a procedural index names, baked or painted, with the
-/// key a bake knows and its sky's own sun (render-material's looks have
-/// neither). `run` spreads a bake's rows (the pool inside a job).
-fn procedural_env_map(
-    i: u32,
-    run: RowRunner,
-    bake_width: usize,
-) -> Option<(EnvMap, Option<EnvSun>, Option<Vec3f>)> {
+/// The environment a procedural index names, baked or painted: an hdri
+/// preset with its key, the map without that key and its sky's own sun
+/// (`hdri::envmap::bake_generated_env_map`); render-material's looks have
+/// none of them. `run` spreads a bake's rows (the pool inside a job).
+fn procedural_env_map(i: u32, run: RowRunner, bake_width: usize) -> Option<GeneratedEnvMap> {
     let name = procedural_environment_name(i)?;
     if let Some(hdri_name) = name.strip_prefix(HDRI_PREFIX) {
         let params = crate::hdri::presets::preset(hdri_name)?;
-        Some(crate::hdri::bake_env_map_with_daylight(&params, bake_width, run))
+        Some(crate::hdri::envmap::bake_generated_env_map(&params, bake_width, run))
     } else {
         let preset = EnvPreset::by_name(name)?;
-        Some((EnvMap::procedural(&preset, 256, 1.0, 0.0), None, None))
+        Some(GeneratedEnvMap { map: EnvMap::procedural(&preset, 256, 1.0, 0.0), keyless: None, sun: None, daylight: None })
     }
 }
 
 /// Build everything for one key: the map (registered, or baked/painted for
-/// a procedural index), then `prepare_ibl_until` with the declared sun
-/// filled. Pure apart from `run` and `stop`, so the job and the synchronous
-/// fallback share it. `None` when the source cannot be built or `stop` said
-/// so.
+/// a procedural index), then `prepare_ibl_until` without the key the
+/// directional light carries. Pure apart from `run` and `stop`, so the job
+/// and the synchronous fallback share it. `None` when the source cannot be
+/// built or `stop` said so.
 #[allow(clippy::too_many_arguments)]
 fn build_ibl(
     generation: u64,
     key: PrepareKey,
-    map: Option<Arc<EnvMap>>,
+    map: Option<RegisteredMap>,
     intensity: f32,
     rotation_deg: f32,
     run: RowRunner,
@@ -369,23 +389,36 @@ fn build_ibl(
     bake_width: usize,
     stop: &dyn Fn() -> bool,
 ) -> Option<IblJobResult> {
-    let (map, baked_sun, baked_daylight) = match key.source {
-        IblSource::Hdri(_) => (map?, None, None),
+    // The keyless copy is the map without one key: a preset's own, or the
+    // one the host declares for the copy it registered.
+    let (map, keyless, keyless_for, baked_sun, baked_daylight) = match key.source {
+        IblSource::Hdri(_) => {
+            let r = map?;
+            (r.map, r.keyless, key.sun, None, None)
+        }
         IblSource::Procedural(i) => {
-            let (m, s, d) = procedural_env_map(i, run, bake_width)?;
-            (Arc::new(m), s, d)
+            let g = procedural_env_map(i, run, bake_width)?;
+            (Arc::new(g.map), g.keyless.map(Arc::new), g.sun, g.sun, g.daylight)
         }
     };
     if stop() {
         return None;
     }
-    // The sun filled in the lighting copy: the one the world declares, else
-    // the one a procedural hdri preset baked (a host that names a preset by
-    // index has no map to declare a sun from). Either way the directional
-    // light carries it (`ibl_sun`, renderer/env_sun.rs) and the SH, the
-    // atlas and the meter do not.
+    // The key the lighting copy is made without: the one the world declares,
+    // else the one a procedural hdri preset baked (a host that names a preset
+    // by index has no map to declare a sun from). Either way the directional
+    // light carries it (`ibl_sun`, renderer/env_sun.rs) and the SH, the atlas
+    // and the meter do not. A generated map loses exactly that key's light
+    // (N3); a key the map has no keyless copy for (a file's detected sun, a
+    // world that declares another key over a preset) has its covering cone
+    // filled.
     let fill = key.sun.or(baked_sun);
-    let prepared = prepare_ibl_until(&map, fill.as_ref(), intensity, rotation_deg, sizes, stop)?;
+    let removal = match (fill.as_ref(), keyless.as_deref()) {
+        (Some(_), Some(keyless)) if fill == keyless_for => KeyRemoval::Exact(keyless),
+        (Some(sun), _) => KeyRemoval::Fill(sun),
+        (None, _) => KeyRemoval::Nothing,
+    };
+    let prepared = prepare_ibl_until(&map, removal, intensity, rotation_deg, sizes, stop)?;
     Some(IblJobResult { generation, key, intensity, rotation_deg, prepared, baked_sun, baked_daylight })
 }
 
@@ -434,9 +467,25 @@ impl Renderer {
     /// do it every frame. Registering another map is a change of map: a job
     /// preparing the old one is cancelled and never lands, and a world that
     /// names the handle prepares the new map in the background (a restart),
-    /// while the old textures and numbers stay bound until it lands.
+    /// while the old textures and numbers stay bound until it lands. A key
+    /// the world declares for this map has its covering cone filled in the
+    /// lighting copy (a file's detected sun); a generated map registers its
+    /// keyless copy too ([`Self::register_generated_environment`]).
     pub fn register_environment(&mut self, texture: TextureRef, env: Arc<EnvMap>) {
-        if self.ibl.maps.get(&texture).is_some_and(|m| Arc::ptr_eq(m, &env)) {
+        self.register_generated_environment(texture, env, None);
+    }
+
+    /// [`Self::register_environment`] for a generated map (an hdri bake):
+    /// `keyless` is the same map without exactly the key the world declares
+    /// on `Environment.sun` (`hdri::envmap::bake_generated_env_map`), and
+    /// the lighting copy is made from it while the world declares a key, so
+    /// only that key's own light leaves the SH, the atlas, the meter and the
+    /// fog band (N3); the dome shows `env`. `None` is `register_environment`.
+    /// Registering the same two `Arc`s again changes nothing; a new pair is a
+    /// change of map.
+    pub fn register_generated_environment(&mut self, texture: TextureRef, env: Arc<EnvMap>, keyless: Option<Arc<EnvMap>>) {
+        let registered = RegisteredMap { map: env, keyless };
+        if self.ibl.maps.get(&texture).is_some_and(|m| m.same(&registered)) {
             return;
         }
         let names = |k: Option<IblSource>| k == Some(IblSource::Hdri(texture));
@@ -452,16 +501,16 @@ impl Renderer {
         if names(self.ibl.job.as_ref().map(|j| j.key.source)) {
             self.cancel_ibl_job();
         }
-        self.ibl.maps.insert(texture, env);
+        self.ibl.maps.insert(texture, registered);
     }
 
-    /// Drop the map registered under `texture` and any preparation of it: a
-    /// job preparing it is cancelled (it never lands), and when the bound
-    /// textures and numbers are its, they go too. This releases the
-    /// renderer's reference to the map (a cancelled job's own goes when it
-    /// winds down). A world that still names the handle names an unknown
-    /// source from here on: nothing prepares, nothing is awaited, and the
-    /// analytic sky and rig take over, as before it was registered.
+    /// Drop the map registered under `texture` (and its keyless copy) and any
+    /// preparation of it: a job preparing it is cancelled (it never lands),
+    /// and when the bound textures and numbers are its, they go too. This
+    /// releases the renderer's references to the maps (a cancelled job's own
+    /// go when it winds down). A world that still names the handle names an
+    /// unknown source from here on: nothing prepares, nothing is awaited, and
+    /// the analytic sky and rig take over, as before it was registered.
     pub fn unregister_environment(&mut self, texture: TextureRef) {
         if self.ibl.maps.remove(&texture).is_none() {
             return;
@@ -551,10 +600,11 @@ impl Renderer {
     }
 
     /// The key the bound preparation was made with, the sun its lighting
-    /// copy was prepared without: the world's `Environment.sun` as the job
-    /// saw it, else the sun a procedural hdri preset baked. `None` when the
-    /// map kept all its light (no declared sun, an engine preset, an
-    /// overcast bake). The rig lights with this key, not with the one the
+    /// copy was prepared without (exactly its light for a generated map, its
+    /// covering cone for a file's sun): the world's `Environment.sun` as the
+    /// job saw it, else the sun a procedural hdri preset baked. `None` when
+    /// the map kept all its light (no declared sun, an engine preset, a bake
+    /// without a key). The rig lights with this key, not with the one the
     /// world declares meanwhile (renderer/env_sun.rs): light and sky come
     /// from the same preparation.
     pub fn ibl_sun(&self) -> Option<EnvSun> {
@@ -701,7 +751,7 @@ impl Renderer {
                         f(i);
                     }
                 };
-                let map = map.map(shrunk_for_sync);
+                let map = map.map(|r| RegisteredMap { map: shrunk_for_sync(r.map), keyless: r.keyless.map(shrunk_for_sync) });
                 let result = build_ibl(self.ibl.generation, wanted, map, intensity, rotation_deg, &serial, SYNC_SIZES, SYNC_HDRI_WIDTH, &|| false);
                 match result {
                     Some(r) => self.adopt_ibl(cx, r),
@@ -753,7 +803,7 @@ impl Renderer {
         let s = &self.ibl;
         let named = s.wanted.is_some_and(|w| w.source == job.key.source);
         let same_map = match job.key.source {
-            IblSource::Hdri(t) => s.maps.get(&t).zip(job.map.as_ref()).is_some_and(|(now, prepared)| Arc::ptr_eq(now, prepared)),
+            IblSource::Hdri(t) => s.maps.get(&t).zip(job.map.as_ref()).is_some_and(|(now, prepared)| now.same(prepared)),
             IblSource::Procedural(_) => true,
         };
         named && same_map
@@ -1790,6 +1840,86 @@ mod tests {
         assert_eq!(renderer.ibl_daylight_sun(), None);
         let look = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
         assert_eq!(build_ibl(3, look, None, 1.0, 0.0, &serial, SYNC_SIZES, 32, &|| false).unwrap().baked_daylight, None);
+    }
+
+    /// N3: a generated map's lighting copy is the map without exactly its
+    /// key. A procedural preset bakes its keyless copy beside its map; a host
+    /// registers one with `register_generated_environment` and declares the
+    /// key it was made without. Either way the SH and the meter are the
+    /// keyless map's while that key lights (the Overcast dome's side panels
+    /// stay, under the cover the cone fill would take), and the full map's
+    /// with no key. A key the map has no keyless copy for (a file's detected
+    /// sun, or a world that declares another key over a preset) still has
+    /// its covering cone filled.
+    #[test]
+    fn a_generated_map_lights_from_its_keyless_copy() {
+        use crate::hdri::envmap::{bake_generated_env_map, remove_sun};
+        use makepad_render_material::ibl::sh9;
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| {
+            for i in 0..n {
+                f(i);
+            }
+        };
+        let dome = PROCEDURAL_ENVIRONMENTS.iter().position(|n| *n == "hdri_overcast_dome").unwrap() as u32;
+        let g = bake_generated_env_map(&crate::hdri::presets::preset("Overcast dome").unwrap(), 32, serial);
+        let (keyless, sun) = (g.keyless.clone().expect("a keyed preset"), g.sun.expect("the dome is the key"));
+        let mut filled = g.map.clone();
+        remove_sun(&mut filled, &sun);
+        assert!(sh9(&filled) != sh9(&keyless), "premise: the cone fill takes more than the key");
+        let build = |key: PrepareKey, map: Option<RegisteredMap>| build_ibl(1, key, map, 1.0, 0.0, &serial, SYNC_SIZES, 32, &|| false).expect("built").prepared;
+
+        // A procedural preset: its own key, declared or not, leaves exactly.
+        let preset = PrepareKey { source: IblSource::Procedural(dome), sun: None, daylight_sun: None };
+        assert_eq!(build(preset, None).sh, sh9(&keyless), "the preset's own key leaves exactly");
+        assert_eq!(build(PrepareKey { sun: Some(sun), ..preset }, None).sh, sh9(&keyless), "declared as it is");
+        let other = EnvSun { dir: vec3f(1.0, 0.0, 0.0), ..sun };
+        let mut other_filled = g.map.clone();
+        remove_sun(&mut other_filled, &other);
+        assert_eq!(build(PrepareKey { sun: Some(other), ..preset }, None).sh, sh9(&other_filled), "another key: its cone");
+
+        // A registered generated map: the keyless copy while a key is declared.
+        let hdri = PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: Some(sun), daylight_sun: None };
+        let generated = RegisteredMap { map: Arc::new(g.map.clone()), keyless: Some(Arc::new(keyless.clone())) };
+        let lit = build(hdri, Some(generated.clone()));
+        assert_eq!((lit.sh, lit.mean_luminance), (sh9(&keyless), crate::hdri::image::mean_luminance(&keyless)));
+        assert_eq!(lit.dome.len(), 32 * 16 * 4, "the dome is the map");
+        assert_eq!(lit.dome[..4], [g.map.data[0][0], g.map.data[0][1], g.map.data[0][2], 1.0]);
+        assert_eq!(build(PrepareKey { sun: None, ..hdri }, Some(generated)).sh, sh9(&g.map), "no key: nothing leaves");
+        // A plain registration (a file): the declared key's cone is filled.
+        let file = RegisteredMap { map: Arc::new(g.map.clone()), keyless: None };
+        assert_eq!(build(hdri, Some(file)).sh, sh9(&filled));
+    }
+
+    /// The keyless copy is registered with its map: the same two `Arc`s again
+    /// are no change, a new copy is a change of map (the job in flight is
+    /// cancelled), and unregistering releases both.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn a_keyless_copy_registers_and_unregisters_with_its_map() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        let (map, keyless) = (grey(16, 0.25), grey(16, 0.2));
+        let env = env_of(IblSource::Hdri(TextureRef(4)), 1.0, 0.0);
+        renderer.register_generated_environment(TextureRef(4), map.clone(), Some(keyless.clone()));
+        renderer.resolve_ibl(&mut cx, &env);
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("preparing");
+        renderer.register_generated_environment(TextureRef(4), map.clone(), Some(keyless.clone()));
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(!cancel.is_cancelled(), "the same pair: the same job runs on");
+        let other = grey(16, 0.1);
+        renderer.register_generated_environment(TextureRef(4), map.clone(), Some(other.clone()));
+        assert!(cancel.is_cancelled(), "a new keyless copy is a change of map");
+        renderer.unregister_environment(TextureRef(4));
+        let start = std::time::Instant::now();
+        while renderer.ibl_job_in_flight() {
+            assert!(start.elapsed().as_secs() < 180, "the cancelled job did not wind down within 180 s");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            renderer.resolve_ibl(&mut cx, &env);
+        }
+        assert!(renderer.ibl.maps.is_empty());
+        for (name, a) in [("map", &map), ("first copy", &keyless), ("second copy", &other)] {
+            assert_eq!(Arc::strong_count(a), 1, "the renderer keeps no reference to the {name}");
+        }
     }
 
     /// A cancelled job's bake runs no more rows: the row runner the job

@@ -142,10 +142,10 @@ pub struct SunConfig {
 ///   `dir` that holds the key's whole reach: a sun's or moon's outer limb
 ///   (soft edge included), a studio key's reach box with its corners and soft
 ///   edge, a detected sun's grown cone. It is at most `cos_radius` (the cone
-///   `radiance` is averaged over lies inside it). The renderer takes the
-///   cone out of the map's own lighting (SH9, specular) because the
-///   directional light carries the key's energy, and takes all of it, so no
-///   part of the key is lit twice.
+///   `radiance` is averaged over lies inside it). Nothing of the key lies
+///   outside it, so it bounds what the renderer takes out of the map's own
+///   lighting (SH9, specular), where the directional light carries the
+///   key's energy instead: no part of the key is lit twice.
 ///
 /// What each producer puts in `radiance`:
 /// - a generated sun: its irradiance at the ground spread over the nominal
@@ -167,9 +167,12 @@ pub struct SunConfig {
 /// `irradiance()`, the directional light's colour and the meter then give
 /// back the emission the producer had, at any size.
 ///
-/// The renderer fills the covering cone in the lighting it derives from the
-/// map, because the directional light carries the energy; the drawn dome
-/// keeps the disc.
+/// The renderer takes the key out of the lighting it derives from the map,
+/// because the directional light carries the energy: a generated map's
+/// exactly (the same map baked without it, which the renderer bakes for a
+/// procedural preset and a host registers beside its own bake), a file's
+/// detected sun by filling its covering cone with the sky around it. The
+/// drawn dome keeps the key.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvSun {
     pub dir: Vec3f,
