@@ -521,9 +521,10 @@ pub fn env_sun_dir(world: &makepad_scene::World) -> Option<Vec3f> {
 }
 
 /// [`env_sun_dir`] for a sun the caller supplies in place of the world's
-/// `Environment.sun`: the renderer passes the sun its bound preparation was
-/// built without (a procedural hdri preset's baked sun, when the world
-/// declares none). Same frame (the map's), same rules.
+/// `Environment.sun`: the renderer passes the key its bound preparation was
+/// made with (the sun the world declared then, else a procedural hdri
+/// preset's baked sun), so light and sky come from one preparation. Same
+/// frame (the map's), same rules.
 pub fn env_sun_dir_with(world: &makepad_scene::World, env_sun: Option<makepad_scene::EnvSun>) -> Option<Vec3f> {
     let authored = world.sun.dir.is_some_and(|d| d.x != 0.0 || d.y != 0.0 || d.z != 0.0);
     if authored {

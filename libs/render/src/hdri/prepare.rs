@@ -4,11 +4,14 @@
 //! dome for the background (at most 2048 wide, RGBA f32), and the numbers
 //! the sun rig, the exposure meter and the fog take from the map.
 //!
-//! The lighting products are built with the environment's declared sun
-//! removed (envmap.rs `remove_sun`, at the key's covering cone): the
-//! renderer's directional light carries that energy, so the SH and the
-//! atlas must not. The dome keeps the disc, because that is what the eye
-//! should see.
+//! The lighting products are built from a copy at most
+//! [`LIGHTING_MAX_WIDTH`] wide with the environment's declared sun removed
+//! (envmap.rs `remove_sun`, at the key's covering cone): the renderer's
+//! directional light carries that energy, so the SH and the atlas must not.
+//! The dome keeps the disc, because that is what the eye should see.
+//!
+//! [`prepare_ibl_until`] asks a `stop` callback between its stages, so a
+//! background job whose environment was replaced gives up early.
 
 use makepad_render_material::ibl::{self, EnvMap};
 use super::*;
@@ -70,30 +73,63 @@ pub fn prepare_ibl_sized(
     max_dome_width: usize,
     atlas_width: usize,
 ) -> PreparedIbl {
+    let sizes = PrepareSizes { dome: max_dome_width, atlas: atlas_width, lighting: LIGHTING_MAX_WIDTH };
+    prepare_ibl_until(env, sun, intensity, rotation_deg, sizes, &|| false).expect("a preparation nobody stops runs to its end")
+}
+
+/// The lighting copy is never wider than this. The prefilter reads its
+/// source at most 512 wide (its pyramid) and the SH at 256, so 1024 loses
+/// nothing they see, while a 4K source is no longer cloned whole for every
+/// job (134 MB at 4K, 536 MB at 8K). `remove_sun` widens its cone by one
+/// texel of the copy, which takes the disc the resize smeared with it.
+pub const LIGHTING_MAX_WIDTH: usize = 1024;
+
+/// The widths a preparation works at: the dome's cap, the atlas, and the
+/// lighting copy's cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrepareSizes {
+    pub dome: usize,
+    pub atlas: usize,
+    pub lighting: usize,
+}
+
+/// [`prepare_ibl_sized`] at chosen sizes that asks `stop` between its
+/// stages (after the dome, after the lighting copy and its sun removal,
+/// before every prefilter level, before the SH) and gives up (`None`) once
+/// it says so: a background job whose environment was replaced stops
+/// within a stage instead of finishing a preparation nobody will use.
+pub fn prepare_ibl_until(
+    env: &EnvMap,
+    sun: Option<&EnvSun>,
+    intensity: f32,
+    rotation_deg: f32,
+    sizes: PrepareSizes,
+    stop: &dyn Fn() -> bool,
+) -> Option<PreparedIbl> {
     let env = sane(env);
     // The dome first, from the source with its sun: resized only when the
     // cap bites (resized clones at the same size, and a 4K map is 128 MB).
-    let dome_width = dome_width(env.width, max_dome_width);
+    let dome_width = dome_width(env.width, sizes.dome);
     let dome_height = dome_width / 2;
     let dome = if dome_width == env.width && dome_height == env.height {
         env.to_rgba_f32()
     } else {
         env.resized(dome_width).to_rgba_f32()
     };
-    // The lighting copy: the declared sun's covering cone filled. remove_sun
-    // only touches the rows the cone reaches, so this is cheap even at 4K.
-    let lit: Cow<EnvMap> = match sun {
-        Some(sun) => {
-            let mut copy = env.clone().into_owned();
-            remove_sun(&mut copy, sun);
-            Cow::Owned(copy)
-        }
-        None => env,
-    };
-    let atlas = ibl::prefilter(&lit, atlas_width, ATLAS_LEVELS);
+    if stop() {
+        return None;
+    }
+    let lit = lighting_copy(&env, sun, sizes.lighting);
+    if stop() {
+        return None;
+    }
+    let atlas = ibl::prefilter_until(&lit, sizes.atlas, ATLAS_LEVELS, stop)?;
+    if stop() {
+        return None;
+    }
     let sh = ibl::sh9(&lit);
     let texture = ibl::pack_ibl(&atlas, &sh, intensity, rotation_deg);
-    PreparedIbl {
+    Some(PreparedIbl {
         texture,
         dome_width,
         dome_height,
@@ -101,7 +137,20 @@ pub fn prepare_ibl_sized(
         sh,
         mean_luminance: mean_luminance(&lit),
         horizon_rgb: horizon_band(&lit),
+    })
+}
+
+/// The copy the atlas, the SH, the meter and the band are taken from: the
+/// source at most `max_width` wide (box-filtered down), with the declared
+/// sun's covering cone filled there. A source that is narrow enough and has
+/// no sun to fill is not copied at all. `env` is already `sane` (`resized`
+/// indexes every texel its size names).
+fn lighting_copy<'a>(env: &'a EnvMap, sun: Option<&EnvSun>, max_width: usize) -> Cow<'a, EnvMap> {
+    let mut lit = if env.width > max_width { Cow::Owned(env.resized(max_width)) } else { Cow::Borrowed(env) };
+    if let Some(sun) = sun {
+        remove_sun(lit.to_mut(), sun);
     }
+    lit
 }
 
 /// The dome's width for a source of `src_width`: the source's, capped by
@@ -199,6 +248,61 @@ mod tests {
         assert_eq!(&p.texture.data[meta..meta + 4], &[6.0, 8.0, 1.5, 30.0f32.to_radians()]);
         let first_atlas_texel = ibl::prefilter(&env, 16, 6).data[0];
         assert_eq!(&p.texture.data[p.texture.width * 4..p.texture.width * 4 + 3], &first_atlas_texel[..3]);
+    }
+
+    /// K1: a preparation asks `stop` between its stages (after the dome,
+    /// after the lighting copy, before every prefilter level, before the
+    /// SH) and gives up once it says so; never told to stop it is exactly
+    /// `prepare_ibl_sized`'s.
+    #[test]
+    fn a_preparation_asks_to_stop_between_its_stages() {
+        let env = map(64, |d| grey(0.2 + 0.8 * d.y.max(0.0)));
+        let sizes = PrepareSizes { dome: 2048, atlas: 16, lighting: LIGHTING_MAX_WIDTH };
+        let asked = std::cell::Cell::new(0usize);
+        let never = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert_eq!(prepare_ibl_until(&env, None, 1.0, 0.0, sizes, &never), Some(prepare_ibl_sized(&env, None, 1.0, 0.0, 2048, 16)));
+        let stages = asked.get();
+        assert_eq!(stages, 2 + ATLAS_LEVELS + 1, "after the dome, after the lighting copy, before every level, before the SH");
+        for k in 0..stages {
+            asked.set(0);
+            let at_k = || {
+                asked.set(asked.get() + 1);
+                asked.get() > k
+            };
+            assert_eq!(prepare_ibl_until(&env, None, 1.0, 0.0, sizes, &at_k), None, "stopped at question {k}");
+            assert_eq!(asked.get(), k + 1, "nothing asked after the stop");
+        }
+    }
+
+    /// M5: the lighting copy is at most LIGHTING_MAX_WIDTH wide. A wider
+    /// source's atlas, SH, meter and band are those of its 1024 wide resize
+    /// with the sun filled there (the dome keeps up to 2048), and the
+    /// resize does not leave the disc behind: `remove_sun` widens its cone
+    /// by one texel of the copy, which holds what the resize smeared. A
+    /// narrower source is not copied at all.
+    #[test]
+    fn the_lighting_copy_is_at_most_1024_wide() {
+        let sun_dir = dir_from_az_el(120.0, 35.0);
+        let cos_radius = 0.265f32.to_radians().cos();
+        let sun = EnvSun { dir: sun_dir, radiance: grey(1.0e5), cos_radius, facing: 1.0, cos_cover: cos_radius };
+        let wide = map(2048, |d| if d.dot(sun_dir) >= cos_radius { grey(1.0e5) } else { vec3f(0.5, 0.5 + 0.1 * d.x, 0.5 - 0.1 * d.y) });
+        assert!(mean_luminance(&wide) > 0.6, "premise: the disc moves the meter: {}", mean_luminance(&wide));
+        assert_eq!(lighting_copy(&wide, None, LIGHTING_MAX_WIDTH).width, LIGHTING_MAX_WIDTH);
+        let lit = lighting_copy(&wide, Some(&sun), LIGHTING_MAX_WIDTH);
+        let mut want = wide.resized(LIGHTING_MAX_WIDTH);
+        remove_sun(&mut want, &sun);
+        assert!(*lit == want, "the 1024 wide resize with the sun filled there");
+        assert!((mean_luminance(&lit) - 0.5).abs() < 0.005, "no disc left in the copy: {}", mean_luminance(&lit));
+        let p = prepare_ibl_sized(&wide, Some(&sun), 1.0, 0.0, 2048, 16);
+        assert_eq!(p.mean_luminance, mean_luminance(&want));
+        assert_eq!(p.horizon_rgb, horizon_band(&want));
+        assert_eq!(p.sh, ibl::sh9(&want));
+        assert_eq!(p.dome_width, 2048, "the dome is not the lighting copy");
+        let narrow = map(512, |_| grey(0.5));
+        assert!(matches!(lighting_copy(&narrow, None, LIGHTING_MAX_WIDTH), Cow::Borrowed(_)), "a narrower source is not copied");
     }
 
     #[test]

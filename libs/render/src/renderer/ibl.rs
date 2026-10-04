@@ -8,9 +8,20 @@
 //! analytic sky reflection. `Background::Environment` draws the dome as the
 //! sky (`DrawEnvBackground`); once it is up the frame skips its analytic
 //! dome.
+//!
+//! Preparations land at the renderer's pace (K1): one job at a time, and a
+//! job runs to its end even when the world declares another key meanwhile
+//! (a running clock re-declares its sun every quarter hour, or every
+//! frame); its result is adopted when it lands, newer than what is bound,
+//! and then the latest key prepares. So light and sky are at most one
+//! preparation behind the world and always come from the same preparation.
+//! Only a change of map cancels the job in flight (another `Arc` registered
+//! under its handle, another environment named, an unregister): the job
+//! polls a token between its stages and stops, and whatever it still
+//! returns is rejected when it is taken.
 use super::*;
-use crate::hdri::prepare::{prepare_ibl_sized, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH};
-use makepad_draw::makepad_platform::thread::{Lane, SubmitError, TaskHandle, TaskPool};
+use crate::hdri::prepare::{prepare_ibl_until, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
+use makepad_draw::makepad_platform::thread::{CancellationToken, Lane, SubmitError, TaskHandle, TaskPool};
 use makepad_render_material::ibl::{EnvMap, EnvPreset};
 use makepad_scene::{Background, EnvSun, Environment, IblSource, TextureRef};
 use std::collections::HashMap;
@@ -175,6 +186,21 @@ struct IblJobResult {
     baked_sun: Option<EnvSun>,
 }
 
+/// The Heavy job in flight. Kept until it ends, also once cancelled, so
+/// no second job ever runs beside it.
+struct IblJob {
+    handle: TaskHandle<Option<IblJobResult>>,
+    /// What it prepares.
+    key: PrepareKey,
+    /// The registered map it prepares (`None` for a procedural index): its
+    /// result is adopted only while this is still the map registered under
+    /// the handle (`Arc::ptr_eq`). Holding it also keeps the allocation from
+    /// being reused by a new map while the job runs.
+    map: Option<Arc<EnvMap>>,
+    /// Set on a change of map; the job polls it between its stages.
+    cancel: CancellationToken,
+}
+
 #[derive(Default)]
 pub(super) struct IblState {
     /// Host-registered HDR environments, by the handle documents name.
@@ -188,24 +214,28 @@ pub(super) struct IblState {
     dome: Option<Texture>,
     dome_size: (usize, usize),
     /// What the world asked for on the last `resolve_ibl` (None: no
-    /// environment, or one that cannot be built). What `environment_pending`
-    /// compares the prepared key and the failed key with.
+    /// environment, one that cannot be built, or one unregistered since).
+    /// What `environment_pending` compares the prepared key and the failed
+    /// key with.
     wanted: Option<PrepareKey>,
-    /// What the textures and numbers below were prepared for.
+    /// What the textures and numbers below were prepared for, while they
+    /// are of the map registered now: a re-registration clears it (the new
+    /// map then prepares while these stay bound).
     prepared_for: Option<PrepareKey>,
+    /// The bound preparation's key and generation (`None`: nothing bound).
+    /// A result is adopted only when it is newer than this one.
+    bound: Option<(PrepareKey, u64)>,
     /// The bound lighting copy's numbers. `sh` is `Some` exactly while a
-    /// preparation is bound (set in `adopt_ibl`, cleared in `drop_ibl`); it
-    /// outlives `prepared_for`, which a re-registration clears.
+    /// preparation is bound (set in `adopt_ibl`, cleared in `unbind_ibl`);
+    /// it outlives `prepared_for`, which a re-registration clears.
     sh: Option<[[f32; 3]; 9]>,
     mean_luminance: f32,
     horizon_rgb: Vec3f,
     /// The sun filled in the bound lighting copy: the declared one, else a
     /// procedural hdri preset's baked one.
     filled_sun: Option<EnvSun>,
-    /// The job in flight, what it prepares, and the generation it carries
-    /// (a result from an older generation is stale and dropped).
-    job: Option<TaskHandle<Option<IblJobResult>>>,
-    job_for: Option<PrepareKey>,
+    /// The job in flight, and the last generation submitted.
+    job: Option<IblJob>,
     generation: u64,
     /// A key whose job failed (a worker panic) is not retried every frame.
     failed_for: Option<PrepareKey>,
@@ -232,11 +262,41 @@ pub const PROCEDURAL_HDRI_WIDTH: usize = 1024;
 const SYNC_DOME_WIDTH: usize = 512;
 const SYNC_ATLAS_WIDTH: usize = 64;
 const SYNC_HDRI_WIDTH: usize = 256;
+const SYNC_SIZES: PrepareSizes = PrepareSizes { dome: SYNC_DOME_WIDTH, atlas: SYNC_ATLAS_WIDTH, lighting: SYNC_DOME_WIDTH };
+/// What a job prepares at: the engine's sizes.
+const JOB_SIZES: PrepareSizes = PrepareSizes { dome: DOME_MAX_WIDTH, atlas: ATLAS_WIDTH, lighting: LIGHTING_MAX_WIDTH };
 
 /// Runs `f(i)` for every `i in 0..n`, however it likes: `fan_out` on the
 /// pool inside a job, a plain loop in the synchronous fallback. A bake takes
 /// it to spread its rows.
 type RowRunner<'a> = &'a dyn Fn(usize, &(dyn Fn(usize) + Sync));
+
+/// A row runner over `run` that runs no more rows once `cancel` is set: a
+/// cancelled job's bake ends within a row (`build_ibl` then stops).
+fn rows_until_cancelled<'a>(run: RowRunner<'a>, cancel: &'a CancellationToken) -> impl Fn(usize, &(dyn Fn(usize) + Sync)) + 'a {
+    move |n, f| {
+        run(n, &|i| {
+            if !cancel.is_cancelled() {
+                f(i)
+            }
+        })
+    }
+}
+
+/// The closed-pool path prepares on the UI thread: the source is shrunk to
+/// the small dome's width before anything else reads it, so the sanity scan,
+/// the dome, the lighting copy, its sun removal, the meter and the band all
+/// run on the small map. A malformed map (fewer texels than its size says)
+/// is left to the preparation's own sanity check: `resized` would index
+/// past its data.
+fn shrunk_for_sync(map: Arc<EnvMap>) -> Arc<EnvMap> {
+    let well_formed = map.height >= 1 && map.data.len() >= map.width * map.height;
+    if well_formed && map.width > SYNC_DOME_WIDTH {
+        Arc::new(map.resized(SYNC_DOME_WIDTH))
+    } else {
+        map
+    }
+}
 
 /// The name `IblSource::Procedural(i)` stands for.
 pub fn procedural_environment_name(i: u32) -> Option<&'static str> {
@@ -278,9 +338,10 @@ fn procedural_env_map(
 }
 
 /// Build everything for one key: the map (registered, or baked/painted for
-/// a procedural index), then `prepare_ibl_sized` with the declared sun
-/// filled. Pure apart from `run`, so the job and the synchronous fallback
-/// share it.
+/// a procedural index), then `prepare_ibl_until` with the declared sun
+/// filled. Pure apart from `run` and `stop`, so the job and the synchronous
+/// fallback share it. `None` when the source cannot be built or `stop` said
+/// so.
 #[allow(clippy::too_many_arguments)]
 fn build_ibl(
     generation: u64,
@@ -289,9 +350,9 @@ fn build_ibl(
     intensity: f32,
     rotation_deg: f32,
     run: RowRunner,
-    dome_cap: usize,
-    atlas_width: usize,
+    sizes: PrepareSizes,
     bake_width: usize,
+    stop: &dyn Fn() -> bool,
 ) -> Option<IblJobResult> {
     let (map, baked_sun) = match key.source {
         IblSource::Hdri(_) => (map?, None),
@@ -300,13 +361,16 @@ fn build_ibl(
             (Arc::new(m), s)
         }
     };
+    if stop() {
+        return None;
+    }
     // The sun filled in the lighting copy: the one the world declares, else
     // the one a procedural hdri preset baked (a host that names a preset by
     // index has no map to declare a sun from). Either way the directional
     // light carries it (`ibl_sun`, renderer/env_sun.rs) and the SH, the
     // atlas and the meter do not.
     let fill = key.sun.or(baked_sun);
-    let prepared = prepare_ibl_sized(&map, fill.as_ref(), intensity, rotation_deg, dome_cap, atlas_width);
+    let prepared = prepare_ibl_until(&map, fill.as_ref(), intensity, rotation_deg, sizes, stop)?;
     Some(IblJobResult { generation, key, intensity, rotation_deg, prepared, baked_sun })
 }
 
@@ -350,10 +414,16 @@ pub(super) fn env_dome_controls(
 impl Renderer {
     /// Make an HDR environment available to `IblSource::Hdri(texture)`.
     /// Decoding (and its budget) is the host's: render-material's
-    /// `ibl::load_hdr` confines it. Re-registering the handle a world
-    /// currently shows prepares the new map in the background; the old
-    /// textures stay bound until it lands.
+    /// `ibl::load_hdr` confines it. Registering the map that is registered
+    /// under the handle already (the same `Arc`) changes nothing: a host may
+    /// do it every frame. Registering another map is a change of map: a job
+    /// preparing the old one is cancelled and never lands, and a world that
+    /// names the handle prepares the new map in the background (a restart),
+    /// while the old textures and numbers stay bound until it lands.
     pub fn register_environment(&mut self, texture: TextureRef, env: Arc<EnvMap>) {
+        if self.ibl.maps.get(&texture).is_some_and(|m| Arc::ptr_eq(m, &env)) {
+            return;
+        }
         let names = |k: Option<IblSource>| k == Some(IblSource::Hdri(texture));
         if names(self.ibl.key.map(|k| k.0)) {
             self.ibl.key = None;
@@ -364,10 +434,36 @@ impl Renderer {
         if names(self.ibl.failed_for.map(|p| p.source)) {
             self.ibl.failed_for = None;
         }
-        if names(self.ibl.job_for.map(|p| p.source)) {
+        if names(self.ibl.job.as_ref().map(|j| j.key.source)) {
             self.cancel_ibl_job();
         }
         self.ibl.maps.insert(texture, env);
+    }
+
+    /// Drop the map registered under `texture` and any preparation of it: a
+    /// job preparing it is cancelled (it never lands), and when the bound
+    /// textures and numbers are its, they go too. This releases the
+    /// renderer's reference to the map (a cancelled job's own goes when it
+    /// winds down). A world that still names the handle names an unknown
+    /// source from here on: nothing prepares, nothing is awaited, and the
+    /// analytic sky and rig take over, as before it was registered.
+    pub fn unregister_environment(&mut self, texture: TextureRef) {
+        if self.ibl.maps.remove(&texture).is_none() {
+            return;
+        }
+        let names = |k: Option<IblSource>| k == Some(IblSource::Hdri(texture));
+        if names(self.ibl.job.as_ref().map(|j| j.key.source)) {
+            self.cancel_ibl_job();
+        }
+        if names(self.ibl.bound.map(|b| b.0.source)) {
+            self.unbind_ibl();
+        }
+        if names(self.ibl.wanted.map(|w| w.source)) {
+            self.ibl.wanted = None;
+        }
+        if names(self.ibl.failed_for.map(|p| p.source)) {
+            self.ibl.failed_for = None;
+        }
     }
 
     /// The IBL lane texture for this frame, when the environment asks for one.
@@ -381,9 +477,14 @@ impl Renderer {
         self.ibl.dome.as_ref()
     }
 
-    /// A preparation for the world's current source has landed.
+    /// A preparation is bound: its textures are up and the frame draws
+    /// with them. Not necessarily the world's current source or key: the
+    /// previous preparation stays bound while the next one prepares (a new
+    /// key, a new map, another environment named), so light and sky never
+    /// drop out in between. A host that waits for the world's own
+    /// environment waits for [`Self::environment_pending`] to turn false.
     pub fn environment_ready(&self) -> bool {
-        self.ibl.prepared_for.is_some() && self.ibl.texture.is_some()
+        self.ibl.bound.is_some() && self.ibl.texture.is_some()
     }
 
     /// ... and its dome texture with it.
@@ -391,29 +492,32 @@ impl Renderer {
         self.environment_ready() && self.ibl.dome.is_some()
     }
 
-    /// The world's environment is not prepared yet: a job is in flight (or
+    /// The world's environment is not prepared yet: a job is preparing (or
     /// finished, and waits for the next draw to adopt it), or the world
-    /// wants one that no job was submitted for (the queue was full; the
-    /// next draw retries). A host keeps drawing while this holds, since a
-    /// draw is what adopts a result and what retries; `items_ready` is
-    /// false meanwhile, so a locked-time host does not take the frame
-    /// before the environment is in it. A source that cannot be built (an
-    /// index past the table, a handle nobody registered) and a failed job
-    /// are not pending: nothing will come.
+    /// wants a key no job was submitted for yet (the queue was full, or the
+    /// job in flight is for an older key: the draw after it lands submits
+    /// the latest). A host keeps drawing while this holds, since a draw is
+    /// what adopts a result and what submits; `items_ready` is false
+    /// meanwhile, so a locked-time host does not take the frame before the
+    /// environment is in it. A source that cannot be built (an index past
+    /// the table, a handle nobody registered), a failed job, and a job
+    /// cancelled by a change of map that is winding down are not pending:
+    /// nothing will come from them.
     pub fn environment_pending(&self) -> bool {
         let s = &self.ibl;
-        s.job.is_some() || s.wanted.is_some_and(|w| s.prepared_for != Some(w) && s.failed_for != Some(w))
+        let live = s.job.as_ref().is_some_and(|j| !j.cancel.is_cancelled());
+        live || s.wanted.is_some_and(|w| s.prepared_for != Some(w) && s.failed_for != Some(w))
     }
 
-    /// How many preparations were submitted so far (tests: a key change
-    /// prepares exactly once).
+    /// How many preparations were submitted so far, the synchronous ones of
+    /// a closed pool included (tests: a key change prepares exactly once).
     pub fn environment_preparations(&self) -> u64 {
         self.ibl.generation
     }
 
     /// The SH9 irradiance coefficients of the BOUND lighting copy. The
     /// three numeric accessors are gated on the bound numbers (`sh` is set
-    /// in `adopt_ibl` and cleared in `drop_ibl`), not on `prepared_for`:
+    /// in `adopt_ibl` and cleared in `unbind_ibl`), not on `prepared_for`:
     /// re-registering the bound handle clears `prepared_for`, and the rig,
     /// the exposure and the fog must keep the old map's values until the
     /// new ones land (a day cycle re-registers every quarter hour).
@@ -431,10 +535,13 @@ impl Renderer {
         self.ibl.sh.map(|_| self.ibl.horizon_rgb)
     }
 
-    /// The sun the bound lighting copy was prepared without: the world's
-    /// `Environment.sun` as the job saw it, else the sun a procedural hdri
-    /// preset baked. `None` when the map kept all its light (no declared
-    /// sun, an engine preset, an overcast bake).
+    /// The key the bound preparation was made with, the sun its lighting
+    /// copy was prepared without: the world's `Environment.sun` as the job
+    /// saw it, else the sun a procedural hdri preset baked. `None` when the
+    /// map kept all its light (no declared sun, an engine preset, an
+    /// overcast bake). The rig lights with this key, not with the one the
+    /// world declares meanwhile (renderer/env_sun.rs): light and sky come
+    /// from the same preparation.
     pub fn ibl_sun(&self) -> Option<EnvSun> {
         self.ibl.sh.and(self.ibl.filled_sun)
     }
@@ -459,15 +566,17 @@ impl Renderer {
         let wanted = PrepareKey { source: ibl.source, sun };
         // Set before the submit: a source that cannot be built drops it again.
         self.ibl.wanted = Some(wanted);
-        // A job for another key than the world now names is stale: drop it
-        // before it can land (else a world that returns to the bound key
-        // while that job runs would see the abandoned source's textures
-        // flip in, and need a second job to get its own back).
-        if self.ibl.job_for.is_some() && self.ibl.job_for != Some(wanted) {
+        // Another environment named is a change of map: the job in flight is
+        // cancelled (else a world that returns to the bound source while it
+        // runs would see the abandoned source's textures flip in, and need a
+        // second job to get its own back). A new key for the same source is
+        // not: that job runs to its end and lands.
+        if self.ibl.job.as_ref().is_some_and(|j| j.key.source != wanted.source) {
             self.cancel_ibl_job();
         }
         self.adopt_finished_ibl(cx);
-        if self.ibl.prepared_for != Some(wanted) && self.ibl.failed_for != Some(wanted) && self.ibl.job_for != Some(wanted) {
+        // One job at a time: the latest key prepares once none is in flight.
+        if self.ibl.job.is_none() && self.ibl.prepared_for != Some(wanted) && self.ibl.failed_for != Some(wanted) {
             self.submit_ibl(cx, wanted, ibl.intensity, ibl.rotation_deg);
         }
         // Intensity and rotation ride the meta row: rewrite texel 9 when
@@ -479,36 +588,45 @@ impl Renderer {
         }
     }
 
+    /// A change of map: the job in flight stops at its next stage (one not
+    /// started yet never starts). It stays the job until it ends, so no
+    /// second job runs beside it, and whatever it returns is rejected when
+    /// it is taken (`job_is_current`).
     fn cancel_ibl_job(&mut self) {
-        if let Some(job) = self.ibl.job.take() {
-            // Only a job that has not started stops; a running one finishes
-            // and its result is dropped (the handle is not polled again).
-            job.cancel();
-            job.detach();
+        if let Some(job) = &self.ibl.job {
+            job.cancel.cancel();
+            job.handle.cancel();
         }
-        self.ibl.job_for = None;
     }
 
-    /// No environment: nothing bound, nothing kept (the maps and the
-    /// background draw stay; they are cheap and the world may ask again).
+    /// No environment: nothing bound, nothing kept but the maps (the host
+    /// unregisters those) and the background draw, which are what the
+    /// world may ask for again.
     fn drop_ibl(&mut self) {
         self.cancel_ibl_job();
+        self.ibl.wanted = None;
+        self.ibl.failed_for = None;
+        self.unbind_ibl();
+    }
+
+    /// Release the bound preparation: textures, numbers, key.
+    fn unbind_ibl(&mut self) {
         let s = &mut self.ibl;
-        s.wanted = None;
         s.key = None;
         s.texture = None;
         s.dome = None;
         s.dome_size = (0, 0);
         s.prepared_for = None;
-        s.failed_for = None;
+        s.bound = None;
         s.sh = None;
         s.mean_luminance = 0.0;
         s.horizon_rgb = Vec3f::default();
         s.filled_sun = None;
     }
 
-    /// Submit the Heavy job for `wanted`. A full queue retries next frame;
-    /// a closed pool (wasm without atomics) prepares now, small.
+    /// Submit the Heavy job for `wanted` (only called with no job in
+    /// flight). A full queue retries next frame; a closed pool (wasm
+    /// without atomics) prepares now, small.
     fn submit_ibl(&mut self, cx: &mut Cx, wanted: PrepareKey, intensity: f32, rotation_deg: f32) {
         let map = match wanted.source {
             IblSource::Hdri(t) => self.ibl.maps.get(&t).cloned(),
@@ -524,7 +642,6 @@ impl Renderer {
             self.drop_ibl();
             return;
         }
-        self.cancel_ibl_job();
         let pool = cx.task_pool();
         match pool.reserve(Lane::Heavy) {
             Ok(slot) => {
@@ -532,12 +649,18 @@ impl Renderer {
                 self.ibl.queue_full_logged = false;
                 let generation = self.ibl.generation;
                 let rows: TaskPool = pool.clone();
-                self.ibl.job = Some(slot.submit(move || {
-                    // Inside a Heavy job: a bake's rows fan out over the pool.
-                    let run = move |n: usize, f: &(dyn Fn(usize) + Sync)| rows.fan_out(Lane::Heavy, n, f);
-                    build_ibl(generation, wanted, map, intensity, rotation_deg, &run, DOME_MAX_WIDTH, ATLAS_WIDTH, PROCEDURAL_HDRI_WIDTH)
-                }));
-                self.ibl.job_for = Some(wanted);
+                let cancel = CancellationToken::new();
+                let token = cancel.clone();
+                let job_map = map.clone();
+                let handle = slot.submit(move || {
+                    // Inside a Heavy job: a bake's rows fan out over the pool
+                    // and stop once the token is set; the stages poll it too.
+                    let pool_rows = move |n: usize, f: &(dyn Fn(usize) + Sync)| rows.fan_out(Lane::Heavy, n, f);
+                    let run = rows_until_cancelled(&pool_rows, &token);
+                    let stop = || token.is_cancelled();
+                    build_ibl(generation, wanted, map, intensity, rotation_deg, &run, JOB_SIZES, PROCEDURAL_HDRI_WIDTH, &stop)
+                });
+                self.ibl.job = Some(IblJob { handle, key: wanted, map: job_map, cancel });
             }
             Err(SubmitError::QueueFull) => {
                 if !self.ibl.queue_full_logged {
@@ -552,7 +675,8 @@ impl Renderer {
                         f(i);
                     }
                 };
-                let result = build_ibl(self.ibl.generation, wanted, map, intensity, rotation_deg, &serial, SYNC_DOME_WIDTH, SYNC_ATLAS_WIDTH, SYNC_HDRI_WIDTH);
+                let map = map.map(shrunk_for_sync);
+                let result = build_ibl(self.ibl.generation, wanted, map, intensity, rotation_deg, &serial, SYNC_SIZES, SYNC_HDRI_WIDTH, &|| false);
                 match result {
                     Some(r) => self.adopt_ibl(cx, r),
                     None => self.ibl.failed_for = Some(wanted),
@@ -561,21 +685,52 @@ impl Renderer {
         }
     }
 
-    /// Take a finished job: adopt its result when it is the newest, drop a
-    /// stale one, remember a failure so it is not retried every frame.
+    /// Take a finished job. Its result is adopted when the job is current
+    /// (`job_is_current`) and the result is newer than the bound
+    /// preparation, even if the world declared another key while it ran:
+    /// the next submit prepares the latest one. A result of a replaced map
+    /// or of a source the world no longer names is dropped. A failure is
+    /// remembered (so it is not retried every frame) only for a current job
+    /// that was not cancelled.
     fn adopt_finished_ibl(&mut self, cx: &mut Cx) {
-        let Some(result) = self.ibl.job.as_mut().and_then(|j| j.try_take()) else { return };
-        self.ibl.job = None;
-        let job_for = self.ibl.job_for.take();
+        let Some(result) = self.ibl.job.as_mut().and_then(|j| j.handle.try_take()) else { return };
+        let Some(job) = self.ibl.job.take() else { return };
+        let current = self.job_is_current(&job);
+        let cancelled = job.cancel.is_cancelled();
+        let bound = self.ibl.bound.map_or(0, |b| b.1);
         match result {
-            Ok(Some(r)) if r.generation == self.ibl.generation => self.adopt_ibl(cx, r),
-            Ok(Some(_)) => {}
-            Ok(None) => self.ibl.failed_for = job_for,
+            Ok(Some(r)) => {
+                if current && r.generation > bound {
+                    self.adopt_ibl(cx, r);
+                }
+            }
+            Ok(None) => {
+                if current && !cancelled {
+                    self.ibl.failed_for = Some(job.key);
+                }
+            }
             Err(e) => {
-                log!("ibl: environment preparation failed: {e:?}");
-                self.ibl.failed_for = job_for;
+                if !cancelled {
+                    log!("ibl: environment preparation failed: {e:?}");
+                    if current {
+                        self.ibl.failed_for = Some(job.key);
+                    }
+                }
             }
         }
+    }
+
+    /// The job prepares the source the world names, from the map that is
+    /// registered under it now (the same `Arc`; a procedural index has no
+    /// map to replace).
+    fn job_is_current(&self, job: &IblJob) -> bool {
+        let s = &self.ibl;
+        let named = s.wanted.is_some_and(|w| w.source == job.key.source);
+        let same_map = match job.key.source {
+            IblSource::Hdri(t) => s.maps.get(&t).zip(job.map.as_ref()).is_some_and(|(now, prepared)| Arc::ptr_eq(now, prepared)),
+            IblSource::Procedural(_) => true,
+        };
+        named && same_map
     }
 
     /// Upload a preparation: both textures replaced at once, the numbers
@@ -601,6 +756,7 @@ impl Renderer {
         s.dome_size = (p.dome_width, p.dome_height);
         s.key = Some((r.key.source, r.intensity.to_bits(), r.rotation_deg.to_bits()));
         s.prepared_for = Some(r.key);
+        s.bound = Some((r.key, r.generation));
         s.failed_for = None;
         s.sh = Some(p.sh);
         s.mean_luminance = p.mean_luminance;
@@ -685,6 +841,16 @@ impl Renderer {
         self.ibl.sh = Some(sh);
         self.ibl.mean_luminance = mean_luminance;
         self.ibl.horizon_rgb = horizon_rgb;
+    }
+
+    /// ... and the key the hand-fed preparation was made with (`ibl_sun`).
+    pub(super) fn feed_environment_sun_for_tests(&mut self, sun: Option<EnvSun>) {
+        self.ibl.filled_sun = sun;
+    }
+
+    /// A job is in flight, live or cancelled and winding down.
+    pub(super) fn ibl_job_in_flight(&self) -> bool {
+        self.ibl.job.is_some()
     }
 }
 
@@ -834,19 +1000,21 @@ mod tests {
         assert_eq!(size_of(&dome_a, &mut cx), (32, 16));
 
         // Switch to B and, before it lands, back to A and to B again: two
-        // more jobs: B, then B again after the world went back to A (the
-        // first B job is dropped as stale). One result adopted.
+        // more jobs: B, then B again after the world went back to A (naming
+        // A is a change of map: the first B job is cancelled and never
+        // lands; the second waits for it to wind down, one job at a time).
+        // One result adopted.
         renderer.resolve_ibl(&mut cx, &b);
         assert!(renderer.environment_pending());
         assert_eq!(renderer.ibl_dome_texture().map(|t| t.texture_id()), Some(dome_a.texture_id()), "A stays up while B prepares");
         assert!(renderer.environment_ready() && renderer.environment_dome_ready(), "A's textures stay bound");
         renderer.resolve_ibl(&mut cx, &a);
-        assert!(!renderer.environment_pending(), "back on the bound source: the B job is stale and dropped, nothing new is needed");
+        assert!(!renderer.environment_pending(), "back on the bound source: the B job is cancelled, nothing new is needed");
         assert_eq!(renderer.ibl_dome_texture().map(|t| t.texture_id()), Some(dome_a.texture_id()));
         renderer.resolve_ibl(&mut cx, &b);
-        assert_eq!(renderer.environment_preparations(), 3);
+        assert!(renderer.environment_pending());
         settle(&mut renderer, &mut cx, &b);
-        assert_eq!(renderer.environment_preparations(), 3, "settling submits nothing more");
+        assert_eq!(renderer.environment_preparations(), 3, "the cancelled B, then B; settling submits nothing more");
         let dome_b = renderer.ibl_dome_texture().cloned().unwrap();
         assert_eq!(size_of(&dome_b, &mut cx), (16, 8), "B's dome");
         assert!((renderer.ibl_mean_luminance().unwrap() - 0.75).abs() < 1.0e-3, "B's meter");
@@ -927,6 +1095,29 @@ mod tests {
         assert_eq!(renderer.environment_preparations(), 1, "and it is not repeated");
     }
 
+    /// M5: on a closed pool the preparation runs on the UI thread, so the
+    /// source is shrunk to the dome's 512 FIRST: the sanity scan, the dome,
+    /// the lighting copy, its sun removal, the meter and the band all run
+    /// on the small map, never on the full-resolution one. The numbers are
+    /// exactly those of a preparation of the 512 wide resize.
+    #[test]
+    fn a_closed_pool_shrinks_the_source_before_preparing_it() {
+        use crate::hdri::prepare::prepare_ibl_sized;
+        use makepad_draw::makepad_platform::thread::ShutdownMode;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.task_pool().close(ShutdownMode::CancelPending);
+        let mut renderer = Renderer::default();
+        let map = Arc::new(EnvMap::from_fn(1024, |d| [0.2 + 0.8 * d[1].max(0.0), 0.5 + 0.25 * d[0], 0.3 + 0.1 * d[2]]));
+        renderer.register_environment(TextureRef(3), map.clone());
+        renderer.resolve_ibl(&mut cx, &env_of(IblSource::Hdri(TextureRef(3)), 1.0, 0.0));
+        let small = prepare_ibl_sized(&map.resized(SYNC_DOME_WIDTH), None, 1.0, 0.0, SYNC_DOME_WIDTH, SYNC_ATLAS_WIDTH);
+        let full = prepare_ibl_sized(&map, None, 1.0, 0.0, SYNC_DOME_WIDTH, SYNC_ATLAS_WIDTH);
+        assert_ne!(full.sh, small.sh, "premise: the full-resolution passes give other numbers");
+        assert_eq!(renderer.ibl_sh9(), Some(&small.sh), "the SH of the shrunk source");
+        assert_eq!(renderer.ibl_mean_luminance(), Some(small.mean_luminance));
+        assert_eq!(renderer.ibl_horizon_rgb(), Some(small.horizon_rgb));
+    }
+
     /// A locked-time host takes a frame once `items_ready` says so, and it
     /// records again until then: with the environment preparing off the UI
     /// thread, the first frame has no lane texture, so the host has to wait
@@ -983,7 +1174,7 @@ mod tests {
         let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
         renderer.resolve_ibl(&mut cx, &env);
         let start = std::time::Instant::now();
-        while !renderer.ibl.job.as_ref().is_some_and(|j| j.is_finished()) {
+        while !renderer.ibl.job.as_ref().is_some_and(|j| j.handle.is_finished()) {
             assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
@@ -1094,7 +1285,7 @@ mod tests {
         let env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
         renderer.resolve_ibl_for(&mut cx, &env, EnvScope::Scene);
         let start = std::time::Instant::now();
-        while !renderer.ibl.job.as_ref().is_some_and(|j| j.is_finished()) {
+        while !renderer.ibl.job.as_ref().is_some_and(|j| j.handle.is_finished()) {
             assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
@@ -1298,5 +1489,263 @@ mod tests {
         // The controls carry the logical size the lookup needs.
         let (_, bg2) = env_dome_controls(0.0, 1.0, &Mat4f::identity(), true, 1.0, 0.0, Some((w, h)));
         assert_eq!((bg2.z, bg2.w), (w as f32, h as f32));
+    }
+
+    /// A key the world declares on one frame: a sun at `az` degrees.
+    fn key_at(az: f32) -> EnvSun {
+        let cos_radius = 2.0f32.to_radians().cos();
+        EnvSun { dir: crate::hdri::dir_from_az_el(az, 40.0), radiance: vec3f(50.0, 50.0, 50.0), cos_radius, facing: 1.0, cos_cover: cos_radius }
+    }
+
+    /// One adoption seen while frames run: the adopted preparation's
+    /// generation and key, the bound meter, and the key the world declared
+    /// on the frame it landed.
+    struct Landing {
+        generation: u64,
+        key: PrepareKey,
+        mean: f32,
+        declared: PrepareKey,
+    }
+
+    /// Run frames, each declaring a new key (the sun a tenth of a degree
+    /// further), until `n` more preparations were adopted.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn frames_until_landed(renderer: &mut Renderer, cx: &mut Cx, env: &mut Environment, frame: &mut u32, n: usize) -> Vec<Landing> {
+        let start = std::time::Instant::now();
+        let mut landed = Vec::new();
+        let mut last = renderer.ibl.bound.map(|b| b.1);
+        while landed.len() < n {
+            assert!(start.elapsed().as_secs() < 180, "{} of {n} preparations landed in 180 s while the key changed every frame", landed.len());
+            *frame += 1;
+            env.sun = Some(key_at(*frame as f32 * 0.1));
+            renderer.resolve_ibl(cx, env);
+            if let Some((key, generation)) = renderer.ibl.bound {
+                if last != Some(generation) {
+                    let source = env.ibl.unwrap().source;
+                    landed.push(Landing { generation, key, mean: renderer.ibl_mean_luminance().unwrap(), declared: PrepareKey { source, sun: env.sun } });
+                    last = Some(generation);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        landed
+    }
+
+    /// K1: preparations land at the renderer's pace. A host whose declared
+    /// key changes every frame (a running clock) does not restart the job:
+    /// the job in flight runs to its end, its result is adopted although
+    /// the world has moved on meanwhile (it is newer than what is bound),
+    /// then the latest key prepares; one job at a time, so the light and
+    /// the sky are at most one preparation behind. A new map under the
+    /// handle is a change of map: the job in flight is cancelled and
+    /// nothing of the replaced map lands after it. Once the key holds, the
+    /// last one lands.
+    #[test]
+    fn a_key_that_changes_every_frame_lands_at_the_renderers_pace() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        renderer.register_environment(TextureRef(5), grey(16, 0.25));
+        let mut env = env_of(IblSource::Hdri(TextureRef(5)), 1.0, 0.0);
+        let mut frame = 0u32;
+        let landed = frames_until_landed(&mut renderer, &mut cx, &mut env, &mut frame, 3);
+        for (i, l) in landed.iter().enumerate() {
+            assert!(i == 0 || l.generation > landed[i - 1].generation, "each adopted preparation is newer than the last");
+            assert_ne!(l.key, l.declared, "adopted although the world declared another key by then");
+            assert!((l.mean - 0.25).abs() < 1.0e-3, "the one map: {}", l.mean);
+        }
+        assert!(
+            renderer.environment_preparations() <= landed.last().unwrap().generation + 1,
+            "one job at a time and none restarted: {} submitted for {} frames",
+            renderer.environment_preparations(),
+            frame
+        );
+
+        // A new map while the latest key prepares: that job (the last one
+        // submitted) is cancelled and only the new map lands from here on.
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("the latest key prepares");
+        let replaced = renderer.environment_preparations();
+        renderer.register_environment(TextureRef(5), grey(16, 0.75));
+        assert!(cancel.is_cancelled(), "a new map cancels the job in flight");
+        for l in frames_until_landed(&mut renderer, &mut cx, &mut env, &mut frame, 2) {
+            assert!(l.generation > replaced, "the replaced map's job never lands");
+            assert!((l.mean - 0.75).abs() < 1.0e-3, "only the new map lands: {}", l.mean);
+        }
+
+        // The key holds: the last declared one lands.
+        settle(&mut renderer, &mut cx, &env);
+        assert_eq!(renderer.ibl.bound.map(|b| b.0), Some(PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: env.sun }));
+        assert!(!renderer.environment_pending());
+    }
+
+    /// K1: only a change of map cancels the job in flight (a new map under
+    /// the handle, another environment named; an unregister, below). A job
+    /// that already finished when its map was replaced is still taken, and
+    /// the check at adoption rejects it: nothing of a replaced map is ever
+    /// bound.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn a_change_of_map_cancels_the_running_job_and_never_adopts_its_result() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        let env = env_of(IblSource::Hdri(TextureRef(6)), 1.0, 0.0);
+        renderer.register_environment(TextureRef(6), grey(16, 0.25));
+        settle(&mut renderer, &mut cx, &env);
+        let mean = |r: &Renderer| r.ibl_mean_luminance().unwrap();
+
+        // A new map while a job runs.
+        renderer.register_environment(TextureRef(6), grey(16, 0.5));
+        renderer.resolve_ibl(&mut cx, &env);
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("the new map prepares");
+        renderer.register_environment(TextureRef(6), grey(16, 0.75));
+        assert!(cancel.is_cancelled(), "a new map cancels the job in flight");
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.75).abs() < 1.0e-3, "{}", mean(&renderer));
+
+        // A job that finished before its map was replaced: taken, rejected.
+        renderer.register_environment(TextureRef(6), grey(16, 0.1));
+        renderer.resolve_ibl(&mut cx, &env);
+        let start = std::time::Instant::now();
+        while !renderer.ibl.job.as_ref().is_some_and(|j| j.handle.is_finished()) {
+            assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let bound = renderer.ibl.bound;
+        renderer.register_environment(TextureRef(6), grey(16, 0.9));
+        renderer.resolve_ibl(&mut cx, &env);
+        assert_eq!(renderer.ibl.bound, bound, "the replaced map's finished preparation is not adopted");
+        assert!((mean(&renderer) - 0.75).abs() < 1.0e-3, "the bound numbers stay: {}", mean(&renderer));
+        assert!(renderer.environment_pending(), "the new map prepares");
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.9).abs() < 1.0e-3, "{}", mean(&renderer));
+
+        // Another environment named while a job runs.
+        renderer.register_environment(TextureRef(7), grey(16, 0.6));
+        renderer.resolve_ibl(&mut cx, &env_of(IblSource::Hdri(TextureRef(7)), 1.0, 0.0));
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("7 prepares");
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(cancel.is_cancelled(), "naming another environment cancels the job in flight");
+        assert!(!renderer.environment_pending(), "6 is bound: nothing to wait for while 7's job winds down");
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.9).abs() < 1.0e-3, "7 never lands: {}", mean(&renderer));
+    }
+
+    /// M3: registering the map that is registered (the same `Arc`) is no
+    /// change: the job in flight runs on and a landed preparation stays.
+    #[test]
+    fn the_identical_map_registered_again_does_not_restart() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        let map = grey(16, 0.25);
+        let env = env_of(IblSource::Hdri(TextureRef(8)), 1.0, 0.0);
+        renderer.register_environment(TextureRef(8), map.clone());
+        renderer.resolve_ibl(&mut cx, &env);
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("preparing");
+        renderer.register_environment(TextureRef(8), map.clone());
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(!cancel.is_cancelled() && renderer.ibl_job_in_flight(), "the same job runs on");
+        assert_eq!(renderer.environment_preparations(), 1);
+        settle(&mut renderer, &mut cx, &env);
+        let lane = renderer.ibl_texture().unwrap().texture_id();
+        for _ in 0..3 {
+            renderer.register_environment(TextureRef(8), map.clone());
+            renderer.resolve_ibl(&mut cx, &env);
+        }
+        assert!(!renderer.environment_pending());
+        assert_eq!(renderer.environment_preparations(), 1);
+        assert_eq!(renderer.ibl_texture().unwrap().texture_id(), lane);
+    }
+
+    /// M8: unregistering drops the map and any preparation of it: nothing
+    /// of it stays bound, the renderer keeps no reference to it (the host's
+    /// `Arc` is the last), and a world that still names it names an unknown
+    /// source (nothing prepares, nothing is awaited). A job in flight for it
+    /// is cancelled and never lands.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn unregistering_releases_the_map_and_any_preparation_of_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        let map = grey(16, 0.25);
+        let env = env_of(IblSource::Hdri(TextureRef(9)), 1.0, 0.0);
+        renderer.register_environment(TextureRef(9), map.clone());
+        settle(&mut renderer, &mut cx, &env);
+        assert!(renderer.environment_ready());
+        renderer.unregister_environment(TextureRef(9));
+        assert!(renderer.ibl.maps.is_empty());
+        assert!(renderer.ibl_texture().is_none() && renderer.ibl_dome_texture().is_none() && renderer.ibl_sh9().is_none());
+        assert!(!renderer.environment_ready() && !renderer.environment_pending() && renderer.items_ready(&cx));
+        assert_eq!(Arc::strong_count(&map), 1, "the renderer keeps no reference");
+        for _ in 0..3 {
+            renderer.resolve_ibl(&mut cx, &env);
+        }
+        assert_eq!(renderer.environment_preparations(), 1, "an unknown source prepares nothing");
+        assert!(!renderer.environment_pending() && renderer.ibl_texture().is_none());
+
+        // While a job prepares it.
+        let map = grey(16, 0.75);
+        renderer.register_environment(TextureRef(9), map.clone());
+        renderer.resolve_ibl(&mut cx, &env);
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("preparing");
+        renderer.unregister_environment(TextureRef(9));
+        assert!(cancel.is_cancelled(), "the job in flight is cancelled");
+        assert!(!renderer.environment_pending());
+        let start = std::time::Instant::now();
+        while renderer.ibl_job_in_flight() {
+            assert!(start.elapsed().as_secs() < 180, "the cancelled job did not wind down within 180 s");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            renderer.resolve_ibl(&mut cx, &env);
+        }
+        assert!(renderer.ibl_texture().is_none() && renderer.ibl_sh9().is_none(), "it never lands");
+        assert_eq!(Arc::strong_count(&map), 1);
+        // A handle nobody registered: nothing happens.
+        renderer.unregister_environment(TextureRef(42));
+    }
+
+    /// K1: the job asks between stages: right after its bake (a procedural
+    /// index) and then inside the preparation (hdri/prepare.rs); told to
+    /// stop it builds nothing.
+    #[test]
+    fn a_build_asks_to_stop_after_its_bake() {
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| {
+            for i in 0..n {
+                f(i);
+            }
+        };
+        let key = PrepareKey { source: IblSource::Procedural(0), sun: None };
+        let asked = std::cell::Cell::new(0usize);
+        let at_once = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert!(build_ibl(1, key, None, 1.0, 0.0, &serial, SYNC_SIZES, SYNC_HDRI_WIDTH, &at_once).is_none());
+        assert_eq!(asked.get(), 1, "asked once, right after the bake");
+        asked.set(0);
+        let never = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert!(build_ibl(1, key, None, 1.0, 0.0, &serial, SYNC_SIZES, SYNC_HDRI_WIDTH, &never).is_some());
+        assert!(asked.get() > 1, "and again inside the preparation");
+    }
+
+    /// A cancelled job's bake runs no more rows: the row runner the job
+    /// hands the bake skips every row once the token is set.
+    #[test]
+    fn a_cancelled_bake_runs_no_more_rows() {
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| {
+            for i in 0..n {
+                f(i);
+            }
+        };
+        let cancel = CancellationToken::new();
+        let rows = rows_until_cancelled(&serial, &cancel);
+        let ran = std::sync::atomic::AtomicUsize::new(0);
+        rows(10, &|i| {
+            ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i == 3 {
+                cancel.cancel();
+            }
+        });
+        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), 4, "rows 0..=3 ran, the rest were skipped");
     }
 }

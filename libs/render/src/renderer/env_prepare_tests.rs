@@ -1,9 +1,10 @@
-//! HDRI phase 2 (C8): the environment preparation (prefilter atlas, dome,
-//! SH9, meter) runs exactly once per key — never per frame, never per poll
-//! — a re-registered map is a new key, and a key that changes while its job
-//! runs ends with the last key's texture. Device-free: `Cx::new` gives a
-//! pool (or a closed one, where C3 prepares synchronously; the counts are
-//! the same either way).
+//! HDRI phase 2: the environment preparation (prefilter atlas, dome, SH9,
+//! meter) runs exactly once per key — never per frame, never per poll — a
+//! re-registered map (another `Arc`) is a new key, and a world that names
+//! another environment while its job runs ends with the last key's
+//! texture. Device-free: `Cx::new` gives a real pool. On a closed pool
+//! (wasm without atomics) every key prepares on the spot, so the flip below
+//! prepares 4 times there, not 3; the counts are asserted for each.
 use super::*;
 use makepad_render_material::ibl::{sh9_irradiance, EnvMap};
 use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
@@ -38,6 +39,18 @@ fn settle(r: &mut Renderer, cx: &mut Cx, env: &Environment) {
     }
 }
 
+/// Resolve until no job is in flight, a cancelled one winding down
+/// included, so whatever it returns has been taken.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn wind_down(r: &mut Renderer, cx: &mut Cx, env: &Environment) {
+    let start = std::time::Instant::now();
+    while r.ibl_job_in_flight() {
+        assert!(start.elapsed().as_secs() < 180, "the job did not wind down within 180 s");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        r.resolve_ibl(cx, env);
+    }
+}
+
 #[test]
 fn a_key_change_prepares_exactly_once() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -59,20 +72,30 @@ fn a_key_change_prepares_exactly_once() {
 
     settle(&mut r, &mut cx, &eight);
     assert_eq!(r.ibl_preparations(), 2, "a new source prepares once");
-    assert_ne!(r.ibl_texture().unwrap().texture_id(), first);
+    let eight_texture = r.ibl_texture().unwrap().texture_id();
+    assert_ne!(eight_texture, first);
     let sh = *r.ibl_sh9().expect("the landed SH");
     let e = sh9_irradiance(&sh, [0.0, 1.0, 0.0]);
     assert!(e[0] > e[2], "eight is red over blue: {e:?}");
 
-    // A key that changes while its job may still be running: exactly one
-    // preparation for the abandoned key (C3 cancels it as stale the moment
-    // the world names eight again, and eight is still bound, so nothing
-    // more is submitted), and the texture is the LAST key's. 4 would mean
-    // the stale job landed and eight had to be prepared again.
+    // The world names seven and, before its job lands, eight again: naming
+    // another environment is a change of map, so seven's job is cancelled
+    // (renderer/ibl.rs, K1), and eight is still bound, so nothing more is
+    // submitted. The cancelled job is let wind down and whatever it returns
+    // is taken (and rejected) before the counts: exactly one preparation for
+    // seven, and the texture is still eight's. 4 would mean seven's result
+    // landed and eight had to be prepared again.
+    let pooled = cx.task_pool().is_open();
     r.resolve_ibl(&mut cx, &seven);
     settle(&mut r, &mut cx, &eight);
+    wind_down(&mut r, &mut cx, &eight);
     let after_flip = r.ibl_preparations();
-    assert!((3..=4).contains(&after_flip), "{after_flip}");
+    if pooled {
+        assert_eq!(after_flip, 3, "seven's job only");
+        assert_eq!(r.ibl_texture().unwrap().texture_id(), eight_texture, "eight's texture stays bound");
+    } else {
+        assert_eq!(after_flip, 4, "a closed pool prepares seven on the spot, then eight again");
+    }
     let sh = *r.ibl_sh9().expect("the landed SH");
     let e = sh9_irradiance(&sh, [0.0, 1.0, 0.0]);
     assert!(e[0] > e[2], "the stale result was dropped: {e:?}");
@@ -86,7 +109,8 @@ fn a_key_change_prepares_exactly_once() {
     // rig keeps the old map's numbers (no flicker on a day-cycle re-bake).
     r.register_environment(TextureRef(8), Arc::new(EnvMap::constant(32, [0.1, 0.1, 0.9])));
     r.resolve_ibl(&mut cx, &eight);
-    if r.ibl_pending() {
+    if pooled {
+        assert!(r.ibl_pending(), "a real pool prepares the new map in the background");
         let e = sh9_irradiance(r.ibl_sh9().expect("the old numbers stay while the new map prepares"), [0.0, 1.0, 0.0]);
         assert!(e[0] > e[2], "still the old (red) map's SH: {e:?}");
         assert!(r.env_lighting(&world_of(&eight)).is_some(), "the rig does not fall back to the analytic values");

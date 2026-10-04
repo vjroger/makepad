@@ -725,6 +725,14 @@ fn ggx_samples(r: f32, count: u32, texel_solid_angle: f32) -> Vec<([f32; 3], f32
 /// set over a box-filtered pyramid of the source (at most 512 wide), so the
 /// result is noise-free enough at 64 samples and deterministic.
 pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
+    prefilter_until(env, base_width, levels, &|| false).expect("a prefilter nobody stops runs to its end")
+}
+
+/// [`prefilter`] that asks `stop` before each level and gives up (`None`)
+/// once it says so: a background preparation whose environment was replaced
+/// stops within a level instead of finishing an atlas nobody will use. The
+/// same atlas as [`prefilter`] while `stop` says no.
+pub fn prefilter_until(env: &EnvMap, base_width: usize, levels: usize, stop: &dyn Fn() -> bool) -> Option<EnvAtlas> {
     let width = base_width.max(8);
     let level_height = width / 2;
     let levels = levels.clamp(1, 10);
@@ -745,6 +753,9 @@ pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
         }
     }
     for k in 0..levels {
+        if stop() {
+            return None;
+        }
         let r = if levels == 1 { 0.0 } else { k as f32 / (levels - 1) as f32 };
         if k == 0 || r <= 0.0 {
             for (uv, ..) in &frames {
@@ -772,7 +783,7 @@ pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
             data.push([acc[0] * inv, acc[1] * inv, acc[2] * inv, 1.0]);
         }
     }
-    EnvAtlas { width, height: level_height * levels, levels, level_height, data }
+    Some(EnvAtlas { width, height: level_height * levels, levels, level_height, data })
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,6 +1088,31 @@ mod tests {
         }
         assert!(prev_var < v0 * 0.5);
         assert_eq!(atlas, prefilter(&env, 128, 6));
+    }
+
+    /// `prefilter_until` asks before every level: told to stop before
+    /// level k it gives up there (k + 1 questions, no atlas), and while it
+    /// is never told to stop it returns exactly `prefilter`'s atlas after
+    /// one question per level.
+    #[test]
+    fn prefilter_until_asks_before_every_level() {
+        let env = EnvMap::procedural(&EnvPreset::Sunset, 32, 1.0, 0.0);
+        let asked = std::cell::Cell::new(0usize);
+        let never = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert_eq!(prefilter_until(&env, 16, 6, &never), Some(prefilter(&env, 16, 6)));
+        assert_eq!(asked.get(), 6, "one question per level");
+        for k in 0..6 {
+            asked.set(0);
+            let before_k = || {
+                asked.set(asked.get() + 1);
+                asked.get() > k
+            };
+            assert_eq!(prefilter_until(&env, 16, 6, &before_k), None, "stopped before level {k}");
+            assert_eq!(asked.get(), k + 1, "nothing asked after the stop");
+        }
     }
 
     #[test]

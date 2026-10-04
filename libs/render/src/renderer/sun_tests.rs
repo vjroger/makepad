@@ -132,26 +132,49 @@ fn the_meter_adds_the_keys_delivered_share_back_and_only_for_a_world_that_names_
     assert_eq!(sunless.gain, 1.0);
     let wide = env_sun_of(vec3f(0.3, 0.8, -0.5), 10.0, 55.0, 0.78);
     let whole = makepad_scene::EnvSun { facing: 1.0, ..wide };
-    let share = |sun: makepad_scene::EnvSun, intensity: f32| {
+    // The key is the bound preparation's (M1), hand-fed here; the world
+    // declares the same one.
+    let share = |renderer: &mut Renderer, sun: makepad_scene::EnvSun, intensity: f32| {
+        renderer.feed_environment_sun_for_tests(Some(sun));
         let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(sun));
         world.environment.ibl.as_mut().unwrap().intensity = intensity;
         renderer.env_lighting(&world).expect("lighting").mean_luminance - 0.5
     };
     let want = 10.0 * (1.0 - 55.0_f32.to_radians().cos()) * 0.5;
-    assert!((share(whole, 1.0) - want).abs() < 1.0e-4, "{} vs {want}", share(whole, 1.0));
-    assert!((share(wide, 1.0) - want * 0.78).abs() < 1.0e-4, "the share carries the key's facing: {}", share(wide, 1.0));
+    let got = share(&mut renderer, whole, 1.0);
+    assert!((got - want).abs() < 1.0e-4, "{got} vs {want}");
+    let got = share(&mut renderer, wide, 1.0);
+    assert!((got - want * 0.78).abs() < 1.0e-4, "the share carries the key's facing: {got}");
     // The intensity is the gain, not part of the mean (the meter multiplies it).
-    assert!((share(wide, 2.0) - want * 0.78).abs() < 1.0e-4);
+    assert!((share(&mut renderer, wide, 2.0) - want * 0.78).abs() < 1.0e-4);
     assert_eq!(renderer.env_lighting(&world).unwrap().gain, 1.0);
-    // An invalid key is not the world's: the renderer reads none from it.
-    let broken = makepad_scene::EnvSun { facing: 2.0, ..wide };
-    assert_eq!(share(broken, 1.0), 0.0);
+    // What the world declares is not what lights: with no key in the bound
+    // preparation, a declared one adds no share (it lights once its own
+    // preparation lands).
+    renderer.feed_environment_sun_for_tests(None);
+    let declares = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(wide));
+    assert_eq!(renderer.env_lighting(&declares).unwrap().mean_luminance, 0.5);
     // A world that names none gets nothing, whatever the scene last bound.
     let aux = World::new();
     assert!(renderer.env_lighting(&aux).is_none());
     let sun = crate::sun::resolve_sun(&aux.sun);
     assert_eq!(renderer.env_sun_rig(&aux, sun), sun);
     assert!(renderer.env_sun_dir(&aux).is_none());
+}
+
+/// Resolve until no preparation is pending (a real pool job; the clock and
+/// the sleep are the test's: it runs natively).
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn settle_world(renderer: &mut Renderer, cx: &mut Cx, world: &World) {
+    let start = std::time::Instant::now();
+    loop {
+        renderer.resolve_ibl(cx, &world.environment);
+        if !renderer.ibl_pending() {
+            return;
+        }
+        assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 /// The whole path on a real preparation: a registered map with a hot disc
@@ -170,20 +193,7 @@ fn a_landed_environment_lights_the_rig_in_both_lanes() {
     });
     renderer.register_environment(makepad_scene::TextureRef(1), std::sync::Arc::new(map));
     let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(sun));
-    // The clock and the sleep are the test's: it runs natively with a real pool.
-    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    let settle = |renderer: &mut Renderer, cx: &mut Cx, world: &World| {
-        let start = std::time::Instant::now();
-        loop {
-            renderer.resolve_ibl(cx, &world.environment);
-            if !renderer.ibl_pending() {
-                return;
-            }
-            assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-    };
-    settle(&mut renderer, &mut cx, &world);
+    settle_world(&mut renderer, &mut cx, &world);
     assert_eq!(renderer.ibl_preparations(), 1);
     let stock = SunLight::default();
 
@@ -192,7 +202,7 @@ fn a_landed_environment_lights_the_rig_in_both_lanes() {
     let key_share = 1.0e3 * (1.0 - sun.cos_radius) * 0.5;
     let lighting = renderer.env_lighting(&world).expect("landed");
     assert!((lighting.mean_luminance - (0.5 + key_share)).abs() < 0.02, "{} vs {}", lighting.mean_luminance, 0.5 + key_share);
-    assert_eq!(renderer.env_sun(&world), Some(sun));
+    assert_eq!(renderer.ibl_sun(), Some(sun));
     let dir = renderer.env_sun_dir(&world).expect("the environment places the sun");
     assert!((dir - toward).length() < 1.0e-4, "{dir:?}");
 
@@ -229,14 +239,58 @@ fn a_landed_environment_lights_the_rig_in_both_lanes() {
     world.environment.sun = None;
     renderer.resolve_ibl(&mut cx, &world.environment);
     assert!(renderer.ibl_pending());
-    assert_eq!(renderer.env_sun(&world), Some(sun), "one key behind the world until the new preparation lands");
+    assert_eq!(renderer.ibl_sun(), Some(sun), "one key behind the world until the new preparation lands");
     renderer.hdr_output = true;
     assert!(renderer.env_sun_rig(&world, stock.to_hdr()).color.x > 0.0);
-    settle(&mut renderer, &mut cx, &world);
+    settle_world(&mut renderer, &mut cx, &world);
     assert_eq!(renderer.ibl_preparations(), 2);
-    assert_eq!(renderer.env_sun(&world), None);
+    assert_eq!(renderer.ibl_sun(), None);
     assert_eq!(renderer.env_sun_rig(&world, stock.to_hdr()).color, Vec3f::default(), "no key: no direct light, never the analytic colour");
     assert!(renderer.env_sun_dir(&world).is_none(), "the shadows stay on the rig's own direction");
+}
+
+/// M1: light and sky come from the same preparation. While one is bound,
+/// the rig lights with that preparation's own key (`ibl_sun`), never with
+/// the key the world declares meanwhile: a world that moves its key from A
+/// to B keeps A's direction, colour and meter until B's preparation lands,
+/// and then lights with B.
+#[test]
+fn the_rig_lights_with_the_bound_preparations_key_until_the_next_lands() {
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let mut renderer = Renderer::default();
+    renderer.hdr_output = true;
+    let a = env_sun_of(crate::hdri::dir_from_az_el(90.0, 45.0), 1.0e3, 3.0, 1.0);
+    let b = env_sun_of(crate::hdri::dir_from_az_el(200.0, 30.0), 2.0e3, 3.0, 1.0);
+    // A plain map: either key's filled cone is the same grey, so the two
+    // preparations differ only in the key they were made with.
+    let map = makepad_render_material::ibl::EnvMap::constant(64, [0.5, 0.5, 0.5]);
+    renderer.register_environment(makepad_scene::TextureRef(1), std::sync::Arc::new(map));
+    let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(a));
+    settle_world(&mut renderer, &mut cx, &world);
+    let stock = SunLight::default().to_hdr();
+    let lit_a = renderer.env_sun_rig(&world, stock);
+    assert!(lit_a.dir.dot(a.dir) > 0.9999 && lit_a.color.x > 0.0, "{lit_a:?}");
+    let meter_a = renderer.env_lighting(&world).unwrap().mean_luminance;
+
+    world.environment.sun = Some(b);
+    renderer.resolve_ibl(&mut cx, &world.environment);
+    assert!(renderer.ibl_pending(), "B prepares");
+    assert_eq!(renderer.ibl_sun(), Some(a));
+    assert_eq!(renderer.env_sun_rig(&world, stock), lit_a, "A lights until B lands");
+    assert!(renderer.env_sun_dir(&world).is_some_and(|d| d.dot(a.dir) > 0.9999), "the shadows follow A too");
+    assert_eq!(renderer.env_lighting(&world).unwrap().mean_luminance, meter_a, "and A meters");
+
+    settle_world(&mut renderer, &mut cx, &world);
+    assert_eq!(renderer.ibl_sun(), Some(b));
+    let lit_b = renderer.env_sun_rig(&world, stock);
+    assert!(lit_b.dir.dot(b.dir) > 0.9999 && lit_b.color.x > lit_a.color.x, "B lights once it lands: {lit_b:?}");
+
+    // A key that is not valid is not declared at all: it prepares as none
+    // (no directional light), never as a key.
+    world.environment.sun = Some(makepad_scene::EnvSun { facing: 2.0, ..b });
+    settle_world(&mut renderer, &mut cx, &world);
+    assert_eq!(renderer.ibl_sun(), None);
+    assert_eq!(renderer.env_sun_rig(&world, stock).color, Vec3f::default());
 }
 
 /// A prepared environment colours the host's fog and feeds the rig; an
@@ -306,12 +360,13 @@ fn a_prepared_environment_colours_the_host_fog_only() {
         facing: 1.0,
         cos_cover: 0.9999,
     });
+    r.feed_environment_sun_for_tests(world.environment.sun);
     let metered = r.env_lighting(&world).unwrap().mean_luminance;
     assert!(metered > 1.4 && metered < 1.6, "1.0 + 0.5, got {metered}");
     assert!(crate::sun::env_exposure(&r.env_lighting(&world).unwrap()) < crate::sun::env_exposure(&crate::sun::EnvLighting { mean_luminance: 1.0, ..r.env_lighting(&world).unwrap() }), "a sunny map meters darker than its sky alone");
-    // And the rig lights with that sun (declared here; a procedural hdri
-    // preset's baked sun arrives the same way through `env_sun`).
-    assert_eq!(r.env_sun(&world), world.environment.sun);
+    // And the rig lights with that sun (the bound preparation's key, as a
+    // declared sun or a procedural hdri preset's baked one).
+    assert_eq!(r.ibl_sun(), world.environment.sun);
     assert!(r.env_sun_rig(&world, SunLight::default().to_hdr()).color.x > 0.0);
 }
 

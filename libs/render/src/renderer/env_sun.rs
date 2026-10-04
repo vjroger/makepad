@@ -12,23 +12,20 @@
 //! last bound.
 use super::*;
 use crate::sun::{EnvLighting, SunLight};
-use makepad_scene::EnvSun;
 
 impl Renderer {
-    /// The key light the environment carries this frame: the world's
-    /// declared `Environment.sun` (when valid), else the sun the bound
-    /// preparation was built without (`ibl_sun`: a procedural hdri
-    /// preset's baked sun, which no host can declare). In the map's frame;
-    /// `sun::env_sun_dir_with` turns it by `Ibl.rotation_deg`.
-    pub(super) fn env_sun(&self, world: &World) -> Option<EnvSun> {
-        world.environment.sun.filter(|s| s.validate().is_ok()).or_else(|| self.ibl_sun())
-    }
-
     /// What the environment lends the rig this frame: `Some` once the world
     /// names a finite IBL and a preparation has landed. renderer/ibl.rs
     /// keeps the previous preparation while a new one runs, so this can be
-    /// one key behind the world for a few frames — and so is the dome, which
-    /// is the point: light and sky always come from the same map.
+    /// one preparation behind the world — and so is the dome, which is the
+    /// point: light and sky always come from the same preparation. The key
+    /// light is the bound preparation's own (`ibl_sun`: the sun the world
+    /// declared when it was submitted, else a procedural hdri preset's
+    /// baked sun), never the key the world declares meanwhile: a key lit
+    /// before its preparation lands would be lit twice (its light is still
+    /// in the bound lighting copy) and metered against the wrong map. In
+    /// the map's frame; `sun::env_sun_dir_with` turns it by
+    /// `Ibl.rotation_deg`.
     ///
     /// The meter. renderer/ibl.rs meters the LIGHTING copy (the key's
     /// covering cone filled), so the key's share of the sphere mean is added
@@ -43,7 +40,7 @@ impl Renderer {
         let ibl = world.environment.ibl.filter(|i| i.intensity.is_finite() && i.rotation_deg.is_finite())?;
         let sh = *self.ibl_sh9()?;
         let mean_luminance = self.ibl_mean_luminance()?;
-        let sun_share = self.env_sun(world).map_or(0.0, |s| {
+        let sun_share = self.ibl_sun().map_or(0.0, |s| {
             // L·2(1 − cos r)·facing / 4 = L·(1 − cos r)/2·facing.
             crate::sky::luminance(s.radiance) * crate::sun::env_sun_scale(&s) * 0.25
         });
@@ -60,12 +57,13 @@ impl Renderer {
     /// exactly what they were.
     pub(super) fn env_sun_dir(&self, world: &World) -> Option<Vec3f> {
         self.env_lighting(world)?;
-        crate::sun::env_sun_dir_with(world, self.env_sun(world))
+        crate::sun::env_sun_dir_with(world, self.ibl_sun())
     }
 
-    /// `sun::env_sun_rig` on this renderer's lane, with this renderer's sun.
+    /// `sun::env_sun_rig` on this renderer's lane, with the bound
+    /// preparation's key.
     pub(super) fn env_sun_rig(&self, world: &World, sun: SunLight) -> SunLight {
-        crate::sun::env_sun_rig_with(world, self.env_sun(world), self.env_lighting(world).as_ref(), sun, self.hdr_output)
+        crate::sun::env_sun_rig_with(world, self.ibl_sun(), self.env_lighting(world).as_ref(), sun, self.hdr_output)
     }
 
     /// C6: the fog colour the environment lends a `Fog::Host` world. `None`
