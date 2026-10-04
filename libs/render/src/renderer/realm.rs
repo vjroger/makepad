@@ -498,6 +498,10 @@ impl Renderer {
     /// Independent camera/lighting caches for an on-demand scene review.
     /// Meshes, textures and immutable metadata share resident handles; the
     /// live renderer's GI, camera and simulation state remain untouched.
+    /// The environment is the live renderer's (I4): the fork is born
+    /// mirroring it ([`Self::mirror_environment_from`]) and never prepares
+    /// one of its own, so a `game.environment` world draws with its map in
+    /// every view; a fork kept across frames mirrors it again each frame.
     pub fn fork_scene_for_review(&self) -> Self {
         let mut review = Self::default();
         review.static_models = self.static_models.clone();
@@ -518,6 +522,7 @@ impl Renderer {
         review.set_gpu_lightmap_mode(crate::GpuLightmapMode::Realtime);
         review.set_clustered_lighting(true);
         review.set_gi_mode(crate::GiMode::Off);
+        review.mirror_environment_from(self);
         review
     }
 

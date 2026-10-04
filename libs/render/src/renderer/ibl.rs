@@ -19,6 +19,10 @@
 //! under its handle, another environment named, an unregister): the job
 //! polls a token between its stages and stops, and whatever it still
 //! returns is rejected when it is taken.
+//!
+//! A fork of the renderer (a split-screen pane, the AI world review) draws
+//! the live renderer's environment (I4): it mirrors the maps and the bound
+//! preparation (`Renderer::mirror_environment_from`) and resolves nothing.
 use super::*;
 use crate::hdri::envmap::GeneratedEnvMap;
 use crate::hdri::prepare::{prepare_ibl_until, KeyRemoval, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
@@ -278,6 +282,55 @@ pub(super) struct IblState {
     failed_for: Option<PrepareKey>,
     queue_full_logged: bool,
     background: Option<Box<DrawEnvBackground>>,
+    /// This renderer draws another renderer's environment
+    /// (`Renderer::mirror_environment_from`): it resolves nothing, so it
+    /// never prepares, binds or drops one of its own.
+    mirror: bool,
+}
+
+impl IblState {
+    /// Take `live`'s registered maps and bound preparation, exactly as they
+    /// are: the same `Arc`s and texture handles (nothing is copied but
+    /// pointers and numbers), the numbers, the key and the daylight report
+    /// bound with it. Not its job, its wishes or its failures: a mirror
+    /// prepares nothing, so it awaits nothing. The destructuring names
+    /// every field, so a new one has to be placed on one side or the other.
+    fn mirror_from(&mut self, live: &IblState) {
+        let IblState {
+            maps,
+            key,
+            texture,
+            dome,
+            dome_size,
+            prepared_for,
+            bound,
+            sh,
+            mean_luminance,
+            horizon_rgb,
+            filled_sun,
+            daylight_sun,
+            wanted: _,
+            job: _,
+            generation: _,
+            failed_for: _,
+            queue_full_logged: _,
+            background: _,
+            mirror: _,
+        } = live;
+        self.maps = maps.clone();
+        self.key = *key;
+        self.texture = texture.clone();
+        self.dome = dome.clone();
+        self.dome_size = *dome_size;
+        self.prepared_for = *prepared_for;
+        self.bound = *bound;
+        self.sh = *sh;
+        self.mean_luminance = *mean_luminance;
+        self.horizon_rgb = *horizon_rgb;
+        self.filled_sun = *filled_sun;
+        self.daylight_sun = *daylight_sun;
+        self.mirror = true;
+    }
 }
 
 /// The built-in environments `IblSource::Procedural` indexes, in order:
@@ -530,6 +583,24 @@ impl Renderer {
         }
     }
 
+    /// Draw `live`'s environment (I4): a renderer forked from it (a
+    /// split-screen pane, the AI world review: `fork_scene_for_review`
+    /// mirrors once at the fork) takes its registered maps and its bound
+    /// preparation, the same textures, numbers, key and daylight report, so
+    /// its dome, its IBL materials, its rig, meter and fog and its "is it
+    /// day?" switches are the live renderer's. From then on this renderer's
+    /// draws resolve no environment of their own (as `draw_scene_aux`'s
+    /// do): it never prepares, binds or drops one, whatever its world names.
+    /// A fork kept across frames calls this every frame, after the live
+    /// renderer's scene draw, so it follows the live renderer to each new
+    /// preparation (and to none), and lets go of the maps the live renderer
+    /// let go. Intensity and rotation ride the lane texture's meta row,
+    /// which the live renderer rewrites in place, so the mirror sees those
+    /// at once.
+    pub fn mirror_environment_from(&mut self, live: &Renderer) {
+        self.ibl.mirror_from(&live.ibl);
+    }
+
     /// The IBL lane texture for this frame, when the environment asks for one.
     pub fn ibl_texture(&self) -> Option<&Texture> {
         self.ibl.texture.as_ref()
@@ -621,11 +692,13 @@ impl Renderer {
     }
 
     /// `resolve_ibl` for a draw of this scope: the scene's draw resolves its
-    /// world's environment, an aux draw leaves the environment as it is.
+    /// world's environment, an aux draw leaves the environment as it is, and
+    /// so does every draw of a mirror (`mirror_environment_from`): what it
+    /// draws is the live renderer's.
     pub(super) fn resolve_ibl_for(&mut self, cx: &mut Cx, env: &Environment, scope: EnvScope) {
         match scope {
-            EnvScope::Scene => self.resolve_ibl(cx, env),
-            EnvScope::Aux => {}
+            EnvScope::Scene if !self.ibl.mirror => self.resolve_ibl(cx, env),
+            EnvScope::Scene | EnvScope::Aux => {}
         }
     }
 
@@ -1941,5 +2014,86 @@ mod tests {
             }
         });
         assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), 4, "rows 0..=3 ran, the rest were skipped");
+    }
+
+    /// I4: a fork of the live renderer (a split-screen pane, the AI world
+    /// review) draws the live renderer's environment: it is born with the
+    /// bound preparation mirrored (the textures, the numbers, the key and
+    /// the daylight report, so the rig, the meter, the fog and the sky's
+    /// switches answer as the live renderer's), its draws prepare nothing
+    /// of their own whatever their world names, and mirrored again it
+    /// follows the live renderer to its next preparation and to none,
+    /// releasing the maps the live renderer let go.
+    #[test]
+    fn a_fork_draws_the_live_renderers_environment_and_never_prepares_its_own() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut live = Renderer::default();
+        let first = grey(32, 0.25);
+        live.register_environment(TextureRef(1), first.clone());
+        let key = EnvSun { dir: vec3f(0.0, 0.6, -0.8), radiance: vec3f(50.0, 45.0, 40.0), cos_radius: 0.999, facing: 1.0, cos_cover: 0.998 };
+        let mut env = env_of(IblSource::Hdri(TextureRef(1)), 1.0, 0.0);
+        env.sun = Some(key);
+        env.daylight_sun = Some(key.dir);
+        settle(&mut live, &mut cx, &env);
+        assert!(live.environment_ready() && live.ibl_sun() == Some(key), "premise: the live renderer's environment landed");
+        let mut world = World::new();
+        world.environment = env;
+        let same = |fork: &Renderer, live: &Renderer, at: &str| {
+            let id = |t: Option<&Texture>| t.map(|t| t.texture_id());
+            assert_eq!(fork.ibl_sh9(), live.ibl_sh9(), "{at}: the SH");
+            assert_eq!(fork.environment_ready(), live.environment_ready(), "{at}: ready");
+            assert_eq!(fork.environment_dome_ready(), live.environment_dome_ready(), "{at}: the dome ready");
+            assert_eq!(id(fork.ibl_texture()), id(live.ibl_texture()), "{at}: the lane texture");
+            assert_eq!(id(fork.ibl_dome_texture()), id(live.ibl_dome_texture()), "{at}: the dome texture");
+            assert_eq!(fork.ibl.dome_size, live.ibl.dome_size, "{at}: the dome's size");
+            assert_eq!(fork.ibl.key, live.ibl.key, "{at}: the meta row's key");
+            assert_eq!(fork.ibl.prepared_for, live.ibl.prepared_for, "{at}: what it was prepared for");
+            assert_eq!(fork.ibl_mean_luminance(), live.ibl_mean_luminance(), "{at}: the meter");
+            assert_eq!(fork.ibl_horizon_rgb(), live.ibl_horizon_rgb(), "{at}: the fog band");
+            assert_eq!(fork.ibl_sun(), live.ibl_sun(), "{at}: the key");
+            assert_eq!(fork.ibl_daylight_sun(), live.ibl_daylight_sun(), "{at}: the daylight report");
+            assert_eq!(fork.env_lighting(&world), live.env_lighting(&world), "{at}: what the rig takes");
+            assert_eq!(fork.env_key_is_its_sun(&world), live.env_key_is_its_sun(&world), "{at}: the sky's sun");
+            assert_eq!(fork.daylight_dir(&world), live.daylight_dir(&world), "{at}: the daylight switches");
+            let maps = |r: &Renderer| {
+                let mut m: Vec<_> = r.ibl.maps.iter().map(|(t, m)| (t.0, Arc::as_ptr(&m.map), m.keyless.as_ref().map(Arc::as_ptr))).collect();
+                m.sort();
+                m
+            };
+            assert_eq!(maps(fork), maps(live), "{at}: the registered maps");
+        };
+
+        let mut fork = live.fork_scene_for_review();
+        same(&fork, &live, "forked");
+        // The fork's draws resolve nothing: its world names the live
+        // renderer's environment, another one, or none.
+        for named in [env, env_of(IblSource::Procedural(7), 1.0, 0.0), Environment::default()] {
+            for _ in 0..3 {
+                fork.resolve_ibl_for(&mut cx, &named, EnvScope::Scene);
+            }
+        }
+        assert_eq!(fork.environment_preparations(), 0, "the fork submitted no preparation");
+        assert!(!fork.ibl_job_in_flight() && !fork.environment_pending(), "and awaits none");
+        same(&fork, &live, "after the fork's draws");
+
+        // The live renderer moves on to another map, a generated one with its
+        // keyless copy: the fork follows once mirrored again (a kept fork
+        // mirrors every frame), and lets go of the replaced map.
+        let (second, keyless) = (grey(32, 0.5), grey(32, 0.4));
+        live.register_generated_environment(TextureRef(1), second.clone(), Some(keyless.clone()));
+        settle(&mut live, &mut cx, &env);
+        assert_ne!(fork.ibl_sh9(), live.ibl_sh9(), "premise: the live renderer prepared the new map");
+        fork.mirror_environment_from(&live);
+        same(&fork, &live, "mirrored after the new map");
+        assert_eq!(Arc::strong_count(&first), 1, "nobody holds the replaced map");
+
+        // No environment, and the map unregistered: the fork has none either.
+        live.resolve_ibl(&mut cx, &Environment::default());
+        live.unregister_environment(TextureRef(1));
+        fork.mirror_environment_from(&live);
+        same(&fork, &live, "mirrored after none");
+        assert!(!fork.environment_ready() && fork.ibl_texture().is_none() && fork.ibl_sh9().is_none());
+        assert_eq!((Arc::strong_count(&second), Arc::strong_count(&keyless)), (1, 1), "nobody holds the unregistered map or its copy");
+        assert_eq!(fork.environment_preparations(), 0);
     }
 }

@@ -55,10 +55,7 @@ impl Renderer {
     ///   environment's light folded in (`env_lamp_rig`), which in the legacy
     ///   lane is the rig the bake snapshots.
     pub(super) fn frame_lamps(&mut self, world: &World, camera_pos: Vec3f) -> (SunLight, Vec3f) {
-        let mut sun = crate::sun::resolve_sun(&world.sun);
-        // A world's own Sun steers every sun-driven system; else the
-        // environment's sun does (renderer/env_sun.rs); else the rig's.
-        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
+        let sun = self.frame_start_sun(world);
         let daylight = self.daylight_dir(world);
         self.light_eye = camera_pos;
         self.light_daylight = daylight;
@@ -69,6 +66,29 @@ impl Renderer {
             world, &mut self.frame_lights, &self.model_headlight_owners,
         );
         (sun, daylight)
+    }
+
+    /// The sun the frame's rig starts from: `resolve_sun`, aimed by a
+    /// world's own Sun, which steers every sun-driven system, else by the
+    /// environment's key (renderer/env_sun.rs), else the rig's own.
+    fn frame_start_sun(&self, world: &World) -> SunLight {
+        let mut sun = crate::sun::resolve_sun(&world.sun);
+        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
+        sun
+    }
+
+    /// The direction toward the light the frame draws `world` with (M7):
+    /// its final rig's, the chain the frame runs (the start sun, the lane's
+    /// rig with the environment folded in, the world's own lights last),
+    /// so a world's own Sun, else the bound environment's key (the sun's or
+    /// the moon's) or an authored `SunConfig.dir`, else the world's analytic
+    /// sun. For a host that tests against the light itself: a held view
+    /// model has no shadow map, so the host ray-tests the eye toward this.
+    /// Read before a draw it is that draw's direction, unless a preparation
+    /// lands in it (then the next draw's). Without an environment it is
+    /// `resolve_sun`'s, aimed by a world's own Sun.
+    pub fn frame_sun_dir(&self, world: &World) -> Vec3f {
+        crate::world_lights::apply_world_sun(world, self.lane_rig(world, self.frame_start_sun(world))).dir
     }
 
     /// The frame's rig in its lane (HDR: `to_hdr` and the analytic fill
@@ -122,7 +142,9 @@ impl Renderer {
     /// [`draw_scene`] plus an optional skinned-character batch. This is the
     /// scene's own draw: its world's environment is the one the renderer
     /// prepares, binds and drops (see [`Self::draw_scene_aux`] for a draw of
-    /// the same frame that is not the scene's).
+    /// the same frame that is not the scene's), unless the renderer draws
+    /// another renderer's environment (a fork: [`Self::mirror_environment_from`]),
+    /// which it then draws as it was mirrored.
     pub fn draw_scene_full(
         &mut self,
         cx: &mut Cx3d,

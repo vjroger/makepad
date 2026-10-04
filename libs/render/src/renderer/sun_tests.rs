@@ -468,6 +468,61 @@ fn the_frames_analytic_sky_puts_its_sun_where_the_light_is_when_the_key_is_the_s
     assert!((sky - light).length() < 1.0e-6, "{sky:?} vs {light:?}");
 }
 
+/// M7: the direction the frame lights from, for a host that tests against
+/// the light itself (the sandbox's held view model has no shadow map, so it
+/// ray-tests the eye toward this): the frame's final rig direction, in
+/// either lane. Under a preset it is the map's key, the sun's or the moon's,
+/// where the shadows come from; an authored direction (the sandbox's eased
+/// sun) and a world's own Sun aim it as they aim the light; without an
+/// environment it is the rig's own, bit for bit. The world's analytic sun
+/// (`resolve_sun`), which the sandbox's ray took, is elsewhere under a map:
+/// a held model sunlit inside the key's shadow, or the reverse.
+#[test]
+fn the_frames_sun_direction_is_where_its_light_comes_from() {
+    // The frame's chain: the switches and the lamps, the lane's rig, the
+    // world's own lights.
+    let frame_dir = |r: &mut Renderer, world: &World| {
+        let (sun, _) = r.frame_lamps(world, Vec3f::default());
+        crate::world_lights::apply_world_sun(world, r.lane_rig(world, sun)).dir
+    };
+    let preset = |name: &str| {
+        let env = crate::hdri::Env::new(&crate::hdri::presets::preset(name).unwrap());
+        (env.sun().expect("a keyed preset"), env.sun_dir().expect("a sky has its sun"))
+    };
+    let aimed = crate::hdri::dir_from_az_el(120.0, 20.0);
+    let own = vec3f(0.3, 0.6, -0.5).normalize();
+    for hdr in [false, true] {
+        for (name, level) in [("Golden hour", 0.5), ("Moonlit night", 0.02)] {
+            let (key, sun_dir) = preset(name);
+            let mut r = lamp_renderer(hdr, true, level, Some(key), Some(sun_dir));
+            let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(key));
+            world.environment.daylight_sun = Some(sun_dir);
+            world.sun.latitude = 52.0;
+            world.sun.time_of_day = Some(14.0);
+            let at = format!("{name}, hdr {hdr}");
+            assert!(crate::sun::resolve_sun(&world.sun).dir.dot(key.dir) < 0.99, "{at}: premise: the world's analytic sun is elsewhere");
+            let dir = r.frame_sun_dir(&world);
+            assert!(dir.dot(key.dir) > 0.9999, "{at}: the key's direction: {dir:?}, the key {:?}", key.dir);
+            assert_eq!(dir, frame_dir(&mut r, &world), "{at}: the frame's own");
+            world.sun.dir = Some(aimed);
+            let dir = r.frame_sun_dir(&world);
+            assert!(dir.dot(aimed) > 0.9999, "{at}: an authored direction aims it: {dir:?}");
+            assert_eq!(dir, frame_dir(&mut r, &world), "{at}: aimed, the frame's own");
+            world.lights.push(makepad_scene::Light::Sun { dir: own, color: vec3f(1.0, 1.0, 1.0), lux: 1.0, shadow: Default::default() });
+            let dir = r.frame_sun_dir(&world);
+            assert!(dir.dot(own) > 0.9999, "{at}: a world's own Sun aims it: {dir:?}");
+            assert_eq!(dir, frame_dir(&mut r, &world), "{at}: a world Sun, the frame's own");
+        }
+    }
+    // No environment: the rig's own direction, bit for bit.
+    let mut world = World::new();
+    world.sun.latitude = 52.0;
+    world.sun.time_of_day = Some(9.0);
+    let mut r = Renderer::default();
+    assert_eq!(r.frame_sun_dir(&world), crate::sun::resolve_sun(&world.sun).dir);
+    assert_eq!(r.frame_sun_dir(&world), frame_dir(&mut r, &world));
+}
+
 /// I1c: the frame's lamps are railed against the rig the frame lights
 /// with, the environment's light folded in, which is the rig the bake
 /// snapshots (legacy lane, the lamp atlas path: MAKEPAD_CLUSTERED=0). A
