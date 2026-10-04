@@ -1536,8 +1536,8 @@ mod tests {
         assert!(rig.color.is_finite() && rig.dir.is_finite() && rig.sky.is_finite());
     }
 
-    /// The core's key on the sandbox's evening, as `Env::sun` reports it: 21
-    /// June at 45 N under the default clear sky, `hour` o'clock.
+    /// The core's key on the default params' evening, as `Env::sun` reports
+    /// it: 21 June at 45 N under the default clear sky, `hour` o'clock.
     fn evening_key(hour: f32) -> Option<makepad_scene::EnvSun> {
         let mut p = crate::hdri::HdriParams::default();
         p.sky.sun.hour = hour;

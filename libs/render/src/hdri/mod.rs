@@ -203,8 +203,11 @@ impl Env {
     /// The fade is narrow, though: the sun crosses it in about two minutes of
     /// sun time. A host that takes the key from a coarser grid steps by the grid,
     /// not by the fade: the sandbox's day cycle re-bakes a map a quarter hour at
-    /// a time, and its key steps by up to 17 % of the 16:00 key at 45 N on 21 June
-    /// under the default clear sky (the last step into sunset is 1.4 %).
+    /// a time, at the world's latitude on its fixed game date, and the step of
+    /// its key is bounded at 20 % of the 16:00 key per quarter-hour bake (the
+    /// plan owner's K8). Under the default clear sky the bound holds from about
+    /// 40 N poleward (15.9 % at 52 N) and is exceeded nearer the equator and
+    /// south of it, up to 30 % at 35 S; the sandbox's env_map tests pin both.
     pub fn sun(&self) -> Option<EnvSun> {
         self.key().map(|(_, key)| key)
     }
