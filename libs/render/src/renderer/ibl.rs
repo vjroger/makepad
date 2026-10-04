@@ -69,19 +69,20 @@ script_mod! {
         // render-material's lookups, as the base assigns them. Since plan 1a
         // task A7 the meta row is row 0 and the atlas rows start at 1, both
         // addressed absolutely (normalised by size() only at the sample), so
-        // a padded RGBA32F allocation (D3D11, desktop GL: spare rows below
-        // the data, size() reports the allocation) cannot hide them; nothing
-        // here overrides them.
+        // spare rows below the data could not hide them; no backend gives a
+        // float texture spare rows now (makepad 9e9a7ee9b: only append-rows
+        // tables keep them). Nothing here overrides them.
         mat_ibl_meta: mod.draw.mat_ibl_meta
         mat_ibl_dir: mod.draw.mat_ibl_dir
         mat_ibl_level: mod.draw.mat_ibl_level
         mat_ibl_sky_env: mod.draw.mat_ibl_sky_env
         // The dome, bilinear by hand (float textures are unfiltered): u
-        // wraps, v clamps, texel centres. The dome is RGBA32F too, so the
-        // same padding applies: the texel coordinates are in the LOGICAL
-        // size (bg2.zw) and size() only converts a texel index to the
-        // sampler's coordinates (never wraps, clamps or scales by it). The
-        // test `the_dome_lookup_never_reads_the_padding_of_a_float_allocation`
+        // wraps, v clamps, texel centres. The texel coordinates are in the
+        // LOGICAL size (bg2.zw) and size() only converts a texel index to
+        // the sampler's coordinates (never wraps, clamps or scales by it),
+        // so the lookup reads the map's texels whatever the allocation (an
+        // exact one on every backend since 9e9a7ee9b). The test
+        // `the_dome_lookup_never_reads_the_padding_of_a_float_allocation`
         // runs this function's transcription over a NaN-padded allocation.
         env_texel: fn(uv: vec2) -> vec3 {
             let size = self.env_tex.size()
@@ -273,7 +274,7 @@ pub(super) struct IblState {
     key: Option<(IblSource, u32, u32)>,
     /// The lane texture (meta row 0, then the atlas: plan 1a task A7) and
     /// the full-resolution dome, with the dome's LOGICAL size (the shader
-    /// addresses texels in it; a padded allocation's `size()` is larger).
+    /// addresses texels in it, never in the allocation's `size()`).
     texture: Option<Texture>,
     dome: Option<Texture>,
     dome_size: (usize, usize),
@@ -1052,7 +1053,7 @@ impl Renderer {
         }
         let dome = self.ibl.dome.clone();
         // The dome's LOGICAL size: the shader addresses texels in it, never
-        // in a (possibly padded) allocation's size().
+        // in the allocation's size().
         let dome_size = dome.as_ref().map(|_| self.ibl.dome_size);
         // The legacy meter reads the luminance the dome shows: the map's
         // mean at the environment's scale x Ibl.intensity (C5's env_exposure
@@ -1139,8 +1140,7 @@ mod tests {
         }
     }
     /// Texel `i` of the lane texture's meta row, which is row 0 (plan 1a
-    /// task A7: `pack_ibl` puts it first, so a padded float allocation on
-    /// D3D11 or desktop GL cannot hide it).
+    /// task A7: `pack_ibl` puts it first).
     fn meta_texel_at(texture: &Texture, cx: &mut Cx, i: usize) -> [f32; 4] {
         match texture.get_format(cx) {
             TextureFormat::VecRGBAf32 { data: Some(data), .. } => {
@@ -1707,14 +1707,14 @@ mod tests {
         [c[0], c[1], c[2]]
     }
 
-    /// The dome is a VecRGBAf32 texture too, so D3D11 and desktop GL may
-    /// allocate it with spare rows (`ceil128(max(3 h, 512))`,
-    /// `platform/src/os/windows/d3d11.rs:3345-3352`,
-    /// `platform/src/os/linux/opengl.rs:3221-3224`) and `size()` reports the
-    /// allocation. The lookup addresses texels in the logical size and
-    /// normalises only the sample, so over an allocation whose spare rows
-    /// are NaN it reads exactly the map: `EnvMap::sample_uv`, finite, at the
-    /// seam, the poles and in between.
+    /// The dome is a VecRGBAf32 texture. D3D11 and desktop GL allocated
+    /// such textures with spare rows (`ceil128(max(3 h, 512))`) until
+    /// makepad 9e9a7ee9b, which keeps them for append-rows tables only, and
+    /// `size()` reported the allocation. The lookup addresses texels in the
+    /// logical size and normalises only the sample, so it reads the map
+    /// whatever the allocation: over one whose spare rows are NaN it reads
+    /// exactly the map, `EnvMap::sample_uv`, finite, at the seam, the poles
+    /// and in between.
     #[test]
     fn the_dome_lookup_never_reads_the_padding_of_a_float_allocation() {
         let map = EnvMap::from_fn(32, |d| [0.5 + 0.5 * d[0], 0.5 + 0.5 * d[1], 0.5 + 0.5 * d[2]]);
@@ -1730,7 +1730,7 @@ mod tests {
             }
         }
         // The same lookup with size() taken as the map's size (no padding:
-        // Metal, WebGPU) is the same texels, so one shader serves both.
+        // every backend's allocation now) is the same texels.
         let unpadded = env_texel_cpu(&map.data, w, h, w as f32, h as f32, [0.37, 0.61]);
         let want = map.sample_uv([0.37, 0.61]);
         assert!((0..3).all(|k| (unpadded[k] - want[k]).abs() < 1.0e-5));
