@@ -267,7 +267,10 @@ impl Renderer {
     /// locked-time host waits for this before it takes the frame. A lane's
     /// shader is the variant for last frame's features (variants.rs), the
     /// one it draws through. The environment prepares off the UI thread
-    /// (`environment_pending`); the host's next draw adopts it.
+    /// (`environment_pending`); the host's next draw adopts it. Under an
+    /// environment the stock IBL program's pipeline is waited for too
+    /// (`stock_ibl_ready`): until it exists shiny stock models draw on the
+    /// analytic PBR lane.
     pub fn items_ready(&self, cx: &Cx) -> bool {
         if self.environment_pending() {
             return false;
@@ -278,7 +281,7 @@ impl Renderer {
         // Shiny models draw matte (no emission, no maps) until the PBR
         // pipeline exists; it is made once a frame has any.
         let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)));
-        custom && pbr
+        custom && pbr && self.stock_ibl_ready(cx)
     }
 
     /// Items the model lanes skipped last frame (lines, points, cards,

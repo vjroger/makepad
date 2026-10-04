@@ -197,9 +197,15 @@ impl Renderer {
         scope: EnvScope,
     ) -> RenderStats {
         // Image-based lighting for the materials that ask for it (before
-        // the items choose their materials), then the world's generic items
-        // ride the placed models for this frame.
+        // the items choose their materials), then whether shiny stock
+        // models take the engine's IBL program this frame (once, before
+        // any lane walks them), then the world's generic items ride the
+        // placed models for this frame. An aux draw resolves nothing and a
+        // fork's draws resolve nothing (they draw the live renderer's,
+        // mirrored); the stock decision then reads the texture that is
+        // bound, the scene's.
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
+        self.prepare_stock_ibl(cx.cx);
         self.push_item_instances(cx.cx, world);
         let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
         self.pop_item_instances();

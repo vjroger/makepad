@@ -412,6 +412,8 @@ pub struct Renderer {
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
     /// Image-based lighting for Splash materials (renderer/ibl.rs).
     ibl: ibl::IblState,
+    /// Shiny stock models under that environment (renderer/stock_ibl.rs).
+    stock_ibl: stock_ibl::StockIblState,
     /// The world's generic items on the model lanes (renderer/items.rs).
     items: items::ItemState,
     /// The streamed world's surface shader, created on first streamed draw.
@@ -649,6 +651,7 @@ mod grass_draw;
 mod vfx_draw;
 pub(crate) mod ibl;
 mod env_sun;
+mod stock_ibl;
 mod items;
 mod water;
 pub use water::{eye_under_water, pack_wave_uniforms};
@@ -656,6 +659,7 @@ pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSF
 // The names `IblSource::Procedural` indexes, for hosts that name an
 // environment as the engine does (Scene3D's `@hdri_golden_hour`).
 pub use ibl::{HDRI_PREFIX, PROCEDURAL_ENVIRONMENTS, PROCEDURAL_HDRI_WIDTH};
+pub use stock_ibl::STOCK_IBL_MATERIAL;
 
 pub use draw_items::*;
 pub use prepared::*;
@@ -730,6 +734,7 @@ impl Default for Renderer {
             pbr_draw: None,
             custom_draws: Default::default(),
             ibl: Default::default(),
+            stock_ibl: Default::default(),
             items: Default::default(),
             city_draw: None,
             grass: None,

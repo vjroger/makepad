@@ -278,6 +278,11 @@ impl Renderer {
             ModelDraw::Custom(name, _) => Some((*name).to_string()),
             _ => None,
         };
+        // Shiny stock models under an environment leave the PBR lane for
+        // the engine's IBL program (renderer/stock_ibl.rs): decided once a
+        // frame, read here by every lane so exactly one of them draws them.
+        let stock_ibl_on = self.stock_ibl_active();
+        let stock_ibl_lane = custom_name.as_deref() == Some(stock_ibl::STOCK_IBL_MATERIAL);
         self.bind_model_lane(cx, &mut draw, eye, fog, sun);
         // The lane draws through the shader variant for this frame's
         // features, and draws that cut no pixel through the one without
@@ -415,12 +420,22 @@ impl Renderer {
                     custom_name.as_deref() == Some(m.name.as_str())
                         || self.custom_draws.get(&m.name).is_some_and(|d| d.draw.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output)))
                 });
+                // A shiny stock model with no material of its own, while an
+                // environment is registered: the stock IBL lane takes it and
+                // the PBR lane leaves it (renderer/stock_ibl.rs).
+                let takes_stock_ibl = stock_ibl::takes_stock_ibl(stock_ibl_on, uses_pbr_lane, inst.custom_material.is_some(), sways);
                 if let Some(name) = custom_name.as_deref() {
-                    if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
-                    if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
-                        d.draw.set_params(cx.cx, material.params);
+                    if stock_ibl_lane {
+                        // Its own instances, plus any that name the program
+                        // outright (an engine name, but never a vanished model).
+                        if !(takes_stock_ibl || wanted_custom.map(|m| m.name.as_str()) == Some(name)) { continue; }
+                    } else {
+                        if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
+                        if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
+                            d.draw.set_params(cx.cx, material.params);
+                        }
                     }
-                } else if wanted_custom.is_some() || sways != foliage_lane || (!foliage_lane && uses_pbr_lane != pbr_lane) {
+                } else if stock_ibl::stock_lane_skips(wanted_custom.is_some(), takes_stock_ibl, sways, foliage_lane, uses_pbr_lane, pbr_lane) {
                     continue;
                 }
                 // Hoisted: `loaded` borrows self, and the per-instance light

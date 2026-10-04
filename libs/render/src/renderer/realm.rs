@@ -626,11 +626,27 @@ impl Renderer {
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
+        // The stock IBL program draws when the frame routes through it and
+        // a shiny stock model is in the list, whether or not an instance
+        // names it (renderer/stock_ibl.rs); the same early-out as
+        // draw_pbr_models, so a scene of matte props pays nothing.
+        let stock_ibl_on = self.stock_ibl_active() && {
+            let shiny: std::collections::HashSet<&str> = self.static_models.iter()
+                .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
+            !shiny.is_empty() && instances.iter().any(|inst| inst.custom_material.is_none() && shiny.contains(inst.model.as_str()))
+        };
         // Blended programs after every opaque one (they neither write depth
         // nor hide what is behind them), each group in name order.
         let mut names: Vec<(bool, String)> = self.custom_draws.iter().filter(|(name, _)| {
-            instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
-        }).map(|(name, m)| (m.draw.draw_vars.options.alpha_blend, name.clone())).collect();
+            (stock_ibl_on && name.as_str() == stock_ibl::STOCK_IBL_MATERIAL)
+                || instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
+        }).map(|(name, m)| {
+            // The stock IBL program stands in for the PBR lane: opaque models, their blended
+            // layers drawn inside it, before every blended program. set_material leaves the
+            // last layer's blend state on its draw, so that state must not sort it.
+            let blended = m.draw.draw_vars.options.alpha_blend && name.as_str() != stock_ibl::STOCK_IBL_MATERIAL;
+            (blended, name.clone())
+        }).collect();
         names.sort();
         let names = names.into_iter().map(|(_, name)| name);
         for name in names {
