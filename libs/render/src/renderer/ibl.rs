@@ -336,8 +336,11 @@ impl IblState {
 /// The built-in environments `IblSource::Procedural` indexes, in order:
 /// render-material's seven looks, then the HDRI generator's presets
 /// (`hdri::presets::PRESET_NAMES`) as `hdri_<name>`, lowercase with `_` for
-/// spaces and dashes (see `hdri_procedural_name`). Indices are stable:
-/// Scene3D's `@names` and `material_lab` keep working.
+/// spaces and dashes (see `hdri_procedural_name`). Indices are stable, so
+/// `material_lab` keeps working; Scene3D's `@names` are these names (its
+/// `@hdri_golden_hour` is the generator's preset baked at
+/// `PROCEDURAL_HDRI_WIDTH`, as here, and registered whole: Scene3D lights
+/// with the key left in the map, its own lights replacing the rig's).
 pub const PROCEDURAL_ENVIRONMENTS: &[&str] = &[
     "studio", "softbox", "sunset", "overcast", "night", "neon", "gradient",
     "hdri_clear_noon", "hdri_golden_hour", "hdri_sunset", "hdri_overcast", "hdri_blue_hour", "hdri_moonlit_night", "hdri_starry_night",

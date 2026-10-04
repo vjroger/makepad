@@ -638,6 +638,9 @@ pub(crate) mod ibl;
 mod env_sun;
 mod items;
 pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
+// The names `IblSource::Procedural` indexes, for hosts that name an
+// environment as the engine does (Scene3D's `@hdri_golden_hour`).
+pub use ibl::{HDRI_PREFIX, PROCEDURAL_ENVIRONMENTS, PROCEDURAL_HDRI_WIDTH};
 
 pub use draw_items::*;
 pub use prepared::*;
