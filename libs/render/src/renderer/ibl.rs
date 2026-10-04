@@ -15,10 +15,14 @@
 //! frame); its result is adopted when it lands, newer than what is bound,
 //! and then the latest key prepares. So light and sky are at most one
 //! preparation behind the world and always come from the same preparation.
-//! Only a change of map cancels the job in flight (another `Arc` registered
-//! under its handle, another environment named, an unregister): the job
-//! polls a token between its stages and stops, and whatever it still
-//! returns is rejected when it is taken.
+//! A host that re-bakes the map it registered (`register_rebaked_environment`:
+//! the sandbox's `params:` sky bakes again every quarter hour of game time,
+//! every 0.3 s on a fast day) is the map's form of a key that moves (K7):
+//! the job preparing an earlier bake runs on and lands, then the newest
+//! bake prepares. Only a change of map cancels the job in flight (another
+//! map registered under its handle, another environment named, an
+//! unregister): the job polls a token between its stages and stops, and
+//! whatever it still returns is rejected when it is taken.
 //!
 //! A fork of the renderer (a split-screen pane, the AI world review) draws
 //! the live renderer's environment (I4): it mirrors the maps and the bound
@@ -210,6 +214,12 @@ struct IblJobResult {
 struct RegisteredMap {
     map: Arc<EnvMap>,
     keyless: Option<Arc<EnvMap>>,
+    /// Which registration this map continues: a change of map
+    /// (`register_generated_environment`) starts a new one, a re-bake
+    /// (`register_rebaked_environment`) continues the one registered under
+    /// the handle. A job's result is adopted while its map's registration
+    /// is still the handle's (`Renderer::job_is_current`).
+    bakes: u64,
 }
 
 impl RegisteredMap {
@@ -231,18 +241,31 @@ struct IblJob {
     /// What it prepares.
     key: PrepareKey,
     /// The registered map it prepares (`None` for a procedural index): its
-    /// result is adopted only while this is still the map registered under
-    /// the handle (`RegisteredMap::same`). Holding it also keeps the
-    /// allocation from being reused by a new map while the job runs.
+    /// result is adopted only while this map, or a later bake of it, is the
+    /// map registered under the handle (`Renderer::job_is_current`).
+    /// Holding it also keeps the allocation from being reused by a new map
+    /// while the job runs.
     map: Option<RegisteredMap>,
     /// Set on a change of map; the job polls it between its stages.
     cancel: CancellationToken,
+}
+
+/// How a finished job stands to what the world names now
+/// (`Renderer::job_is_current`).
+struct JobStanding {
+    /// Its result may be adopted: the source is named, and the job prepared
+    /// the map registered under it or an earlier bake of that map.
+    current: bool,
+    /// It prepared the map registered now (not an earlier bake).
+    registered: bool,
 }
 
 #[derive(Default)]
 pub(super) struct IblState {
     /// Host-registered HDR environments, by the handle documents name.
     maps: HashMap<TextureRef, RegisteredMap>,
+    /// The last registration handed out (`RegisteredMap::bakes`).
+    registrations: u64,
     /// What `texture`'s meta row holds: (source, intensity bits, rotation bits).
     key: Option<(IblSource, u32, u32)>,
     /// The lane texture (meta row 0, then the atlas: plan 1a task A7) and
@@ -258,7 +281,8 @@ pub(super) struct IblState {
     wanted: Option<PrepareKey>,
     /// What the textures and numbers below were prepared for, while they
     /// are of the map registered now: a re-registration clears it (the new
-    /// map then prepares while these stay bound).
+    /// map then prepares while these stay bound), and an earlier bake that
+    /// lands after a re-bake leaves it clear (the newest bake prepares next).
     prepared_for: Option<PrepareKey>,
     /// The bound preparation's key and generation (`None`: nothing bound).
     /// A result is adopted only when it is newer than this one.
@@ -309,6 +333,7 @@ impl IblState {
             horizon_rgb,
             filled_sun,
             daylight_sun,
+            registrations: _,
             wanted: _,
             job: _,
             generation: _,
@@ -523,7 +548,9 @@ impl Renderer {
     /// do it every frame. Registering another map is a change of map: a job
     /// preparing the old one is cancelled and never lands, and a world that
     /// names the handle prepares the new map in the background (a restart),
-    /// while the old textures and numbers stay bound until it lands. A key
+    /// while the old textures and numbers stay bound until it lands (the
+    /// next bake of the same environment is not a change of map:
+    /// [`Self::register_rebaked_environment`]). A key
     /// the world declares for this map has its covering cone filled in the
     /// lighting copy (a file's detected sun); a generated map registers its
     /// keyless copy too ([`Self::register_generated_environment`]).
@@ -538,12 +565,46 @@ impl Renderer {
     /// only that key's own light leaves the SH, the atlas, the meter and the
     /// fog band (N3); the dome shows `env`. `None` is `register_environment`.
     /// Registering the same two `Arc`s again changes nothing; a new pair is a
-    /// change of map.
+    /// change of map. A host that bakes the same environment again (a clock's
+    /// next quarter hour) registers the bake with
+    /// [`Self::register_rebaked_environment`], which lets the preparation in
+    /// flight land.
     pub fn register_generated_environment(&mut self, texture: TextureRef, env: Arc<EnvMap>, keyless: Option<Arc<EnvMap>>) {
-        let registered = RegisteredMap { map: env, keyless };
-        if self.ibl.maps.get(&texture).is_some_and(|m| m.same(&registered)) {
+        self.register_map(texture, env, keyless, false);
+    }
+
+    /// The next bake of the environment registered under `texture`, with its
+    /// keyless copy as for [`Self::register_generated_environment`]: a host
+    /// clock that re-bakes its map (the sandbox's `params:` sky bakes again
+    /// every quarter hour of game time). A re-bake is not a change of map
+    /// but the map's form of a key that moves (K1, K7): the job preparing an
+    /// earlier bake runs to its end and is adopted when it lands (newer than
+    /// what is bound, the bakes registered meanwhile notwithstanding), and
+    /// then the newest bake prepares; the bakes in between never do. So a
+    /// clock that re-bakes faster than the renderer prepares shows at the
+    /// renderer's pace, at most one preparation behind its newest bake,
+    /// with light and sky from the same preparation (M1). The world declares
+    /// the newest bake's key, which its preparation is made without. With
+    /// nothing registered under the handle this is a first registration;
+    /// the same two `Arc`s again change nothing.
+    pub fn register_rebaked_environment(&mut self, texture: TextureRef, env: Arc<EnvMap>, keyless: Option<Arc<EnvMap>>) {
+        self.register_map(texture, env, keyless, true);
+    }
+
+    /// Register `env` (and its keyless copy) under `texture`, as the next
+    /// bake of the environment registered there (`rebake`) or as a change of
+    /// map, which cancels a job preparing the handle.
+    fn register_map(&mut self, texture: TextureRef, env: Arc<EnvMap>, keyless: Option<Arc<EnvMap>>, rebake: bool) {
+        let mut registered = RegisteredMap { map: env, keyless, bakes: 0 };
+        let now = self.ibl.maps.get(&texture);
+        if now.is_some_and(|m| m.same(&registered)) {
             return;
         }
+        let continued = if rebake { now.map(|m| m.bakes) } else { None };
+        registered.bakes = continued.unwrap_or_else(|| {
+            self.ibl.registrations = self.ibl.registrations.wrapping_add(1);
+            self.ibl.registrations
+        });
         let names = |k: Option<IblSource>| k == Some(IblSource::Hdri(texture));
         if names(self.ibl.key.map(|k| k.0)) {
             self.ibl.key = None;
@@ -554,7 +615,7 @@ impl Renderer {
         if names(self.ibl.failed_for.map(|p| p.source)) {
             self.ibl.failed_for = None;
         }
-        if names(self.ibl.job.as_ref().map(|j| j.key.source)) {
+        if continued.is_none() && names(self.ibl.job.as_ref().map(|j| j.key.source)) {
             self.cancel_ibl_job();
         }
         self.ibl.maps.insert(texture, registered);
@@ -658,7 +719,7 @@ impl Renderer {
     /// in `adopt_ibl` and cleared in `unbind_ibl`), not on `prepared_for`:
     /// re-registering the bound handle clears `prepared_for`, and the rig,
     /// the exposure and the fog must keep the old map's values until the
-    /// new ones land (a day cycle re-registers every quarter hour).
+    /// new ones land (a day cycle re-bakes every quarter hour).
     pub fn ibl_sh9(&self) -> Option<&[[f32; 3]; 9]> {
         self.ibl.sh.as_ref()
     }
@@ -827,7 +888,7 @@ impl Renderer {
                         f(i);
                     }
                 };
-                let map = map.map(|r| RegisteredMap { map: shrunk_for_sync(r.map), keyless: r.keyless.map(shrunk_for_sync) });
+                let map = map.map(|r| RegisteredMap { map: shrunk_for_sync(r.map), keyless: r.keyless.map(shrunk_for_sync), bakes: r.bakes });
                 let result = build_ibl(self.ibl.generation, wanted, map, intensity, rotation_deg, &serial, SYNC_SIZES, SYNC_HDRI_WIDTH, &|| false);
                 match result {
                     Some(r) => self.adopt_ibl(cx, r),
@@ -839,32 +900,37 @@ impl Renderer {
 
     /// Take a finished job. Its result is adopted when the job is current
     /// (`job_is_current`) and the result is newer than the bound
-    /// preparation, even if the world declared another key while it ran:
-    /// the next submit prepares the latest one. A result of a replaced map
-    /// or of a source the world no longer names is dropped. A failure is
-    /// remembered (so it is not retried every frame) only for a current job
-    /// that was not cancelled.
+    /// preparation, even if the world declared another key or the host
+    /// registered a later bake while it ran: the next submit prepares the
+    /// latest one. A result of a replaced map or of a source the world no
+    /// longer names is dropped. A failure is remembered (so it is not
+    /// retried every frame) only for a current job of the map registered
+    /// now that was not cancelled: a later bake gets its own try.
     fn adopt_finished_ibl(&mut self, cx: &mut Cx) {
         let Some(result) = self.ibl.job.as_mut().and_then(|j| j.handle.try_take()) else { return };
         let Some(job) = self.ibl.job.take() else { return };
-        let current = self.job_is_current(&job);
+        let JobStanding { current, registered } = self.job_is_current(&job);
         let cancelled = job.cancel.is_cancelled();
         let bound = self.ibl.bound.map_or(0, |b| b.1);
         match result {
             Ok(Some(r)) => {
                 if current && r.generation > bound {
                     self.adopt_ibl(cx, r);
+                    if !registered {
+                        // An earlier bake: bound, but the newest still prepares.
+                        self.ibl.prepared_for = None;
+                    }
                 }
             }
             Ok(None) => {
-                if current && !cancelled {
+                if current && registered && !cancelled {
                     self.ibl.failed_for = Some(job.key);
                 }
             }
             Err(e) => {
                 if !cancelled {
                     log!("ibl: environment preparation failed: {e:?}");
-                    if current {
+                    if current && registered {
                         self.ibl.failed_for = Some(job.key);
                     }
                 }
@@ -872,17 +938,22 @@ impl Renderer {
         }
     }
 
-    /// The job prepares the source the world names, from the map that is
-    /// registered under it now (the same `Arc`; a procedural index has no
-    /// map to replace).
-    fn job_is_current(&self, job: &IblJob) -> bool {
+    /// Whether the job prepares the source the world names, from the map
+    /// registered under it now or an earlier bake of it (a procedural index
+    /// has no map to replace). A change of map starts a new registration, so
+    /// an earlier map's job is never current after it, even when the earlier
+    /// map's bakes came first.
+    fn job_is_current(&self, job: &IblJob) -> JobStanding {
         let s = &self.ibl;
         let named = s.wanted.is_some_and(|w| w.source == job.key.source);
-        let same_map = match job.key.source {
-            IblSource::Hdri(t) => s.maps.get(&t).zip(job.map.as_ref()).is_some_and(|(now, prepared)| now.same(prepared)),
-            IblSource::Procedural(_) => true,
+        let (of_the_registration, registered) = match job.key.source {
+            IblSource::Hdri(t) => match s.maps.get(&t).zip(job.map.as_ref()) {
+                Some((now, prepared)) => (now.same(prepared) || now.bakes == prepared.bakes, now.same(prepared)),
+                None => (false, false),
+            },
+            IblSource::Procedural(_) => (true, true),
         };
-        named && same_map
+        JobStanding { current: named && of_the_registration, registered }
     }
 
     /// Upload a preparation: both textures replaced at once, the numbers
@@ -1787,6 +1858,82 @@ mod tests {
         assert!((mean(&renderer) - 0.9).abs() < 1.0e-3, "7 never lands: {}", mean(&renderer));
     }
 
+    /// Wait until the job in flight has finished (without taking it).
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn until_finished(renderer: &Renderer) {
+        let start = std::time::Instant::now();
+        while !renderer.ibl.job.as_ref().is_some_and(|j| j.handle.is_finished()) {
+            assert!(start.elapsed().as_secs() < 180, "the preparation did not finish within 180 s");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// K7 (K1 for a host that re-bakes its map): a clock that re-bakes the
+    /// registered environment faster than the renderer prepares it (the
+    /// sandbox's day cycle registers a new bake every quarter hour of game
+    /// time, every 0.3 s on a 30 s day) lands at the renderer's pace. A
+    /// re-bake is not a change of map: the job in flight runs on and its
+    /// bake is adopted, newer than what is bound, although newer bakes are
+    /// registered by then; then the newest bake prepares, and the ones in
+    /// between never do. Every bake here declares the same key (none), so
+    /// the key alone cannot tell the bound bake from the newest. A change of
+    /// map after re-bakes still cancels.
+    #[test]
+    fn a_rebaked_map_lands_at_the_renderers_pace() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        let env = env_of(IblSource::Hdri(TextureRef(10)), 1.0, 0.0);
+        let mean = |r: &Renderer| r.ibl_mean_luminance().unwrap_or(-1.0);
+        renderer.register_generated_environment(TextureRef(10), grey(16, 0.25), None);
+        renderer.resolve_ibl(&mut cx, &env);
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("the first bake prepares");
+        // Two re-bakes while it prepares.
+        let (between, newest) = (grey(16, 0.5), grey(16, 0.75));
+        renderer.register_rebaked_environment(TextureRef(10), between.clone(), None);
+        renderer.resolve_ibl(&mut cx, &env);
+        renderer.register_rebaked_environment(TextureRef(10), newest.clone(), None);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(!cancel.is_cancelled(), "a re-bake does not cancel the job in flight");
+        assert_eq!(renderer.environment_preparations(), 1, "one job at a time");
+        until_finished(&renderer);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!((mean(&renderer) - 0.25).abs() < 1.0e-3, "the first bake lands although two newer ones are registered: {}", mean(&renderer));
+        assert!(renderer.environment_pending(), "the newest bake prepares next");
+        assert_eq!(renderer.environment_preparations(), 2);
+        let preparing = renderer.ibl.job.as_ref().and_then(|j| j.map.as_ref()).map(|m| m.map.clone()).expect("a job for the newest bake");
+        assert!(Arc::ptr_eq(&preparing, &newest), "the newest bake, not the one in between");
+        drop(preparing);
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.75).abs() < 1.0e-3, "{}", mean(&renderer));
+        assert!(!renderer.environment_pending());
+        assert_eq!(renderer.environment_preparations(), 2, "the bake in between never prepared");
+        assert_eq!(Arc::strong_count(&between), 1, "and nothing holds it");
+
+        // A change of map after a re-bake still cancels: the re-bake's job
+        // never lands, the new map does.
+        renderer.register_rebaked_environment(TextureRef(10), grey(16, 0.1), None);
+        renderer.resolve_ibl(&mut cx, &env);
+        let cancel = renderer.ibl.job.as_ref().map(|j| j.cancel.clone()).expect("the re-bake prepares");
+        renderer.register_generated_environment(TextureRef(10), grey(16, 0.9), None);
+        assert!(cancel.is_cancelled(), "a change of map cancels the re-bake's job");
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.9).abs() < 1.0e-3, "{}", mean(&renderer));
+        // A finished job of a bake whose map was then replaced is rejected.
+        renderer.register_rebaked_environment(TextureRef(10), grey(16, 0.3), None);
+        renderer.resolve_ibl(&mut cx, &env);
+        until_finished(&renderer);
+        renderer.register_generated_environment(TextureRef(10), grey(16, 0.6), None);
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!((mean(&renderer) - 0.9).abs() < 1.0e-3, "the replaced bake is not adopted: {}", mean(&renderer));
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.6).abs() < 1.0e-3, "{}", mean(&renderer));
+        // With nothing registered under the handle a re-bake is a first registration.
+        renderer.unregister_environment(TextureRef(10));
+        renderer.register_rebaked_environment(TextureRef(10), grey(16, 0.4), None);
+        settle(&mut renderer, &mut cx, &env);
+        assert!((mean(&renderer) - 0.4).abs() < 1.0e-3, "{}", mean(&renderer));
+    }
+
     /// M3: registering the map that is registered (the same `Arc`) is no
     /// change: the job in flight runs on and a landed preparation stays.
     #[test]
@@ -1955,14 +2102,14 @@ mod tests {
 
         // A registered generated map: the keyless copy while a key is declared.
         let hdri = PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: Some(sun), daylight_sun: None };
-        let generated = RegisteredMap { map: Arc::new(g.map.clone()), keyless: Some(Arc::new(keyless.clone())) };
+        let generated = RegisteredMap { map: Arc::new(g.map.clone()), keyless: Some(Arc::new(keyless.clone())), bakes: 1 };
         let lit = build(hdri, Some(generated.clone()));
         assert_eq!((lit.sh, lit.mean_luminance), (sh9(&keyless), crate::hdri::image::mean_luminance(&keyless)));
         assert_eq!(lit.dome.len(), 32 * 16 * 4, "the dome is the map");
         assert_eq!(lit.dome[..4], [g.map.data[0][0], g.map.data[0][1], g.map.data[0][2], 1.0]);
         assert_eq!(build(PrepareKey { sun: None, ..hdri }, Some(generated)).sh, sh9(&g.map), "no key: nothing leaves");
         // A plain registration (a file): the declared key's cone is filled.
-        let file = RegisteredMap { map: Arc::new(g.map.clone()), keyless: None };
+        let file = RegisteredMap { map: Arc::new(g.map.clone()), keyless: None, bakes: 2 };
         assert_eq!(build(hdri, Some(file)).sh, sh9(&filled));
     }
 
