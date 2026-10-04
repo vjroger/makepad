@@ -516,7 +516,8 @@ const RIG_COLOR_STEP: f32 = 1.0 / 4096.0;
 /// environment sun, or when the script authored `SunConfig.dir` — a look,
 /// the true sun for its hour (`resolve_sun`), or a host's own eased clock
 /// (the sandbox's running day cycle over a re-baked map, which authors the
-/// eased direction so the map's quarter-hour steps never steer its shadows),
+/// eased direction so the map's bake-grid steps, a quarter hour or 7.5
+/// minutes while the sun is low, never steer its shadows),
 /// none of which is the map's to override. A `Light::Sun` is the caller's
 /// business (`world_sun_dir` first).
 pub fn env_sun_dir(world: &makepad_scene::World) -> Option<Vec3f> {

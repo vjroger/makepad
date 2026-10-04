@@ -11,8 +11,9 @@
 //!
 //! Preparations land at the renderer's pace (K1): one job at a time, and a
 //! job runs to its end even when the world declares another key meanwhile
-//! (a running clock re-declares its sun every quarter hour, or every
-//! frame); its result is adopted when it lands, newer than what is bound,
+//! (a running clock re-declares its sun every quarter hour, every 7.5
+//! minutes while the sun is low, or every frame); its result is adopted
+//! when it lands, newer than what is bound,
 //! and then the latest key prepares. So light and sky are at most one
 //! preparation behind the world and always come from the same preparation.
 //! A host that re-bakes the map it registered (`register_rebaked_environment`:
@@ -713,11 +714,12 @@ impl Renderer {
     /// 0.7 s) sees this true nearly all the time: whenever a preparation
     /// lands, a newer bake is already registered and wanted, so the next
     /// one is submitted at once. Such a host must not wait for it to turn
-    /// false before it draws or takes a bake, nor use `items_ready` (which
-    /// holds while this does) to gate its frames: it would wait for a
-    /// moment that does not come. [`Self::environment_ready`] says an
-    /// environment is bound; the bakes land at the renderer's pace
-    /// meanwhile (K7). The sandbox reads neither.
+    /// false before it draws or hands the renderer its next bake, nor use
+    /// `items_ready` (which is false while this holds) to gate its frames:
+    /// it would wait for a moment that does not come.
+    /// [`Self::environment_ready`] says an environment is bound; the bakes
+    /// land at the renderer's pace meanwhile (K7). The sandbox reads
+    /// neither.
     pub fn environment_pending(&self) -> bool {
         let s = &self.ibl;
         let live = s.job.as_ref().is_some_and(|j| !j.cancel.is_cancelled());
