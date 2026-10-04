@@ -50,7 +50,7 @@
 //! these numbers so this note cannot rot.
 
 use makepad_draw::*;
-use super::{dir_from_az_el, AtmosphereParams, SunDiscParams, SunMode, SunParams};
+use super::{dir_from_az_el, AtmosphereParams, EnvSun, SunDiscParams, SunMode, SunParams};
 use crate::sky::{noaa_solar_position, SkyDate};
 
 /// Top-of-atmosphere sun irradiance, in scene units per channel. The scale is
@@ -232,12 +232,12 @@ impl Atmosphere {
 
     /// Mean radiance over the nominal disc cone (radius size_deg / 2):
     /// radiance x 2 pi (1 - sun_cos_radius()) is exactly `sun_irradiance()`.
-    /// This is what the engine's key light wants.
+    /// This is what the engine's key light wants. The cone is the one the
+    /// f32 `sun_cos_radius()` names, cancellation and all, because that is
+    /// the cone every consumer of the key computes (`EnvSun::cone_radiance`):
+    /// a cancellation-free cone here lit a 0.1 degree sun 6 % too dark.
     pub fn sun_cone_radiance(&self) -> Vec3f {
-        let half = 0.5 * self.disc_radius as f64;
-        // 2 pi (1 - cos r) written without the cancellation.
-        let cone = 4.0 * std::f64::consts::PI * half.sin() * half.sin();
-        self.sun_irradiance * (1.0 / cone as f32)
+        EnvSun::cone_radiance(self.sun_irradiance, self.sun_cos_radius())
     }
 
     pub fn sun_cos_radius(&self) -> f32 {

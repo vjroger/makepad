@@ -1270,6 +1270,12 @@ mod shader_registration_tests {
             // The dome's texel addressing works in its logical size
             // (bg2.zw), the instance field the lookup reads.
             assert!(source.contains("bg2"), "{name}: the dome lookup reads its logical size");
+            // K2: the hash dither is the legacy lane's (its 8-bit output
+            // bands); the HDR lane writes linear radiance, which the
+            // composite dithers after its tone map, and a fixed +-0.004
+            // there would swamp a dim map. One factor: (1 - hdr).
+            let dither = source.lines().find(|l| l.contains("0.008")).unwrap_or_else(|| panic!("{name}: the dither"));
+            assert!(dither.contains("(1.0 - l_hdr)"), "{name}: the HDR lane adds no dither: {dither}");
         }
     }
 

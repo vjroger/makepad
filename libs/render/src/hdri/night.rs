@@ -220,8 +220,11 @@ struct Moon {
     earthshine: Vec3f,
     /// Mean radiance over the disc.
     mean: Vec3f,
-    /// The mean times the disc's solid angle: irradiance on a surface facing the moon.
-    /// It fades out as the moon sets.
+    /// The mean times the disc's solid angle: the disc's whole emission, what the
+    /// key carries.
+    emission: Vec3f,
+    /// The emission as irradiance on a surface facing the moon: it fades out as
+    /// the moon sets.
     irradiance: Vec3f,
 }
 
@@ -287,11 +290,13 @@ impl NightSky {
                 lit,
                 earthshine: lit * (EARTHSHINE * earth_phase),
                 mean: Vec3f::default(),
+                emission: Vec3f::default(),
                 irradiance: Vec3f::default(),
             };
             moon.mean = disc_mean(&moon, sun_dir);
             // The disc's solid angle 2 pi (1 - cos r), written so it keeps its precision for a tiny r.
             let solid_angle = 4.0 * PI * (0.5 * radius).sin().powi(2);
+            moon.emission = moon.mean * solid_angle;
             moon.irradiance = moon.mean * (solid_angle * smoothstep(-0.01, 0.01, dir.y));
             Some(moon)
         } else {
@@ -395,7 +400,10 @@ impl NightSky {
     /// The moon as the map's key light. It applies only when the moon is enabled and
     /// above the horizon and the sun is below -6 degrees; above that the twilight sky
     /// still outshines it.
-    /// - The radiance is the disc's mean, so radiance x solid angle is its true irradiance.
+    /// - The radiance is the disc's emission (its mean over its true solid angle)
+    ///   over the cone its f32 `cos_radius` names, the cone every consumer of the
+    ///   key computes, so radiance x 2 pi (1 - cos_radius) is its true irradiance
+    ///   at any size (`EnvSun::cone_radiance`).
     /// - The direction is in the map's own frame.
     pub fn moon_key(&self) -> Option<EnvSun> {
         let m = self.moon.as_ref()?;
@@ -404,7 +412,7 @@ impl NightSky {
         }
         // A disc a fraction of a degree wide with a hard edge: a surface facing
         // it gets all of its emission, and the disc is its own covering cone.
-        Some(EnvSun { dir: m.dir, radiance: m.mean, cos_radius: m.cos_radius, facing: 1.0, cos_cover: m.cos_radius })
+        Some(EnvSun { dir: m.dir, radiance: EnvSun::cone_radiance(m.emission, m.cos_radius), cos_radius: m.cos_radius, facing: 1.0, cos_cover: m.cos_radius })
     }
 
     /// The moon's disc for the bake's refinement: its direction in the map's own frame and its angular radius.
@@ -835,6 +843,25 @@ mod tests {
         p.moon_elevation_deg = 30.0;
         p.moon = false;
         assert!(key(&p, -10.0).is_none(), "no moon, no key");
+    }
+
+    /// M6: the moon's key carries the disc's whole emission (its mean over
+    /// the disc's true solid angle) through the f32 cone it stores, at the
+    /// 0.1 degree minimum as at the real moon's half degree.
+    #[test]
+    fn the_moons_key_carries_its_emission_through_its_f32_cone() {
+        for size_deg in [0.1f32, 0.53] {
+            let p = NightParams { moon_size_deg: size_deg, ..Default::default() };
+            let night = NightSky::new(&p, 1, dir_from_az_el(315.0, -30.0), 22.0, 45.0);
+            let key = night.moon_key().expect("night, moon up");
+            let m = night.moon.as_ref().unwrap();
+            let r = (0.5 * size_deg).to_radians();
+            let want = m.mean * (4.0 * PI * (0.5 * r).sin().powi(2));
+            let got = key.irradiance();
+            for (g, w) in [(got.x, want.x), (got.y, want.y), (got.z, want.z)] {
+                assert!((g / w - 1.0).abs() < 1.0e-6, "{size_deg} deg: {g} for {w}");
+            }
+        }
     }
 
     #[test]

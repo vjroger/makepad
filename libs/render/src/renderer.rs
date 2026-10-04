@@ -512,6 +512,9 @@ pub struct Renderer {
     asset_light_error:Option<String>,
     /// This frame's eye, for ranking lights past the authored budget.
     light_eye: Vec3f,
+    /// This frame's daylight direction (renderer/env_sun.rs `daylight_dir`):
+    /// what the lamps' photocell reads, here and in the bake's lamp key.
+    light_daylight: Vec3f,
     /// See [`Renderer::set_camera_relative`].
     camera_relative: bool,
     /// Cached [`Self::harvest_lamps`] output — the harvest walks strings, so
@@ -760,7 +763,7 @@ impl Default for Renderer {
             frame_lights: Vec::new(),
             frame_baked_count: 0,
             host_lights: Vec::new(),
-            host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),camera_relative:false,
+            host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),light_daylight:SunLight::default().dir,camera_relative:false,
             model_headlight_owners: Vec::new(),
             lamp_cache: Vec::new(),
             lamp_cache_rev: None,

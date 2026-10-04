@@ -23,9 +23,23 @@ pub fn bake_env_map(
     width: usize,
     run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
 ) -> (EnvMap, Option<EnvSun>) {
+    let (map, sun, _) = bake_env_map_with_daylight(params, width, run);
+    (map, sun)
+}
+
+/// [`bake_env_map`] and the map's own sun for the daylight switches,
+/// `Environment.daylight_sun`: [`Env::sun_dir`], the sky's sun wherever it is
+/// (below the horizon while the moon is the key, or at twilight with no key at
+/// all), world space like the key; `None` for a studio. A host that bakes a
+/// map for the engine reports both.
+pub fn bake_env_map_with_daylight(
+    params: &HdriParams,
+    width: usize,
+    run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
+) -> (EnvMap, Option<EnvSun>, Option<Vec3f>) {
     let env = Env::new(params);
-    let sun = env.sun();
-    (env.bake_par(width, run), sun)
+    let (sun, daylight) = (env.sun(), env.sun_dir());
+    (env.bake_par(width, run), sun, daylight)
 }
 
 /// Loads an equirect as an engine environment map (EXR, Radiance .hdr, or
@@ -180,8 +194,10 @@ pub fn detect_sun(env: &EnvMap) -> Option<EnvSun> {
         }
     }
     // The cone is the cap with the gathered texels' area: omega = 2π(1 - cos r).
-    // At least one texel was gathered, so omega > 0 and the radiance is finite.
-    let cos_radius = (1.0 - omega / std::f32::consts::TAU).clamp(-1.0, 1.0);
+    // At least one texel was gathered, so omega > 0; a texel at the zenith of a
+    // fine map is so small that its cosine rounds to 1 in f32, a cone with no
+    // solid angle, so the narrowest cone an f32 cosine names stands for it.
+    let cos_radius = (1.0 - omega / std::f32::consts::TAU).clamp(-1.0, 1.0 - 0.5 * f32::EPSILON);
     if cos_radius < SUN_MAX_RADIUS_DEG.to_radians().cos() {
         return None;
     }
@@ -192,7 +208,9 @@ pub fn detect_sun(env: &EnvMap) -> Option<EnvSun> {
     // The cap's cosine comes from an area and the texel's from a direction, so
     // either may be the smaller: the covering cone is the wider of the two.
     let cos_cover = cos_edge.clamp(-1.0, 1.0).min(cos_radius);
-    Some(EnvSun { dir: centre, radiance: energy * (1.0 / omega), cos_radius, facing, cos_cover })
+    // The energy over the cone as its f32 cosine names it, the cone every
+    // consumer of the key computes: `irradiance()` gives the energy back.
+    Some(EnvSun { dir: centre, radiance: EnvSun::cone_radiance(energy, cos_radius), cos_radius, facing, cos_cover })
 }
 
 /// Fills the sun's covering cone (`cos_cover`: the cone that holds the key's
@@ -439,6 +457,39 @@ mod tests {
         // A closed overcast hides the disc: its key is dimmed to nothing and the map has no sun.
         let (map, _) = bake_env_map(&crate::hdri::presets::preset("Overcast").unwrap(), 512, serial);
         assert!(detect_sun(&map).is_none());
+    }
+
+    /// M6: a detected sun's radiance is the energy it gathered over the cone
+    /// as its f32 cosine gives it, so `irradiance()` hands that energy back,
+    /// also for a sun of one texel, whose cone keeps few digits of 1 - cos,
+    /// and for one at the zenith of a fine map, whose cosine rounds to 1: its
+    /// cone is the narrowest an f32 can name instead of none.
+    #[test]
+    fn a_detected_sun_carries_its_energy_through_its_f32_cone() {
+        for (w, y) in [(1024usize, 40usize), (1024, 256), (2048, 0)] {
+            let h = w / 2;
+            let mut map = EnvMap::constant(w, [1.0, 1.0, 1.0]);
+            map.data[y * w + 300] = [1.0e5, 1.0e5, 1.0e5, 1.0];
+            let sun = detect_sun(&map).expect("one hot texel is a sun");
+            assert!(sun.validate().is_ok(), "{sun:?}");
+            let want = (1.0e5 - 1.0) * area_at(y, w, h);
+            let got = sun.irradiance().y;
+            assert!((got / want - 1.0).abs() < 1.0e-6, "{w} wide, row {y}: {got} for {want} ({sun:?})");
+        }
+    }
+
+    /// N1: a bake reports the sky's own sun beside its key: under the
+    /// moonlit preset the key is the moon and the sun is 30 degrees down; a
+    /// studio reports none.
+    #[test]
+    fn a_bake_reports_the_skys_own_sun_for_the_daylight_switches() {
+        let moonlit = crate::hdri::presets::preset("Moonlit night").unwrap();
+        let (map, key, daylight) = bake_env_map_with_daylight(&moonlit, 32, serial);
+        assert_eq!((map, key), bake_env_map(&moonlit, 32, serial), "the same map and key");
+        assert_eq!(daylight, Env::new(&moonlit).sun_dir());
+        assert!(daylight.is_some_and(|d| d.y < -0.4) && key.is_some_and(|k| k.dir.y > 0.4), "{daylight:?} {key:?}");
+        let (_, _, studio) = bake_env_map_with_daylight(&crate::hdri::presets::preset("Three-point").unwrap(), 32, serial);
+        assert_eq!(studio, None);
     }
 
     #[test]

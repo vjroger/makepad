@@ -189,12 +189,13 @@ impl Studio {
         let key = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).map(|i| {
             let l = enabled[i];
             let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
-            // 2 pi (1 - cos r), written without the cancellation.
-            let cone = 4.0 * std::f32::consts::PI * (0.5 * radius).sin().powi(2);
             let integral = key_emission(&prepared[i..], KEY_GRID);
             EnvSun {
                 dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg),
-                radiance: integral.emission / cone,
+                // Over the cone the f32 cosine names, the one every consumer of
+                // the key computes, so the emission comes back exactly however
+                // small the light (`EnvSun::cone_radiance`).
+                radiance: EnvSun::cone_radiance(integral.emission, radius.cos()),
                 cos_radius: radius.cos(),
                 facing: integral.facing,
                 // The reach box's cone can only be wider than the nominal one
@@ -1013,6 +1014,23 @@ mod tests {
         let cone = std::f32::consts::TAU * (1.0 - sun.cos_radius);
         let want = light_color(&key) * solid;
         assert!((sun.radiance * cone - want).length() < 1.0e-3 * want.length(), "{:?} vs {want:?}", sun.radiance * cone);
+    }
+
+    /// M6: a key as small as a light may be (0.1 degrees) carries the integral
+    /// exactly through the f32 cone it stores, and so does a sun-sized one:
+    /// `EnvSun::irradiance` gives `key_emission`'s emission back to the
+    /// float's rounding.
+    #[test]
+    fn a_small_key_carries_its_emission_through_its_f32_cone() {
+        for size_deg in [0.1f32, 0.53] {
+            let light = LightParams { key: true, shape: "disc".to_string(), width_deg: size_deg, height_deg: size_deg, softness: 0.0, ..Default::default() };
+            let key = Studio::new(&black_studio(), std::slice::from_ref(&light)).key().expect("a key light");
+            let want = emission_on(std::slice::from_ref(&light), KEY_GRID);
+            let got = key.irradiance();
+            for (g, w) in [(got.x, want.x), (got.y, want.y), (got.z, want.z)] {
+                assert!(w > 0.0 && (g / w - 1.0).abs() < 1.0e-6, "{size_deg} deg: {g} for {w}");
+            }
+        }
     }
 
     /// A baked map's cosine-weighted share, Σ L cosθ dΩ / Σ L dΩ in luminance, θ

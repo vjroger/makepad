@@ -42,6 +42,50 @@ impl Renderer {
         hdr.ground = floor_mix(bounce, hdr.ground);
     }
 
+    /// The frame's "is it day?" switches and its lamps, first thing in the
+    /// frame (no device needed, so the tests drive it): the sun the frame's
+    /// rig starts from (`resolve_sun`, aimed by a world's own Sun, else the
+    /// environment's key) and the direction the switches read.
+    /// - N1: the switches (a streamed city's night factor with its windows
+    ///   and headlights, the lamps' photocell, and later the analytic sky)
+    ///   read the daylight sun (`daylight_dir`): the environment's own sun
+    ///   when it reports one, never a moon key's direction.
+    /// - I1c: the lamps are railed against the rig the frame lights with, the
+    ///   environment's light folded in (`env_lamp_rig`), which in the legacy
+    ///   lane is the rig the bake snapshots.
+    pub(super) fn frame_lamps(&mut self, world: &World, camera_pos: Vec3f) -> (SunLight, Vec3f) {
+        let mut sun = crate::sun::resolve_sun(&world.sun);
+        // A world's own Sun steers every sun-driven system; else the
+        // environment's sun does (renderer/env_sun.rs); else the rig's.
+        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
+        let daylight = self.daylight_dir(world);
+        self.light_eye = camera_pos;
+        self.light_daylight = daylight;
+        self.stream_lights(camera_pos, daylight.y);
+        let lamps = self.env_lamp_rig(world, sun);
+        self.build_frame_lights(&lamps);
+        crate::entity_lights::append_entity_lights_with_model_headlights(
+            world, &mut self.frame_lights, &self.model_headlight_owners,
+        );
+        (sun, daylight)
+    }
+
+    /// The frame's rig in its lane (HDR: `to_hdr` and the analytic fill
+    /// first) with the environment's sun, fill and legacy exposure folded
+    /// in, before the world's own Sun and Sky have the last word: what the
+    /// exposure meters, and, after them, what the shaders, the GI, the
+    /// cascades and the bake take.
+    pub(super) fn lane_rig(&self, world: &World, sun: SunLight) -> SunLight {
+        let sun = if self.hdr_output {
+            let mut hdr = sun.to_hdr();
+            self.hdr_fill_from_sky(world, &mut hdr);
+            hdr
+        } else {
+            sun
+        };
+        self.env_sun_rig(world, sun)
+    }
+
     /// Encode the whole 3D scene for one view. `draw_list` is the host's
     /// scene draw list (begun/ended here, exactly as before the move).
     pub fn draw_scene(
@@ -168,27 +212,18 @@ impl Renderer {
             self.sky_clock = true;
         }
         self.sky_hour = hour;
-        let mut sun = crate::sun::resolve_sun(&world.sun);
-        // A world's own Sun steers every sun-driven system; else the
-        // environment's sun does (renderer/env_sun.rs); else the rig's.
-        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
-        self.light_eye = camera_pos;
-        self.stream_lights(camera_pos, sun.dir.y);
-        self.build_frame_lights(&sun);
-        crate::entity_lights::append_entity_lights_with_model_headlights(
-            world, &mut self.frame_lights, &self.model_headlight_owners,
-        );
+        // The daylight switches and the lamps (N1, I1c), and the sun the
+        // frame's rig starts from.
+        let (sun, daylight) = self.frame_lamps(world, camera_pos);
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.
         let env = self.env_lighting(world);
         let sun = if self.hdr_output {
             self.scale_frame_lights_hdr();
-            let mut hdr = sun.to_hdr();
-            self.hdr_fill_from_sky(world, &mut hdr);
             // The environment's sun and fill (renderer/env_sun.rs; the lane
             // is HDR here, so nothing is exposed in the values).
-            let hdr = self.env_sun_rig(world, hdr);
+            let hdr = self.lane_rig(world, sun);
             // Exposure. An environment meters ITSELF: the key is the map's
             // mean luminance (its sun included) in the lane's units, so
             // the dome, the fill and the sun it lights with land at
@@ -219,7 +254,7 @@ impl Renderer {
             hdr
         } else {
             // Legacy lane: the environment's values carry its own exposure.
-            let sun = self.env_sun_rig(world, sun);
+            let sun = self.lane_rig(world, sun);
             if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
                 log!("legacy: sun {:?} sky {:?} ground {:?} dir {:?} env {}", sun.color, sun.sky, sun.ground, sun.dir, env.is_some());
             }
@@ -346,30 +381,16 @@ impl Renderer {
         // passthrough feed.
         let shows_environment = self.stage.shows_environment();
 
-        // One sun for every shader this frame (sun.rs). Written before any
-        // batch begins, because instance fields are snapshotted per draw and
-        // uniforms are captured when the draw item opens.
-        let sun = {
-            let mut sun = crate::sun::resolve_sun(&world.sun);
-            if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
-            let sun = if self.hdr_output {
-                let mut hdr = sun.to_hdr();
-                self.hdr_fill_from_sky(world, &mut hdr);
-                hdr
-            } else {
-                sun
-            };
-            // The environment's sun, fill and (legacy lane) exposure, before
-            // the world's own lights have the last word.
-            let sun = self.env_sun_rig(world, sun);
-            let sun = crate::world_lights::apply_world_sun(world, sun);
-            // C8 reads these three lines (frame, shaders, bake) against
-            // each other: one sun at every site.
-            if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
-                log!("rig: dir {:?} color {:?} sky {:?} ground {:?}", sun.dir, sun.color, sun.sky, sun.ground);
-            }
-            sun
-        };
+        // One sun for every shader this frame (sun.rs): the frame's rig from
+        // above (its lane, the environment's sun, fill and legacy exposure,
+        // the world's own lights last), the one the lamps, the cascades and
+        // the bake took too. Written before any batch begins, because
+        // instance fields are snapshotted per draw and uniforms are captured
+        // when the draw item opens. C8 reads these three lines (frame,
+        // shaders, bake) against each other: one sun at every site.
+        if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
+            log!("rig: dir {:?} color {:?} sky {:?} ground {:?}", sun.dir, sun.color, sun.sky, sun.ground);
+        }
 
         // SDF-atlas sun era: the sidecars bake against one sun elevation.
         // An EXPLICIT sun change (OnChange's only kind — the day cycle
@@ -391,7 +412,11 @@ impl Renderer {
         // horizon colour stays customisable either way: it only ever tinted
         // the FOG, and in analytic mode the fog instead comes from the
         // model's own tone-mapped horizon so sky and haze agree.
-        let sky_frame = analytic_sky_frame(world, sun.dir, shows_environment, self.hdr_output, self.sky_clock);
+        // Day or night is the daylight switches' (N1): under a moonlit map
+        // the sky is a night sky while the moon lights the frame. A world's
+        // own Sun steers it, as it steers the rig.
+        let sky_dir = if crate::world_lights::world_sun_dir(world).is_some() { sun.dir } else { daylight };
+        let sky_frame = analytic_sky_frame(world, sky_dir, shows_environment, self.hdr_output, self.sky_clock);
 
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {
@@ -414,9 +439,10 @@ impl Renderer {
             _ => (vec3(0.75, 0.87, 0.96), 0.0),
         };
         // The world environment's fog, when it names one. Under `Fog::Host`
-        // a prepared environment lends its horizon band as the COLOUR (the
-        // haze, the water's horizon and the stock lanes' `sky_env` horizon
-        // then agree with the dome); the density stays the host's.
+        // a prepared environment that is the background lends its horizon
+        // band as the COLOUR (the haze, the water's horizon and the stock
+        // lanes' `sky_env` horizon then agree with the dome); the density
+        // stays the host's, and under the host's own sky so does the colour.
         let (fog_color, fog_density) = match crate::world_lights::world_fog(world) {
             Some(fog) => fog,
             None => (self.env_fog_color(world, shows_environment).unwrap_or(fog_color), fog_density),

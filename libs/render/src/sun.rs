@@ -18,6 +18,9 @@ use makepad_draw::*;
 /// was `color*0.28 + color*dp*0.72`.
 const LEGACY_AMBIENT: f32 = 0.28;
 const LEGACY_DIRECT: f32 = 0.72;
+/// The stock rig's drop-shadow strength: what the shadow quads and hulls
+/// are drawn at with a full key (they scale by `shadow_alpha / 0.35`).
+const STOCK_SHADOW_ALPHA: f32 = 0.35;
 
 /// The sun every game shader reads. Values are final multipliers — the
 /// shaders apply them directly, they do not rescale.
@@ -46,7 +49,7 @@ impl Default for SunLight {
             color: vec3f(LEGACY_DIRECT, LEGACY_DIRECT, LEGACY_DIRECT),
             sky: vec3f(LEGACY_AMBIENT, LEGACY_AMBIENT, LEGACY_AMBIENT),
             ground: vec3f(LEGACY_AMBIENT, LEGACY_AMBIENT, LEGACY_AMBIENT),
-            shadow_alpha: 0.35,
+            shadow_alpha: STOCK_SHADOW_ALPHA,
         }
     }
 }
@@ -538,6 +541,22 @@ pub fn env_sun_dir_with(world: &makepad_scene::World, env_sun: Option<makepad_sc
     (dir.is_finite() && dir.length() > 1.0e-6).then(|| dir.normalize())
 }
 
+/// The environment's own sun in world space for the "is it day?" switches
+/// (N1: the lamps' photocell, a streamed city's night factor, the analytic
+/// sky): `daylight` (`Environment.daylight_sun`, in the map's frame, as the
+/// renderer's bound preparation holds it) turned with the map by
+/// `Ibl.rotation_deg` and normalised. An authored `SunConfig.dir` does not
+/// stop it, as it stops the key's direction: that direction aims a light (a
+/// look, or a host's own clock), while this says whether the environment
+/// shows day or night, and a moonlit map is night whatever aims its moon.
+/// `None` when the world names no IBL or the map knows no sun of its own:
+/// the switches then follow the world's own sun.
+pub fn env_daylight_dir_with(world: &makepad_scene::World, daylight: Option<Vec3f>) -> Option<Vec3f> {
+    let ibl = world.environment.ibl.filter(|i| i.rotation_deg.is_finite())?;
+    let dir = crate::hdri::rotate_y(daylight?, ibl.rotation_deg);
+    (dir.is_finite() && dir.length() > 1.0e-6).then(|| dir.normalize())
+}
+
 /// The rig with the environment's light folded in, in the lane's units:
 /// call it on the HDR rig (after `to_hdr` and `hdr_fill_from_sky`) under
 /// HDR output and on the plain rig otherwise, and BEFORE
@@ -565,15 +584,19 @@ pub fn env_sun_dir_with(world: &makepad_scene::World, env_sun: Option<makepad_sc
 /// sun that has set and a moon that has not risen, a zero key) has no direct
 /// term: all its light is in the fill, never the analytic rig's colour, so a
 /// sunset fades out instead of switching to a stock sun. (The direction is
-/// then the caller's: `resolve_sun` keeps the shadows and the cascades
-/// stable.) The legacy lane has no composite to apply a meter, so the map's
-/// exposure is baked into the values the environment supplies here, and
-/// since it has no tone mapper either, the direct term is held to what the
-/// fill leaves under white ([`legacy_direct_within_white`]).
+/// then the caller's: `resolve_sun` keeps the cascades stable.) The legacy
+/// lane has no composite to apply a meter, so the map's exposure is baked
+/// into the values the environment supplies here, and since it has no tone
+/// mapper either, the direct term is held to what the brighter fill leaves
+/// under white ([`legacy_direct_within_white`]).
+///
+/// The drop shadows go with the key the environment supplies: unless the
+/// script authored a strength, `shadow_alpha` is the stock strength times the
+/// key's share of the light ([`env_shadow_alpha`]), none without a key.
 ///
 /// Only the fields the environment supplies are quantised (RIG_*_STEP) and,
-/// in the legacy lane, exposed; an authored `SunConfig` dir, colour or
-/// ambient passes through bit for bit, in both lanes.
+/// in the legacy lane, exposed; an authored `SunConfig` dir, colour, ambient
+/// or shadow strength passes through bit for bit, in both lanes.
 pub fn env_sun_rig(world: &makepad_scene::World, env: Option<&EnvLighting>, sun: SunLight, hdr: bool) -> SunLight {
     env_sun_rig_with(world, world.environment.sun, env, sun, hdr)
 }
@@ -613,16 +636,40 @@ pub fn env_sun_rig_with(
         out.sky = fill([0.0, 1.0, 0.0]);
         out.ground = fill([0.0, -1.0, 0.0]);
     }
-    // After the fill: the legacy lane limits the direct term by the sky the
-    // frame will actually show (an authored ambient included).
+    // After the fill: the legacy lane limits the direct term by the fill the
+    // frame will actually show (an authored ambient included), the brighter
+    // hemisphere per channel.
     if world.sun.color.is_none() {
         let direct = match env_sun {
             Some(s) => s.radiance * (env_sun_scale(&s) * gain * exposure),
             None => Vec3f::default(),
         };
-        out.color = qc(if hdr { direct } else { legacy_direct_within_white(direct, out.sky) });
+        let fill = vec3f(out.sky.x.max(out.ground.x), out.sky.y.max(out.ground.y), out.sky.z.max(out.ground.z));
+        out.color = qc(if hdr { direct } else { legacy_direct_within_white(direct, fill) });
+        // The key is the environment's, and so are its drop shadows.
+        if world.sun.shadow_alpha.is_none() {
+            out.shadow_alpha = env_shadow_alpha(out.color, out.sky);
+        }
     }
     out
+}
+
+/// N2: the drop shadows' strength under a key the environment supplies (the
+/// character quads, the blob fallback and the caster hulls draw at
+/// `shadow_alpha` alone): the stock strength times the key's share of the
+/// light on the ground they fall on, `direct / (direct + sky fill)` in
+/// luminance, in the lane's own values. A key that carries all the light
+/// casts at the stock strength, a dim one (a moon under its own airglow, a
+/// sun sinking into the fill) faintly, no key or a zero key not at all. Not
+/// the rig's own strength: that one is faded by the WORLD's analytic clock,
+/// which says nothing about the map (a moonlit map under a world at
+/// midnight still has its key).
+fn env_shadow_alpha(direct: Vec3f, sky: Vec3f) -> f32 {
+    let (d, s) = (crate::sky::luminance(direct), crate::sky::luminance(sky).max(0.0));
+    if !(d > 0.0) || !(d + s).is_finite() {
+        return 0.0;
+    }
+    STOCK_SHADOW_ALPHA * (d / (d + s))
 }
 
 /// What the stock legacy rig gives a white surface that faces the sun, per
@@ -632,10 +679,13 @@ const LEGACY_WHITE: f32 = LEGACY_DIRECT + LEGACY_AMBIENT;
 
 /// The environment's direct term for the legacy lane: `direct` (already
 /// exposed) scaled, hue kept, so that a white surface facing the sun reads
-/// at most white, `direct + sky <= LEGACY_WHITE` in every channel. The HDR
-/// lane has a tone mapper and does not call this; neither does a rig that
-/// already fits (its values come back unchanged, so a dim or overcast map
-/// is what the meter alone gave it).
+/// at most white, `direct + fill <= LEGACY_WHITE` in every channel, where
+/// `fill` is the brighter of the sky and the ground fill per channel: a wall
+/// facing a low sun is lit by both hemispheres, and a sunlit ground (a
+/// params noon's (0.375, 0.339, 0.281) under a sky of (0.069, 0.130, 0.243))
+/// can be the brighter one. The HDR lane has a tone mapper and does not call
+/// this; neither does a rig that already fits (its values come back
+/// unchanged, so a dim or overcast map is what the meter alone gave it).
 ///
 /// The meter counts a sun at a quarter of its weight (renderer/env_sun.rs),
 /// right for a lane that tone maps and wrong for one that clips: the golden
@@ -646,9 +696,9 @@ const LEGACY_WHITE: f32 = LEGACY_DIRECT + LEGACY_AMBIENT;
 /// a sun and a fill that add up to white, as the stock rig's 0.72 + 0.28 do,
 /// in the map's colours; the map's own sun-to-shade ratio is more than a
 /// display with no tone curve can show.
-fn legacy_direct_within_white(direct: Vec3f, sky: Vec3f) -> Vec3f {
+fn legacy_direct_within_white(direct: Vec3f, fill: Vec3f) -> Vec3f {
     let mut scale = 1.0f32;
-    for (d, s) in [(direct.x, sky.x), (direct.y, sky.y), (direct.z, sky.z)] {
+    for (d, s) in [(direct.x, fill.x), (direct.y, fill.y), (direct.z, fill.z)] {
         if d.is_finite() && d > 0.0 {
             // A fill that is white already leaves no room for the sun.
             let room = (LEGACY_WHITE - if s.is_finite() { s.max(0.0) } else { 0.0 }).max(0.0);
@@ -1113,7 +1163,88 @@ mod tests {
         // twice every value the environment supplies.
         let bright = env_sun_rig(&world, Some(&EnvLighting { gain: 2.0, ..grey_lighting(0.2) }), SunLight::default().to_hdr(), true);
         assert!((bright.sky.x - 0.4).abs() < 2.0e-3 && (bright.color.x - 2.0 * want).abs() < 4.0e-3, "{bright:?}");
-        assert_eq!(rig.shadow_alpha, SunLight::default().shadow_alpha, "shadows are not the map's business");
+        // N2: the drop shadows are the key's too, at its share of the light.
+        let lum = crate::sky::luminance;
+        let share = lum(rig.color) / (lum(rig.color) + lum(rig.sky));
+        assert!((rig.shadow_alpha - STOCK_SHADOW_ALPHA * share).abs() < 1.0e-6, "{} vs {share}", rig.shadow_alpha);
+    }
+
+    /// N2: when the environment supplies the key (no authored colour), the
+    /// drop shadows (the character quads, the blobs and the caster hulls,
+    /// which draw at `shadow_alpha` alone) are as strong as the key's share of
+    /// direct + fill makes them: the stock strength for a key that carries
+    /// all the light, none without a key. An authored `shadow_alpha` wins; an
+    /// authored colour is the script's key and keeps the rig's own shadows.
+    /// The world's analytic clock does not fade them: a moon key under a
+    /// world whose own hour is midnight casts.
+    #[test]
+    fn the_drop_shadows_follow_the_environments_key() {
+        let lum = crate::sky::luminance;
+        let lighting = grey_lighting(0.2);
+        let toward = vec3f(0.3, 0.8, -0.5);
+        for hdr in [true, false] {
+            let lane = |s: SunLight| if hdr { s.to_hdr() } else { s };
+            let stock = lane(SunLight::default());
+            let mut shares = Vec::new();
+            for radiance in [600.0, 6000.0, 60000.0] {
+                let rig = env_sun_rig(&env_world(Some(disc(toward, radiance)), 0.0), Some(&lighting), stock, hdr);
+                let share = lum(rig.color) / (lum(rig.color) + lum(rig.sky));
+                assert!(share > 0.0 && share < 1.0, "{hdr} {radiance}: {rig:?}");
+                assert!((rig.shadow_alpha - STOCK_SHADOW_ALPHA * share).abs() < 1.0e-6, "{hdr} {radiance}: {} for a share of {share}", rig.shadow_alpha);
+                shares.push(rig.shadow_alpha);
+            }
+            assert!(shares[0] < shares[1], "{hdr}: a stronger key casts darker shadows: {shares:?}");
+            // No key, a zero key: no directional light, no drop shadows.
+            assert_eq!(env_sun_rig(&env_world(None, 0.0), Some(&lighting), stock, hdr).shadow_alpha, 0.0, "{hdr}");
+            let zero = makepad_scene::EnvSun { radiance: Vec3f::default(), ..disc(toward, 1.0) };
+            assert_eq!(env_sun_rig(&env_world(Some(zero), 0.0), Some(&lighting), stock, hdr).shadow_alpha, 0.0, "{hdr}");
+            // An authored strength wins.
+            let mut authored = env_world(Some(disc(toward, 6000.0)), 0.0);
+            authored.sun.shadow_alpha = Some(0.6);
+            assert_eq!(env_sun_rig(&authored, Some(&lighting), lane(resolve_sun(&authored.sun)), hdr).shadow_alpha, 0.6, "{hdr}");
+            // An authored colour: the key is the script's, and so are its shadows.
+            authored.sun.shadow_alpha = None;
+            authored.sun.color = Some(vec3f(0.5, 0.5, 0.5));
+            let input = lane(resolve_sun(&authored.sun));
+            assert_eq!(env_sun_rig(&authored, Some(&lighting), input, hdr).shadow_alpha, input.shadow_alpha, "{hdr}");
+            // A world whose own clock says midnight (its rig casts nothing) under a moonlit map.
+            let mut night = env_world(Some(disc(toward, 6000.0)), 0.0);
+            night.sun.time_of_day = Some(0.0);
+            night.sun.latitude = 52.0;
+            let input = lane(resolve_sun(&night.sun));
+            assert_eq!(input.shadow_alpha, 0.0, "premise: the analytic midnight casts nothing");
+            assert!(env_sun_rig(&night, Some(&lighting), input, hdr).shadow_alpha > 0.0, "{hdr}: the map's key casts");
+        }
+        // Without an environment the rig's own strength stays, bit for bit.
+        let stock = SunLight::default();
+        assert_eq!(env_sun_rig(&env_world(Some(disc(toward, 6000.0)), 0.0), None, stock, false).shadow_alpha, stock.shadow_alpha);
+    }
+
+    /// K3: the legacy lane holds a white wall at white whichever hemisphere
+    /// is the brighter: a params noon's ground (0.375, 0.339, 0.281) outshines
+    /// its sky (0.069, 0.130, 0.243) in every channel, so a wall facing a low
+    /// sun, lit by the ground's bounce, would clip if the sun were held
+    /// against the sky alone.
+    #[test]
+    fn the_legacy_lane_holds_the_sun_within_white_over_a_ground_brighter_than_its_sky() {
+        let (sky, ground) = ([0.069f32, 0.130, 0.243], [0.375f32, 0.339, 0.281]);
+        let map = makepad_render_material::ibl::EnvMap::from_fn(128, |d| if d[1] >= 0.0 { sky } else { ground });
+        // A mean at the meter's key: exposure 1, so the legacy fill is the map's own.
+        let lighting = EnvLighting { sh: makepad_render_material::ibl::sh9(&map), mean_luminance: 0.75, gain: 1.0 };
+        assert_eq!(env_exposure(&lighting), 1.0);
+        let warm = makepad_scene::EnvSun { radiance: vec3f(60000.0, 40000.0, 20000.0), ..disc(vec3f(0.6, 0.3, -0.7), 1.0) };
+        let rig = env_sun_rig(&env_world(Some(warm), 0.0), Some(&lighting), SunLight::default(), false);
+        let (c, s, g) = (rig.color, rig.sky, rig.ground);
+        assert!(g.x > s.x && g.y > s.y && g.z > s.z, "premise: the ground is the brighter fill: sky {s:?} ground {g:?}");
+        let channels = [(c.x, s.x.max(g.x)), (c.y, s.y.max(g.y)), (c.z, s.z.max(g.z))];
+        for (direct, fill) in channels {
+            // 1/4096 is the colour grid.
+            assert!(direct + fill <= LEGACY_WHITE + 2.5e-4, "{direct} + {fill} clips: {rig:?}");
+        }
+        // The sun is held exactly as far as its tightest channel needs, hue kept.
+        let tight = channels.iter().map(|(d, f)| d + f).fold(0.0f32, f32::max);
+        assert!((tight - LEGACY_WHITE).abs() < 5.0e-4, "{rig:?}");
+        assert!((c.y / c.x - 40.0 / 60.0).abs() < 2.0e-3 && (c.z / c.x - 20.0 / 60.0).abs() < 2.0e-3, "{c:?}");
     }
 
     #[test]

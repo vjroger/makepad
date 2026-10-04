@@ -229,7 +229,9 @@ impl Env {
     }
 
     /// World-space sun direction in Sky mode (also below the horizon), None
-    /// in Studio mode.
+    /// in Studio mode. This is the environment's own sun the engine's "is it
+    /// day?" switches read (`Environment.daylight_sun`), whatever the key in
+    /// [`Self::sun`] is: the sun itself, the moon, or none at twilight.
     pub fn sun_dir(&self) -> Option<Vec3f> {
         self.atmo
             .as_ref()
@@ -901,6 +903,42 @@ mod tests {
         assert_eq!(state, 2, "the evening ends in moonlight");
         assert!(mid_fade, "a sample falls inside a fade");
         assert!(samples.iter().filter(|s| s.5.is_none()).count() > 10, "the key is out for a while between sunset and the moon");
+    }
+
+    /// M6: the sun's key carries the whole irradiance the atmosphere lets
+    /// through, through the f32 cone it stores: `EnvSun::irradiance` (and the
+    /// renderer's light, the same product) gives it back to the float's
+    /// rounding at the 0.1 degree minimum as at the 0.53 degree default. A
+    /// cancellation-free cone in the producer lit the 0.1 degree sun 6 % too
+    /// dark, because every consumer takes 1 - cos from the f32 cosine.
+    #[test]
+    fn the_suns_key_carries_its_irradiance_through_its_f32_cone() {
+        for size_deg in [0.1f32, 0.53] {
+            let mut p = sun_at(60.0);
+            p.sky.sun_disc.size_deg = size_deg;
+            p.sky.clouds.coverage = 0.0;
+            p.sky.clouds.cirrus = 0.0;
+            let env = Env::new(&p);
+            let key = env.sun().expect("the sun is up");
+            let want = env.atmo.as_ref().expect("sky mode").sun_irradiance();
+            let got = key.irradiance();
+            for (g, w) in [(got.x, want.x), (got.y, want.y), (got.z, want.z)] {
+                assert!((g / w - 1.0).abs() < 1.0e-6, "{size_deg} deg: {g} for {w}");
+            }
+        }
+    }
+
+    /// N1: the environment's own sun for the daylight switches is the sky's
+    /// sun wherever it is: below the horizon under the moonlit preset, whose
+    /// key is the moon; a studio has none.
+    #[test]
+    fn a_sky_reports_its_sun_below_the_horizon_and_a_studio_none() {
+        let moonlit = Env::new(&presets::preset("Moonlit night").unwrap());
+        let key = moonlit.sun().expect("the risen moon is the key");
+        let daylight = moonlit.sun_dir().expect("a sky has its sun");
+        assert!(key.dir.y > 0.4, "the moon is 30 degrees up: {key:?}");
+        assert!(daylight.y < -0.4, "the sun is 30 degrees down: {daylight:?}");
+        assert!(Env::new(&presets::preset("Three-point").unwrap()).sun_dir().is_none());
     }
 
     /// The engine's key light and the generator's are one type: a

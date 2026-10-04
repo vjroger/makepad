@@ -224,7 +224,13 @@ fn a_landed_environment_lights_the_rig_in_both_lanes() {
     assert!(hdr.color.x * exposure > 1.0, "premise: this sun would clip when exposed");
     assert!((legacy.color.x + legacy.sky.x - 1.0).abs() < 5.0e-4, "{:?} {:?}", legacy.color, legacy.sky);
     assert_eq!(legacy.dir, hdr.dir);
-    assert_eq!(legacy.shadow_alpha, stock.shadow_alpha);
+    // N2: the drop shadows go with the map's key, at its share of the light
+    // in each lane (the stock rig's 0.35 is what a key with all of it casts).
+    let lum = crate::sky::luminance;
+    for rig in [hdr, legacy] {
+        let share = lum(rig.color) / (lum(rig.color) + lum(rig.sky));
+        assert!((rig.shadow_alpha - stock.shadow_alpha * share).abs() < 1.0e-6, "{rig:?}");
+    }
 
     // An authored colour and ambient are the script's, in the lane's units.
     let mut authored = world.clone();
@@ -293,8 +299,113 @@ fn the_rig_lights_with_the_bound_preparations_key_until_the_next_lands() {
     assert_eq!(renderer.env_sun_rig(&world, stock).color, Vec3f::default());
 }
 
-/// A prepared environment colours the host's fog and feeds the rig; an
-/// authored `Fog`, an MR stage and a missing preparation leave it alone.
+/// A street lamp, harvested the way `harvest_lamps` sizes one.
+fn street_lamp() -> crate::lightmap::LmLight {
+    let (radius, strength) = crate::lightmap::lamp_photometry(2.82);
+    crate::lightmap::LmLight {
+        pos: vec3f(0.0, 2.82, 0.0),
+        color: vec3f(strength, strength * 0.775, strength * 0.475),
+        radius,
+        dir: vec3f(0.0, -1.0, 0.0),
+        spot: 1.0,
+        ..Default::default()
+    }
+}
+
+/// A renderer in the given lane with one street lamp and a landed
+/// preparation hand-fed: a flat map of `level`, its key, its own sun.
+fn lamp_renderer(hdr: bool, clustered: bool, level: f32, key: Option<makepad_scene::EnvSun>, daylight: Option<Vec3f>) -> Renderer {
+    let mut r = Renderer::default();
+    r.set_hdr_output(hdr);
+    r.set_clustered_lighting(clustered);
+    r.set_static_lights(vec![street_lamp()]);
+    let sh = makepad_render_material::ibl::sh9(&makepad_render_material::ibl::EnvMap::constant(32, [level, level, level]));
+    r.feed_environment_numbers_for_tests(sh, level, vec3f(level, level, level));
+    r.feed_environment_sun_for_tests(key);
+    r.feed_environment_daylight_for_tests(daylight);
+    r
+}
+
+/// N1: a moon key lights the scene and steers its light (and the cascades),
+/// but the "is it day?" switches follow the real sun, which the moonlit
+/// preset reports 30 degrees under the horizon: in the clustered HDR lane
+/// the street lamps' photocell is fully on and the analytic sky (a host
+/// background) reads night. Read from the moon's direction, as the frame did,
+/// the lamps were off and the sky was a day sky at the moon's place. The
+/// world's own clock says 14:00 here: the environment's sun decides.
+#[test]
+fn a_moon_key_lights_the_scene_while_the_lamps_and_the_sky_follow_the_sun() {
+    let preset = crate::hdri::Env::new(&crate::hdri::presets::preset("Moonlit night").unwrap());
+    let (moon, sun_dir) = (preset.sun().expect("the moon is the key"), preset.sun_dir().expect("a sky has its sun"));
+    let mut r = lamp_renderer(true, true, 0.02, Some(moon), Some(sun_dir));
+    let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(moon));
+    world.environment.daylight_sun = Some(sun_dir);
+    world.sky = Some(makepad_scene::SkyConfig::default());
+    world.sun.time_of_day = Some(14.0);
+    world.sun.latitude = 52.0;
+    let (sun, daylight) = r.frame_lamps(&world, Vec3f::default());
+    assert!(sun.dir.dot(moon.dir) > 0.9999, "the moon aims the light: {:?}", sun.dir);
+    let rig = r.lane_rig(&world, sun);
+    assert!(rig.dir.dot(moon.dir) > 0.999 && rig.color.x > 0.0, "and lights: {rig:?}");
+    assert!(daylight.dot(sun_dir) > 0.9999, "the switches read the sun: {daylight:?}");
+    assert_eq!(r.frame_lights[0].color, street_lamp().color, "the photocell is fully on");
+    let sky = analytic_sky_frame(&world, daylight, true, true, false).expect("the analytic sky");
+    assert!(sky.zenith.w > 0.95, "the analytic sky reads night: {}", sky.zenith.w);
+    // The moon's own direction says day: what the switches must not read.
+    assert_eq!(Renderer::lamp_photocell(moon.dir), 0.0);
+    assert!(analytic_sky_frame(&world, moon.dir, true, true, false).unwrap().zenith.w < 0.05);
+}
+
+/// N1: a map that knows no sun of its own (a studio, a loaded file) leaves
+/// the switches on the world's own sun, as without an environment: a studio
+/// key 30 or more degrees up lights a world whose clock says 23:00, and the
+/// lamps are on; at 13:00 they are off.
+#[test]
+fn a_studio_map_leaves_the_daylight_switches_on_the_worlds_sun() {
+    let preset = crate::hdri::Env::new(&crate::hdri::presets::preset("Three-point").unwrap());
+    let key = preset.sun().expect("a studio key");
+    assert!(preset.sun_dir().is_none() && Renderer::lamp_photocell(key.dir) == 0.0, "premise: the key alone would say day: {key:?}");
+    let mut r = lamp_renderer(true, true, 0.2, Some(key), None);
+    let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(key));
+    world.sun.latitude = 52.0;
+    world.sun.time_of_day = Some(23.0);
+    let (sun, daylight) = r.frame_lamps(&world, Vec3f::default());
+    assert!(sun.dir.dot(key.dir) > 0.9999, "the key aims the light");
+    assert_eq!(daylight, crate::sun::resolve_sun(&world.sun).dir, "the world's own sun");
+    assert!(daylight.y < 0.0);
+    assert_eq!(r.frame_lights[0].color, street_lamp().color, "night by the world's clock: lamps on");
+    world.sun.time_of_day = Some(13.0);
+    let (_, daylight) = r.frame_lamps(&world, Vec3f::default());
+    assert!(daylight.y > 0.5);
+    assert_eq!(r.frame_lights[0].color, Vec3f::default(), "day by the world's clock: lamps off");
+}
+
+/// I1c: the frame's lamps are railed against the rig the frame lights
+/// with, the environment's light folded in, which is the rig the bake
+/// snapshots (legacy lane, the lamp atlas path: MAKEPAD_CLUSTERED=0). A
+/// bright map over a world whose own clock says midnight: the analytic rig
+/// would leave the lamps their whole pool, the environment's daylight less,
+/// and the per-frame lamps and the baked pools must agree on which.
+#[test]
+fn the_frame_lamps_and_the_bake_take_one_rig() {
+    let key = env_sun_of(crate::hdri::dir_from_az_el(200.0, 45.0), 6.0e3, 0.27, 1.0);
+    let mut r = lamp_renderer(false, false, 0.5, Some(key), Some(key.dir));
+    let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(key));
+    world.environment.daylight_sun = Some(key.dir);
+    world.sun.latitude = 52.0;
+    world.sun.time_of_day = Some(0.0);
+    let (sun, _) = r.frame_lamps(&world, Vec3f::default());
+    // What the frame hands the shaders, the cascades and the bake (no world
+    // Sun or Sky here, so the world's lights change nothing).
+    let bake = crate::world_lights::apply_world_sun(&world, r.lane_rig(&world, sun));
+    assert_ne!(Renderer::legacy_daylight_key(&crate::sun::resolve_sun(&world.sun)), r.lamp_daylight_key(&bake), "premise: the analytic midnight rails the lamps otherwise");
+    assert_eq!(r.lamp_cache_rev.map(|k| k.1), Some(r.lamp_daylight_key(&bake)), "the lamps are keyed on the bake's rig");
+    assert_eq!(r.frame_lights[0].color, r.static_lights_for(&bake)[0].color, "the same lamp, seen twice");
+}
+
+/// A prepared environment that is the background colours the host's fog
+/// and feeds the rig; an authored `Fog`, an MR stage, a missing preparation
+/// and a background that is not the environment leave the fog alone.
 #[test]
 fn a_prepared_environment_colours_the_host_fog_only() {
     use makepad_render_material::ibl::{sh9, EnvMap};
@@ -310,6 +421,13 @@ fn a_prepared_environment_colours_the_host_fog_only() {
         intensity: 1.0,
         rotation_deg: 0.0,
     });
+    // K4: the fog is the dome's horizon, so it is the environment's only
+    // where the environment is the sky. Under the host's background (the
+    // analytic sky or a colour) the host's fog stands, whatever lights.
+    assert!(r.env_fog_color(&world, true).is_none(), "Background::Host keeps the host's fog");
+    world.environment.background = makepad_scene::Background::Color(vec4(0.2, 0.3, 0.4, 1.0));
+    assert!(r.env_fog_color(&world, true).is_none(), "so does a colour background");
+    world.environment.background = makepad_scene::Background::Environment { blur: 0.0, intensity: 1.0 };
     // HDR lane: the band at the map's own scale × Ibl.intensity 1, exactly
     // (HDR_SKY_GAIN is the analytic sky's and never reaches the
     // environment's fog).
@@ -382,14 +500,17 @@ fn the_host_fog_takes_the_backgrounds_intensity_and_waits_for_the_preparation() 
         intensity: 2.0,
         rotation_deg: 0.0,
     });
+    world.environment.background = makepad_scene::Background::Environment { blur: 0.0, intensity: 1.0 };
     let mut r = Renderer::default();
     r.set_hdr_output(true);
     assert!(r.env_fog_color(&world, true).is_none(), "nothing prepared yet: the host's fog stands");
     let sh = makepad_render_material::ibl::sh9(&makepad_render_material::ibl::EnvMap::constant(32, [1.0, 1.0, 1.0]));
     r.feed_environment_numbers_for_tests(sh, 1.0, vec3f(0.5, 0.6, 0.7));
     let band = vec3f(0.5, 0.6, 0.7);
-    // A background that is not the environment shows no intensity of its own.
     assert_eq!(r.env_fog_color(&world, true), Some(band * 2.0));
+    // K4: not the environment's sky, not its fog: the host's stands.
+    world.environment.background = makepad_scene::Background::Host;
+    assert!(r.env_fog_color(&world, true).is_none(), "Background::Host keeps the host's fog");
     world.environment.background = makepad_scene::Background::Environment { blur: 0.0, intensity: 0.5 };
     assert_eq!(r.env_fog_color(&world, true), Some(band * 0.5 * 2.0), "HDR: the dome's radiance x Ibl.intensity x the background's");
     // Legacy: the same radiance through the dome's tone map, metered on the

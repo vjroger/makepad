@@ -161,8 +161,11 @@ pub struct SunConfig {
 ///   cone's solid angle.
 ///
 /// `cos_radius` is an f32: for the 0.53 degree sun `1 − cos_radius` keeps
-/// about three significant digits, so `irradiance()` is good to about 0.3 %
-/// there.
+/// about three significant digits, and for a 0.1 degree sun about one. So
+/// every producer divides the emission by the cone as an f32 `cos_radius`
+/// gives it, the cone every consumer computes ([`EnvSun::cone_radiance`]):
+/// `irradiance()`, the directional light's colour and the meter then give
+/// back the emission the producer had, at any size.
 ///
 /// The renderer fills the covering cone in the lighting it derives from the
 /// map, because the directional light carries the energy; the drawn dome
@@ -203,8 +206,30 @@ impl EnvSun {
     /// 2π(1 - cos r) (the irradiance on a surface facing a small light;
     /// a wide one delivers `facing` of it, which is not in this).
     pub fn irradiance(&self) -> Vec3f {
-        self.radiance * (std::f32::consts::TAU * (1.0 - self.cos_radius.clamp(-1.0, 1.0)))
+        self.radiance * cone_solid_angle(self.cos_radius)
     }
+
+    /// The radiance a producer stores for a key whose whole emission is
+    /// `emission` over the cone of `cos_radius`: the emission over the cone's
+    /// solid angle 2π(1 − cos_radius), computed from the f32 cosine exactly as
+    /// [`Self::irradiance`] and the renderer compute it, so the round trip
+    /// gives the emission back to the float's rounding however small the
+    /// cone (a cancellation-free cone would differ from theirs by up to 6 %
+    /// for a 0.1 degree sun). A cone with no solid angle (a cosine of 1 or
+    /// more, or not finite) has no average: zero.
+    pub fn cone_radiance(emission: Vec3f, cos_radius: f32) -> Vec3f {
+        let cone = cone_solid_angle(cos_radius);
+        if !(cone > 0.0) {
+            return Vec3f::default();
+        }
+        vec3f(emission.x / cone, emission.y / cone, emission.z / cone)
+    }
+}
+
+/// 2π(1 − cos r) from the f32 cosine: the one cone `EnvSun`'s producers and
+/// consumers share.
+fn cone_solid_angle(cos_radius: f32) -> f32 {
+    std::f32::consts::TAU * (1.0 - cos_radius.clamp(-1.0, 1.0))
 }
 
 /// What surrounds a world: its background, image-based lighting and fog.
@@ -226,14 +251,31 @@ pub struct Environment {
     /// `Light::Sky` say otherwise. `None`, or a key with no radiance, under a
     /// prepared environment means NO directional light from the environment
     /// (an overcast map, a studio without a key, a sun that has set): the map
-    /// lights with its fill alone, never with the analytic rig's sun colour;
-    /// the shadows' direction then stays the rig's own (`resolve_sun`), so
+    /// lights with its fill alone, never with the analytic rig's sun colour,
+    /// and draws no drop shadows unless `SunConfig.shadow_alpha` is authored
+    /// (with a key, their strength is the key's share of the light); the
+    /// shadows' direction then stays the rig's own (`resolve_sun`), so
     /// the cascades and the baked lightmaps do not move. A world with no
     /// environment IBL, or one the renderer has not prepared yet, keeps the
     /// analytic rig bit for bit. `dir` is in the map's own frame: a
     /// generator's own `rotation_deg` is baked in, `Ibl.rotation_deg` is NOT;
     /// the renderer turns the sun together with the map.
     pub sun: Option<EnvSun>,
+    /// The environment's own sun, when its producer has one: the direction
+    /// TOWARD it (y-up, in the map's own frame like `sun.dir`, turned with
+    /// the map by `Ibl.rotation_deg`), also when it is below the horizon. A
+    /// generated sky reports it whatever its key is: the sun itself, the
+    /// moon, or no key at all at twilight (`hdri::Env::sun_dir`). Its
+    /// elevation is what the renderer's "is it day?" switches read (the
+    /// street lamps' photocell, a streamed city's night factor and its lit
+    /// windows and headlights, the analytic sky), while `sun` lights the
+    /// scene and casts its shadows: under a moonlit sky the moon is the key
+    /// and the lamps are on. `None` (a studio, a loaded file, an environment
+    /// that knows no sun): those switches follow the world's own sun
+    /// (`World::sun`), as they do without an environment. The renderer
+    /// reads it, like `sun`, from the preparation that is bound, once the
+    /// environment's IBL is prepared.
+    pub daylight_sun: Option<Vec3f>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -287,6 +329,11 @@ impl Environment {
         }
         if let Some(sun) = &self.sun {
             sun.validate()?;
+        }
+        if let Some(dir) = self.daylight_sun {
+            if !dir.is_finite() || dir.length() < 1.0e-3 {
+                return Err("daylight sun direction must be finite and non-zero");
+            }
         }
         match self.fog {
             Fog::Linear { start, end, .. } if !(f(start) && f(end) && start < end) => Err("linear fog needs start < end"),
@@ -385,5 +432,41 @@ mod tests {
         assert_eq!(point.irradiance(), vec3f(0.0, 0.0, 0.0));
         let tilted = EnvSun { facing: 0.78, cos_cover: -0.5, ..wide };
         assert_eq!(tilted.irradiance(), wide.irradiance(), "facing and the covering cone are not in it");
+    }
+
+    /// M6: a producer stores the emission over the cone as the f32 cosine
+    /// gives it, so `irradiance()` hands the emission back to the float's
+    /// rounding, for the 0.1 degree sun (where 1 − cos keeps one digit) as
+    /// for the 0.53 degree one and a wide studio key.
+    #[test]
+    fn a_cone_radiance_gives_its_emission_back() {
+        let emission = vec3f(120.0, 95.0, 70.0);
+        for size_deg in [0.1f32, 0.53, 30.0, 110.0] {
+            let cos_radius = (0.5 * size_deg).to_radians().cos();
+            let sun = EnvSun { dir: vec3f(0.0, 1.0, 0.0), radiance: EnvSun::cone_radiance(emission, cos_radius), cos_radius, facing: 1.0, cos_cover: cos_radius };
+            let back = sun.irradiance();
+            for (got, want) in [(back.x, emission.x), (back.y, emission.y), (back.z, emission.z)] {
+                assert!((got / want - 1.0).abs() < 1.0e-6, "{size_deg} deg: {got} for {want}");
+            }
+        }
+        // A cone with no solid angle has no average.
+        assert_eq!(EnvSun::cone_radiance(emission, 1.0), Vec3f::default());
+        assert_eq!(EnvSun::cone_radiance(emission, f32::NAN), Vec3f::default());
+    }
+
+    /// N1: the environment's own sun is an additive field like `sun`: none
+    /// by default, `Copy` kept, refused at the frame check when it names no
+    /// direction; any direction below the horizon is one.
+    #[test]
+    fn an_environment_reports_no_daylight_sun_by_default() {
+        let e = Environment::default();
+        assert_eq!(e.daylight_sun, None);
+        let night = Environment { daylight_sun: Some(vec3f(0.3, -0.5, -0.8)), ..Environment::default() };
+        assert!(night.validate().is_ok());
+        let copy: Environment = night;
+        assert_eq!(copy, night);
+        for bad in [vec3f(f32::NAN, -1.0, 0.0), vec3f(0.0, 0.0, 0.0), vec3f(0.0, f32::INFINITY, 0.0)] {
+            assert!(Environment { daylight_sun: Some(bad), ..Environment::default() }.validate().is_err(), "{bad:?}");
+        }
     }
 }

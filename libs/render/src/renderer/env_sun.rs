@@ -66,10 +66,51 @@ impl Renderer {
         crate::sun::env_sun_rig_with(world, self.ibl_sun(), self.env_lighting(world).as_ref(), sun, self.hdr_output)
     }
 
-    /// C6: the fog colour the environment lends a `Fog::Host` world. `None`
-    /// in an MR stage (the room supplies the horizon), for an authored
-    /// `Fog` (world_lights::world_fog already answered) and without a
-    /// prepared environment. The density stays the host's (`SkyConfig::fog`).
+    /// The bound map's own sun in world space for the daylight switches:
+    /// `None` without a prepared environment or when the map knows no sun of
+    /// its own (renderer/ibl.rs `ibl_daylight_sun`).
+    pub(super) fn env_daylight_dir(&self, world: &World) -> Option<Vec3f> {
+        self.env_lighting(world)?;
+        crate::sun::env_daylight_dir_with(world, self.ibl_daylight_sun())
+    }
+
+    /// N1: the direction the frame's "is it day?" switches read (the street
+    /// lamps' photocell, a streamed city's night factor with its lit windows
+    /// and headlights, the analytic sky): a world's own Sun, else the
+    /// environment's own sun (the bound map's, even while the moon or no key
+    /// at all lights the frame), else the world's own sun (`resolve_sun`):
+    /// a map that knows no sun of its own (a studio, a loaded file) leaves
+    /// the switches there, as without an environment. Never the key's
+    /// direction: a moon key lights the frame and casts its shadows, but a
+    /// moonlit night is still night. Without an environment this is the
+    /// direction the frame's rig starts from, bit for bit.
+    pub(super) fn daylight_dir(&self, world: &World) -> Vec3f {
+        crate::world_lights::world_sun_dir(world)
+            .or_else(|| self.env_daylight_dir(world))
+            .unwrap_or_else(|| crate::sun::resolve_sun(&world.sun).dir)
+    }
+
+    /// I1c: the rig the frame's lamps are railed against: the frame's own,
+    /// the environment's sun, fill and exposure folded in
+    /// (`sun::env_sun_rig_with`), in the display units the rails measure in
+    /// whatever the lane (`lamp_daylight_scale`'s headroom under white). In
+    /// the legacy lane it is the rig the bake snapshots too, so a lamp's
+    /// per-frame term and its baked pool are railed alike (lights.rs: they
+    /// "may never disagree"); in the clustered HDR lane only the photocell
+    /// switches the lamps, and it reads `daylight_dir`. Without an
+    /// environment it is `sun` bit for bit.
+    pub(super) fn env_lamp_rig(&self, world: &World, sun: SunLight) -> SunLight {
+        crate::sun::env_sun_rig_with(world, self.ibl_sun(), self.env_lighting(world).as_ref(), sun, false)
+    }
+
+    /// C6: the fog colour the environment lends a `Fog::Host` world whose
+    /// background is the environment. `None` in an MR stage (the room
+    /// supplies the horizon), for an authored `Fog` (world_lights::world_fog
+    /// already answered), without a prepared environment, and (K4) under any
+    /// other background: the fog is the dome's horizon, so where the host's
+    /// sky (or a colour) is drawn, the host's fog meets it, whatever the
+    /// environment lights with. The density stays the host's
+    /// (`SkyConfig::fog`).
     ///
     /// The colour is the dome's own at the horizon, at the environment's
     /// own scale × Ibl.intensity (no HDR_SKY_GAIN: that is the analytic
@@ -82,12 +123,10 @@ impl Renderer {
         if !shows_environment || !matches!(world.environment.fog, makepad_scene::Fog::Host) {
             return None;
         }
-        let env = self.env_lighting(world)?;
         // The dome is drawn at the background's own intensity too.
-        let background = match world.environment.background {
-            makepad_scene::Background::Environment { intensity, .. } if intensity.is_finite() => intensity.max(0.0),
-            _ => 1.0,
-        };
+        let makepad_scene::Background::Environment { intensity, .. } = world.environment.background else { return None };
+        let background = if intensity.is_finite() { intensity.max(0.0) } else { 1.0 };
+        let env = self.env_lighting(world)?;
         let horizon = self.ibl_horizon_rgb()? * background;
         if self.hdr_output {
             return Some(crate::sun::env_fog_color(horizon, &env));

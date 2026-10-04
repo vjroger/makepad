@@ -40,7 +40,7 @@ script_mod! {
     // intensity), exactly what the IBL reflections see: HDR_SKY_GAIN is
     // the analytic sky's and never applies here. HDR lane: that linear
     // radiance, the composite tone maps. Legacy lane: the analytic dome's
-    // tone map (sky_dome.rs), metered on the luminance the dome shows. A
+    // tone map (sky_dome.rs), metered on the luminance the dome shows, and a
     // hash dither against banding, as the analytic dome has.
     mod.draw.DrawEnvBackground = mod.std.set_type_default() do #(DrawEnvBackground::script_shader(vm)){
         alpha_blend: false
@@ -122,8 +122,13 @@ script_mod! {
             let m = max(max(ldr0.x, ldr0.y), max(ldr0.z, 1.0))
             let ldr = pow(ldr0 * (1.0 / m), vec3(0.4545454, 0.4545454, 0.4545454))
             let out = mix(ldr, c, hdr)
+            // The dither is the legacy lane's alone: its 8-bit output bands.
+            // The HDR lane writes linear radiance, which the composite
+            // dithers after its tone map; a fixed +-0.004 there would swamp
+            // a dim map.
             let hash = fract(sin(dot(d.xy + d.zz, vec2(12.9898, 78.233))) * 43758.5453)
-            return vec4(out + vec3(1.0, 1.0, 1.0) * ((hash - 0.5) * 0.008), 1.0)
+            let dither = (hash - 0.5) * 0.008 * (1.0 - hdr)
+            return vec4(out + vec3(1.0, 1.0, 1.0) * dither, 1.0)
         }
         fragment: fn() {
             self.fb0 = self.pixel()
@@ -164,13 +169,17 @@ pub(super) enum EnvScope {
     Aux,
 }
 
-/// What a preparation is for: the source and the sun filled in its
-/// lighting copy. Intensity and rotation are not here: they are meta texels
-/// the shader reads, rewritten in place when they change.
+/// What a preparation is for: the source, the sun filled in its lighting
+/// copy, and the map's own sun the world reports for the daylight switches
+/// (`Environment.daylight_sun`: it changes nothing in the preparation, but it
+/// is the map's, so it binds with it and the switches follow the sky that is
+/// drawn). Intensity and rotation are not here: they are meta texels the
+/// shader reads, rewritten in place when they change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PrepareKey {
     source: IblSource,
     sun: Option<EnvSun>,
+    daylight_sun: Option<Vec3f>,
 }
 
 /// What the Heavy job hands back.
@@ -184,6 +193,8 @@ struct IblJobResult {
     /// A procedural hdri preset's own sun (a registered map has none here;
     /// its sun is the world's `Environment.sun`).
     baked_sun: Option<EnvSun>,
+    /// ... and its sky's own sun for the daylight switches (`hdri::Env::sun_dir`).
+    baked_daylight: Option<Vec3f>,
 }
 
 /// The Heavy job in flight. Kept until it ends, also once cancelled, so
@@ -234,6 +245,9 @@ pub(super) struct IblState {
     /// The sun filled in the bound lighting copy: the declared one, else a
     /// procedural hdri preset's baked one.
     filled_sun: Option<EnvSun>,
+    /// The bound map's own sun for the daylight switches: the one the world
+    /// reported, else a procedural hdri preset's.
+    daylight_sun: Option<Vec3f>,
     /// The job in flight, and the last generation submitted.
     job: Option<IblJob>,
     generation: u64,
@@ -321,19 +335,20 @@ pub fn hdri_procedural_name(preset: &str) -> String {
 }
 
 /// The environment a procedural index names, baked or painted, with the
-/// sun a bake knows. `run` spreads a bake's rows (the pool inside a job).
+/// key a bake knows and its sky's own sun (render-material's looks have
+/// neither). `run` spreads a bake's rows (the pool inside a job).
 fn procedural_env_map(
     i: u32,
     run: RowRunner,
     bake_width: usize,
-) -> Option<(EnvMap, Option<EnvSun>)> {
+) -> Option<(EnvMap, Option<EnvSun>, Option<Vec3f>)> {
     let name = procedural_environment_name(i)?;
     if let Some(hdri_name) = name.strip_prefix(HDRI_PREFIX) {
         let params = crate::hdri::presets::preset(hdri_name)?;
-        Some(crate::hdri::bake_env_map(&params, bake_width, run))
+        Some(crate::hdri::bake_env_map_with_daylight(&params, bake_width, run))
     } else {
         let preset = EnvPreset::by_name(name)?;
-        Some((EnvMap::procedural(&preset, 256, 1.0, 0.0), None))
+        Some((EnvMap::procedural(&preset, 256, 1.0, 0.0), None, None))
     }
 }
 
@@ -354,11 +369,11 @@ fn build_ibl(
     bake_width: usize,
     stop: &dyn Fn() -> bool,
 ) -> Option<IblJobResult> {
-    let (map, baked_sun) = match key.source {
-        IblSource::Hdri(_) => (map?, None),
+    let (map, baked_sun, baked_daylight) = match key.source {
+        IblSource::Hdri(_) => (map?, None, None),
         IblSource::Procedural(i) => {
-            let (m, s) = procedural_env_map(i, run, bake_width)?;
-            (Arc::new(m), s)
+            let (m, s, d) = procedural_env_map(i, run, bake_width)?;
+            (Arc::new(m), s, d)
         }
     };
     if stop() {
@@ -371,7 +386,7 @@ fn build_ibl(
     // atlas and the meter do not.
     let fill = key.sun.or(baked_sun);
     let prepared = prepare_ibl_until(&map, fill.as_ref(), intensity, rotation_deg, sizes, stop)?;
-    Some(IblJobResult { generation, key, intensity, rotation_deg, prepared, baked_sun })
+    Some(IblJobResult { generation, key, intensity, rotation_deg, prepared, baked_sun, baked_daylight })
 }
 
 /// The quad's two instance vectors for this frame. Pure, so the lane
@@ -546,6 +561,15 @@ impl Renderer {
         self.ibl.sh.and(self.ibl.filled_sun)
     }
 
+    /// The bound map's own sun for the daylight switches, in the map's frame:
+    /// the `Environment.daylight_sun` the job saw, else a procedural hdri
+    /// preset's sky's sun. `None` when the map knows no sun of its own (a
+    /// studio, a loaded file, an engine look) or nothing is bound: the
+    /// switches then follow the world's own sun (renderer/env_sun.rs).
+    pub fn ibl_daylight_sun(&self) -> Option<Vec3f> {
+        self.ibl.sh.and(self.ibl.daylight_sun)
+    }
+
     /// `resolve_ibl` for a draw of this scope: the scene's draw resolves its
     /// world's environment, an aux draw leaves the environment as it is.
     pub(super) fn resolve_ibl_for(&mut self, cx: &mut Cx, env: &Environment, scope: EnvScope) {
@@ -563,7 +587,8 @@ impl Renderer {
             return;
         };
         let sun = env.sun.filter(|s| s.validate().is_ok());
-        let wanted = PrepareKey { source: ibl.source, sun };
+        let daylight_sun = env.daylight_sun.filter(|d| d.is_finite() && d.length() >= 1.0e-3);
+        let wanted = PrepareKey { source: ibl.source, sun, daylight_sun };
         // Set before the submit: a source that cannot be built drops it again.
         self.ibl.wanted = Some(wanted);
         // Another environment named is a change of map: the job in flight is
@@ -622,6 +647,7 @@ impl Renderer {
         s.mean_luminance = 0.0;
         s.horizon_rgb = Vec3f::default();
         s.filled_sun = None;
+        s.daylight_sun = None;
     }
 
     /// Submit the Heavy job for `wanted` (only called with no job in
@@ -762,6 +788,7 @@ impl Renderer {
         s.mean_luminance = p.mean_luminance;
         s.horizon_rgb = p.horizon_rgb;
         s.filled_sun = r.key.sun.or(r.baked_sun);
+        s.daylight_sun = r.key.daylight_sun.or(r.baked_daylight);
     }
 
     /// Rewrite meta texel 9's intensity and rotation in the resident lane
@@ -846,6 +873,11 @@ impl Renderer {
     /// ... and the key the hand-fed preparation was made with (`ibl_sun`).
     pub(super) fn feed_environment_sun_for_tests(&mut self, sun: Option<EnvSun>) {
         self.ibl.filled_sun = sun;
+    }
+
+    /// ... and its map's own sun for the daylight switches (`ibl_daylight_sun`).
+    pub(super) fn feed_environment_daylight_for_tests(&mut self, daylight: Option<Vec3f>) {
+        self.ibl.daylight_sun = daylight;
     }
 
     /// A job is in flight, live or cancelled and winding down.
@@ -1522,7 +1554,7 @@ mod tests {
             if let Some((key, generation)) = renderer.ibl.bound {
                 if last != Some(generation) {
                     let source = env.ibl.unwrap().source;
-                    landed.push(Landing { generation, key, mean: renderer.ibl_mean_luminance().unwrap(), declared: PrepareKey { source, sun: env.sun } });
+                    landed.push(Landing { generation, key, mean: renderer.ibl_mean_luminance().unwrap(), declared: PrepareKey { source, sun: env.sun, daylight_sun: env.daylight_sun } });
                     last = Some(generation);
                 }
             }
@@ -1573,7 +1605,7 @@ mod tests {
 
         // The key holds: the last declared one lands.
         settle(&mut renderer, &mut cx, &env);
-        assert_eq!(renderer.ibl.bound.map(|b| b.0), Some(PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: env.sun }));
+        assert_eq!(renderer.ibl.bound.map(|b| b.0), Some(PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: env.sun, daylight_sun: env.daylight_sun }));
         assert!(!renderer.environment_pending());
     }
 
@@ -1711,7 +1743,7 @@ mod tests {
                 f(i);
             }
         };
-        let key = PrepareKey { source: IblSource::Procedural(0), sun: None };
+        let key = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
         let asked = std::cell::Cell::new(0usize);
         let at_once = || {
             asked.set(asked.get() + 1);
@@ -1726,6 +1758,38 @@ mod tests {
         };
         assert!(build_ibl(1, key, None, 1.0, 0.0, &serial, SYNC_SIZES, SYNC_HDRI_WIDTH, &never).is_some());
         assert!(asked.get() > 1, "and again inside the preparation");
+    }
+
+    /// N1: a procedural hdri preset reports its sky's own sun for the
+    /// daylight switches, and it binds with the preparation, as the preset's
+    /// key does: the moonlit preset's sun is 30 degrees down while its key
+    /// (the moon) is up. A sun the world reports wins over the preset's, an
+    /// engine look has none, and an unbound renderer reports none.
+    #[test]
+    fn a_procedural_presets_own_sun_binds_with_its_preparation() {
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| {
+            for i in 0..n {
+                f(i);
+            }
+        };
+        let moonlit = PROCEDURAL_ENVIRONMENTS.iter().position(|n| *n == "hdri_moonlit_night").unwrap() as u32;
+        let key = PrepareKey { source: IblSource::Procedural(moonlit), sun: None, daylight_sun: None };
+        let built = build_ibl(1, key, None, 1.0, 0.0, &serial, SYNC_SIZES, 32, &|| false).expect("built");
+        let daylight = built.baked_daylight.expect("a sky reports its own sun");
+        assert!(daylight.y < -0.4 && built.baked_sun.is_some_and(|k| k.dir.y > 0.4), "{daylight:?} {:?}", built.baked_sun);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut renderer = Renderer::default();
+        assert_eq!(renderer.ibl_daylight_sun(), None, "nothing bound");
+        renderer.adopt_ibl(&mut cx, built);
+        assert_eq!(renderer.ibl_daylight_sun(), Some(daylight));
+        let reported = vec3f(0.0, -1.0, 0.0);
+        let key = PrepareKey { daylight_sun: Some(reported), ..key };
+        renderer.adopt_ibl(&mut cx, build_ibl(2, key, None, 1.0, 0.0, &serial, SYNC_SIZES, 32, &|| false).unwrap());
+        assert_eq!(renderer.ibl_daylight_sun(), Some(reported), "the world's report wins");
+        renderer.unbind_ibl();
+        assert_eq!(renderer.ibl_daylight_sun(), None);
+        let look = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
+        assert_eq!(build_ibl(3, look, None, 1.0, 0.0, &serial, SYNC_SIZES, 32, &|| false).unwrap().baked_daylight, None);
     }
 
     /// A cancelled job's bake runs no more rows: the row runner the job
