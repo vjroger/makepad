@@ -1588,10 +1588,11 @@ mod tests {
 
     #[test]
     fn an_authored_dir_holds_while_the_key_comes_and_goes() {
-        // A host that re-bakes a `params:` map a quarter hour at a time under
-        // its day clock authors `SunConfig.dir` from its eased hour: the
-        // shadows stay on that sun while the map's key (whose direction steps
-        // by the bake grid) fades in and out. `authored_sun_values_beat_the_
+        // A host that re-bakes a `params:` map on a grid under its day clock
+        // (the sandbox's: a quarter hour, 7.5 minutes while the sun is low)
+        // authors `SunConfig.dir` from its eased hour: the shadows stay on
+        // that sun while the map's key (whose direction steps by the bake
+        // grid) fades in and out. `authored_sun_values_beat_the_
         // environment` pins the rule for a steady key; this is the same rule
         // across the sunset.
         let d = vec3f(-0.4, 0.5, 0.3).normalize();

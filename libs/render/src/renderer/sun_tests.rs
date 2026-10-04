@@ -385,8 +385,9 @@ fn a_studio_map_leaves_the_daylight_switches_on_the_worlds_sun() {
 /// is the sun: a world's own Sun, or a key that is the map's own sun, also
 /// when an authored `SunConfig.dir` aims it (a look, or a host's eased
 /// clock: the sandbox authors its eased sun while the map's report steps on
-/// its quarter-hour grid a preparation late, and a disc drawn there would
-/// not be where the shadows come from). A moon key or none, aimed or not,
+/// its bake grid (a quarter hour, 7.5 minutes while the sun is low) a
+/// preparation late, and a disc drawn there would not be where the shadows
+/// come from). A moon key or none, aimed or not,
 /// leaves the sky on the map's own sun, so a moonlit night stays night;
 /// without an environment the sky is the rig's, as before plan 2.
 #[test]

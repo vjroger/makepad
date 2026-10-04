@@ -17,7 +17,8 @@
 //! preparation behind the world and always come from the same preparation.
 //! A host that re-bakes the map it registered (`register_rebaked_environment`:
 //! the sandbox's `params:` sky bakes again every quarter hour of game time,
-//! every 0.3 s on a fast day) is the map's form of a key that moves (K7):
+//! every 7.5 minutes while the sun is low; every 0.3 s on a 30 s day, half
+//! that then) is the map's form of a key that moves (K7):
 //! the job preparing an earlier bake runs on and lands, then the newest
 //! bake prepares. Only a change of map cancels the job in flight (another
 //! map registered under its handle, another environment named, an
@@ -566,7 +567,7 @@ impl Renderer {
     /// fog band (N3); the dome shows `env`. `None` is `register_environment`.
     /// Registering the same two `Arc`s again changes nothing; a new pair is a
     /// change of map. A host that bakes the same environment again (a clock's
-    /// next quarter hour) registers the bake with
+    /// next bake) registers the bake with
     /// [`Self::register_rebaked_environment`], which lets the preparation in
     /// flight land.
     pub fn register_generated_environment(&mut self, texture: TextureRef, env: Arc<EnvMap>, keyless: Option<Arc<EnvMap>>) {
@@ -576,7 +577,8 @@ impl Renderer {
     /// The next bake of the environment registered under `texture`, with its
     /// keyless copy as for [`Self::register_generated_environment`]: a host
     /// clock that re-bakes its map (the sandbox's `params:` sky bakes again
-    /// every quarter hour of game time). A re-bake is not a change of map
+    /// every quarter hour of game time, every 7.5 minutes while the sun is
+    /// low). A re-bake is not a change of map
     /// but the map's form of a key that moves (K1, K7): the job preparing an
     /// earlier bake runs to its end and is adopted when it lands (newer than
     /// what is bound, the bakes registered meanwhile notwithstanding), and
@@ -681,7 +683,9 @@ impl Renderer {
     /// previous preparation stays bound while the next one prepares (a new
     /// key, a new map, another environment named), so light and sky never
     /// drop out in between. A host that waits for the world's own
-    /// environment waits for [`Self::environment_pending`] to turn false.
+    /// environment waits for [`Self::environment_pending`] to turn false
+    /// (not one that re-bakes its map faster than the renderer prepares:
+    /// that one sees it true nearly all the time, see there).
     pub fn environment_ready(&self) -> bool {
         self.ibl.bound.is_some() && self.ibl.texture.is_some()
     }
@@ -702,6 +706,18 @@ impl Renderer {
     /// the table, a handle nobody registered), a failed job, and a job
     /// cancelled by a change of map that is winding down are not pending:
     /// nothing will come from them.
+    ///
+    /// A host that re-bakes its map faster than the renderer prepares one
+    /// (`register_rebaked_environment`: the sandbox's day cycle on a fast
+    /// day, a bake every 0.3 s on a 30 s day against a preparation of about
+    /// 0.7 s) sees this true nearly all the time: whenever a preparation
+    /// lands, a newer bake is already registered and wanted, so the next
+    /// one is submitted at once. Such a host must not wait for it to turn
+    /// false before it draws or takes a bake, nor use `items_ready` (which
+    /// holds while this does) to gate its frames: it would wait for a
+    /// moment that does not come. [`Self::environment_ready`] says an
+    /// environment is bound; the bakes land at the renderer's pace
+    /// meanwhile (K7). The sandbox reads neither.
     pub fn environment_pending(&self) -> bool {
         let s = &self.ibl;
         let live = s.job.as_ref().is_some_and(|j| !j.cancel.is_cancelled());
@@ -719,7 +735,7 @@ impl Renderer {
     /// in `adopt_ibl` and cleared in `unbind_ibl`), not on `prepared_for`:
     /// re-registering the bound handle clears `prepared_for`, and the rig,
     /// the exposure and the fog must keep the old map's values until the
-    /// new ones land (a day cycle re-bakes every quarter hour).
+    /// new ones land (a day cycle re-bakes on its grid, a quarter hour or less).
     pub fn ibl_sh9(&self) -> Option<&[[f32; 3]; 9]> {
         self.ibl.sh.as_ref()
     }
@@ -1871,7 +1887,8 @@ mod tests {
     /// K7 (K1 for a host that re-bakes its map): a clock that re-bakes the
     /// registered environment faster than the renderer prepares it (the
     /// sandbox's day cycle registers a new bake every quarter hour of game
-    /// time, every 0.3 s on a 30 s day) lands at the renderer's pace. A
+    /// time, every 7.5 minutes while the sun is low; every 0.3 s on a 30 s
+    /// day, half that then) lands at the renderer's pace. A
     /// re-bake is not a change of map: the job in flight runs on and its
     /// bake is adopted, newer than what is bound, although newer bakes are
     /// registered by then; then the newest bake prepares, and the ones in
