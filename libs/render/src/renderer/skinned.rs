@@ -265,8 +265,11 @@ impl Renderer {
     /// branches on (`ibl_lane_ctl`, a stock lane's: x the switch, y the
     /// lane's scale, z the fill from the map unless the world authors one
     /// or GI gathers one; it reads the `gi_on` on `vars`, so the GI is
-    /// bound first). No environment: nothing bound, the control all zero,
-    /// and the lane shades exactly as before.
+    /// bound first). No environment: the call binds nothing and writes the
+    /// control all zero, so the lane shades exactly as before. It does not
+    /// clear the slot: after an environment is dropped the atlas bound last
+    /// stays on it, unread (the switch is off) and alive, until the next
+    /// environment's atlas replaces it.
     pub(super) fn bind_skin_ibl(&self, cx: &Cx, vars: &mut DrawVars) {
         let bound = match (self.ibl_texture(), vars.draw_shader_id) {
             (Some(texture), Some(shader)) => {

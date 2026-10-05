@@ -15,6 +15,9 @@ impl Renderer {
     /// adaptive-quality history owned by this device.
     pub fn enter_realm(&mut self) {
         self.custom_draws.clear();
+        // The stock IBL program went with them: a build of it that failed
+        // may be made again (renderer/stock_ibl.rs).
+        self.stock_ibl_forget_failure();
         self.static_chunks.clear();
         self.chunk_visible.clear();
         self.slab_key = None;
@@ -583,8 +586,13 @@ impl Renderer {
         self.custom_draws.get(name).map(|m| &**m)
     }
 
+    /// Keep only the installed materials `names` lists (a host's reload:
+    /// the ones it still declares). The stock IBL program goes with the
+    /// rest and the next frame under an environment builds it again, also
+    /// when its last build failed (renderer/stock_ibl.rs).
     pub fn retain_custom_materials(&mut self, names: &[String]) {
         self.custom_draws.retain(|name, _| names.contains(name));
+        self.stock_ibl_forget_failure();
     }
 
     pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
@@ -628,8 +636,13 @@ impl Renderer {
     ) {
         // The stock IBL program draws when the frame routes through it and
         // a shiny stock model is in the list, whether or not an instance
-        // names it (renderer/stock_ibl.rs); the same early-out as
-        // draw_pbr_models, so a scene of matte props pays nothing.
+        // names it (renderer/stock_ibl.rs). The list check is the name scan
+        // of draw_pbr_models' early-out without its fast path (the diffuse
+        // lane's model_orders): while the frame routes, each call hashes
+        // the resident shiny models' names and scans the list, and a list
+        // with no shiny stock model draws nothing through the program.
+        // While the frame does not route (no environment) nothing is
+        // scanned.
         let stock_ibl_on = self.stock_ibl_active() && self.lists_a_stock_ibl_model(instances);
         // Blended programs after every opaque one (they neither write depth
         // nor hide what is behind them), each group in name order.

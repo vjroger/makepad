@@ -12,7 +12,10 @@
 //! targets and its generated skin surface; slot 5 receives the atlas as it
 //! does for every IBL material (draw_models.rs).
 //!
-//! The program is built on first use, once, and stays installed. Whether
+//! The program is built on first use, once, and stays installed until the
+//! host drops its materials (`retain_custom_materials`, `enter_realm`): the
+//! next frame under an environment builds it again, and a build that
+//! failed is made again only then (`stock_ibl_forget_failure`). Whether
 //! this frame routes through it is decided after the environment is
 //! resolved (`prepare_stock_ibl`, in `draw_scene_scoped` after
 //! `resolve_ibl_for`), from the IBL texture (the bound preparation's; a
@@ -51,7 +54,8 @@ use makepad_render_material::{HookMask, HookSet, MaterialDesc};
 pub const STOCK_IBL_MATERIAL: &str = "__stock_ibl";
 
 pub(super) struct StockIblState {
-    /// The program did not build (logged once, never retried).
+    /// The program did not build (logged once). It is not built again
+    /// until the host drops its materials (`stock_ibl_forget_failure`).
     failed: bool,
     /// This frame routes shiny stock models through the program.
     active: bool,
@@ -71,9 +75,10 @@ impl Default for StockIblState {
 }
 
 impl Renderer {
-    /// Install `__stock_ibl` when it is missing (and did not fail before).
-    /// True when it is installed after the call. A held VM (a script-driven
-    /// draw mid-apply) means "next frame", not failure.
+    /// Install `__stock_ibl` when it is missing (and its build did not fail
+    /// since the host last dropped its materials). True when it is
+    /// installed after the call. A held VM (a script-driven draw mid-apply)
+    /// means "next frame", not failure.
     pub(super) fn stock_ibl_install(&mut self, cx: &mut Cx) -> bool {
         if self.custom_material_shader(STOCK_IBL_MATERIAL).is_some() {
             return true;
@@ -102,6 +107,15 @@ impl Renderer {
             }
             None => false,
         }
+    }
+
+    /// Forget a build that failed, where the host drops its materials
+    /// (`retain_custom_materials`: a script reload; `enter_realm`: another
+    /// world): what did not build may build now, so the next frame under
+    /// an environment tries once more. Until then the failure stays
+    /// remembered and no frame builds (and logs) it again.
+    pub(super) fn stock_ibl_forget_failure(&mut self) {
+        self.stock_ibl.failed = false;
     }
 
     /// Decide, once per frame after the environment is resolved, whether
@@ -218,8 +232,9 @@ impl Renderer {
     /// to wait for, as for the items' materials and the PBR lane there: the
     /// scene draw that binds an environment installs the program before any
     /// lane walks the models, so after a draw it is missing only when it did
-    /// not build (those models stay on the PBR lane for good) or the VM was
-    /// held (as a held VM leaves the PBR lane unmade).
+    /// not build (those models stay on the PBR lane until the host drops its
+    /// materials: `stock_ibl_forget_failure`) or the VM was held (as a held
+    /// VM leaves the PBR lane unmade).
     pub(super) fn stock_ibl_ready(&self, cx: &Cx) -> bool {
         self.ibl_texture().is_none()
             || !self.pbr_materials_enabled
@@ -278,6 +293,16 @@ mod tests {
         cx
     }
 
+    /// Where the installed program lives. Its Box keeps this address for as
+    /// long as it stays installed (a lane's pass takes it out and puts the
+    /// same Box back), and an install puts another Box in its place before
+    /// the old one is freed: the address is the same exactly when no
+    /// program was built and installed in between. The shader id cannot
+    /// tell: the same program text gives the same shader.
+    fn program_at(renderer: &Renderer) -> Option<*const CustomMaterial> {
+        renderer.custom_material(STOCK_IBL_MATERIAL).map(|m| m as *const CustomMaterial)
+    }
+
     #[test]
     fn only_a_shiny_stock_model_under_an_environment_takes_the_program() {
         // (active, uses_pbr_lane, own_material, sways)
@@ -319,7 +344,9 @@ mod tests {
         let mut cx = headless();
         let mut renderer = Renderer::default();
         assert!(renderer.stock_ibl_install(&mut cx), "the program builds and installs");
-        assert!(renderer.stock_ibl_install(&mut cx), "installed once: the second call finds it");
+        let built = program_at(&renderer);
+        assert!(renderer.stock_ibl_install(&mut cx), "the second call finds it");
+        assert_eq!(program_at(&renderer), built, "installed once: the second call builds no other program");
         let m = renderer.custom_material(STOCK_IBL_MATERIAL).expect("installed under its name");
         assert!(m.ibl, "binds the environment on detail_map");
         assert_eq!(m.plan.builtins, vec![Builtin::Ibl], "no hooks: no hooked composition");
@@ -333,7 +360,6 @@ mod tests {
         assert_eq!(textures[5].id, live_id!(detail_map), "the PBR lane's free detail slot");
         assert!(textures.iter().any(|t| t.id == live_id!(orm_map)), "a stock model's ORM binds as on the PBR lane");
         assert!(textures.iter().any(|t| t.id == live_id!(morph_map)), "its morph targets too");
-        assert!(renderer.stock_ibl_ready(&cx));
     }
 
     #[test]
@@ -341,13 +367,11 @@ mod tests {
         let mut cx = headless();
         let mut renderer = Renderer::default();
         renderer.prepare_stock_ibl(&mut cx);
+        // The decision off: the lanes' filter is the one they had (the
+        // truth table above).
         assert!(!renderer.stock_ibl_active());
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "no environment, no program");
         assert!(renderer.custom_draws.is_empty());
-        assert!(renderer.stock_ibl_ready(&cx), "nothing to wait for");
-        for (uses_pbr, own, sways) in [(true, false, false), (true, true, false), (false, false, false), (true, false, true)] {
-            assert!(!takes_stock_ibl(renderer.stock_ibl_active(), uses_pbr, own, sways));
-        }
     }
 
     /// Under a bound environment: before a scene draw has installed the
@@ -428,14 +452,17 @@ mod tests {
         // Every backend but Metal compiles synchronously (window_snapshot.rs).
         #[cfg(not(target_vendor = "apple"))]
         assert!(active, "an environment and a ready variant: the frame routes");
-        assert_eq!(renderer.stock_ibl_ready(&cx), active, "items_ready waits on the shader the lanes draw through");
+        assert_eq!(renderer.stock_ibl_ready(&cx), active, "the program is waited for on the shader the lanes draw through");
+        assert_eq!(renderer.items_ready(&cx), active, "and items_ready waits for it");
 
         // The next frame's first decision reads the variant off the draw;
         // another list's diffuse pass finds it built and decides the same.
+        let built = program_at(&renderer);
         renderer.prepare_stock_ibl(&mut cx);
         assert_eq!(renderer.stock_ibl_active(), active);
         renderer.confirm_stock_ibl(&mut cx);
-        assert_eq!(on_draw(&renderer), Some(variant), "one variant per feature set, built once");
+        assert_eq!(program_at(&renderer), built, "the next frame builds no other program");
+        assert_eq!(on_draw(&renderer), Some(variant), "one variant per feature set");
         assert_eq!(renderer.stock_ibl_active(), active);
 
         // The PBR lane off, or the environment gone: the diffuse pass does
@@ -486,81 +513,125 @@ mod tests {
         renderer
     }
 
+    /// No environment, a shiny and a matte model resident and placed: the
+    /// frame's first estimate (`prepare_stock_ibl`) stays off, which leaves
+    /// the lanes' filter the one they had (the truth table above), no
+    /// program is built, and `items_ready` has nothing to wait for. The
+    /// walk of the placed list through the lanes is not driven here: no
+    /// headless test walks an instance list.
     #[test]
-    fn placed_stock_models_without_an_environment_keep_their_lanes() {
+    fn without_an_environment_resident_stock_models_build_no_program_and_wait_for_nothing() {
         let mut cx = headless();
         let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
-        // The frame's decision with nothing registered: the environment is
-        // absent, so no program exists and neither model changes lane.
         renderer.prepare_stock_ibl(&mut cx);
-        assert!(!renderer.stock_ibl_active());
+        assert!(!renderer.stock_ibl_active(), "no environment: the estimate is off");
         assert!(renderer.custom_draws.is_empty(), "no environment: not even the program is built");
-        // The lanes' filter for both models is the one they had before
-        // (the diffuse, PBR and foliage lanes as (foliage_lane, pbr_lane)).
-        let sways = false;
-        for name in ["test/chrome", "test/matte"] {
-            let uses_pbr = wants_pbr(&renderer, name);
-            let takes = takes_stock_ibl(renderer.stock_ibl_active(), uses_pbr, false, sways);
-            assert!(!takes, "{name} stays on its lane");
-            for (foliage, pbr) in [(false, false), (false, true), (true, true)] {
-                let before = sways != foliage || (!foliage && uses_pbr != pbr);
-                assert_eq!(stock_lane_skips(false, takes, sways, foliage, uses_pbr, pbr), before, "{name}: lane ({foliage}, {pbr})");
-            }
-        }
         assert!(renderer.items_ready(&cx), "and nothing is waited for");
     }
 
-    /// The active path, headless: an environment's lane texture turns the
-    /// frame's decision on, the program is built once, only the shiny
-    /// model leaves the PBR lane for it, and dropping the environment
-    /// turns the decision off again.
+    /// Under a bound environment, with the same two models resident:
+    /// `prepare_stock_ibl`, the frame's first estimate (each list's diffuse
+    /// pass decides again, `confirm_stock_ibl`: the test above), is on
+    /// exactly while the shader on the program's draw can draw; the program
+    /// is built once; `stock_ibl_ready` and `items_ready` wait for that
+    /// pipeline; and without the environment the estimate is off again
+    /// while the program stays installed. The route predicate is asked
+    /// with each model's `wants_pbr` flag, which stands in for the walk's
+    /// `uses_pbr_lane`: no headless test walks the instance list, so the
+    /// composed route (the lanes' filter in draw_models.rs, the program's
+    /// pass in realm.rs) is the lab's pixel test (`--scene=ibl`, columns 4
+    /// and 5), run before a merge.
     #[test]
-    fn an_environment_routes_the_shiny_stock_model_and_only_it() {
+    fn an_environment_turns_the_first_estimate_on_and_the_route_predicate_takes_only_the_shiny_models_flag() {
         use makepad_render_material::ibl::EnvMap;
         use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
         let mut cx = headless();
         let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
+        // A closed pool prepares on the spot: the call binds the texture.
+        cx.task_pool().close(ShutdownMode::CancelPending);
         renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(32, [0.5, 0.4, 0.3])));
-        let mut env = Environment::default();
-        env.ibl = Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 });
-        // resolve_ibl prepares the lane texture on a background job (plan 2:
-        // one job at a time, adopted by the resolve after it lands; a closed
-        // pool prepares on the calling thread, small): poll it as a frame does.
-        let start = std::time::Instant::now();
-        while renderer.ibl_texture().is_none() {
-            renderer.resolve_ibl(&mut cx, &env);
-            assert!(start.elapsed().as_secs() < 180, "the environment never prepared");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        renderer.resolve_ibl(&mut cx, &env);
+        assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
         renderer.prepare_stock_ibl(&mut cx);
         let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("an environment builds the program");
         let active = renderer.stock_ibl_active();
-        assert_eq!(active, cx.draw_shader_ready(id, renderer.hdr_output), "the decision is the texture plus the program's pipeline");
+        assert_eq!(active, cx.draw_shader_ready(id, renderer.hdr_output), "the first estimate is the texture plus the pipeline of the shader on the program's draw");
         // Every backend but Metal compiles synchronously (window_snapshot.rs).
         #[cfg(not(target_vendor = "apple"))]
-        assert!(active, "an environment and a ready program: the frame routes");
+        assert!(active, "an environment and a ready program: the estimate is on");
         let (chrome, matte) = (wants_pbr(&renderer, "test/chrome"), wants_pbr(&renderer, "test/matte"));
-        assert_eq!(takes_stock_ibl(active, chrome, false, false), active, "the chrome model takes the program");
-        assert!(!takes_stock_ibl(active, matte, false, false), "the matte model keeps the diffuse lane");
-        // Exactly one drawer for each: the program or one stock lane.
+        assert_eq!(takes_stock_ibl(active, chrome, false, false), active, "the predicate takes the chrome model's flag");
+        assert!(!takes_stock_ibl(active, matte, false, false), "and leaves the matte model's to the diffuse lane");
+        // Exactly one drawer for each flag: the program or one stock lane.
         for uses_pbr in [chrome, matte] {
             let takes = takes_stock_ibl(active, uses_pbr, false, false);
             let stock = [(false, false), (false, true), (true, true)].iter().filter(|(foliage, pbr)| !stock_lane_skips(false, takes, false, *foliage, uses_pbr, *pbr)).count();
             assert_eq!(stock + takes as usize, 1);
         }
-        assert_eq!(renderer.stock_ibl_ready(&cx), active, "items_ready waits exactly while the pipeline compiles");
-        // A second frame finds the program installed: one program, built once.
+        assert_eq!(renderer.stock_ibl_ready(&cx), active, "the program is waited for exactly while its pipeline cannot draw");
+        assert_eq!(renderer.items_ready(&cx), active, "and items_ready waits for it");
+        // A second frame finds the program installed and builds no other.
+        let built = program_at(&renderer);
         renderer.prepare_stock_ibl(&mut cx);
+        assert_eq!(program_at(&renderer), built, "one program, built once");
         assert_eq!(renderer.custom_material_shader(STOCK_IBL_MATERIAL), Some(id));
         assert_eq!(renderer.custom_draws.len(), 1);
-        // No environment again: the decision is off, both models are back
-        // on their lanes; the program stays installed for the next one.
+        // No environment again: the estimate is off; the program stays
+        // installed for the next one.
         renderer.resolve_ibl(&mut cx, &Environment::default());
         assert!(renderer.ibl_texture().is_none());
         renderer.prepare_stock_ibl(&mut cx);
         assert!(!renderer.stock_ibl_active());
-        assert!(!takes_stock_ibl(renderer.stock_ibl_active(), chrome, false, false));
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some());
+    }
+
+    /// Decision 9: a build that failed is remembered, so the frames after
+    /// it build (and log) nothing, and it is forgotten where the host drops
+    /// its materials: `retain_custom_materials` (a script reload) and
+    /// `enter_realm` (another world). The next frame under the environment
+    /// then builds the program. The failure here is a treeline of
+    /// `Builtin::Ibl` whose body does not compile, mended before the next
+    /// frame: without the memory that frame would build it.
+    #[test]
+    fn a_failed_build_is_not_made_again_until_the_host_reloads_its_materials() {
+        use makepad_scene::Environment;
+        let reloads: [(&str, fn(&mut Renderer)); 2] = [
+            ("retain_custom_materials", |renderer| renderer.retain_custom_materials(&[])),
+            ("enter_realm", |renderer| renderer.enter_realm()),
+        ];
+        for (reload, run) in reloads {
+            let mut cx = headless();
+            cx.task_pool().close(ShutdownMode::CancelPending);
+            let mut renderer = Renderer::default();
+            renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
+            let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+            renderer.resolve_ibl(&mut cx, &env);
+            assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
+
+            cx.with_vm(|vm| {
+                script_eval!(vm, {
+                    use mod.prelude.widgets_internal.*
+                    mod.draw.mat_ibl_coat_treeline_kept = mod.draw.mat_ibl_coat_treeline
+                    mod.draw.mat_ibl_coat_treeline = fn(env: vec3, r: vec3) -> vec3 {
+                        return no_such_function(env)
+                    }
+                });
+            });
+            renderer.prepare_stock_ibl(&mut cx);
+            assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "{reload}: premise: the program does not build");
+            assert!(!renderer.stock_ibl_active() && renderer.items_ready(&cx), "{reload}: no program: nothing routes and nothing is waited for");
+            cx.with_vm(|vm| {
+                script_eval!(vm, { mod.draw.mat_ibl_coat_treeline = mod.draw.mat_ibl_coat_treeline_kept });
+            });
+            renderer.prepare_stock_ibl(&mut cx);
+            assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "{reload}: a failed build is remembered: the next frame builds nothing");
+
+            run(&mut renderer);
+            assert!(renderer.ibl_texture().is_some(), "{reload}: premise: the environment stays bound");
+            renderer.prepare_stock_ibl(&mut cx);
+            assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some(), "{reload}: the next frame under the environment builds the program");
+        }
     }
 
     // ---- the lanes' control value (`ibl_ctl`) ----

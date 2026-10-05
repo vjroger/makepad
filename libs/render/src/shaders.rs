@@ -1647,7 +1647,9 @@ mod skin_ibl_tests {
     }
 
     /// The surface path lowers with the IBL lookups on the backends the
-    /// compile list emits source for.
+    /// compile list emits source for, and takes them only under the lane's
+    /// switch: along its reflection and along its normal, the coat along
+    /// its own reflection.
     #[test]
     fn the_skin_lane_lowers_with_the_ibl_lookups() {
         with_vm(|vm| {
@@ -1671,12 +1673,23 @@ mod skin_ibl_tests {
                 let fill = lowered_fn_body(&source, "mat_ibl_lane_ambient").unwrap_or_else(|| panic!("{name}: no lane fill lookup"));
                 assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "{name}: the fill lookup carries the lane's scale: {fill}");
                 assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "{name}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
-                // The surface path and the toy coat call them, and nothing
-                // in the lane's pixel stage takes a raw lookup.
+                // The surface path and the toy coat take them under the
+                // lane's switch, pinned as text: no test draws a skinned
+                // batch. The lookups are on while ibl_ctl.x is set, in the
+                // surface path and in the coat and nowhere else (the lane
+                // functions test z). Under it the surface path reflects the
+                // map along its reflection at its roughness, then fills
+                // along its normal over the fill it had, and the block
+                // ends; the coat reflects the map along its own reflection
+                // as a lacquer (0.03), and nothing else.
                 let pixel = lowered_fn_body(&source, "pixel").unwrap_or_else(|| panic!("{name}: no pixel function"));
-                assert!(pixel.contains("mat_ibl_lane_sky_env(") && pixel.contains("mat_ibl_lane_ambient("), "{name}: the surface path takes the lane's lookups");
                 let coat = lowered_fn_body(&source, "toy_coat").unwrap_or_else(|| panic!("{name}: no toy coat"));
-                assert!(coat.contains("mat_ibl_lane_sky_env("), "{name}: the coat takes the lane's reflection");
+                let (switch, f) = if name == "skin GLSL" { ("if((uni_ibl_ctl.x > 0.5)){", "io_") } else { ("if((u_io_ibl_ctl.x > 0.5)){", "f_io_") };
+                assert_eq!(source.matches("ibl_ctl.x > 0.5").count(), 2, "{name}: the switch set turns the lookups on, once in the surface path and once in the coat");
+                assert!(pixel.contains(&format!("{switch}\nl_environment = {f}mat_ibl_lane_sky_env(normalize(l_reflection), l_rough);\n")), "{name}: under the switch the surface reflects the map along its reflection, at its roughness");
+                assert!(pixel.contains(&format!("\nl_fill = {f}mat_ibl_lane_ambient(l_n, l_fill);\n}}\n")), "{name}: under the switch the surface fills from the map along its normal, over the fill it had, and the block ends");
+                assert!(coat.contains(&format!("{switch}\nl_env = {f}mat_ibl_lane_sky_env(normalize(l_r), 0.03);\n}}\n")), "{name}: under the switch the coat reflects the map along its own reflection, as a lacquer: {coat}");
+                // Nothing in the lane's pixel stage takes a raw lookup.
                 for (stage, body) in [("pixel", &pixel), ("toy_coat", &coat)] {
                     assert!(!body.contains("io_mat_ibl_sky_env(") && !body.contains("io_mat_ibl_ambient("), "{name}: {stage} takes a lookup at the map's raw scale");
                 }
