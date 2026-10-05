@@ -569,6 +569,63 @@ mod tests {
         });
     }
 
+    /// Car paint's clear coat mirrors `sky_env` and, on the stock PBR lane,
+    /// paints a treeline band along its horizon (`coat_treeline`: the
+    /// analytic sky has none). An IBL program mirrors the map, which has a
+    /// horizon of its own: there `coat_treeline` is the identity, so no
+    /// analytic ridge covers the map's reflection, and the rest of the
+    /// coat is the stock coat line for line. The stock lane's band is the
+    /// one it was, statement for statement (no environment, no change).
+    #[test]
+    fn an_ibl_programs_coat_mirrors_the_maps_horizon_and_the_stock_coat_keeps_its_treeline() {
+        use crate::shaders::lowered_fn_body;
+        with_vm(|vm| {
+            let m = DrawSceneCustom::build(vm, &MaterialDesc { ibl: true, ..Default::default() }, &HookSet::new(), HookMask::ALL, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.plan.builtins, vec![Builtin::Ibl]);
+            let ibl_program = m.program.as_ref().unwrap().as_object();
+            let stock_program = script_eval!(vm, { mod.draw.DrawScenePbr }).as_object().unwrap();
+            // Both programs lower for every backend.
+            for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
+                for (name, program) in [("the IBL program", ibl_program), ("the stock PBR program", stock_program)] {
+                    let errors = frontend_errors_for(vm, program, backend);
+                    assert!(errors.is_empty(), "{name}, {backend:?}: {errors:?}");
+                }
+            }
+            for glsl in [true, false] {
+                let (ibl, stock) = (lowered(vm, ibl_program, glsl), lowered(vm, stock_program, glsl));
+                for (name, source) in [("the IBL program", &ibl), ("the stock PBR program", &stock)] {
+                    assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}, {name}: {source}");
+                }
+                let body = |source: &str, name: &str, function: &str| lowered_fn_body(source, function).unwrap_or_else(|| panic!("glsl {glsl}: {name} has no {function}"));
+                // Under a map: no noise ridge and no analytic horizon
+                // colour in the coat, and the function it calls for car
+                // paint returns the reflection as it took it.
+                let coat = body(&ibl, "the IBL program", "clear_coat");
+                assert!(!coat.contains("tn_noise(") && !coat.contains("sun_ground"), "glsl {glsl}: an IBL program's coat paints the analytic treeline over the map's reflection: {coat}");
+                assert_eq!(body(&ibl, "the IBL program", "coat_treeline").trim(), "return p_env;", "glsl {glsl}: under a map the treeline is the identity");
+                // The stock lane: the band it had, every constant of it,
+                // over the reflection it is handed.
+                let band = body(&stock, "the stock PBR program", "coat_treeline");
+                for part in [
+                    "(p_r.z, p_r.x);",
+                    "((0.035 + (0.05 * ", "((l_az * 9", "), 0.5)))) + (0.03 * ", "((l_az * 37", "), 1.5))));",
+                    "((1.0 - smoothstep((l_ridge - 0.01), (l_ridge + 0.01), p_r.y)) * smoothstep((-0.02), 0.0, p_r.y));",
+                    "(p_env, ((", "sun_ground * 0.28) + (", "fog_color * 0.12)), (l_tree * 0.85));",
+                ] {
+                    assert!(band.contains(part), "glsl {glsl}: the stock lane's treeline is the band it was, `{part}`: {band}");
+                }
+                assert_eq!((band.matches("tn_noise(").count(), band.trim().lines().count()), (2, 4), "glsl {glsl}: two noise taps, four statements: {band}");
+                // Car paint only (a toy's rim skips it), and the IBL
+                // program's coat is this coat: only the function differs.
+                let stock_coat = body(&stock, "the stock PBR program", "clear_coat");
+                let call = if glsl { "if((l_rim < 0.5)){\nl_env = io_coat_treeline(l_env, l_r);\n}\n" } else { "if((l_rim < 0.5)){\nl_env = f_io_coat_treeline(l_env, l_r);\n}\n" };
+                assert!(stock_coat.contains(call) && !stock_coat.contains("tn_noise("), "glsl {glsl}: the coat paints the band through the function, on car paint: {stock_coat}");
+                assert_eq!(coat, stock_coat, "glsl {glsl}: an IBL program's coat is the stock coat");
+            }
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
     #[test]
     fn a_plain_opaque_material_gets_a_discard_free_variant_with_the_stock_layout() {
         with_vm(|vm| {

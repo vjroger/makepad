@@ -12,7 +12,9 @@
 //! `mat_ambient` exist with stock bodies; `params` is the material's vec4;
 //! `v_csm` is the true world position; `detail_map` is free on the lane;
 //! `ibl_ctl` is the lane's control of the IBL lookups (y: its scale on the
-//! map, z: 1 while the fill comes from the map), written per draw.
+//! map, z: 1 while the fill comes from the map), written per draw;
+//! `coat_treeline(env, r)` is what the lane's clear coat paints over the
+//! horizon of its reflection `env` along `r`.
 use makepad_draw::*;
 use makepad_draw::makepad_platform::makepad_script::script_eval;
 
@@ -129,6 +131,13 @@ script_mod! {
         if self.ibl_ctl.z > 0.5 { return self.mat_ibl_ambient(n, a) * self.ibl_ctl.y }
         return a
     }
+    // Car paint's clear coat on the lane paints a treeline over the horizon
+    // of its reflection (`coat_treeline`: the analytic sky has none). The
+    // map supplies its own horizon, so under it the reflection stays as the
+    // coat took it.
+    mod.draw.mat_ibl_coat_treeline = fn(env: vec3, r: vec3) -> vec3 {
+        return env
+    }
 }
 
 /// The engine overrides a program can carry.
@@ -145,7 +154,8 @@ pub enum Builtin {
     /// The error material (surface and composition).
     Error,
     /// Image-based lighting from the atlas in `detail_map`, under the lane's
-    /// control (`ibl_ctl`).
+    /// control (`ibl_ctl`); the clear coat reflects the map with no analytic
+    /// treeline over it.
     Ibl,
 }
 
@@ -183,6 +193,8 @@ pub fn overrides(vm: &mut ScriptVm, builtin: Builtin) -> Vec<(LiveId, ScriptObje
             // The lane's reflection and fill: the two lookups under ibl_ctl.
             (id!(sky_env), f(script_eval!(vm, { mod.draw.mat_ibl_lane_sky_env }))),
             (id!(mat_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_lane_ambient }))),
+            // No analytic treeline over the map's reflection in the clear coat.
+            (id!(coat_treeline), f(script_eval!(vm, { mod.draw.mat_ibl_coat_treeline }))),
         ],
     };
     pairs.into_iter().filter_map(|(id, o)| o.filter(|o| vm.bx.heap.is_fn(*o)).map(|o| (id, o))).collect()
