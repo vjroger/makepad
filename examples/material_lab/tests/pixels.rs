@@ -203,6 +203,19 @@ fn world_items_and_a_rect_area_light_draw_in_the_dark() {
     }
 }
 
+/// The least mean luma of a shape the sunset lights through the IBL lookups
+/// at the LANE'S scale. The lab never asks for HDR output, so on every
+/// platform it draws in the legacy lane, where the lookups carry the map's
+/// exposure as the rig's fill does (`ibl_ctl.y`, renderer/stock_ibl.rs; the
+/// sunset meters at the ceiling, 3.2). With the scale the item pair and the
+/// stock chrome pair read means of 131.9 to 142.9 (D3D11); at the map's raw
+/// scale, which is what a frame draws when the control is not resolved at
+/// the rig site (frame.rs, `resolve_ibl_lane`) or not written on the draw
+/// (draw_models.rs, `bind_ibl_lane`), 47.4 to 53.6. No headless test runs
+/// those two calls, so this is the check that fails when one of them is
+/// lost: a mean near 50 is that.
+const LIT_AT_THE_LANES_SCALE: f32 = 90.0;
+
 #[test]
 fn image_based_lighting_reflects_its_environment() {
     let img = world_scene("ibl", "pixels::image_based_lighting_reflects_its_environment");
@@ -216,9 +229,11 @@ fn image_based_lighting_reflects_its_environment() {
             println!("[material_lab] ibl {row} column {c}: brightest {:.1}, mean {:.1}", brightest(cols[c]), mean_luma(cols[c]));
         }
         // Both metal item shapes reflect the sunset (no other light is on),
-        // so both are lit; the environment is warm at the horizon.
+        // so both are lit, at the lane's scale and not the map's raw one;
+        // the environment is warm at the horizon.
         for c in 0..2 {
-            assert!(mean_luma(cols[c]) > 25.0, "column {c}: an IBL metal {row} reflects its environment");
+            let mean = mean_luma(cols[c]);
+            assert!(mean > LIT_AT_THE_LANES_SCALE, "column {c}: an IBL metal {row} reflects its environment at the lane's scale: mean {mean:.1}, want above {LIT_AT_THE_LANES_SCALE}");
         }
         assert!(warm(cols[0]) > 50, "the sunset's warm horizon shows in the {row}'s reflection");
         // The stock chrome pair (column 4) draws through the engine's IBL
@@ -229,7 +244,8 @@ fn image_based_lighting_reflects_its_environment() {
         // band, not the sunset.
         println!("[material_lab] ibl {row} column 4: warm {}, cool {}", warm(cols[4]), cool(cols[4]));
         assert!(fraction(cols[4], |p| !is_background(p)) > 0.03, "{row} column 4 drew nothing");
-        assert!(mean_luma(cols[4]) > 25.0, "a stock chrome {row} reflects the environment");
+        let mean = mean_luma(cols[4]);
+        assert!(mean > LIT_AT_THE_LANES_SCALE, "a stock chrome {row} reflects the environment at the lane's scale: mean {mean:.1}, want above {LIT_AT_THE_LANES_SCALE}");
         assert!(warm(cols[4]) > 50, "the stock chrome {row}'s reflection is the sunset's");
         assert!(cool(cols[4]) < warm(cols[4]), "the stock chrome {row}'s reflection is not the analytic sky_env's blue horizon");
         // The matte stock pair (column 5) keeps the diffuse lane: no light,
