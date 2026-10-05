@@ -34,6 +34,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     city::script_mod(vm);
     grass::script_mod(vm);
     foliage::script_mod(vm);
+    // The skin lane assigns render-material's IBL lookups by name
+    // (skinned_gpu.rs), so they exist before it is declared. Idempotent:
+    // custom_material.rs registers them again for the material programs.
+    makepad_render_material::builtin::register(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
     water::script_mod(vm);
@@ -1552,6 +1556,87 @@ mod shader_registration_tests {
                 let n = m.geometries.total_slots.div_ceil(4);
                 let limit = makepad_draw::makepad_platform::draw_shader_layout::MAX_VERTEX_ATTRIBUTES;
                 assert!(n <= limit, "{name}: {n} geometry vertex attributes (the limit is {limit})");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod skin_ibl_tests {
+    use super::*;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+
+    /// The scene shaders as the crate registers them (`crate::script_mod`,
+    /// what `custom_material::register` and a running renderer run), then
+    /// `f`. The compile list's hand-made registration also has the shared
+    /// Splash stdlib now (`mod.shared`, `makepad_render_graph::pass_stdlib`,
+    /// whose `srgb_to_linear` the skin lane's surface path calls), but the
+    /// crate's own list is the one whose order D2 changes (render-material's
+    /// built-ins before the skin block), so that is the one under test.
+    fn with_vm(f: impl FnOnce(&mut ScriptVm)) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_draw::script_mod(vm);
+            vm.bx.heap.new_module(id!(prelude));
+            script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
+            vm.bx.heap.new_module(id!(widgets));
+            crate::script_mod(vm);
+            f(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "script errors: {errors:#?}");
+        });
+    }
+
+    /// The skin lane declares the IBL atlas on a named slot past every
+    /// numbered binding, inside the budgets the PBR lane is held to, with
+    /// the flag off until the renderer binds an environment.
+    #[test]
+    fn the_skin_lane_carries_the_ibl_slot_inside_its_budgets_and_off_by_default() {
+        with_vm(|vm| {
+            let skin = DrawSceneSkinnedGpu::script_new_with_default(vm);
+            let id = skin.draw_vars.draw_shader_id.expect("registered skin shader");
+            let cx = vm.cx();
+            let mapping = &cx.draw_shaders[id.index].mapping;
+            let textures = &mapping.textures;
+            assert!(textures.len() <= skin.draw_vars.texture_slots.len(), "skin exceeds the combined texture bindings");
+            assert!(textures.iter().filter(|t| t.id != live_id!(morph_map)).count() <= 16, "skin exceeds the WebGL2 fragment texture budget");
+            // The numbered bindings draw_skinned_inner writes keep their slots.
+            assert_eq!(textures[0].id, live_id!(tex));
+            assert_eq!(textures[1].id, live_id!(joint_tex));
+            assert_eq!(textures[2].id, live_id!(ao_map));
+            assert_eq!(textures[3].id, live_id!(light_map));
+            assert_eq!(textures[4].id, live_id!(top_map));
+            assert_eq!(textures[5].id, live_id!(csm_map));
+            let detail = textures.iter().position(|t| t.id == live_id!(detail_map)).expect("the IBL atlas slot");
+            assert!(detail > 5, "the atlas binds by name, past the numbered slots");
+            assert_eq!(textures.last().map(|t| t.id), Some(live_id!(morph_map)), "morph_map stays the last texture");
+            let flag = mapping.dyn_uniforms.inputs.iter().find(|i| i.id == live_id!(ibl_ctl)).expect("the ibl_ctl uniform");
+            assert!(skin.draw_vars.dyn_uniforms[flag.offset..flag.offset + flag.slots].iter().all(|v| *v == 0.0), "IBL is off until the renderer binds an environment");
+            // The flag's four floats lie inside the draw's uniform block,
+            // which is as big as the shader's uniforms (DrawVars::dyn_uniforms
+            // is sized to mapping.dyn_uniforms.total_slots when the shader
+            // binds), and the block stays under the most a GL / WebGL 2
+            // uniform block is guaranteed (DRAW_CALL_MAX_UNIFORM_FLOATS).
+            assert!(flag.offset + flag.slots <= skin.draw_vars.dyn_uniforms.len(), "ibl_ctl lies outside the draw call's uniform block");
+            assert!(mapping.dyn_uniforms.total_slots <= DRAW_CALL_MAX_UNIFORM_FLOATS, "skin exceeds the draw call's uniform budget: {} of {}", mapping.dyn_uniforms.total_slots, DRAW_CALL_MAX_UNIFORM_FLOATS);
+        });
+    }
+
+    /// The surface path lowers with the IBL lookups on the backends the
+    /// compile list emits source for.
+    #[test]
+    fn the_skin_lane_lowers_with_the_ibl_lookups() {
+        with_vm(|vm| {
+            for (name, result) in [
+                ("skin GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "glsl", false)})),
+                ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
+            ] {
+                let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
+                assert!(source.contains("mat_ibl_sky_env") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
+                assert!(source.contains("detail_map"), "{name}: the atlas is sampled");
+                assert!(source.contains("cluster_lights"), "{name}: the clustered lights stay");
             }
         });
     }
