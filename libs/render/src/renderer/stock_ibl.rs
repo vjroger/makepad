@@ -353,4 +353,117 @@ mod tests {
         renderer.confirm_stock_ibl(&mut cx);
         assert!(!renderer.stock_ibl_active(), "no environment: no routing");
     }
+
+    use crate::model::PbrMaterial;
+
+    /// A resident stock model in the fixture form of
+    /// prepared_static_preview_tests.rs: one triangle, seven floats a vertex.
+    fn triangle(pbr: PbrMaterial) -> StaticModel {
+        let mut vertices = Vec::new();
+        for p in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]] {
+            vertices.extend_from_slice(&[p[0], p[1], p[2], 0.0, 0.0, f32::from_bits(0xffff_ffff), 0.0]);
+        }
+        StaticModel {
+            vertices, indices: vec![0, 1, 2], texture_uri: None, texture_png: None,
+            min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
+            parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
+            ground_ao: None, draw_layers: Vec::new(), detail_png: None, detail_scale: [1.0, 1.0],
+            prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, liquids: Vec::new(), liquid_ranges: Vec::new(),
+            pbr,
+        }
+    }
+
+    /// Whether the resident model `name` asks for the PBR lane.
+    fn wants_pbr(renderer: &Renderer, name: &str) -> bool {
+        renderer.static_models.iter().find(|(k, _)| k == name).map(|(_, m)| m.wants_pbr).unwrap()
+    }
+
+    /// A renderer with a chrome and a matte stock model resident and placed.
+    fn renderer_with_a_chrome_and_a_matte_model(cx: &mut Cx) -> Renderer {
+        let mut renderer = Renderer::default();
+        let chrome = PbrMaterial { metallic: 1.0, roughness: 0.15, ..Default::default() };
+        renderer.load_model_parsed(cx, "test/chrome", triangle(chrome), None, None).expect("the chrome model uploads");
+        renderer.load_model_parsed(cx, "test/matte", triangle(PbrMaterial::default()), None, None).expect("the matte model uploads");
+        assert!(wants_pbr(&renderer, "test/chrome") && !wants_pbr(&renderer, "test/matte"), "a narrowed roughness is the PBR lane, the default the diffuse lane");
+        let instance = |model: &str| ModelInstance { model: model.into(), custom_material: None, transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new() };
+        renderer.set_models(vec![instance("test/chrome"), instance("test/matte")]);
+        renderer
+    }
+
+    #[test]
+    fn placed_stock_models_without_an_environment_keep_their_lanes() {
+        let mut cx = headless();
+        let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
+        // The frame's decision with nothing registered: the environment is
+        // absent, so no program exists and neither model changes lane.
+        renderer.prepare_stock_ibl(&mut cx);
+        assert!(!renderer.stock_ibl_active());
+        assert!(renderer.custom_draws.is_empty(), "no environment: not even the program is built");
+        // The lanes' filter for both models is the one they had before
+        // (the diffuse, PBR and foliage lanes as (foliage_lane, pbr_lane)).
+        let sways = false;
+        for name in ["test/chrome", "test/matte"] {
+            let uses_pbr = wants_pbr(&renderer, name);
+            let takes = takes_stock_ibl(renderer.stock_ibl_active(), uses_pbr, false, sways);
+            assert!(!takes, "{name} stays on its lane");
+            for (foliage, pbr) in [(false, false), (false, true), (true, true)] {
+                let before = sways != foliage || (!foliage && uses_pbr != pbr);
+                assert_eq!(stock_lane_skips(false, takes, sways, foliage, uses_pbr, pbr), before, "{name}: lane ({foliage}, {pbr})");
+            }
+        }
+        assert!(renderer.items_ready(&cx), "and nothing is waited for");
+    }
+
+    /// The active path, headless: an environment's lane texture turns the
+    /// frame's decision on, the program is built once, only the shiny
+    /// model leaves the PBR lane for it, and dropping the environment
+    /// turns the decision off again.
+    #[test]
+    fn an_environment_routes_the_shiny_stock_model_and_only_it() {
+        use makepad_render_material::ibl::EnvMap;
+        use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
+        let mut cx = headless();
+        let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
+        renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(32, [0.5, 0.4, 0.3])));
+        let mut env = Environment::default();
+        env.ibl = Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 });
+        // resolve_ibl prepares the lane texture on a background job (plan 2:
+        // one job at a time, adopted by the resolve after it lands; a closed
+        // pool prepares on the calling thread, small): poll it as a frame does.
+        let start = std::time::Instant::now();
+        while renderer.ibl_texture().is_none() {
+            renderer.resolve_ibl(&mut cx, &env);
+            assert!(start.elapsed().as_secs() < 180, "the environment never prepared");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        renderer.prepare_stock_ibl(&mut cx);
+        let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("an environment builds the program");
+        let active = renderer.stock_ibl_active();
+        assert_eq!(active, cx.draw_shader_ready(id, renderer.hdr_output), "the decision is the texture plus the program's pipeline");
+        // Every backend but Metal compiles synchronously (window_snapshot.rs).
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(active, "an environment and a ready program: the frame routes");
+        let (chrome, matte) = (wants_pbr(&renderer, "test/chrome"), wants_pbr(&renderer, "test/matte"));
+        assert_eq!(takes_stock_ibl(active, chrome, false, false), active, "the chrome model takes the program");
+        assert!(!takes_stock_ibl(active, matte, false, false), "the matte model keeps the diffuse lane");
+        // Exactly one drawer for each: the program or one stock lane.
+        for uses_pbr in [chrome, matte] {
+            let takes = takes_stock_ibl(active, uses_pbr, false, false);
+            let stock = [(false, false), (false, true), (true, true)].iter().filter(|(foliage, pbr)| !stock_lane_skips(false, takes, false, *foliage, uses_pbr, *pbr)).count();
+            assert_eq!(stock + takes as usize, 1);
+        }
+        assert_eq!(renderer.stock_ibl_ready(&cx), active, "items_ready waits exactly while the pipeline compiles");
+        // A second frame finds the program installed: one program, built once.
+        renderer.prepare_stock_ibl(&mut cx);
+        assert_eq!(renderer.custom_material_shader(STOCK_IBL_MATERIAL), Some(id));
+        assert_eq!(renderer.custom_draws.len(), 1);
+        // No environment again: the decision is off, both models are back
+        // on their lanes; the program stays installed for the next one.
+        renderer.resolve_ibl(&mut cx, &Environment::default());
+        assert!(renderer.ibl_texture().is_none());
+        renderer.prepare_stock_ibl(&mut cx);
+        assert!(!renderer.stock_ibl_active());
+        assert!(!takes_stock_ibl(renderer.stock_ibl_active(), chrome, false, false));
+        assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some());
+    }
 }

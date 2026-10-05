@@ -207,18 +207,35 @@ fn world_items_and_a_rect_area_light_draw_in_the_dark() {
 fn image_based_lighting_reflects_its_environment() {
     let img = world_scene("ibl", "pixels::image_based_lighting_reflects_its_environment");
     let split = img.split();
-    let all: Vec<_> = (0..3).map(|c| img.rows(c, split)).collect();
+    let all: Vec<_> = (0..6).map(|c| img.rows(c, split)).collect();
+    let warm = |col: &[(usize, [i32; 3])]| col.iter().filter(|(_, p)| !is_background(*p)).filter(|(_, p)| p[0] > p[2] + 10).count();
+    let cool = |col: &[(usize, [i32; 3])]| col.iter().filter(|(_, p)| !is_background(*p)).filter(|(_, p)| p[2] > p[0] + 10).count();
     for (r, row) in ROWS.iter().enumerate() {
         let cols: Vec<_> = all.iter().map(|rows| &rows[r]).collect();
-        for c in 0..3 {
+        for c in 0..6 {
             println!("[material_lab] ibl {row} column {c}: brightest {:.1}, mean {:.1}", brightest(cols[c]), mean_luma(cols[c]));
         }
-        // Both metal shapes reflect the sunset (no other light is on), so
-        // both are lit; the environment is warm at the horizon.
+        // Both metal item shapes reflect the sunset (no other light is on),
+        // so both are lit; the environment is warm at the horizon.
         for c in 0..2 {
             assert!(mean_luma(cols[c]) > 25.0, "column {c}: an IBL metal {row} reflects its environment");
         }
-        let warm = cols[0].iter().filter(|(_, p)| !is_background(*p)).filter(|(_, p)| p[0] > p[2] + 10).count();
-        assert!(warm > 50, "the sunset's warm horizon shows in the {row}'s reflection");
+        assert!(warm(cols[0]) > 50, "the sunset's warm horizon shows in the {row}'s reflection");
+        // The stock chrome pair (column 4) draws through the engine's IBL
+        // program: lit and warm like the item shapes. The scene authors a
+        // pale blue fog of zero density (items_world), the colour the
+        // analytic lane's sky_env reflects at the horizon whatever the
+        // environment is: a chrome shape left on that lane shows a cool
+        // band, not the sunset.
+        println!("[material_lab] ibl {row} column 4: warm {}, cool {}", warm(cols[4]), cool(cols[4]));
+        assert!(fraction(cols[4], |p| !is_background(p)) > 0.03, "{row} column 4 drew nothing");
+        assert!(mean_luma(cols[4]) > 25.0, "a stock chrome {row} reflects the environment");
+        assert!(warm(cols[4]) > 50, "the stock chrome {row}'s reflection is the sunset's");
+        assert!(cool(cols[4]) < warm(cols[4]), "the stock chrome {row}'s reflection is not the analytic sky_env's blue horizon");
+        // The matte stock pair (column 5) keeps the diffuse lane: no light,
+        // no environment term (the world's zero Sun and Sky have the last
+        // word over the environment's fill, frame.rs lane_rig), a dark shape.
+        assert!(fraction(cols[5], |p| !is_background(p)) > 0.03, "{row} column 5 drew nothing");
+        assert!(mean_luma(cols[5]) < 15.0, "a matte stock {row} under no light stays dark");
     }
 }

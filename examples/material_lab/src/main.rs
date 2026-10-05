@@ -21,7 +21,12 @@
 //!    cube lit by the `sunset` environment (ibl);
 //! 1. the same material with no light near it;
 //! 2. an Unlit cyan cube;
-//! 3. two small red cubes from one packed Instances item.
+//! 3. two small red cubes from one packed Instances item;
+//! and, for ibl only, placed STOCK models beside them (models with no
+//! material of their own, not items):
+//! 4. a chrome GLB cube on the PBR lane, lit by the environment through the
+//!    engine's `__stock_ibl` program (renderer/stock_ibl.rs);
+//! 5. a matte GLB cube on the diffuse lane: dark, nothing lights it.
 //!
 //! Above every cube sits a sphere with the same material (and in the rect
 //! scene its own light): a sphere has every normal, so a light, the
@@ -283,6 +288,14 @@ fn items_world(scene: Scene) -> World {
         }
         Scene::Ibl => {
             w.environment.ibl = Some(makepad_scene::Ibl { source: makepad_scene::IblSource::Procedural(2), intensity: 1.0, rotation_deg: 0.0 });
+            // An authored fog of zero density: nothing is fogged, but the
+            // analytic lane's sky_env horizon (the fog colour) is pinned to
+            // the engine's pale blue default, whatever the environment's
+            // horizon band is (plan 2 lends that band to a Fog::Host world
+            // whose background is the environment). A stock chrome shape that
+            // missed the IBL program then reflects a cool band and the pixel
+            // test tells the two lanes apart.
+            w.environment.fog = makepad_scene::Fog::Exp2 { color: vec3f(0.75, 0.87, 0.96), density: 0.0 };
         }
         Scene::Hooks => {}
     }
@@ -313,6 +326,14 @@ fn cube_glb() -> Vec<u8> {
     }
     let colors = vec![[1.0f32, 1.0, 1.0]; positions.len()];
     makepad_gltf::write_glb_mesh_colored(&positions, &indices, Some(&colors))
+}
+
+/// A lab model as a stock model with a mirror-metal material: a roughness
+/// the file narrowed puts it on the PBR lane (`PbrMaterial::is_shiny`).
+fn chrome_model(glb: &[u8]) -> makepad_render::StaticModel {
+    let mut model = makepad_render::StaticModel::parse_glb(glb).expect("the lab model parses");
+    model.pbr = makepad_render::PbrMaterial { metallic: 1.0, roughness: 0.15, ..Default::default() };
+    model
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -412,6 +433,27 @@ impl MaterialLab {
             }
         }).collect()
     }
+
+    /// The ibl scene's placed stock models, each column a cube with its
+    /// sphere above (the lab's two rows): chrome at column 4, matte at 5.
+    fn stock_instances() -> Vec<ModelInstance> {
+        let models = [(4usize, "lab/chrome", 0.0), (4, "lab/chrome_sphere", SPHERE_ROW), (5, "lab/cube", 0.0), (5, "lab/sphere", SPHERE_ROW)];
+        models.into_iter().map(|(column, model, y)| {
+            let mut transform = Mat4f::identity();
+            transform.v[12] = column_x(column);
+            transform.v[13] = y;
+            ModelInstance {
+                model: model.into(),
+                custom_material: None,
+                transform,
+                tint: vec4(1.0, 1.0, 1.0, 1.0),
+                color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
+                dynamic: true,
+                depth_order: 0.0,
+                part_poses: Vec::new(),
+            }
+        }).collect()
+    }
 }
 
 impl Widget for MaterialLab {
@@ -433,6 +475,11 @@ impl Widget for MaterialLab {
             }
             if let Err(e) = self.renderer.load_model(cx.cx, "lab/sphere", &sphere_glb(), None) {
                 log!("material lab: sphere did not load: {e}");
+            }
+            for (id, glb) in [("lab/chrome", cube_glb()), ("lab/chrome_sphere", sphere_glb())] {
+                if let Err(e) = self.renderer.load_model_parsed(cx.cx, id, chrome_model(&glb), None, None) {
+                    log!("material lab: {id} did not load: {e}");
+                }
             }
             self.install_materials(cx.cx);
             if let Err(e) = self.renderer.register_geometry(GeometryId(1), cube_geometry()) {
@@ -465,7 +512,11 @@ impl Widget for MaterialLab {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
             let scene = scene();
-            self.renderer.set_models(if scene == Scene::Hooks { Self::instances() } else { Vec::new() });
+            self.renderer.set_models(match scene {
+                Scene::Hooks => Self::instances(),
+                Scene::Ibl => Self::stock_instances(),
+                Scene::Rect => Vec::new(),
+            });
             let mut draws = SceneDraws {
                 cube: &mut self.draw_cube,
                 alpha: &mut self.draw_alpha,
@@ -503,10 +554,16 @@ impl Widget for MaterialLab {
         // then), and say so once for the test.
         if !self.announced && scene() != Scene::Hooks {
             // Built-in item materials compile on first use; give the
-            // pipelines time, then say so once.
-            let names = ["__item_unlit"];
+            // pipelines time, then say so once. The ibl scene also waits
+            // for the item IBL program and the stock lane's
+            // (renderer/stock_ibl.rs), else the grab shows the analytic sky,
+            // and items_ready covers the environment (it prepares on a
+            // background job and is false until the preparation lands) and
+            // the stock PBR pipeline: until that exists the chrome pair sits
+            // on the diffuse lane, black in this world.
+            let names: &[&str] = if scene() == Scene::Ibl { &["__item_unlit", "__item_ibl", makepad_render::STOCK_IBL_MATERIAL] } else { &["__item_unlit"] };
             let ready = names.iter().all(|n| self.renderer.custom_material_shader(n).is_some_and(|id| cx.cx.draw_shader_ready(id, false)));
-            if ready && self.frames > 90 {
+            if ready && self.renderer.items_ready(cx.cx) && self.frames > 90 {
                 self.announced = true;
                 log!("material lab: ready, world scene, {} items skipped", self.renderer.skipped_items());
             }
