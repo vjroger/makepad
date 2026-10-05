@@ -601,8 +601,13 @@ pub fn env_key_is_its_sun(key: Option<makepad_scene::EnvSun>, daylight: Option<V
 /// preset, 0.93 for the Top softbox): `EnvSun.facing` is that share, and the
 /// one directional light, which the lanes shade at N·L = 1 there, carries
 /// exactly it. The hemisphere terms are the SH irradiance at ±Y over π —
-/// what `mat_ibl_ambient` returns — so a stock cube and an IBL material
-/// under one map agree.
+/// what `mat_ibl_ambient` returns — times the lane's scale
+/// ([`env_lane_scale`]: 1 under HDR output, the map's exposure in the legacy
+/// lane). The lanes that take the IBL lookups multiply the same scale into
+/// both lookups (`ibl_ctl.y`: the stock IBL program, the skin lane, the IBL
+/// item materials; renderer/stock_ibl.rs), so a stock cube and an IBL
+/// material under one map agree in both lanes. `mat_ibl_*` themselves return
+/// the map at its own scale × `Ibl.intensity` in every lane.
 ///
 /// An environment WITHOUT a sun (overcast, a studio without a key light, a
 /// sun that has set and a moon that has not risen, a zero key) has no direct
@@ -638,7 +643,7 @@ pub fn env_sun_rig_with(
     if world.environment.ibl.filter(|i| i.intensity.is_finite() && i.rotation_deg.is_finite()).is_none() {
         return sun;
     }
-    let exposure = if hdr { 1.0 } else { env_exposure(env) };
+    let exposure = env_lane_scale(Some(env), hdr);
     let gain = if env.gain.is_finite() { env.gain.max(0.0) } else { 0.0 };
     // Non-finite and negative values read as 0; everything else lands on
     // the colour grid.
@@ -751,6 +756,34 @@ pub fn env_exposure(env: &EnvLighting) -> f32 {
     let mean = if env.mean_luminance.is_finite() { env.mean_luminance.max(0.0) } else { 0.0 };
     let gain = if env.gain.is_finite() { env.gain.max(0.0) } else { 0.0 };
     hdr_exposure_for_key(mean * gain)
+}
+
+/// The scale a lane puts on everything it takes from an environment's map:
+/// 1 under HDR output (the composite exposes the frame, map and all), the
+/// map's own exposure ([`env_exposure`]) in the legacy lane, which has no
+/// composite. [`env_sun_rig_with`] multiplies it into the fill and the key
+/// it takes from the map, and the lanes that take the IBL lookups carry it
+/// as `ibl_ctl.y` (renderer/stock_ibl.rs), so the hemisphere on a matte wall
+/// and the lookups on the chrome prop beside it are exposed alike. Without
+/// an environment's lighting (`env` None: the world names none, or nothing
+/// is prepared) there is nothing to expose: 1.
+pub fn env_lane_scale(env: Option<&EnvLighting>, hdr: bool) -> f32 {
+    match env {
+        Some(env) if !hdr => env_exposure(env),
+        _ => 1.0,
+    }
+}
+
+/// Whether the world authors the hemisphere fill itself: a script's
+/// `SunConfig.ambient`, which [`env_sun_rig_with`] passes through, or a
+/// world's own `Light::Sky`, which `world_lights::apply_world_sun` puts in
+/// the rig's place. The stock lanes that take an environment's IBL lookups
+/// then keep that fill and take only the reflection from the map
+/// (`ibl_ctl.z`, renderer/stock_ibl.rs): an authored value passes through
+/// there as it does in the rig.
+pub fn fill_is_authored(world: &makepad_scene::World) -> bool {
+    world.sun.ambient.is_some()
+        || world.lights.iter().any(|l| matches!(l, makepad_scene::Light::Sky { .. }) && l.validate().is_ok())
 }
 
 /// The CPU twin of the legacy (display-referred) lane's environment dome
@@ -1425,6 +1458,64 @@ mod tests {
         // A zero key is the same as none.
         let zero = makepad_scene::EnvSun { radiance: Vec3f::default(), ..disc(vec3f(0.3, 0.8, -0.5), 1.0) };
         assert_eq!(env_sun_rig(&env_world(Some(zero), 0.0), Some(&grey_lighting(0.2)), SunLight::default().to_hdr(), true).color, Vec3f::default());
+    }
+
+    /// One exposure for everything a lane takes from the map: the scale the
+    /// IBL lanes carry is the factor the rig's fill is made with, so for one
+    /// normal the hemisphere and `mat_ibl_ambient` x the scale agree, under
+    /// a bright map and a dark one, in both lanes.
+    #[test]
+    fn the_lanes_scale_is_the_exposure_the_rig_puts_in_its_fill() {
+        // A clear noon's mean (exposure 0.417) and a night's (the ceiling, 3.2).
+        for level in [1.8, 0.004] {
+            let lighting = grey_lighting(level);
+            let exposure = env_exposure(&lighting);
+            assert!((exposure - 1.0).abs() > 0.5, "premise: {level} meters far from 1 ({exposure})");
+            assert_eq!(env_lane_scale(Some(&lighting), true), 1.0, "HDR output: the composite exposes");
+            assert_eq!(env_lane_scale(Some(&lighting), false), exposure, "the legacy lane: the map's own exposure");
+            let world = env_world(None, 0.0);
+            for hdr in [true, false] {
+                let rig = env_sun_rig(&world, Some(&lighting), SunLight::default(), hdr);
+                let scale = env_lane_scale(Some(&lighting), hdr);
+                for (n, fill) in [([0.0, 1.0, 0.0], rig.sky), ([0.0, -1.0, 0.0], rig.ground)] {
+                    // What mat_ibl_ambient returns for n (SH irradiance x Ibl.intensity / pi), at the lane's scale.
+                    let e = makepad_render_material::ibl::sh9_irradiance(&lighting.sh, n);
+                    let lookup = e[0].max(0.0) * lighting.gain / std::f32::consts::PI * scale;
+                    // The rig's values sit on the colour grid.
+                    assert!((fill.x - lookup).abs() <= 0.6 * RIG_COLOR_STEP, "level {level} hdr {hdr} n {n:?}: rig {} lookup {lookup}", fill.x);
+                }
+            }
+        }
+        // No environment's lighting: nothing to expose, in either lane.
+        assert_eq!(env_lane_scale(None, false), 1.0);
+        assert_eq!(env_lane_scale(None, true), 1.0);
+    }
+
+    /// The fill is the author's while a script sets `SunConfig.ambient` or
+    /// the world carries a valid `Light::Sky` (the two values the rig lets
+    /// through, `env_sun_rig_with` and `world_lights::apply_world_sun`); a
+    /// Sun, a lamp or a broken Sky is not a fill.
+    #[test]
+    fn an_authored_ambient_or_a_worlds_sky_is_an_authored_fill() {
+        use makepad_scene::Light;
+        let world = env_world(None, 0.0);
+        assert!(!fill_is_authored(&world), "an environment alone: the map's fill");
+        let mut ambient = world.clone();
+        ambient.sun.ambient = Some(vec3f(0.55, 0.55, 0.55));
+        assert!(fill_is_authored(&ambient), "SunConfig.ambient");
+        let mut sky = world.clone();
+        sky.lights.push(Light::Sky { top: vec3f(0.2, 0.3, 0.4), ground: vec3f(0.1, 0.1, 0.1), intensity: 1.0 });
+        assert!(fill_is_authored(&sky), "a world's Light::Sky");
+        let mut others = world.clone();
+        others.sun.color = Some(vec3f(1.0, 0.9, 0.8));
+        others.lights.push(Light::Sun { dir: vec3f(0.3, 1.0, 0.2), color: vec3f(1.0, 1.0, 1.0), lux: 1.0, shadow: Default::default() });
+        others.lights.push(Light::Lamp { pos: vec3f(0.0, 3.0, 0.0), color: vec3f(1.0, 1.0, 1.0), intensity: 4.0, range: 10.0, shadow: false });
+        others.lights.push(Light::Sky { top: vec3f(f32::NAN, 0.0, 0.0), ground: vec3f(0.0, 0.0, 0.0), intensity: 1.0 });
+        assert!(!fill_is_authored(&others), "a colour, a Sun, a lamp and a Sky that does not validate author no fill");
+        // What apply_world_sun does with the same lights: the pair agrees.
+        let rig = SunLight::default();
+        assert_ne!(crate::world_lights::apply_world_sun(&sky, rig).sky, rig.sky, "premise: a valid Sky replaces the fill");
+        assert_eq!(crate::world_lights::apply_world_sun(&others, rig).sky, rig.sky, "premise: a broken Sky does not");
     }
 
     #[test]

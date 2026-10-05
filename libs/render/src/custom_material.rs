@@ -55,6 +55,17 @@ script_mod! {
         // the instance stream they took the lane one output register past
         // what D3D11's `vs_5_0` allows, and they are one per material draw.
         params: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // The control of an IBL program's two lookups (render-material's
+        // lane functions read it; the renderer writes it per draw,
+        // renderer/stock_ibl.rs): y = the lane's scale on the map (1 under
+        // HDR output, the map's own exposure in the legacy lane, as the
+        // rig's fill carries it), z = 1 while the fill comes from the map
+        // (0: the stock IBL program keeps an authored or a gathered fill).
+        // x is the skin lane's switch (shaders/skinned_gpu.rs has the same
+        // uniform); a program here is IBL by construction. The default is
+        // the lookups as they are without a lane: the map's own scale, its
+        // fill. Only a program with Builtin::Ibl reads it.
+        ibl_ctl: uniform(vec4(1.0, 1.0, 1.0, 0.0))
         surface: fn(base: vec4) -> vec4 { return base }
         // What a hook may read besides its arguments: the clock, the true
         // world position, the mesh uv and the geometric normal.
@@ -500,6 +511,60 @@ mod tests {
                 let errors = frontend_errors_for(vm, prog, backend);
                 assert!(errors.is_empty(), "{backend:?}: {errors:?}");
             }
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// The lowered source of a program object, for GLSL or HLSL.
+    fn lowered(vm: &mut ScriptVm, program: ScriptObject, glsl: bool) -> String {
+        let draw = vm.bx.heap.value(vm.bx.heap.modules, id!(draw).into(), NoTrap).as_object().unwrap();
+        vm.bx.heap.set_value(draw, id!(program_under_test).into(), program.into(), NoTrap);
+        let source = if glsl {
+            script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "glsl", false) })
+        } else {
+            script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "hlsl", false) })
+        };
+        vm.bx.heap.string_with(source, |_, s| s.to_string()).unwrap_or_default()
+    }
+
+    /// An IBL program (the stock IBL program and the built-in item IBL
+    /// material are this one: the PBR lane, IBL, no hooks) takes the
+    /// reflection and the fill through the lane's control: both lookups x
+    /// `ibl_ctl.y` (the lane's scale, so the lookups carry the exposure the
+    /// rig's fill carries), and the fill from the map only while
+    /// `ibl_ctl.z` is set, else the fill the lane passes in (an authored
+    /// ambient, the gathered GI). Never written, the control is neutral:
+    /// the raw lookups. The stock PBR lane's own program has no control.
+    #[test]
+    fn an_ibl_program_takes_its_lookups_through_the_lanes_control() {
+        use crate::shaders::lowered_fn_body;
+        with_vm(|vm| {
+            let m = DrawSceneCustom::build(vm, &MaterialDesc { ibl: true, ..Default::default() }, &HookSet::new(), HookMask::ALL, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.plan.builtins, vec![Builtin::Ibl]);
+            assert_eq!(m.draw.pbr.skinned.uniform_value(vm.cx(), live_id!(ibl_ctl)), [1.0, 1.0, 1.0, 0.0], "never written: the map's own scale, the fill from the map");
+            let program = m.program.as_ref().unwrap().as_object();
+            for glsl in [true, false] {
+                let source = lowered(vm, program, glsl);
+                assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}: {source}");
+                // `sky_env` (the reflection of the surface and of the clear
+                // coat) and `mat_ambient` (the fill) are the lane functions.
+                let reflection = lowered_fn_body(&source, "sky_env").unwrap_or_else(|| panic!("glsl {glsl}: no sky_env"));
+                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "glsl {glsl}: the reflection carries the lane's scale: {reflection}");
+                let fill = lowered_fn_body(&source, "mat_ambient").unwrap_or_else(|| panic!("glsl {glsl}: no mat_ambient"));
+                assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "glsl {glsl}: the fill carries the lane's scale: {fill}");
+                assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "glsl {glsl}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
+                // Nothing in the lit surface or the coat reads the map past them.
+                for stage in ["shade", "clear_coat"] {
+                    let body = lowered_fn_body(&source, stage).unwrap_or_else(|| panic!("glsl {glsl}: no {stage}"));
+                    assert!(!body.contains("mat_ibl_"), "glsl {glsl}: {stage} takes a lookup at the map's raw scale");
+                }
+            }
+            // No environment, no change: the stock PBR lane's program has
+            // neither the control nor a lookup.
+            let stock = script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "glsl", false) });
+            let stock = vm.bx.heap.string_with(stock, |_, s| s.to_string()).unwrap_or_default();
+            assert!(!stock.is_empty() && !stock.starts_with("ERRORS:"));
+            assert!(!stock.contains("ibl_ctl") && !stock.contains("mat_ibl_"), "the stock PBR lane's program is as it was");
             assert!(vm.take_errors().is_empty());
         });
     }

@@ -1,6 +1,7 @@
 //! Stock PBR props under image-based lighting (phase 3 of the HDRI plan).
 //!
-//! A shiny placed model with no material of its own draws on the PBR lane
+//! A shiny placed model with no material of its own (none named, or one
+//! that is not installed: `has_own_material`) draws on the PBR lane
 //! (`ModelDraw::Pbr`) until a world names an environment. Then it draws
 //! through `__stock_ibl`: an engine-owned Splash material program that is
 //! the PBR lane with `Builtin::Ibl` installed (custom_material.rs) and
@@ -23,6 +24,24 @@
 //! models leave the PBR lane only once that variant's pipeline is ready.
 //! Without an environment nothing is built and both lanes take exactly the
 //! instances they took before.
+//!
+//! The lanes that take the IBL lookups (this program, the skin lane's
+//! surface path, the IBL item materials and a host's IBL material) read
+//! one control, `ibl_ctl`, resolved per draw where the frame makes its rig
+//! (`resolve_ibl_lane`) and written when a lane binds (`ibl_lane_ctl`):
+//! - y, the lane's scale on both lookups: 1 under HDR output, the map's own
+//!   exposure in the legacy lane (`sun::env_lane_scale`, the factor the
+//!   rig's fill is made with), so everything in a lane carries one
+//!   exposure. The shared `mat_ibl_*` functions stay at the map's own scale:
+//!   the dome applies its own exposure, a legacy fork draws the live HDR
+//!   renderer's texture (the meta row cannot carry a lane's value), and a
+//!   preview reads them as they are.
+//! - z, the fill from the map. Cleared on the stock lanes (this program and
+//!   the skin lane) while the world authors its fill (`SunConfig.ambient`,
+//!   a `Light::Sky`: `sun::fill_is_authored`) or fast GI gathers one for
+//!   the draw: they keep the fill they had before they took the lookups
+//!   and take the reflection alone from the map. An item's or a host's IBL
+//!   material has no such fill: it always fills from the map.
 use super::*;
 use crate::custom_material::DrawSceneCustom;
 use makepad_render_material::{HookMask, HookSet, MaterialDesc};
@@ -31,12 +50,24 @@ use makepad_render_material::{HookMask, HookSet, MaterialDesc};
 /// engine name (the `__item_*` convention): a host never installs it.
 pub const STOCK_IBL_MATERIAL: &str = "__stock_ibl";
 
-#[derive(Default)]
 pub(super) struct StockIblState {
     /// The program did not build (logged once, never retried).
     failed: bool,
     /// This frame routes shiny stock models through the program.
     active: bool,
+    /// The scale this draw's lane puts on the IBL lookups
+    /// (`sun::env_lane_scale`; `resolve_ibl_lane`).
+    scale: f32,
+    /// This draw's world authors its fill (`sun::fill_is_authored`): the
+    /// stock lanes keep it.
+    authored_fill: bool,
+}
+
+impl Default for StockIblState {
+    fn default() -> Self {
+        // No draw yet: the lookups at the map's own scale, the fill the map's.
+        Self { failed: false, active: false, scale: 1.0, authored_fill: false }
+    }
 }
 
 impl Renderer {
@@ -123,6 +154,63 @@ impl Renderer {
         self.stock_ibl.active
     }
 
+    /// Take this draw's control of the lanes that read the IBL lookups, at
+    /// the frame's rig site (frame.rs), from the lighting the rig takes
+    /// from the environment: the lane's scale and whether the world authors
+    /// its fill. Every draw resolves its own (an aux draw's world can name
+    /// no environment; a fork draws in its own lane).
+    pub(super) fn resolve_ibl_lane(&mut self, world: &World, env: Option<&crate::sun::EnvLighting>) {
+        self.stock_ibl.scale = crate::sun::env_lane_scale(env, self.hdr_output);
+        self.stock_ibl.authored_fill = crate::sun::fill_is_authored(world);
+    }
+
+    /// `ibl_ctl` for a draw that takes the IBL lookups (the lane functions
+    /// of render-material read it): x = 1, the lookups are on (the skin
+    /// lane's switch; a PBR-family IBL program is one by construction);
+    /// y = the lane's scale on both lookups (`sun::env_lane_scale`: the
+    /// exposure the rig's fill carries); z = 1 while the fill comes from the
+    /// map, 0 while a stock lane keeps the fill it had: the world authors
+    /// one (`sun::fill_is_authored`), or fast GI gathers one for this draw
+    /// (`gi_on`, as `gi.bind` just wrote it on `vars`: bind the GI first).
+    /// Only the stock lanes (`stock_lane`: the stock IBL program, the skin
+    /// lane) have a fill of their own to keep; an item's or a host's IBL
+    /// material always fills from the map.
+    pub(super) fn ibl_lane_ctl(&self, cx: &Cx, vars: &DrawVars, stock_lane: bool) -> [f32; 4] {
+        // `gi_ambient` returns the gathered field exactly while gi_on is
+        // above 0 (fast_gi/shaders.rs).
+        let gathered = vars.uniform_range(cx, live_id!(gi_on)).is_some_and(|(at, _)| vars.dyn_uniforms.get(at).is_some_and(|on| *on > 0.0));
+        let from_map = !(stock_lane && (self.stock_ibl.authored_fill || gathered));
+        [1.0, self.stock_ibl.scale, if from_map { 1.0 } else { 0.0 }, 0.0]
+    }
+
+    /// Write `ibl_ctl` on the draw of the PBR-family IBL program `name`
+    /// (`bind_model_lane`, after the GI is bound).
+    pub(super) fn bind_ibl_lane(&self, cx: &Cx, name: &str, vars: &mut DrawVars) {
+        let ctl = self.ibl_lane_ctl(cx, vars, name == STOCK_IBL_MATERIAL);
+        vars.set_uniform(cx, live_id!(ibl_ctl), &ctl);
+    }
+
+    /// Whether `inst` has a material of its own for the lanes' routing: it
+    /// names one and that one is installed. `lane` is the program walking
+    /// the list, whose draw is out of `custom_draws` for its pass
+    /// (`draw_custom_models`). A name that is not installed (a replica that
+    /// installs no materials, one dropped by `retain_custom_materials`)
+    /// draws through the stock lanes, so it routes as a stock model.
+    pub(super) fn has_own_material(&self, inst: &ModelInstance, lane: Option<&str>) -> bool {
+        inst.custom_material.as_ref().is_some_and(|m| lane == Some(m.name.as_str()) || self.custom_draws.contains_key(&m.name))
+    }
+
+    /// Whether `instances` lists a model the stock IBL program draws while
+    /// the frame routes: a shiny one with no material of its own
+    /// (`draw_custom_models` draws the program only then). The per-instance
+    /// routing (`takes_stock_ibl`) reads the same `has_own_material`, so a
+    /// model the PBR lane leaves is always one this lists.
+    pub(super) fn lists_a_stock_ibl_model(&self, instances: &[ModelInstance]) -> bool {
+        let shiny: std::collections::HashSet<&str> = self.static_models.iter()
+            .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
+        !shiny.is_empty() && instances.iter().any(|inst| !self.has_own_material(inst, None) && shiny.contains(inst.model.as_str()))
+    }
+
     /// Whether a locked-time host has nothing to wait for on this path: no
     /// environment, the PBR lane off, no program installed, or the pipeline
     /// of the shader on the program's draw ready, the variant the lanes
@@ -154,9 +242,11 @@ impl Renderer {
 }
 
 /// Whether one instance draws through the stock IBL program this frame:
-/// the frame routes (`active`), the model wants the PBR lane, it names no
-/// material of its own and it is not swaying foliage (the foliage lane keeps
-/// those). Read by every lane, so exactly one of them draws the instance.
+/// the frame routes (`active`), the model wants the PBR lane, it has no
+/// material of its own (`Renderer::has_own_material`: none named, or the
+/// named one not installed) and it is not swaying foliage (the foliage lane
+/// keeps those). Read by every lane, so exactly one of them draws the
+/// instance.
 pub(super) fn takes_stock_ibl(active: bool, uses_pbr_lane: bool, own_material: bool, sways: bool) -> bool {
     active && uses_pbr_lane && !own_material && !sways
 }
@@ -471,5 +561,282 @@ mod tests {
         assert!(!renderer.stock_ibl_active());
         assert!(!takes_stock_ibl(renderer.stock_ibl_active(), chrome, false, false));
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some());
+    }
+
+    // ---- the lanes' control value (`ibl_ctl`) ----
+
+    use makepad_draw::makepad_platform::thread::ShutdownMode;
+    use makepad_render_material::ibl::EnvMap;
+    use makepad_scene::{GeometryId, GeometryRef, Ibl, IblSource, Item, ItemKind, Light, MaterialFrame, MaterialId, MaterialKind, PbrParams, TextureRef};
+
+    /// A sky over a darker ground, `level` the sky's green: 2.9 meters like
+    /// the clear noon preset (a mean near 1.8, exposure about 0.4), 0.006
+    /// like a night (the band's ceiling, 3.2).
+    fn sky_over_ground(level: f32) -> EnvMap {
+        EnvMap::from_fn(64, |d| if d[1] > 0.0 { [0.8 * level, level, 1.25 * level] } else { [0.3 * level, 0.27 * level, 0.2 * level] })
+    }
+
+    /// The built-in material a lit, opaque item draws through under an
+    /// environment (renderer/items.rs `item_custom`).
+    const ITEM_IBL: &str = "__item_ibl";
+
+    /// Bind `map` on `renderer` (a closed pool prepares on the spot), let a
+    /// scene draw's first decision install the stock IBL program, and give
+    /// the world that names the map, with one IBL item in it (a chrome
+    /// triangle, drawn through `__item_ibl`).
+    fn bind_map(cx: &mut Cx, renderer: &mut Renderer, map: EnvMap) -> World {
+        cx.task_pool().close(ShutdownMode::CancelPending);
+        renderer.register_environment(TextureRef(1), std::sync::Arc::new(map));
+        let mut world = World::new();
+        world.environment.ibl = Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 });
+        renderer.resolve_ibl(cx, &world.environment);
+        assert!(renderer.ibl_texture().is_some(), "premise: the environment is bound");
+        renderer.prepare_stock_ibl(cx);
+        assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_some(), "premise: the stock IBL program is installed");
+        let triangle = GeometryData {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![],
+            colors: vec![],
+            indices: vec![0, 1, 2],
+        };
+        renderer.register_geometry(GeometryId(1), triangle).expect("the item's geometry");
+        world.set_material(MaterialFrame { id: MaterialId(1), kind: MaterialKind::Pbr(PbrParams { metallic: 1.0, roughness: 0.15, ..Default::default() }), ..Default::default() });
+        world.items.push(Item::new(ItemKind::Mesh { geometry: GeometryRef::Resident(GeometryId(1)), material: MaterialId(1), transform: Mat4f::identity() }));
+        // The frame's item pass picks (and builds) the item's material.
+        renderer.push_item_instances(cx, &world);
+        let named = renderer.placed_models.last().and_then(|inst| inst.custom_material.as_ref()).map(|m| m.name.clone());
+        renderer.pop_item_instances();
+        assert_eq!(named.as_deref(), Some(ITEM_IBL), "premise: under an environment a lit item draws through the item IBL material");
+        assert!(renderer.custom_material(ITEM_IBL).is_some_and(|m| m.ibl), "premise: it is an IBL program");
+        world
+    }
+
+    /// The frame's rig for `world` and, as `draw_scene_inner` does at the
+    /// same site, the lanes' control for this draw.
+    fn frame_rig(renderer: &mut Renderer, world: &World) -> SunLight {
+        let env = renderer.env_lighting(world);
+        renderer.resolve_ibl_lane(world, env.as_ref());
+        crate::world_lights::apply_world_sun(world, renderer.lane_rig(world, crate::sun::resolve_sun(&world.sun)))
+    }
+
+    /// `ibl_ctl` as it stands on a draw.
+    fn ctl_on(cx: &Cx, vars: &DrawVars) -> [f32; 4] {
+        let (at, slots) = vars.uniform_range(cx, live_id!(ibl_ctl)).expect("the ibl_ctl uniform");
+        assert_eq!(slots, 4);
+        [vars.dyn_uniforms[at], vars.dyn_uniforms[at + 1], vars.dyn_uniforms[at + 2], vars.dyn_uniforms[at + 3]]
+    }
+
+    const STOCK_LANE: &str = "the stock IBL program";
+    const ITEM_LANE: &str = "an IBL item";
+    const SKIN_LANE: &str = "the skin lane";
+
+    /// What the three lanes that take the IBL lookups write on their draws
+    /// this frame, each bound as its pass binds it: the GI first (`gi_on`:
+    /// what `gi.bind` writes, the field's strength while it samples), then
+    /// the lane's control. A program's draw is out of `custom_draws` for
+    /// its pass, as in `draw_custom_models`.
+    fn lane_ctls(cx: &Cx, renderer: &mut Renderer, skin: &mut DrawSceneSkinnedGpu, gi_on: f32) -> [(&'static str, [f32; 4]); 3] {
+        let program = |renderer: &mut Renderer, name: &str| {
+            let mut m = renderer.custom_draws.remove(name).expect("installed");
+            m.draw.draw_vars.set_uniform(cx, live_id!(gi_on), &[gi_on]);
+            renderer.bind_ibl_lane(cx, name, &mut m.draw.draw_vars);
+            let ctl = ctl_on(cx, &m.draw.draw_vars);
+            renderer.custom_draws.insert(name.to_string(), m);
+            ctl
+        };
+        let stock = program(renderer, STOCK_IBL_MATERIAL);
+        let item = program(renderer, ITEM_IBL);
+        skin.draw_vars.set_uniform(cx, live_id!(gi_on), &[gi_on]);
+        renderer.bind_skin_ibl(cx, &mut skin.draw_vars);
+        [(STOCK_LANE, stock), (ITEM_LANE, item), (SKIN_LANE, ctl_on(cx, &skin.draw_vars))]
+    }
+
+    /// What `mat_ibl_ambient` returns for the normal `n` (render-material's
+    /// builtin.rs): the SH9 irradiance, clamped, x `Ibl.intensity` / pi.
+    /// The rotation is about +Y and leaves the two poles where they are.
+    fn mat_ibl_ambient(lighting: &crate::sun::EnvLighting, n: [f32; 3]) -> Vec3f {
+        let e = makepad_render_material::ibl::sh9_irradiance(&lighting.sh, n);
+        vec3f(e[0].max(0.0), e[1].max(0.0), e[2].max(0.0)) * (lighting.gain / std::f32::consts::PI)
+    }
+
+    /// Decision 1: one exposure for everything in a lane. For a map that
+    /// meters far from 1, the frame's rig fill at +Y and -Y is what each
+    /// lane's IBL fill returns for the same normal (`mat_ibl_ambient` x the
+    /// scale on the lane's draw), under HDR output and in the legacy lane.
+    /// Before the lanes carried the scale the legacy lane's lookups lit at
+    /// the map's raw scale beside a rig exposed by 0.4 (noon) or 3.2 (night).
+    #[test]
+    fn in_each_lane_the_rigs_fill_is_the_ibl_fill_of_the_lanes_that_take_the_lookups() {
+        for (label, level) in [("a clear noon", 2.9), ("a night", 0.006)] {
+            let mut cx = headless();
+            let mut renderer = Renderer::default();
+            let world = bind_map(&mut cx, &mut renderer, sky_over_ground(level));
+            let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
+            let lighting = renderer.env_lighting(&world).expect("the bound map lights the world");
+            let exposure = crate::sun::env_exposure(&lighting);
+            assert!((exposure - 1.0).abs() > 0.5, "premise: {label} meters far from 1 ({exposure})");
+            for hdr in [false, true] {
+                renderer.hdr_output = hdr;
+                let rig = frame_rig(&mut renderer, &world);
+                assert!(rig.sky.y > rig.ground.y && rig.ground.y > 0.0, "premise: {label}, hdr {hdr}: the map fills both hemispheres, {:?} over {:?}", rig.sky, rig.ground);
+                for (lane, ctl) in lane_ctls(&cx, &mut renderer, &mut skin, 0.0) {
+                    for (n, fill) in [([0.0, 1.0, 0.0], rig.sky), ([0.0, -1.0, 0.0], rig.ground)] {
+                        let lookup = mat_ibl_ambient(&lighting, n) * ctl[1];
+                        let off = fill - lookup;
+                        // The rig's values sit on its colour grid (1/4096).
+                        assert!(off.x.abs().max(off.y.abs()).max(off.z.abs()) <= 0.6 / 4096.0, "{label}, hdr {hdr}, {lane}, n {n:?}: the rig fills {fill:?}, the lane's IBL fill is {lookup:?}");
+                    }
+                    assert_eq!(ctl, [1.0, if hdr { 1.0 } else { exposure }, 1.0, 0.0], "{label}, hdr {hdr}, {lane}: the lookups on, the lane's scale, the fill the map's");
+                }
+            }
+        }
+    }
+
+    /// The built-in item material carries the lane's scale too (it has lit
+    /// at the map's raw scale in the legacy lane since the rig took the
+    /// map's exposure), and always fills from the map: an item has no fill
+    /// of its own to keep.
+    #[test]
+    fn the_item_ibl_material_carries_the_lanes_scale() {
+        let mut cx = headless();
+        let mut renderer = Renderer::default();
+        let world = bind_map(&mut cx, &mut renderer, sky_over_ground(2.9));
+        let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
+        let lighting = renderer.env_lighting(&world).expect("the bound map lights the world");
+        let exposure = crate::sun::env_exposure(&lighting);
+        let item = |cx: &Cx, renderer: &mut Renderer, skin: &mut DrawSceneSkinnedGpu, gi_on: f32| lane_ctls(cx, renderer, skin, gi_on)[1].1;
+        frame_rig(&mut renderer, &world);
+        assert_eq!(item(&cx, &mut renderer, &mut skin, 0.0), [1.0, exposure, 1.0, 0.0], "the legacy lane: the map's exposure on both lookups");
+        renderer.hdr_output = true;
+        frame_rig(&mut renderer, &world);
+        assert_eq!(item(&cx, &mut renderer, &mut skin, 0.0), [1.0, 1.0, 1.0, 0.0], "HDR output: the composite exposes");
+        // An authored ambient and gathered GI are the stock lanes' to keep.
+        renderer.hdr_output = false;
+        let mut authored = world.clone();
+        authored.sun.ambient = Some(vec3f(0.55, 0.55, 0.55));
+        frame_rig(&mut renderer, &authored);
+        assert_eq!(item(&cx, &mut renderer, &mut skin, 0.6), [1.0, exposure, 1.0, 0.0], "an item fills from the map whatever the world authors");
+    }
+
+    /// Decisions 2 and 3. While the world authors its fill (a script's
+    /// `SunConfig.ambient`, a `Light::Sky`) or fast GI gathers one for the
+    /// draw, the stock IBL program and the skin lane keep that fill
+    /// (`ibl_ctl.z` 0) and still take the reflection from the map, at the
+    /// lane's scale (x and y stay). An IBL item is not a stock lane.
+    #[test]
+    fn an_authored_fill_or_gathered_gi_keeps_the_stock_lanes_fill_and_the_maps_reflection() {
+        let mut cx = headless();
+        let mut renderer = Renderer::default();
+        let world = bind_map(&mut cx, &mut renderer, sky_over_ground(2.9));
+        let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
+        let lighting = renderer.env_lighting(&world).expect("the bound map lights the world");
+        // The legacy lane (the default): its scale is the map's exposure.
+        let scale = crate::sun::env_exposure(&lighting);
+        let want = |lanes: [(&'static str, [f32; 4]); 3], stock_fill: f32, what: &str| {
+            for (lane, ctl) in lanes {
+                let fill = if lane == ITEM_LANE { 1.0 } else { stock_fill };
+                assert_eq!(ctl, [1.0, scale, fill, 0.0], "{what}: {lane}");
+            }
+        };
+        let from_map = frame_rig(&mut renderer, &world);
+        want(lane_ctls(&cx, &mut renderer, &mut skin, 0.0), 1.0, "nothing authored, no GI: the fill is the map's");
+
+        let mut ambient = world.clone();
+        ambient.sun.ambient = Some(vec3f(0.55, 0.55, 0.55));
+        let rig = frame_rig(&mut renderer, &ambient);
+        assert_eq!((rig.sky, rig.ground), (vec3f(0.55, 0.55, 0.55), vec3f(0.55, 0.55, 0.55)), "premise: the script's ambient is the rig's fill");
+        want(lane_ctls(&cx, &mut renderer, &mut skin, 0.0), 0.0, "SunConfig.ambient: the script's fill stays, the reflection is the map's");
+
+        let mut sky = world.clone();
+        sky.lights.push(Light::Sky { top: vec3f(0.2, 0.3, 0.4), ground: vec3f(0.1, 0.1, 0.1), intensity: 1.0 });
+        let rig = frame_rig(&mut renderer, &sky);
+        assert_eq!((rig.sky, rig.ground), (vec3f(0.2, 0.3, 0.4), vec3f(0.1, 0.1, 0.1)), "premise: the world's Sky is the rig's fill");
+        want(lane_ctls(&cx, &mut renderer, &mut skin, 0.0), 0.0, "a Light::Sky: the world's fill stays, the reflection is the map's");
+
+        // The next draw's world authors nothing: the map's fill again.
+        assert_eq!(frame_rig(&mut renderer, &world).sky, from_map.sky);
+        want(lane_ctls(&cx, &mut renderer, &mut skin, 0.0), 1.0, "the authored fill gone");
+
+        // Fast GI gathers the ambient for a draw (gi_on above 0, what
+        // gi.bind writes while the field samples): the draw keeps it.
+        want(lane_ctls(&cx, &mut renderer, &mut skin, 0.6), 0.0, "fast GI on: the gathered fill stays, the reflection is the map's");
+        want(lane_ctls(&cx, &mut renderer, &mut skin, 0.0), 1.0, "fast GI off again");
+    }
+
+    /// No environment: no draw's control differs from the uniform's
+    /// default, which is the lookups as they were before the control (the
+    /// map's own scale, the fill from the map), and the skin lane's switch
+    /// stays off with every component zero.
+    #[test]
+    fn without_an_environment_the_lanes_control_is_neutral() {
+        let mut cx = headless();
+        let mut renderer = Renderer::default();
+        let mut skin = cx.with_vm(|vm| DrawSceneSkinnedGpu::script_new_with_default(vm));
+        // An IBL program can be installed with no environment bound (a
+        // host's; here the engine's own, built directly).
+        assert!(renderer.stock_ibl_install(&mut cx));
+        let default = ctl_on(&cx, &renderer.custom_material(STOCK_IBL_MATERIAL).unwrap().draw.draw_vars);
+        assert_eq!(default, [1.0, 1.0, 1.0, 0.0], "an IBL program whose control was never written takes the raw lookups");
+        let mut authored = World::new();
+        authored.sun.ambient = Some(vec3f(0.55, 0.55, 0.55));
+        for world in [World::new(), authored] {
+            for hdr in [false, true] {
+                renderer.hdr_output = hdr;
+                frame_rig(&mut renderer, &world);
+                let mut m = renderer.custom_draws.remove(STOCK_IBL_MATERIAL).unwrap();
+                renderer.bind_ibl_lane(&cx, "a host's IBL material", &mut m.draw.draw_vars);
+                assert_eq!(ctl_on(&cx, &m.draw.draw_vars), default, "hdr {hdr}: no environment, nothing to scale");
+                renderer.custom_draws.insert(STOCK_IBL_MATERIAL.to_string(), m);
+                renderer.bind_skin_ibl(&cx, &mut skin.draw_vars);
+                assert_eq!(ctl_on(&cx, &skin.draw_vars), [0.0; 4], "hdr {hdr}: no environment, the skin lane's switch off");
+            }
+        }
+    }
+
+    /// Decision 8: a model whose named material is not installed is a stock
+    /// model. A shiny one takes the stock IBL route like every other shiny
+    /// stock prop; one whose material is installed keeps its own program,
+    /// in every lane's walk of the list (the walking program's draw is out
+    /// of `custom_draws` for its pass).
+    #[test]
+    fn a_shiny_model_naming_an_uninstalled_material_takes_the_stock_ibl_route() {
+        let mut cx = headless();
+        let mut renderer = renderer_with_a_chrome_and_a_matte_model(&mut cx);
+        bind_map(&mut cx, &mut renderer, EnvMap::constant(16, [0.25; 3]));
+        let paint = cx.with_vm(|vm| DrawSceneCustom::unlit(vm, &HookSet::new(), HookMask::ALL, 0.0)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(renderer.install_custom_material("paint".to_string(), paint), "a host material, installed");
+        let instance = |model: &str, material: Option<&str>| ModelInstance {
+            model: model.into(),
+            custom_material: material.map(|name| CustomMaterialInstance { name: name.into(), params: Vec4f::default() }),
+            transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(),
+        };
+        let (stock, missing, own) = (instance("test/chrome", None), instance("test/chrome", Some("replica/paint")), instance("test/chrome", Some("paint")));
+        let active = renderer.stock_ibl_active();
+        // Every backend but Metal compiles synchronously (window_snapshot.rs).
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(active, "premise: the frame routes");
+        let chrome = wants_pbr(&renderer, "test/chrome");
+        // Each lane's walk: the stock lanes (no program), the stock IBL
+        // program's own pass and the host material's own pass.
+        for lane in [None, Some(STOCK_IBL_MATERIAL), Some("paint")] {
+            let walking = lane.and_then(|name| renderer.custom_draws.remove(name).map(|m| (name, m)));
+            assert!(!renderer.has_own_material(&stock, lane), "lane {lane:?}: no name, no material of its own");
+            assert!(!renderer.has_own_material(&missing, lane), "lane {lane:?}: a name that is not installed is no material of its own");
+            assert!(renderer.has_own_material(&own, lane), "lane {lane:?}: an installed material is the model's own");
+            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&missing, lane), false), active, "lane {lane:?}: the shiny model takes the stock IBL route, as the shiny stock prop beside it");
+            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&stock, lane), false), active);
+            assert!(!takes_stock_ibl(active, chrome, renderer.has_own_material(&own, lane), false), "lane {lane:?}: the model with its own program keeps it");
+            if let Some((name, m)) = walking { renderer.custom_draws.insert(name.to_string(), m); }
+        }
+        // The program's pass draws when such a model is listed, alone too
+        // (the PBR lane has left it: nothing else would draw it).
+        assert!(renderer.lists_a_stock_ibl_model(&[instance("test/matte", None), instance("test/chrome", Some("replica/paint"))]), "an uninstalled name on a shiny model is listed for the program");
+        assert!(renderer.lists_a_stock_ibl_model(&[instance("test/chrome", None)]));
+        assert!(!renderer.lists_a_stock_ibl_model(&[instance("test/chrome", Some("paint")), instance("test/matte", None), instance("test/matte", Some("replica/paint"))]), "its own program, or a matte model: nothing for the stock IBL program");
+        // A material dropped by a reload is not installed any more.
+        renderer.retain_custom_materials(&[STOCK_IBL_MATERIAL.to_string()]);
+        assert!(!renderer.has_own_material(&own, None), "dropped by retain_custom_materials: a stock model again");
+        assert!(renderer.lists_a_stock_ibl_model(&[own]));
     }
 }

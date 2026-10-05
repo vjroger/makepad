@@ -422,6 +422,9 @@ impl Renderer {
             kind: if b.unlit { BaseKind::Unlit } else { BaseKind::Pbr },
             blend: if b.blend == 2 { Blend::Over } else { Blend::Opaque },
             lighting: if b.unlit { LightingModel::Unlit } else { LightingModel::Lit },
+            // The environment's reflection and fill, at the lane's scale
+            // (`ibl_ctl`, written when the lane binds the program:
+            // renderer/stock_ibl.rs); an item always fills from the map.
             ibl: b.ibl,
         };
         let built = cx.try_with_vm(|vm| DrawSceneCustom::build(vm, &desc, &HookSet::new(), HookMask::ALL, Vec4f::default()));

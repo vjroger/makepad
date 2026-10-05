@@ -630,11 +630,7 @@ impl Renderer {
         // a shiny stock model is in the list, whether or not an instance
         // names it (renderer/stock_ibl.rs); the same early-out as
         // draw_pbr_models, so a scene of matte props pays nothing.
-        let stock_ibl_on = self.stock_ibl_active() && {
-            let shiny: std::collections::HashSet<&str> = self.static_models.iter()
-                .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
-            !shiny.is_empty() && instances.iter().any(|inst| inst.custom_material.is_none() && shiny.contains(inst.model.as_str()))
-        };
+        let stock_ibl_on = self.stock_ibl_active() && self.lists_a_stock_ibl_model(instances);
         // Blended programs after every opaque one (they neither write depth
         // nor hide what is behind them), each group in name order.
         let mut names: Vec<(bool, String)> = self.custom_draws.iter().filter(|(name, _)| {

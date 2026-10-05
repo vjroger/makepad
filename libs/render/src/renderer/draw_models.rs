@@ -427,8 +427,11 @@ impl Renderer {
                 });
                 // A shiny stock model with no material of its own, while an
                 // environment is registered: the stock IBL lane takes it and
-                // the PBR lane leaves it (renderer/stock_ibl.rs).
-                let takes_stock_ibl = stock_ibl::takes_stock_ibl(stock_ibl_on, uses_pbr_lane, inst.custom_material.is_some(), sways);
+                // the PBR lane leaves it (renderer/stock_ibl.rs). A material
+                // it names is its own only while that one is installed: a
+                // name that is not draws through the stock lanes anyway.
+                let own_material = self.has_own_material(inst, custom_name.as_deref());
+                let takes_stock_ibl = stock_ibl::takes_stock_ibl(stock_ibl_on, uses_pbr_lane, own_material, sways);
                 if let Some(name) = custom_name.as_deref() {
                     if stock_ibl_lane {
                         // Its own instances, plus any that name the program
@@ -769,6 +772,15 @@ impl Renderer {
         let pbr_lane = draw.is_pbr();
         self.clustered.bind(cx.cx, &mut draw.base().draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut draw.base().draw_vars);
+        // An IBL program's control of its two lookups: the lane's scale,
+        // and for the stock IBL program whether the fill comes from the
+        // map (renderer/stock_ibl.rs). After the GI: it reads the gi_on
+        // just bound.
+        if let ModelDraw::Custom(name, m) = draw {
+            if m.ibl {
+                self.bind_ibl_lane(cx.cx, name, &mut m.draw.draw_vars);
+            }
+        }
         // Sun, fog and the debug switches, once for the whole lane. They are
         // uniforms rather than instance lanes -- the vertex stage ran out of
         // D3D11 input registers -- which is also what they describe: one

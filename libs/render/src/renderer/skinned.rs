@@ -261,25 +261,29 @@ impl Renderer {
     }
 
     /// The environment's IBL atlas on the skin lane's detail slot (found by
-    /// name: the slot follows the mixins), and the flag the surface path
-    /// branches on. No environment: nothing bound, the flag off, and the
-    /// lane shades exactly as before.
+    /// name: the slot follows the mixins), and the control the surface path
+    /// branches on (`ibl_lane_ctl`, a stock lane's: x the switch, y the
+    /// lane's scale, z the fill from the map unless the world authors one
+    /// or GI gathers one; it reads the `gi_on` on `vars`, so the GI is
+    /// bound first). No environment: nothing bound, the control all zero,
+    /// and the lane shades exactly as before.
     pub(super) fn bind_skin_ibl(&self, cx: &Cx, vars: &mut DrawVars) {
-        let ibl_on = match (self.ibl_texture(), vars.draw_shader_id) {
+        let bound = match (self.ibl_texture(), vars.draw_shader_id) {
             (Some(texture), Some(shader)) => {
                 let slot = cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(detail_map))
                     .filter(|slot| *slot < vars.texture_slots.len());
                 match slot {
                     Some(slot) => {
                         vars.set_texture(slot, texture);
-                        1.0
+                        true
                     }
-                    None => 0.0,
+                    None => false,
                 }
             }
-            _ => 0.0,
+            _ => false,
         };
-        vars.set_uniform(cx, live_id!(ibl_ctl), &[ibl_on, 0.0, 0.0, 0.0]);
+        let ctl = if bound { self.ibl_lane_ctl(cx, vars, true) } else { [0.0; 4] };
+        vars.set_uniform(cx, live_id!(ibl_ctl), &ctl);
     }
 
     /// Draw the skinned batch inside the already-open scene pass.
@@ -571,9 +575,12 @@ mod tests {
     /// What `draw_skinned_inner` binds for the environment
     /// (`bind_skin_ibl`): under a bound one the skin draw carries the
     /// frame's IBL lane texture on its `detail_map` slot and `ibl_ctl.x` is
-    /// 1; with none, never bound or dropped again, the flag is off and the
-    /// surface path keeps its hemisphere. The rig is the crate's own
-    /// registration (`crate::script_mod`), as in `shaders::skin_ibl_tests`.
+    /// 1, with the lane's control beside it (y the scale, z the fill
+    /// switch: neutral here, no draw has resolved a lane; their values are
+    /// renderer/stock_ibl.rs's tests); with none, never bound or dropped
+    /// again, the whole control is zero and the surface path keeps its
+    /// hemisphere. The rig is the crate's own registration
+    /// (`crate::script_mod`), as in `shaders::skin_ibl_tests`.
     #[test]
     fn the_skin_draw_carries_the_atlas_and_the_flag_only_under_an_environment() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -609,7 +616,7 @@ mod tests {
         let lane = renderer.ibl_texture().expect("premise: the environment is bound").texture_id();
         renderer.bind_skin_ibl(&cx, &mut skin.draw_vars);
         assert_eq!(skin.draw_vars.texture_slots[slot].as_ref().map(|t| t.texture_id()), Some(lane), "an environment: its lane texture on the detail slot");
-        assert_eq!(flag(&cx, &skin), [1.0, 0.0, 0.0, 0.0], "an environment: the flag on");
+        assert_eq!(flag(&cx, &skin), [1.0, 1.0, 1.0, 0.0], "an environment: the flag on, the map's own scale and its fill until a draw resolves the lane");
         for numbered in 0..=5 {
             assert!(skin.draw_vars.texture_slots[numbered].is_none(), "slot {numbered} is not the atlas's");
         }

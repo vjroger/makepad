@@ -273,6 +273,10 @@ impl Renderer {
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.
         let env = self.env_lighting(world);
+        // The lanes that take the environment's IBL lookups carry the
+        // scale the rig's fill is made with below, and keep a fill the
+        // world authors (renderer/stock_ibl.rs).
+        self.resolve_ibl_lane(world, env.as_ref());
         let sun = if self.hdr_output {
             self.scale_frame_lights_hdr();
             // The environment's sun and fill (renderer/env_sun.rs; the lane

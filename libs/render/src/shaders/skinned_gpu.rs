@@ -21,7 +21,8 @@ script_mod! {
     // static world must never pay. Lighting/fog match DrawSceneSkinned minus
     // the AO path — a deforming mesh cannot carry a baked occlusion atlas.
     // Under an environment the surface path takes the same IBL lookups the
-    // PBR lane takes through Builtin::Ibl (ibl_ctl below).
+    // PBR lane takes through Builtin::Ibl, under the same control (ibl_ctl
+    // below).
     mod.draw.DrawSceneSkinnedGpu = mod.std.set_type_default() do #(DrawSceneSkinnedGpu::script_shader(vm)){
         ..mod.draw.SceneFurSurface,
         ..mod.draw.SceneColorAdjust,
@@ -331,8 +332,14 @@ script_mod! {
         // renderer/skinned.rs binds it by name) and the render-material
         // lookups that read it. ibl_ctl.x = 1 while a world names an
         // environment; the surface path then takes them in place of the
-        // hemisphere. Declared after the surface maps so every numbered
-        // slot keeps its number; morph_map stays the last texture.
+        // hemisphere, through the lane functions: both x ibl_ctl.y, the
+        // lane's scale on the map (1 under HDR output, the map's exposure
+        // in the legacy lane, so the lookups carry the exposure the rig's
+        // fill carries), and the fill from the map only while ibl_ctl.z is
+        // set (cleared, the fill stays what it was: an authored ambient,
+        // the gathered GI; renderer/stock_ibl.rs `ibl_lane_ctl`). Declared
+        // after the surface maps so every numbered slot keeps its number;
+        // morph_map stays the last texture.
         detail_map: texture_2d(float)
         ibl_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         mat_ibl_meta: mod.draw.mat_ibl_meta
@@ -340,6 +347,8 @@ script_mod! {
         mat_ibl_level: mod.draw.mat_ibl_level
         mat_ibl_sky_env: mod.draw.mat_ibl_sky_env
         mat_ibl_ambient: mod.draw.mat_ibl_ambient
+        mat_ibl_lane_sky_env: mod.draw.mat_ibl_lane_sky_env
+        mat_ibl_lane_ambient: mod.draw.mat_ibl_lane_ambient
 
         // Toy gloss on a character (fur_layer.y packs rim * 255 * 65536 +
         // clearcoat * 255 * 256 + flake * 255, the PBR lane's layout): a
@@ -354,7 +363,7 @@ script_mod! {
             let fc = (0.04 + 0.96 * pow(1.0 - ndv, 5.0)) * coat
             var env = mix(self.sun_ground, self.sun_sky * 1.6, smoothstep(-0.2, 0.4, r.y))
             // Under an environment the lacquer reflects it, as the PBR lane's coat does through sky_env.
-            if self.ibl_ctl.x > 0.5 { env = self.mat_ibl_sky_env(normalize(r), 0.03) }
+            if self.ibl_ctl.x > 0.5 { env = self.mat_ibl_lane_sky_env(normalize(r), 0.03) }
             let h = normalize(l + v)
             let ndh = max(dot(n, h), 0.0)
             let den = ndh * ndh * (0.0016 - 1.0) + 1.0
@@ -461,11 +470,13 @@ script_mod! {
                 // hemisphere reflection and the ambient fill with the lookups the
                 // PBR lane takes through Builtin::Ibl: prefiltered radiance along
                 // the reflection at this roughness, SH9 irradiance over pi along
-                // the normal (the lane's fill units). Off, the two values above
-                // are the lane's old expressions, unchanged.
+                // the normal (the lane's fill units), both at the lane's scale
+                // (ibl_ctl.y); the fill stays the one above while the world
+                // authors it or GI gathers it (ibl_ctl.z 0). Off, the two values
+                // above are the lane's old expressions, unchanged.
                 if self.ibl_ctl.x>0.5 {
-                    environment=self.mat_ibl_sky_env(normalize(reflection),rough)
-                    fill=self.mat_ibl_ambient(n,fill)
+                    environment=self.mat_ibl_lane_sky_env(normalize(reflection),rough)
+                    fill=self.mat_ibl_lane_ambient(n,fill)
                 }
                 let fresnel=f0+(max(vec3(1.0-rough,1.0-rough,1.0-rough),f0)-f0)*pow(1.0-ndv,5.0)
                 let ambient=(base*(1.0-metal)*fill+environment*fresnel)*ao

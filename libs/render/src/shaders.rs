@@ -1178,6 +1178,29 @@ pub struct DrawLmTopDilate {
 /// the window would darken at all must carry a blocker height.
 pub const LM_SUN_SOFT: (f32, f32) = (0.2, 0.8);
 
+/// The body of the function `name` in a lowered shader source a compile
+/// test emitted (GLSL defines it as `io_<name>(`, HLSL as `f_io_<name>(`):
+/// the lines between its opening line and its closing brace.
+#[cfg(test)]
+pub(crate) fn lowered_fn_body(source: &str, name: &str) -> Option<String> {
+    let (glsl, hlsl) = (format!("io_{name}("), format!("f_io_{name}("));
+    // `<type> <name>(..){` at the start of a line: the definition, not a call.
+    let mut lines = source.lines().skip_while(|l| {
+        !(l.trim_end().ends_with('{') && l.split_whitespace().nth(1).is_some_and(|w| w.starts_with(&glsl) || w.starts_with(&hlsl)))
+    });
+    lines.next()?;
+    let (mut depth, mut body) = (1i32, String::new());
+    for line in lines {
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth <= 0 {
+            return Some(body);
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    None
+}
+
 #[cfg(test)]
 mod shader_registration_tests {
     use super::*;
@@ -1637,6 +1660,26 @@ mod skin_ibl_tests {
                 assert!(source.contains("mat_ibl_sky_env") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
                 assert!(source.contains("detail_map"), "{name}: the atlas is sampled");
                 assert!(source.contains("cluster_lights"), "{name}: the clustered lights stay");
+                // The lane takes both lookups through render-material's
+                // lane functions, which carry its control (ibl_ctl): the
+                // lane's scale on the reflection and on the fill (y), and
+                // the fill from the map only while the switch is set (z),
+                // else the fill the lane had (an authored ambient, the
+                // gathered GI).
+                let reflection = lowered_fn_body(&source, "mat_ibl_lane_sky_env").unwrap_or_else(|| panic!("{name}: no lane reflection lookup"));
+                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "{name}: the reflection lookup carries the lane's scale: {reflection}");
+                let fill = lowered_fn_body(&source, "mat_ibl_lane_ambient").unwrap_or_else(|| panic!("{name}: no lane fill lookup"));
+                assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "{name}: the fill lookup carries the lane's scale: {fill}");
+                assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "{name}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
+                // The surface path and the toy coat call them, and nothing
+                // in the lane's pixel stage takes a raw lookup.
+                let pixel = lowered_fn_body(&source, "pixel").unwrap_or_else(|| panic!("{name}: no pixel function"));
+                assert!(pixel.contains("mat_ibl_lane_sky_env(") && pixel.contains("mat_ibl_lane_ambient("), "{name}: the surface path takes the lane's lookups");
+                let coat = lowered_fn_body(&source, "toy_coat").unwrap_or_else(|| panic!("{name}: no toy coat"));
+                assert!(coat.contains("mat_ibl_lane_sky_env("), "{name}: the coat takes the lane's reflection");
+                for (stage, body) in [("pixel", &pixel), ("toy_coat", &coat)] {
+                    assert!(!body.contains("io_mat_ibl_sky_env(") && !body.contains("io_mat_ibl_ambient("), "{name}: {stage} takes a lookup at the map's raw scale");
+                }
             }
         });
     }
