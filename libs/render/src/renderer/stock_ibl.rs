@@ -284,10 +284,16 @@ mod tests {
         assert!(!renderer.stock_ibl_active(), "the PBR lane off: no routing");
         assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "and no program");
 
-        // The control: the same frame with the lane on routes.
+        // The control: the same frame with the lane on builds the program
+        // and routes once its pipeline can draw.
         renderer.pbr_materials_enabled = true;
         renderer.prepare_stock_ibl(&mut cx);
-        assert!(renderer.stock_ibl_active() && renderer.custom_material(STOCK_IBL_MATERIAL).is_some());
+        let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("the lane on: the program is built");
+        let active = renderer.stock_ibl_active();
+        assert_eq!(active, cx.draw_shader_ready(id, renderer.hdr_output), "the decision is the program's pipeline");
+        // Every backend but Metal compiles synchronously (window_snapshot.rs).
+        #[cfg(not(target_vendor = "apple"))]
+        assert!(active, "the lane on and a ready program: the frame routes");
     }
 
     /// The lanes draw the program through its variant for this frame's
