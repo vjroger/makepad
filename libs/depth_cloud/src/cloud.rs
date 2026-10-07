@@ -21,6 +21,12 @@
 //! any `XrSceneView` and call `open`, or hand it live GPU targets with
 //! [`DepthCloud::set_rendered_source`].
 //!
+//! Styles ([`CloudStyle`]): a point per grid cell, or lines joining
+//! neighbouring points into rows (scanlines), columns or a grid; each
+//! segment's ends go through the same depth / crop / edge / physics path as
+//! points, and its colour runs from one end's pixel to the other's. With an
+//! edge cut, lines also break where they would jump in depth.
+//!
 //! Shaping: a depth crop band (vertex shader), and mouse effects
 //! ([`CloudEffect`]: attract, repel, swirl, ripple) that push the points
 //! around the cursor; each point has momentum and springs back home with
@@ -86,6 +92,10 @@ script_mod! {
         crop: uniform(vec2(-1.0, 2.0))
         // 1 = add tex_offset (points pushed by a mouse effect).
         use_offset: uniform(0.0)
+        // 0 points, 1 horizontal lines, 2 vertical lines, 3 grid.
+        style: uniform(0.0)
+        // Line thickness in cells.
+        line_width: uniform(0.25)
 
         v_color: varying(vec3f)
 
@@ -113,11 +123,10 @@ script_mod! {
             return d * self.depth_params.z
         }
 
-        vertex: fn() {
-            let quad = self.geom.pos * 2.0 - vec2(1.0, 1.0)
-            let id = self.point_id
-            let row = floor((id + 0.5) * self.grid.z)
-            let col = id - row * self.grid.x
+        // The point of grid cell (col, row): xyz = world position (with the
+        // physics offset), w = its view depth; w < 0 = no point (no depth,
+        // outside the crop band, or on a depth edge).
+        point_at: fn(col: float, row: float) -> vec4 {
             let cell = vec2((col + 0.5) * self.grid.z, (row + 0.5) * self.grid.w)
 
             // Manual bilinear over the 2x2 texels around the cell centre.
@@ -137,8 +146,7 @@ script_mod! {
             let z11 = self.depth_tap(t00 + tx + ty)
             let z_lo = min(min(z00, z10), min(z01, z11))
             if z_lo < 0.0 {
-                self.cull()
-                return
+                return vec4(0.0, 0.0, 0.0, -1.0)
             }
             let z = mix(mix(z00, z10, fx), mix(z01, z11, fx), fy)
             // Where the point sits in the source's own range, 0 = nearest:
@@ -152,8 +160,7 @@ script_mod! {
                 far_frac = (inv_near - 1.0 / max(raw, 0.00001)) / max(inv_near - inv_far, 0.00001)
             }
             if far_frac < self.crop.x || far_frac > self.crop.y {
-                self.cull()
-                return
+                return vec4(0.0, 0.0, 0.0, -1.0)
             }
 
             if self.edge_cut > 0.0 {
@@ -166,8 +173,7 @@ script_mod! {
                 let lo = min(z_lo, min(min(za, zb), min(zc, zd)))
                 let hi = max(max(max(z00, z10), max(z01, z11)), max(max(za, zb), max(zc, zd)))
                 if lo < 0.0 || hi - lo > self.edge_cut * lo {
-                    self.cull()
-                    return
+                    return vec4(0.0, 0.0, 0.0, -1.0)
                 }
             }
 
@@ -185,21 +191,19 @@ script_mod! {
                 )
                 wp = wp + offset
             }
-            let view = self.draw_pass.camera_view * vec4(wp.x, wp.y, wp.z, 1.0)
-            // Camera-facing billboard covering exactly one cell at depth z.
-            let half_x = self.tan_half.x * self.grid.z * z * self.point_size
-            let half_y = self.tan_half.y * self.grid.w * z * self.point_size
-            let corner = vec4(view.x + quad.x * half_x, view.y + quad.y * half_y, view.z, view.w)
-            self.vertex_pos = self.draw_pass.camera_projection * corner
+            return vec4(wp.x, wp.y, wp.z, z)
+        }
 
+        // The picture's colour at grid cell (col, row).
+        color_at: fn(col: float, row: float) -> vec3 {
+            let cell = vec2((col + 0.5) * self.grid.z, (row + 0.5) * self.grid.w)
             let cuv = vec2(
                 self.picture_rect.x + cell.x * self.picture_rect.z,
                 self.picture_rect.y + cell.y * self.picture_rect.w
             )
             if self.color_mode > 0.5 {
                 let c = self.tex_color.sample_lod(cuv, 0.0)
-                self.v_color = vec3(c.x, c.y, c.z)
-                return
+                return vec3(c.x, c.y, c.z)
             }
             // NV12, BT.709 limited range.
             let yv = self.tex_y.sample_lod(cuv, 0.0).x
@@ -207,11 +211,104 @@ script_mod! {
             let y = (yv * 255.0 - 16.0) / 219.0
             let u = (chroma.x * 255.0 - 128.0) / 224.0
             let v = (chroma.y * 255.0 - 128.0) / 224.0
-            self.v_color = vec3(
+            return vec3(
                 clamp(y + 1.5748 * v, 0.0, 1.0),
                 clamp(y - 0.1873 * u - 0.4681 * v, 0.0, 1.0),
                 clamp(y + 1.8556 * u, 0.0, 1.0)
             )
+        }
+
+        vertex: fn() {
+            let id = self.point_id
+            if self.style < 0.5 {
+                // Points: one camera-facing billboard per grid cell.
+                let row = floor((id + 0.5) * self.grid.z)
+                let col = id - row * self.grid.x
+                let p = self.point_at(col, row)
+                if p.w < 0.0 {
+                    self.cull()
+                    return
+                }
+                let quad = self.geom.pos * 2.0 - vec2(1.0, 1.0)
+                let view = self.draw_pass.camera_view * vec4(p.x, p.y, p.z, 1.0)
+                // Covers exactly one cell at depth z (front view: no gaps).
+                let half_x = self.tan_half.x * self.grid.z * p.w * self.point_size
+                let half_y = self.tan_half.y * self.grid.w * p.w * self.point_size
+                let corner = vec4(view.x + quad.x * half_x, view.y + quad.y * half_y, view.z, view.w)
+                self.vertex_pos = self.draw_pass.camera_projection * corner
+                self.v_color = self.color_at(col, row)
+                return
+            }
+
+            // Lines: one segment per instance between neighbouring cells.
+            // Horizontal segments ((cols - 1) per row) come first, then
+            // vertical ones (cols per row, rows - 1 rows); style 1 draws only
+            // the horizontal set, 2 only the vertical set, 3 both (grid).
+            let h_count = (self.grid.x - 1.0) * self.grid.y
+            var horizontal = 0.0
+            var seg = id
+            if self.style < 1.5 {
+                horizontal = 1.0
+            } else if self.style > 2.5 {
+                if id < h_count {
+                    horizontal = 1.0
+                } else {
+                    seg = id - h_count
+                }
+            }
+            var col0 = 0.0
+            var row0 = 0.0
+            var col1 = 0.0
+            var row1 = 0.0
+            if horizontal > 0.5 {
+                let per_row = self.grid.x - 1.0
+                row0 = floor((seg + 0.5) / per_row)
+                col0 = seg - row0 * per_row
+                col1 = col0 + 1.0
+                row1 = row0
+            } else {
+                row0 = floor((seg + 0.5) * self.grid.z)
+                col0 = seg - row0 * self.grid.x
+                col1 = col0
+                row1 = row0 + 1.0
+            }
+            let p0 = self.point_at(col0, row0)
+            let p1 = self.point_at(col1, row1)
+            if p0.w < 0.0 || p1.w < 0.0 {
+                self.cull()
+                return
+            }
+            // With an edge cut, lines also break where they would jump in depth.
+            if self.edge_cut > 0.0 && abs(p0.w - p1.w) > self.edge_cut * min(p0.w, p1.w) {
+                self.cull()
+                return
+            }
+            // A ribbon in the view plane: along the segment by geom.pos.x,
+            // across it by geom.pos.y, `line_width` cells thick.
+            let along = self.geom.pos.x
+            let side = self.geom.pos.y * 2.0 - 1.0
+            let v0 = self.draw_pass.camera_view * vec4(p0.x, p0.y, p0.z, 1.0)
+            let v1 = self.draw_pass.camera_view * vec4(p1.x, p1.y, p1.z, 1.0)
+            let dx = v1.x - v0.x
+            let dy = v1.y - v0.y
+            let len = sqrt(dx * dx + dy * dy)
+            var nx = 0.0
+            var ny = 1.0
+            if len > 0.000001 {
+                nx = -dy / len
+                ny = dx / len
+            }
+            let z = mix(p0.w, p1.w, along)
+            let half_width = self.tan_half.y * self.grid.w * z * self.line_width * 0.5
+            let vp = mix(v0, v1, along)
+            let corner = vec4(
+                vp.x + nx * side * half_width,
+                vp.y + ny * side * half_width,
+                vp.z,
+                vp.w
+            )
+            self.vertex_pos = self.draw_pass.camera_projection * corner
+            self.v_color = mix(self.color_at(col0, row0), self.color_at(col1, row1), along)
         }
 
         pixel: fn() {
@@ -241,6 +338,59 @@ pub struct DrawDepthCloud {
     /// Instance stream: grid cell index (exact integer in f32).
     #[live(0.0)]
     pub point_id: f32,
+}
+
+/// How the cloud's grid is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloudStyle {
+    /// One square per grid cell.
+    #[default]
+    Points,
+    /// Each row joined into a line (scanlines).
+    LinesHorizontal,
+    /// Each column joined into a line.
+    LinesVertical,
+    /// Both: a wireframe mesh.
+    Grid,
+}
+
+impl CloudStyle {
+    pub const ALL: [CloudStyle; 4] = [
+        Self::Points,
+        Self::LinesHorizontal,
+        Self::LinesVertical,
+        Self::Grid,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Points => "Points",
+            Self::LinesHorizontal => "Horizontal lines",
+            Self::LinesVertical => "Vertical lines",
+            Self::Grid => "Grid",
+        }
+    }
+
+    /// Instances for a `cols x rows` grid: cells, or segments between them.
+    fn instance_count(self, cols: usize, rows: usize) -> usize {
+        let horizontal = cols.saturating_sub(1) * rows;
+        let vertical = cols * rows.saturating_sub(1);
+        match self {
+            Self::Points => cols * rows,
+            Self::LinesHorizontal => horizontal,
+            Self::LinesVertical => vertical,
+            Self::Grid => horizontal + vertical,
+        }
+    }
+
+    fn shader_value(self) -> f32 {
+        match self {
+            Self::Points => 0.0,
+            Self::LinesHorizontal => 1.0,
+            Self::LinesVertical => 2.0,
+            Self::Grid => 3.0,
+        }
+    }
 }
 
 /// What the mouse does to the points around the cursor.
@@ -368,6 +518,12 @@ pub struct DepthCloud {
     /// them directly and they snap home when the mouse leaves.
     #[rust(true)]
     pub momentum: bool,
+    /// Points, or lines joining neighbouring points (rows, columns, grid).
+    #[rust]
+    pub style: CloudStyle,
+    /// Line thickness in grid cells (line styles).
+    #[rust(0.25)]
+    pub line_width: f32,
     #[rust(5.0)]
     pub damping: f32,
     #[rust]
@@ -606,9 +762,13 @@ impl DepthCloud {
         let tan_y = 1.0 / scene.projection.v[5].abs().max(0.00001);
         let far = self.depth_amount.max(1.0);
         let crop = self.crop;
+        let style = self.style.shader_value();
+        let line_width = self.line_width.max(0.0);
         let dv = &mut self.draw_cloud.draw_vars;
         dv.set_texture(4, offsets.as_ref().unwrap_or(&dummy));
         dv.set_uniform(cx.cx, live_id!(use_offset), &[if offsets.is_some() { 1.0 } else { 0.0 }]);
+        dv.set_uniform(cx.cx, live_id!(style), &[style]);
+        dv.set_uniform(cx.cx, live_id!(line_width), &[line_width]);
         let ((dw, dh), rect, depth_mode, params, color_mode) = match (&self.rendered, &self.textures) {
             (Some(r), _) => {
                 dv.set_texture(0, &dummy);
@@ -807,7 +967,10 @@ impl Widget for DepthCloud {
         let aspect = pw / ph.max(1.0);
         let cols = (self.points_per_row.round() as usize).clamp(8, 2048);
         let rows = ((cols as f32 / aspect.max(0.01)).round() as usize).clamp(1, 2048);
-        let count = cols * rows;
+        let count = self.style.instance_count(cols, rows);
+        if count == 0 {
+            return DrawStep::done();
+        }
         if self.instance_ids.len() != count {
             self.instance_ids = (0..count).map(|i| i as f32).collect();
         }

@@ -22,7 +22,7 @@ pub mod depth;
 pub mod pipeline;
 mod sim;
 
-pub use cloud::{CloudEffect, DepthCloud, DepthCloudAction, RenderedDepth};
+pub use cloud::{CloudEffect, CloudStyle, DepthCloud, DepthCloudAction, RenderedDepth};
 pub use depth::{DepthSource, FrameLayout};
 pub use pipeline::{FrameStats, PipelineSettings, SourceSpec, VideoInput};
 

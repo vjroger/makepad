@@ -28,7 +28,7 @@ mod picker;
 mod rendered;
 
 use makepad_depth_cloud::{
-    CloudEffect, DepthCloud, DepthCloudAction, DepthSource, FrameLayout, PipelineSettings,
+    CloudEffect, CloudStyle, DepthCloud, DepthCloudAction, DepthSource, FrameLayout, PipelineSettings,
     RenderedDepth, SourceSpec, VideoInput,
 };
 use makepad_widgets::*;
@@ -122,7 +122,9 @@ script_mod! {
                                 Label{text: "Point cloud"}
                                 depth_amount := PanelSlider{text: "Depth amount (far/near)" min: 1.0 max: 12.0 default: 4.0}
                                 points_per_row := PanelSlider{text: "Points per row" min: 64.0 max: 1280.0 step: 16.0 default: 384.0 precision: 0}
+                                style := DropDown{labels: ["Points" "Horizontal lines" "Vertical lines" "Grid"]}
                                 point_size := PanelSlider{text: "Point size (cells)" min: 0.3 max: 4.0 default: 1.15}
+                                line_width := PanelSlider{text: "Line width (cells)" min: 0.02 max: 2.0 default: 0.25}
                                 edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.0}
                                 fov := PanelSlider{text: "Field of view (deg)" min: 20.0 max: 100.0 step: 1.0 default: 50.0 precision: 0}
                                 Hr{}
@@ -519,6 +521,15 @@ impl MatchEvent for App {
         if let Some(v) = slided(cx, ids!(crop_far)) {
             self.crop.1 = v as f32;
             self.apply_crop(cx);
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(style)).changed(actions) {
+            let style = CloudStyle::ALL.get(index).copied().unwrap_or_default();
+            self.with_cloud(cx, |_, cloud| cloud.style = style);
+            redraw = true;
+        }
+        if let Some(v) = slided(cx, ids!(line_width)) {
+            self.with_cloud(cx, |_, cloud| cloud.line_width = v as f32);
+            redraw = true;
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(effect)).changed(actions) {
             let effect = CloudEffect::ALL.get(index).copied().unwrap_or_default();
