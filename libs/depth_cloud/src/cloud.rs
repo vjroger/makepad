@@ -96,6 +96,8 @@ script_mod! {
         style: uniform(0.0)
         // Line thickness in cells.
         line_width: uniform(0.25)
+        // View units per screen point at view depth 1 (line minimum width).
+        view_per_point: uniform(0.002)
 
         v_color: varying(vec3f)
 
@@ -264,6 +266,16 @@ script_mod! {
                 let per_row = self.grid.x - 1.0
                 row0 = floor((seg + 0.5) / per_row)
                 col0 = seg - row0 * per_row
+                // Approximate GPU division (fast-math reciprocals) can land
+                // one row off at a row's end: fix up so col0 is in range.
+                if col0 < 0.0 {
+                    row0 = row0 - 1.0
+                    col0 = col0 + per_row
+                }
+                if col0 > per_row - 0.5 {
+                    row0 = row0 + 1.0
+                    col0 = col0 - per_row
+                }
                 col1 = col0 + 1.0
                 row1 = row0
             } else {
@@ -283,14 +295,21 @@ script_mod! {
                 self.cull()
                 return
             }
-            // A ribbon in the view plane: along the segment by geom.pos.x,
-            // across it by geom.pos.y, `line_width` cells thick.
+            // A ribbon along the segment (geom.pos.x) and across it
+            // (geom.pos.y), `line_width` cells thick. The across direction
+            // is perpendicular to the segment AS SEEN ON SCREEN: screen
+            // pixels are view x/y over view depth (one uniform scale for both
+            // axes), so take the direction after that divide; an offset at
+            // constant view depth along it is then exactly perpendicular on
+            // screen, even for segments running into the depth.
             let along = self.geom.pos.x
             let side = self.geom.pos.y * 2.0 - 1.0
             let v0 = self.draw_pass.camera_view * vec4(p0.x, p0.y, p0.z, 1.0)
             let v1 = self.draw_pass.camera_view * vec4(p1.x, p1.y, p1.z, 1.0)
-            let dx = v1.x - v0.x
-            let dy = v1.y - v0.y
+            let iw0 = 1.0 / max(-v0.z, 0.00001)
+            let iw1 = 1.0 / max(-v1.z, 0.00001)
+            let dx = v1.x * iw1 - v0.x * iw0
+            let dy = v1.y * iw1 - v0.y * iw0
             let len = sqrt(dx * dx + dy * dy)
             var nx = 0.0
             var ny = 1.0
@@ -298,9 +317,12 @@ script_mod! {
                 nx = -dy / len
                 ny = dx / len
             }
-            let z = mix(p0.w, p1.w, along)
-            let half_width = self.tan_half.y * self.grid.w * z * self.line_width * 0.5
             let vp = mix(v0, v1, along)
+            // One cell is 2 * tan_half.y * grid.w * z tall at depth z; never
+            // thinner than one screen point, so thin lines don't break up.
+            let z = mix(p0.w, p1.w, along)
+            let min_half = 0.5 * self.view_per_point * max(-vp.z, 0.00001)
+            let half_width = max(self.tan_half.y * self.grid.w * z * self.line_width, min_half)
             let corner = vec4(
                 vp.x + nx * side * half_width,
                 vp.y + ny * side * half_width,
@@ -769,6 +791,8 @@ impl DepthCloud {
         dv.set_uniform(cx.cx, live_id!(use_offset), &[if offsets.is_some() { 1.0 } else { 0.0 }]);
         dv.set_uniform(cx.cx, live_id!(style), &[style]);
         dv.set_uniform(cx.cx, live_id!(line_width), &[line_width]);
+        let view_h = scene.viewport_rect.size.y.max(1.0) as f32;
+        dv.set_uniform(cx.cx, live_id!(view_per_point), &[2.0 * tan_y / view_h]);
         let ((dw, dh), rect, depth_mode, params, color_mode) = match (&self.rendered, &self.textures) {
             (Some(r), _) => {
                 dv.set_texture(0, &dummy);
