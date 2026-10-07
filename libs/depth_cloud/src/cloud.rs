@@ -306,14 +306,18 @@ script_mod! {
             let side = self.geom.pos.y * 2.0 - 1.0
             let v0 = self.draw_pass.camera_view * vec4(p0.x, p0.y, p0.z, 1.0)
             let v1 = self.draw_pass.camera_view * vec4(p1.x, p1.y, p1.z, 1.0)
-            let iw0 = 1.0 / max(-v0.z, 0.00001)
-            let iw1 = 1.0 / max(-v1.z, 0.00001)
-            let dx = v1.x * iw1 - v0.x * iw0
-            let dy = v1.y * iw1 - v0.y * iw0
+            // Division-free (w0 * w1 times x1/w1 - x0/w0): the same direction
+            // when both ends are in front, and still the projected line when
+            // one end is behind the camera (dollied into the cloud).
+            let w0 = -v0.z
+            let w1 = -v1.z
+            let dx = v1.x * w0 - v0.x * w1
+            let dy = v1.y * w0 - v0.y * w1
             let len = sqrt(dx * dx + dy * dy)
+            let scale = abs(w0) + abs(w1)
             var nx = 0.0
             var ny = 1.0
-            if len > 0.000001 {
+            if len > 0.000000000001 * scale * scale {
                 nx = -dy / len
                 ny = dx / len
             }
@@ -791,8 +795,11 @@ impl DepthCloud {
         dv.set_uniform(cx.cx, live_id!(use_offset), &[if offsets.is_some() { 1.0 } else { 0.0 }]);
         dv.set_uniform(cx.cx, live_id!(style), &[style]);
         dv.set_uniform(cx.cx, live_id!(line_width), &[line_width]);
-        let view_h = scene.viewport_rect.size.y.max(1.0) as f32;
-        dv.set_uniform(cx.cx, live_id!(view_per_point), &[2.0 * tan_y / view_h]);
+        // XR eye passes carry no viewport (identity projection, empty
+        // rect): no pixel floor there, lines keep their cell width.
+        let view_h = scene.viewport_rect.size.y as f32;
+        let view_per_point = if view_h > 1.0 { 2.0 * tan_y / view_h } else { 0.0 };
+        dv.set_uniform(cx.cx, live_id!(view_per_point), &[view_per_point]);
         let ((dw, dh), rect, depth_mode, params, color_mode) = match (&self.rendered, &self.textures) {
             (Some(r), _) => {
                 dv.set_texture(0, &dummy);
