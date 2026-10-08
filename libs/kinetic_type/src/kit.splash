@@ -50,9 +50,15 @@ mod.kin.curve_entry = fn(i) {
     out[i] = c
 }
 
-// A dial's shader accessor, `self.<dial>()`, for the first four dials
-// (p1..p4 are self.p.x..w).
+// A dial's shader accessor, `self.<dial>()`, for each of the ten dials
+// (p1..p4 are self.p.x..w, p5..p8 self.p_b.x..w, p9 and p10 self.p_c.xy).
 mod.kin.dial_x = fn() -> float { return self.p.x }
 mod.kin.dial_y = fn() -> float { return self.p.y }
 mod.kin.dial_z = fn() -> float { return self.p.z }
 mod.kin.dial_w = fn() -> float { return self.p.w }
+mod.kin.dial_b_x = fn() -> float { return self.p_b.x }
+mod.kin.dial_b_y = fn() -> float { return self.p_b.y }
+mod.kin.dial_b_z = fn() -> float { return self.p_b.z }
+mod.kin.dial_b_w = fn() -> float { return self.p_b.w }
+mod.kin.dial_c_x = fn() -> float { return self.p_c.x }
+mod.kin.dial_c_y = fn() -> float { return self.p_c.y }

@@ -7,14 +7,14 @@
 
 use crate::draw::{DrawKineticBackdrop, DrawKineticGlyph};
 use crate::kernel::{self, SIGNALS};
-use crate::kit::{self, Kit, KitValues};
+use crate::kit::{self, Kit, KitValues, MAX_DIALS};
 use crate::records::{Karaoke, Records, GLYPH_WORDS};
 use crate::shapes::{self, GlyphSet, VERT_FLOATS};
 use makepad_draw::makepad_platform::draw_shader_layout::{LayoutKind, LayoutPacking, PodType};
 use makepad_draw::*;
 use makepad_audio_reactive::{bind_audio, AudioFrame};
 use makepad_render_graph::{Attachments, FrameUniforms, GraphRunner, Stage, StageInputs};
-use makepad_script_compute::kernel::{FieldTy, Kernel, Layout, LayoutField};
+use makepad_script_compute::kernel::{Call, FieldTy, Kernel, Layout, LayoutField};
 use std::sync::Arc;
 
 /// The per-frame signals a host gives.
@@ -28,8 +28,9 @@ pub struct KineticFrame {
     pub energy: f32,
     /// Bass, mid, high (0..1).
     pub bands: [f32; 3],
-    /// The first four dials (p1..p4) when the host sets them.
-    pub dials: [Option<f32>; 4],
+    /// The kit's dials p1..p10, in its order, where the host sets them
+    /// (`None`: the kit's own default).
+    pub dials: [Option<f32>; MAX_DIALS],
     pub karaoke: Karaoke,
     /// The picture under the layer (glass, backdrops).
     pub content: Option<Texture>,
@@ -62,11 +63,34 @@ pub struct FrameStats {
     pub record_us: f32,
 }
 
+/// The shader accessor of each dial slot (kit.splash): p1..p4 read
+/// `self.p`, p5..p8 `self.p_b`, p9 and p10 `self.p_c`.
+const DIAL_ACCESSORS: [&str; MAX_DIALS] = ["dial_x", "dial_y", "dial_z", "dial_w", "dial_b_x", "dial_b_y", "dial_b_z", "dial_b_w", "dial_c_x", "dial_c_y"];
+
+/// The kernel param of each dial slot.
+const DIAL_PARAMS: [&str; MAX_DIALS] = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10"];
+
+/// The dials a frame runs with, p1..p10: the host's value where it sets
+/// one, else the kit's default, else 0.5.
+pub(crate) fn dial_values(values: &KitValues, frame: &KineticFrame) -> [f32; MAX_DIALS] {
+    std::array::from_fn(|k| frame.dials[k].or_else(|| values.dials.get(k).map(|d| d.1)).unwrap_or(0.5))
+}
+
+/// The dials into a kernel call: `p1..p10`, and each of `named` (the
+/// kit's dials) by its name.
+pub(crate) fn set_dial_params(call: &mut Call<'_>, p: &[f32; MAX_DIALS], named: &[(String, f32)]) {
+    for (k, v) in p.iter().enumerate() {
+        call.set_param(DIAL_PARAMS[k], *v);
+        if let Some((name, _)) = named.get(k) {
+            call.set_param(name, *v);
+        }
+    }
+}
+
 /// The draw members of a kit: its shader fns (`backdrop`'s draw takes
 /// only the helpers, not the glyph stage's own `look`, `floor`, `deform`)
-/// and an accessor `self.<dial>()` per dial of the first four it does not
-/// write itself.
-fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue)> {
+/// and an accessor `self.<dial>()` per dial it does not write itself.
+pub(crate) fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue)> {
     let own = kit.shader_fns(vm);
     let mut out: Vec<(LiveId, ScriptValue)> = own
         .iter()
@@ -77,13 +101,13 @@ fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue
         .cloned()
         .collect();
     let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(kit::KIT_MODULE).into(), NoTrap).as_object();
-    for (k, (name, _)) in kit.values.dials.iter().enumerate().take(4) {
+    for (k, (name, _)) in kit.values.dials.iter().enumerate().take(MAX_DIALS) {
         let id = LiveId::from_str(name);
         if own.iter().any(|(n, _)| *n == id) {
             continue;
         }
         if let Some(m) = module {
-            out.push((id, vm.bx.heap.value(m, LiveId::from_str(["dial_x", "dial_y", "dial_z", "dial_w"][k]).into(), NoTrap)));
+            out.push((id, vm.bx.heap.value(m, LiveId::from_str(DIAL_ACCESSORS[k]).into(), NoTrap)));
         }
     }
     out
@@ -529,12 +553,14 @@ impl KineticView {
 
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: [f32; 4], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4], share: [f32; 4]) {
+    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: &[f32; MAX_DIALS], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4], share: [f32; 4]) {
         dv.set_uniform(cx, live_id!(k_share), &share);
         for (k, name) in ["time", "beat", "phase", "pulse", "bar", "energy", "bpm"].iter().enumerate() {
             dv.set_uniform(cx, LiveId::from_str(name), &[s[k]]);
         }
-        dv.set_uniform(cx, live_id!(p), &p);
+        dv.set_uniform(cx, live_id!(p), &p[0..4]);
+        dv.set_uniform(cx, live_id!(p_b), &p[4..8]);
+        dv.set_uniform(cx, live_id!(p_c), &[p[8], p[9], 0.0, 0.0]);
         dv.set_uniform(cx, live_id!(bands), &bands);
         let c = &values.colors;
         dv.set_uniform(cx, live_id!(col_bg), &[c[0].x, c[0].y, c[0].z, c[0].w]);
@@ -566,15 +592,7 @@ impl KineticView {
         let (bmin, bmax) = set.bounds;
         let (width, height) = ((bmax[0] - bmin[0]).max(0.001), (bmax[1] - bmin[1]).max(0.001));
         let size = self.values.shape.size;
-        let mut p = [0.5f32; 4];
-        for k in 0..4 {
-            if let Some((_, d)) = self.values.dials.get(k) {
-                p[k] = *d;
-            }
-            if let Some(v) = frame.dials[k] {
-                p[k] = v;
-            }
-        }
+        let p = dial_values(&self.values, frame);
         // ---- records and the animator
         if self.records.dying > 0 && self.values.dying.is_none_or(|d| frame.time - self.text_at > d) {
             self.records.retire_dying();
@@ -617,12 +635,7 @@ impl KineticView {
             for ((name, _), v) in SIGNALS.iter().zip(sig.iter()) {
                 call.set_param(name, *v);
             }
-            for k in 0..4 {
-                call.set_param(&format!("p{}", k + 1), p[k]);
-                if let Some((name, _)) = self.values.dials.get(k) {
-                    call.set_param(name, p[k]);
-                }
-            }
+            set_dial_params(&mut call, &p, &self.values.dials);
             let ok = call.input("glyphs", &self.records.data[..n * GLYPH_WORDS]).and_then(|_| call.input("spectrum", frame.spectrum())).and_then(|_| call.output("out", &mut self.out[..]));
             let run = ok.and_then(|_| if n > 2048 { call.run_parallel(n, 8) } else { call.run(n) });
             if let Err(e) = run {
@@ -673,9 +686,7 @@ impl KineticView {
             for ((name, _), v) in SIGNALS.iter().zip(sig.iter()) {
                 call.set_param(name, *v);
             }
-            for k in 0..4 {
-                call.set_param(&format!("p{}", k + 1), p[k]);
-            }
+            set_dial_params(&mut call, &p, &self.values.dials);
             let r = call.input("base", &base).and_then(|_| call.input("spectrum", frame.spectrum())).and_then(|_| call.output("out", &mut o)).and_then(|_| call.run(1));
             match r {
                 Ok(_) => cam = o,
@@ -695,9 +706,7 @@ impl KineticView {
             for ((name, _), v) in SIGNALS.iter().zip(sig.iter()) {
                 call.set_param(name, *v);
             }
-            for k in 0..4 {
-                call.set_param(&format!("p{}", k + 1), p[k]);
-            }
+            set_dial_params(&mut call, &p, &self.values.dials);
             let r = call.input("spectrum", frame.spectrum()).and_then(|_| call.output("out", &mut self.curve.0)).and_then(|_| call.run(np));
             match r {
                 Ok(_) => {
@@ -766,7 +775,7 @@ impl KineticView {
             pp.pass.set_camera(cx.cx, view, proj);
             pp.list.begin_always(cx);
             let pview = [pw as f32, ph as f32, self.text_at, 1.0];
-            Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, pview, textu, share);
+            Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, pview, textu, share);
             if let Some(a) = &frame.audio {
                 bind_audio(cx.cx, &mut self.draw.draw_vars, a);
             }
@@ -784,7 +793,7 @@ impl KineticView {
         self.pass.set_camera(cx.cx, view, projection);
         self.list.begin_always(cx);
         if let Some(b) = self.backdrop.as_mut().filter(|_| !self.overlay) {
-            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu, textu, share);
+            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, &p, bands, misc, viewu, textu, share);
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);
             }
@@ -797,7 +806,7 @@ impl KineticView {
             b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px });
             calls += 1;
         }
-        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, viewu, textu, share);
+        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, viewu, textu, share);
         if let Some(c) = &frame.content {
             self.draw.draw_vars.set_texture(0, c);
         }

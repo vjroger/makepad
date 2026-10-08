@@ -10,7 +10,8 @@
 //! 4 cube, 5 floor, 6 surface), `nrm` (world normal), `wpos`, `lpos` (glyph-local),
 //! `luv` (uv in the glyph's ink box), the record's `color`, `attr`, `info`
 //! (t, word, line, index), the frame's `time beat phase pulse bar energy`,
-//! the dials `p` (and each by its name, `self.swing()`), the palette
+//! the dials `p` (p1..p4), `p_b` (p5..p8) and `p_c.xy` (p9, p10), each
+//! also by its name (`self.swing()`), the palette
 //! `col_a col_b col_c col_bg`, `self.eye()`, `self.content(uv)` (the
 //! picture under the layer) and the stock finishes (`finish(mat, …)`,
 //! `shade`, `env`, `spec`, `hue`, `key`, `rim`).
@@ -56,6 +57,9 @@ script_mod! {
         energy: uniform(0.0)
         bpm: uniform(120.0)
         p: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        // The dials past the fourth: p5..p8, then p9 and p10 in xy.
+        p_b: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p_c: uniform(vec4(0.5, 0.5, 0.0, 0.0))
         // bass, mid, high, level (0..1)
         bands: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         col_a: uniform(vec4(1.0, 1.0, 1.0, 1.0))
@@ -360,6 +364,9 @@ script_mod! {
         energy: uniform(0.0)
         bpm: uniform(120.0)
         p: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        // The dials past the fourth: p5..p8, then p9 and p10 in xy.
+        p_b: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p_c: uniform(vec4(0.5, 0.5, 0.0, 0.0))
         // bass, mid, high, level (0..1)
         bands: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         col_a: uniform(vec4(1.0, 1.0, 1.0, 1.0))

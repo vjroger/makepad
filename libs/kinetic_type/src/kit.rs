@@ -9,7 +9,7 @@
 //!     layout: @line | @cloud  wrap: 12  align: @center  line_gap: 1.2  tracking: 0.0
 //!     copies: 1  alphabet: "#%&"  cells: {res: 12 layers: 2 fill: @block}
 //!     colors: {bg: #05060d a: #ffc84a b: #2a1450 c: #49e6ff}
-//!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1.. in order, 0..1
+//!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1..p10 in order (ten at most), 0..1
 //!     camera: {fov: 50 dist: 9 height: 0}   // dist, height in cap heights
 //!     ground: {y: -0.7 size: 14}         // a floor plane (its look: `floor: fn() -> vec4`)
 //!     picture: {width: 1024 height: 256 view: 2}   // glyphs into a picture; backdrop = the screen
@@ -45,6 +45,10 @@ const KIT_GLUE: &str = include_str!("kit.splash");
 
 /// The fields of a kit that are kernels, not draw members.
 pub const KERNEL_FIELDS: &[&str] = &["glyph", "camera_fn", "curve_fn"];
+
+/// The most dials a kit declares: `p1..p10`, in the order written (a host
+/// carries every one, [`crate::view::KineticFrame::dials`]).
+pub const MAX_DIALS: usize = 10;
 
 /// A kit evaluated: its object (kept alive while the host builds from it)
 /// and its values.
@@ -332,10 +336,13 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
             dials.push((name.to_string(), num(v).unwrap_or(0.5)));
         }
     }
+    if dials.len() > MAX_DIALS {
+        return Err(format!("dials: {} declared; a kit has {MAX_DIALS} at most (p1..p{MAX_DIALS})", dials.len()));
+    }
     // A dial is a kernel param and a shader function by its name: it may
     // not take a name the kernel or the look already has.
     const TAKEN: &[&str] = &[
-        "time", "seed", "count", "p1", "p2", "p3", "p4", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "bands",
+        "time", "seed", "count", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "p_b", "p_c", "bands",
         "key", "rim", "cap", "n", "vd", "eye", "content", "screen_uv", "finish", "shade", "env", "spec", "hue", "fog", "look", "floor", "deform", "backdrop", "picture", "ink",
         "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy", "fwidth", "ray", "plane_hit", "text_plane", "k_share", "dying",
     ];

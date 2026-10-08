@@ -7,7 +7,7 @@
 // Signals the kit has as params: time, beat (fractional beats), phase
 // (0..1 in the beat), pulse (the beat's eased envelope 0..1), bar (0..1 in
 // the bar), bpm, energy (0..1), grow (the 0..1 sweep of the kit's cycle),
-// and its dials by name (p1..p4 too).
+// and its dials by name (p1..p10 too).
 
 // The vj_fx hash (a sin hash), for porting looks that used it.
 fn hash1(x) { fract(sin(x * 12.9898) * 43758.5453) }

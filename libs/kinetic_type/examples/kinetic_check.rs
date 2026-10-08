@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! MAKEPAD_HIDE_WINDOWS=1 kinetic_check strip <kit.splash> --out sheet.png [--text "..."] [--count 8]
-//!     [--from 0] [--step 0.25 (beats)] [--bpm 120] [--width 480] [--cols 4] [--sing] [--p1 0.5]..
+//!     [--from 0] [--step 0.25 (beats)] [--bpm 120] [--width 480] [--cols 4] [--sing] [--p1 0.5]..[--p10 0.5]
 //! MAKEPAD_HIDE_WINDOWS=1 kinetic_check bench <kit.splash> [--text "..."] [--frames 240]
 //! ```
 //!
@@ -103,7 +103,7 @@ struct Job {
     size: (u32, u32),
     cols: usize,
     sing: bool,
-    dials: [Option<f32>; 4],
+    dials: [Option<f32>; makepad_kinetic_type::kit::MAX_DIALS],
     bench: usize,
     texts: Vec<String>,
     every: f32,
@@ -159,7 +159,7 @@ impl KineticHost {
         let Some(file) = args.get(2).cloned() else { finish(Err("usage: kinetic_check strip|bench <kit.splash> [options]".into())) };
         let kit = std::fs::read_to_string(&file).unwrap_or_else(|e| finish(Err(format!("{file}: {e}"))));
         let width = argf(args, "--width", 480.0) as u32;
-        let mut dials = [None; 4];
+        let mut dials = [None; makepad_kinetic_type::kit::MAX_DIALS];
         for (k, d) in dials.iter_mut().enumerate() {
             *d = arg(args, &format!("--p{}", k + 1)).and_then(|v| v.parse().ok());
         }

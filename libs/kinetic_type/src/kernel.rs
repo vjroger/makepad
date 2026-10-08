@@ -10,7 +10,7 @@
 //! `bass mid high` (0..1 bands), `floor_y` (the floor's height),
 //! `view_w view_h` (a picture's world extent, 0 without one), `band(f)`
 //! (the spectrum at log frequency f 0..1, the host's 32 bands), the
-//! dials `p1..p4` and each dial by its own name;
+//! dials `p1..p10` and each dial by its own name;
 //! `time` is the kernel's own time input. The `kinetic` module
 //! (kinetic.splash) is imported unqualified.
 
@@ -100,7 +100,7 @@ pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &Layout) -> Result<A
         decls.push(param(name, *default, 1000000000.0));
     }
     let dials = &kit.values.dials;
-    for k in 0..4 {
+    for k in 0..crate::kit::MAX_DIALS {
         decls.push(param(&format!("p{}", k + 1), dials.get(k).map_or(0.5, |d| d.1), 1000.0));
     }
     for (name, d) in dials {
@@ -206,12 +206,54 @@ mod tests {
         let dials = with_kit("Kinetic{ dials: {zeta: 0.1 alpha_amt: 0.9 mid_amt: 0.3} }", |_, kit| kit.unwrap().values.dials);
         assert_eq!(dials, vec![("zeta".to_string(), 0.1), ("alpha_amt".to_string(), 0.9), ("mid_amt".to_string(), 0.3)]);
         assert!(with_kit("Nope{}", |_, kit| kit.is_err()));
-        // Each of the first four dials has its shader accessor.
+        // Each of the ten dial slots has its shader accessor.
         let fns = with_kit("Kinetic{ dials: {a: 0.1 b: 0.2 c: 0.3 d: 0.4} }", |vm, kit| {
             let m = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(crate::kit::KIT_MODULE).into(), NoTrap).as_object().unwrap();
             drop(kit);
-            ["dial_x", "dial_y", "dial_z", "dial_w"].iter().filter(|k| vm.bx.heap.value(m, LiveId::from_str(k).into(), NoTrap).as_object().is_some_and(|f| vm.bx.heap.as_fn(f).is_some())).count()
+            ["dial_x", "dial_y", "dial_z", "dial_w", "dial_b_x", "dial_b_y", "dial_b_z", "dial_b_w", "dial_c_x", "dial_c_y"].iter().filter(|k| vm.bx.heap.value(m, LiveId::from_str(k).into(), NoTrap).as_object().is_some_and(|f| vm.bx.heap.as_fn(f).is_some())).count()
         });
-        assert_eq!(fns, 4);
+        assert_eq!(fns, 10);
+    }
+
+    /// A kit with six dials: the host's values reach the glyph fn, by slot
+    /// (`p4..p6`) and by name, the kit's defaults stand where the host sets
+    /// none, a slot past the kit's list is 0.5, and every dial has its
+    /// shader accessor `self.<dial>()`.
+    #[test]
+    fn a_kit_with_six_dials_reaches_the_glyph_function() {
+        let src = "Kinetic{\n  dials: {alpha_amt: 0.1 beta_amt: 0.2 gamma_amt: 0.3 delta_amt: 0.4 eps_amt: 0.5 zeta_amt: 0.6}\n  glyph: fn(g, o) {\n    o.pos = vec3(p5, p6, zeta_amt)\n    o.scale = vec3(eps_amt, p4, delta_amt)\n  }\n}\n";
+        let (out, members) = with_kit(src, |vm, kit| {
+            let kit = kit.unwrap_or_else(|e| panic!("{e}"));
+            let mut frame = crate::view::KineticFrame::default();
+            frame.dials[3] = Some(0.75);
+            frame.dials[4] = Some(0.85);
+            frame.dials[5] = Some(0.9);
+            let p = crate::view::dial_values(&kit.values, &frame);
+            assert_eq!(p, [0.1, 0.2, 0.3, 0.75, 0.85, 0.9, 0.5, 0.5, 0.5, 0.5], "the kit's defaults, the host's fourth to sixth, 0.5 past the list");
+            let k = compile(vm, &kit, Which::Glyph, &out_layout()).unwrap_or_else(|e| panic!("{e}"));
+            let recs = vec![0.0f32; 40];
+            let spec = [0.0f32; 32];
+            let mut out = vec![0.0f32; 24];
+            let mut call = k.call();
+            call.input("spectrum", &spec).unwrap();
+            call.input("glyphs", &recs).unwrap();
+            call.output("out", &mut out).unwrap();
+            crate::view::set_dial_params(&mut call, &p, &kit.values.dials);
+            call.run(1).unwrap();
+            drop(call);
+            let members: Vec<String> = crate::view::members(vm, &kit, false).iter().map(|(id, _)| id.to_string()).collect();
+            (out, members)
+        });
+        assert_eq!(out[0..3], [0.85, 0.9, 0.9], "p5, p6 and the sixth dial by its name");
+        assert_eq!(out[7..10], [0.85, 0.75, 0.75], "the fifth by its name, p4, the fourth by its name");
+        for name in ["alpha_amt", "beta_amt", "gamma_amt", "delta_amt", "eps_amt", "zeta_amt"] {
+            assert!(members.iter().any(|m| m == name), "`self.{name}()` in the shaders: {members:?}");
+        }
+        // Ten is the most a kit declares.
+        let eleven = (0..11).map(|k| format!("d{k}_amt: 0.5")).collect::<Vec<_>>().join(" ");
+        let e = with_kit(&format!("Kinetic{{ dials: {{{eleven}}} }}"), |_, kit| kit.err()).expect("eleven dials refused");
+        assert!(e.contains(&format!("{} at most", crate::kit::MAX_DIALS)), "{e}");
+        let ten = (0..10).map(|k| format!("d{k}_amt: 0.5")).collect::<Vec<_>>().join(" ");
+        assert_eq!(with_kit(&format!("Kinetic{{ dials: {{{ten}}} }}"), |_, kit| kit.map(|k| k.values.dials.len())), Ok(10));
     }
 }
