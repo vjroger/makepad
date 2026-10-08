@@ -9,7 +9,7 @@
 //!     layout: @line | @cloud  wrap: 12  align: @center  line_gap: 1.2  tracking: 0.0
 //!     copies: 1  alphabet: "#%&"  cells: {res: 12 layers: 2 fill: @block}
 //!     colors: {bg: #05060d a: #ffc84a b: #2a1450 c: #49e6ff}
-//!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1.. in order, 0..1
+//!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1.. in order, 0..1, up to 16
 //!     camera: {fov: 50 dist: 9 height: 0}   // dist, height in cap heights
 //!     ground: {y: -0.7 size: 14}         // a floor plane (its look: `floor: fn() -> vec4`)
 //!     picture: {width: 1024 height: 256 view: 2}   // glyphs into a picture; backdrop = the screen
@@ -19,9 +19,63 @@
 //!     camera_fn: fn(c) { ... }           // optional camera kernel (CPU); c.share -> self.k_share
 //!     curve: {points: 256 closed: true up: [0, 1, 0]}  curve_fn: fn(c) { c.pos = ... }   // a path at c.u, even by arc length
 //!     dying: 0.8                          // a shorter text's surplus stays 0.8 s (g.dying = 1)
+//!     screen: true                        // a picture kit's glyphs also draw on the screen (below)
+//!     forms: [{name: "WALL"}, {name: "DISC" text: "SPIN" font: @bold wrap: 12 post: []}]   // per-form settings (below)
+//!     form_dial: @form                    // the dial that picks the form (default: the first)
 //!     look: fn() -> vec4 { ... }         // every other fn: the glyph shader
 //! }
 //! ```
+//!
+//! FORMS. A kit that folds several kits into one (a family, its first dial
+//! FORM) lists them in `forms: [{...}, {...}]`, each form an object of the
+//! kit's own settings that this form sets differently: `text`, `case`,
+//! `font`, `weight`, `axes`, `size`, `wrap`, `line_gap`, `tracking`,
+//! `align`, `layout`, `copies`, `picture`, `colors`, `camera`, `screen`,
+//! `post` and every other value setting above (not `dials` or fns: they
+//! are the kit's). The form dial (`form_dial: @name`, else the first
+//! dial) split into equal parts picks the form: with three forms 0..1/3 is
+//! the first. A form starts from the kit's settings and replaces what it
+//! names, as if that kit had been written with them, so the form looks
+//! exactly as the kit it came from:
+//! - `font`, `weight` and `axes` go together: a form naming any of them
+//!   names its whole font (`font: @inter weight: 900` takes no `axes`
+//!   from the kit);
+//! - `colors` change key by key (`colors: {b: #x3c3c3c}` keeps bg, a, c);
+//! - any other `{...}` setting (`picture`, `camera`, `cells`, `cycle`, ...)
+//!   replaces the kit's whole (`camera: {fov: 30}` takes no `dist` from
+//!   the kit), and `nil` removes one (`wrap: nil`, `picture: nil`: this
+//!   form draws its glyphs on the screen like a kit without a picture);
+//! - `post` replaces the kit's whole list: `post: [Glow{threshold: 0.6
+//!   strength: 0.25}]` its own glow, `post: []` none; a form without
+//!   `post` keeps the kit's;
+//! - `name` labels the form; the kit keeps its own.
+//! Turning the form dial lays the text out again with the form's settings
+//! (fresh records, as if the kit had just loaded with this text; the
+//! text's arrival time stays). What a host sets still wins over a form's
+//! defaults: the host's words over the form's `text`, its font, weight and
+//! axes over the form's, its palette over the form's colours. The kernels
+//! and the shaders are the kit's, shared by every form: they branch on
+//! the form dial (`if form < 0.333 { ... }`). Each form costs what its
+//! kit did: the records (its text times its `copies`), the shapes, the
+//! grid and the picture target are the shown form's own (the target takes
+//! the form's `picture` size, and shrinks to 16 x 16 while a form with
+//! `picture: nil` shows).
+//!
+//! SCREEN. A `picture` kit draws its glyphs flat into the picture, and the
+//! backdrop is the screen. With `screen: true` (per form too) the glyphs
+//! also draw on the screen, after the backdrop, in the frame's own camera
+//! (the default framing or `camera_fn`). The glyph shaders tell the two
+//! passes apart by `self.on_screen` (a uniform, readable in `deform` and
+//! in `look`): 0 while drawing into the picture, 1 on the screen (always
+//! 1 in a kit without a picture). Each does what its pass needs: `look`
+//! discards in the pass a form does not use (`if self.on_screen < 0.5 {
+//! discard() }`); `deform` is best left whole (an early return there
+//! compiles the vertex stage differently, which a strong lens shows).
+//! Without `screen` a picture kit's glyphs draw into the picture only, as
+//! before. A form that draws on the screen only is cheaper as `picture:
+//! nil`: no picture pass at all, its glyphs on the screen as in a kit
+//! without a picture (`self.on_screen` 1); `screen: true` is for a form
+//! that draws both.
 //!
 //! Stock shader helpers besides the look's lighting: `self.fwidth(v)` (both
 //! draws), and on the backdrop `self.eye()`, `self.ray(uv)`,
@@ -45,6 +99,12 @@ const KIT_GLUE: &str = include_str!("kit.splash");
 
 /// The fields of a kit that are kernels, not draw members.
 pub const KERNEL_FIELDS: &[&str] = &["glyph", "camera_fn", "curve_fn"];
+
+/// The most dials a kit declares. Every dial reaches the kernels by its
+/// name; the shaders read the first four as `self.p` (p1..p4), the next
+/// twelve as `self.p5_8`, `self.p9_12` and `self.p13_16`, and each as
+/// `self.<dial>()`.
+pub const MAX_DIALS: usize = 16;
 
 /// A kit evaluated: its object (kept alive while the host builds from it)
 /// and its values.
@@ -152,8 +212,76 @@ pub struct KitValues {
     /// `g.changed_at` the change, `g.from` where it was) so a kit can fly
     /// or fade them out; None: they vanish with the old text.
     pub dying: Option<f32>,
+    /// `screen: true`: a picture kit's glyphs also draw on the screen
+    /// (`self.on_screen` 1 there, 0 in the picture).
+    pub screen: bool,
     pub passes: Vec<makepad_render_graph::PassDecl>,
     pub pass_values: Vec<makepad_render_graph::PassValues>,
+    /// `forms: [...]`: each form's settings (the kit's with the form's
+    /// over them; their own `forms` empty). Empty: a kit without forms.
+    pub forms: Vec<Form>,
+    /// The dial that picks the form (`form_dial: @name`; the first).
+    pub form_dial: usize,
+}
+
+/// One of a kit's `forms` (see the module docs): its label and its
+/// settings, whole.
+#[derive(Clone, Debug)]
+pub struct Form {
+    pub name: String,
+    pub values: KitValues,
+}
+
+/// The settings a form may set (the kit's value settings and post passes,
+/// not its dials or fns).
+const FORM_KEYS: &[&str] = &[
+    "name", "text", "case", "font", "weight", "axes", "size", "depth", "bevel", "bevel_type", "bevel_rings", "detail", "tracking", "line_gap", "wrap", "align", "layout",
+    "alphabet", "cells", "colors", "material", "camera", "ground", "picture", "grid", "curve", "cycle", "copies", "dying", "screen", "post",
+];
+
+/// Where a setting is read: a form's own field when it has one (even
+/// `nil`), else the kit's. A form naming any of `font`, `weight`, `axes`
+/// names its whole font.
+#[derive(Clone, Copy)]
+struct Src {
+    kit: ScriptObject,
+    form: Option<ScriptObject>,
+    form_font: bool,
+}
+
+impl Src {
+    fn new(vm: &ScriptVm, kit: ScriptObject, form: Option<ScriptObject>) -> Self {
+        let form_font = form.is_some_and(|f| ["font", "weight", "axes"].iter().any(|n| has_own(vm, f, n)));
+        Self { kit, form, form_font }
+    }
+
+    fn get(&self, vm: &ScriptVm, name: &str) -> ScriptValue {
+        if let Some(f) = self.form {
+            let font_key = matches!(name, "font" | "weight" | "axes");
+            if (font_key && self.form_font) || has_own(vm, f, name) {
+                return field(vm, f, name);
+            }
+        }
+        field(vm, self.kit, name)
+    }
+}
+
+/// Whether `o` has the field `name` itself (set to anything, `nil` too).
+fn has_own(vm: &ScriptVm, o: ScriptObject, name: &str) -> bool {
+    let id = LiveId::from_str(name);
+    fields(vm, o).iter().any(|(k, _)| *k == id)
+}
+
+/// A Splash list's items (`[a, b]`).
+fn list(vm: &ScriptVm, v: ScriptValue) -> Vec<ScriptValue> {
+    let h = &vm.bx.heap;
+    if let Some(a) = v.as_array() {
+        return (0..h.array_len(a)).map(|i| h.array_index(a, i, NoTrap)).collect();
+    }
+    if let Some(o) = v.as_object() {
+        return (0..h.vec_len(o)).map(|i| h.vec_value(o, i, NoTrap)).collect();
+    }
+    Vec::new()
 }
 
 fn field(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
@@ -210,14 +338,73 @@ pub fn script_mod(vm: &mut ScriptVm) {
     }
 }
 
-/// Reads the values of the evaluated kit `o`.
+/// Reads the values of the evaluated kit `o`: its own, then each of its
+/// `forms` (the kit's settings with the form's over them).
 fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> {
+    let src = Src::new(vm, o, None);
+    let mut values = read_layer(vm, src)?;
+    let fv = field(vm, o, "forms");
+    if fv.is_nil() {
+        return Ok(values);
+    }
+    let items = list(vm, fv);
+    if items.is_empty() {
+        return Err("forms: a list of the forms' settings, `forms: [{name: \"A\"}, {name: \"B\" text: \"...\"}]`".into());
+    }
+    values.form_dial = match field(vm, o, "form_dial") {
+        v if v.is_nil() => 0,
+        v => {
+            let name = text_of(vm, v).unwrap_or_default();
+            values.dials.iter().position(|(d, _)| *d == name).ok_or_else(|| format!("form_dial: @{name} is not one of the kit's dials"))?
+        }
+    };
+    if values.dials.is_empty() {
+        return Err("forms: the kit has no dial to pick its forms (`dials: {form: 0.0 ...}`)".into());
+    }
+    let mut forms = Vec::with_capacity(items.len());
+    for (k, item) in items.into_iter().enumerate() {
+        let fo = item.as_object().ok_or_else(|| format!("forms[{k}] is not a {{...}} of settings"))?;
+        for (key, v) in fields(vm, fo) {
+            let key = key.to_string();
+            if v.as_object().is_some_and(|f| vm.bx.heap.as_fn(f).is_some()) {
+                return Err(format!("forms[{k}]: `{key}` is a fn; a form sets values, the kit's fns serve every form"));
+            }
+            if !FORM_KEYS.contains(&key.as_str()) {
+                return Err(format!("forms[{k}]: `{key}` is not a setting a form can change ({})", FORM_KEYS.join(", ")));
+            }
+        }
+        let src = Src::new(vm, o, Some(fo));
+        let mut v = read_layer(vm, src).map_err(|e| format!("forms[{k}]: {e}"))?;
+        let name = {
+            let n = field(vm, fo, "name");
+            text_of(vm, n).unwrap_or_default()
+        };
+        // The kit's own: its name and dials, and its post passes unless
+        // the form has its own `post`.
+        v.name = values.name.clone();
+        v.dials = values.dials.clone();
+        if !has_own(vm, fo, "post") {
+            v.passes = values.passes.clone();
+            v.pass_values = values.pass_values.clone();
+        }
+        v.form_dial = values.form_dial;
+        forms.push(Form { name, values: v });
+    }
+    values.forms = forms;
+    Ok(values)
+}
+
+/// Reads one layer of settings: the kit's (`src.form` None) or a form's
+/// over the kit's. The dials are always the kit's; the post passes are
+/// read here for the kit and for a form with its own `post`.
+fn read_layer(vm: &mut ScriptVm, src: Src) -> Result<KitValues, String> {
+    let o = src.kit;
     let mut shape = ShapeSpec::default();
     let s = |vm: &mut ScriptVm, n: &str| {
-        let v = field(vm, o, n);
+        let v = src.get(vm, n);
         text_of(vm, v)
     };
-    let f = |vm: &ScriptVm, n: &str| num(field(vm, o, n));
+    let f = |vm: &ScriptVm, n: &str| num(src.get(vm, n));
     let mut bold = true;
     if let Some(font) = s(vm, "font") {
         bold = font == "bold";
@@ -232,7 +419,7 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     }
     // Variable-font axes by four-letter tag: `axes: {wdth: 125 slnt: -8}`
     // (`wght` is `weight`).
-    let axes = field(vm, o, "axes");
+    let axes = src.get(vm, "axes");
     if let Some(a) = axes.as_object() {
         for (tag, v) in fields(vm, a) {
             let Some(v) = num(v) else { continue };
@@ -294,7 +481,7 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     if let Some(a) = s(vm, "alphabet") {
         shape.alphabet = a;
     }
-    let cells = field(vm, o, "cells");
+    let cells = src.get(vm, "cells");
     if let Some(c) = cells.as_object() {
         let fill = {
             let v = field(vm, c, "fill");
@@ -308,11 +495,15 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     }
     let case = s(vm, "case");
     let mut colors = [vec4(0.02, 0.02, 0.04, 1.0), vec4(1.0, 1.0, 1.0, 1.0), vec4(0.2, 0.2, 0.3, 1.0), vec4(1.0, 0.45, 0.2, 1.0)];
-    let cv = field(vm, o, "colors");
-    if let Some(c) = cv.as_object() {
-        for (k, n) in ["bg", "a", "b", "c"].iter().enumerate() {
-            if let Some(v) = color(field(vm, c, n)) {
-                colors[k] = v;
+    // The kit's colours, then a form's key by key.
+    let layers = [Some(o), src.form];
+    for layer in layers.into_iter().flatten() {
+        let cv = field(vm, layer, "colors");
+        if let Some(c) = cv.as_object() {
+            for (k, n) in ["bg", "a", "b", "c"].iter().enumerate() {
+                if let Some(v) = color(field(vm, c, n)) {
+                    colors[k] = v;
+                }
             }
         }
     }
@@ -325,19 +516,24 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
         Some("holo") => 5.0,
         Some(other) => return Err(format!("material: @{other} is not one of matte, metal, neon, plastic, glass, holo")),
     };
+    // The dials are the kit's (read_values gives them to its forms, and
+    // the kit's post passes to a form without its own).
     let mut dials = Vec::new();
-    let dv = field(vm, o, "dials");
+    let dv = if src.form.is_none() { field(vm, o, "dials") } else { NIL };
     if let Some(d) = dv.as_object() {
         for (name, v) in fields(vm, d) {
             dials.push((name.to_string(), num(v).unwrap_or(0.5)));
         }
     }
+    if dials.len() > MAX_DIALS {
+        return Err(format!("dials: {} declared; a kit has at most {MAX_DIALS}", dials.len()));
+    }
     // A dial is a kernel param and a shader function by its name: it may
     // not take a name the kernel or the look already has.
     const TAKEN: &[&str] = &[
-        "time", "seed", "count", "p1", "p2", "p3", "p4", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "bands",
+        "time", "seed", "count", "p1", "p2", "p3", "p4", "p5_8", "p9_12", "p13_16", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "bands",
         "key", "rim", "cap", "n", "vd", "eye", "content", "screen_uv", "finish", "shade", "env", "spec", "hue", "fog", "look", "floor", "deform", "backdrop", "picture", "ink",
-        "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy", "fwidth", "ray", "plane_hit", "text_plane", "k_share", "dying",
+        "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy", "fwidth", "ray", "plane_hit", "text_plane", "k_share", "dying", "on_screen",
     ];
     for (name, _) in &dials {
         let module_fn = crate::kernel::KINETIC_MODULE.lines().filter_map(|l| l.strip_prefix("fn ")).any(|l| l.split('(').next() == Some(name.as_str()));
@@ -346,27 +542,27 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
         }
     }
     let (mut fov, mut dist, mut height) = (50.0, None, None);
-    let cam = field(vm, o, "camera");
+    let cam = src.get(vm, "camera");
     if let Some(c) = cam.as_object() {
         fov = num(field(vm, c, "fov")).unwrap_or(fov);
         dist = num(field(vm, c, "dist"));
         height = num(field(vm, c, "height"));
     }
-    let fl = field(vm, o, "ground");
+    let fl = src.get(vm, "ground");
     let floor = fl.as_object().map(|c| (num(field(vm, c, "y")), num(field(vm, c, "size"))));
-    let pic = field(vm, o, "picture");
+    let pic = src.get(vm, "picture");
     let picture = pic.as_object().map(|c| {
         let w = num(field(vm, c, "width")).unwrap_or(1024.0).clamp(16.0, 4096.0) as u32;
         let h = num(field(vm, c, "height")).unwrap_or(256.0).clamp(16.0, 4096.0) as u32;
         (w, h, num(field(vm, c, "view")).unwrap_or(2.0).max(0.01))
     });
-    let sf = field(vm, o, "grid");
+    let sf = src.get(vm, "grid");
     let surface = sf.as_object().map(|c| {
         let u = num(field(vm, c, "u")).unwrap_or(96.0).clamp(2.0, 1024.0) as u32;
         let v = num(field(vm, c, "v")).unwrap_or(32.0).clamp(2.0, 1024.0) as u32;
         (u, v, num(field(vm, c, "copies")).unwrap_or(1.0).clamp(1.0, 256.0) as u32)
     });
-    let cv = field(vm, o, "curve");
+    let cv = src.get(vm, "curve");
     let curve_points = cv.as_object().map(|c| num(field(vm, c, "points")).unwrap_or(256.0).clamp(4.0, 4096.0) as u32);
     let curve_frames = cv.as_object().map_or(crate::curve::Frames::default(), |c| crate::curve::Frames {
         closed: num(field(vm, c, "closed")).unwrap_or(0.0) > 0.5,
@@ -376,7 +572,7 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
         }),
     });
     let (mut cycle_beats, mut pingpong) = (0.0, false);
-    let cy = field(vm, o, "cycle");
+    let cy = src.get(vm, "cycle");
     if let Some(c) = cy.as_object() {
         cycle_beats = num(field(vm, c, "beats")).unwrap_or(4.0);
         pingpong = num(field(vm, c, "pingpong")).unwrap_or(0.0) > 0.5;
@@ -384,7 +580,11 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     // Passes: kits call their template, `Pass{}`s are read as they are.
     let mut passes = Vec::new();
     let mut pass_values = Vec::new();
-    let post = field(vm, o, "post");
+    let post = match src.form {
+        None => field(vm, o, "post"),
+        Some(f) if has_own(vm, f, "post") => field(vm, f, "post"),
+        Some(_) => NIL,
+    };
     let items = makepad_render_graph::script::post_items(vm, post);
     let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object().ok_or("the kit module is not registered")?;
     for (k, item) in items.into_iter().enumerate() {
@@ -434,7 +634,92 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
         cycle_beats,
         pingpong,
         dying: f(vm, "dying").filter(|d| *d > 0.0).map(|d| d.min(30.0)),
+        screen: f(vm, "screen").is_some_and(|v| v > 0.5),
         passes,
         pass_values,
+        forms: Vec::new(),
+        form_dial: 0,
     })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A family kit: the kit's settings, and three forms over them.
+    pub const FAMILY: &str = r#"Kinetic{
+    name: "FAMILY"  text: "ONE"  case: @upper  font: @roboto  weight: 820  axes: {wdth: 84}
+    copies: 2  picture: {width: 512 height: 128 view: 2.0}
+    camera: {dist: 10.0 fov: 72}
+    colors: {bg: #x000000 a: #xffffff b: #x0d0d0d c: #xff0000}
+    dials: {form: 0.1 speed: 0.5}
+    post: [Glow{threshold: 0.95 strength: 0.3}]
+    forms: [
+        {name: "FIRST"},
+        {name: "SECOND" text: "two words here" case: @lower font: @inter weight: 900 copies: 3 colors: {b: #x3c3c3c} camera: {fov: 30} wrap: 4 picture: nil screen: true post: [Glow{threshold: 0.95 strength: 0.25}]},
+        {name: "THIRD" text: "third" post: []}
+    ]
+    look: fn() -> vec4 { return vec4(1.0, 1.0, 1.0, 1.0) }
+}"#;
+
+    fn with_kit<R>(src: &str, f: impl FnOnce(Result<Kit, String>) -> R) -> R {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_draw::script_mod(vm);
+            crate::view::script_mod(vm);
+            f(load(vm, src, "family_test"))
+        })
+    }
+
+    /// The first value of each pass uniform (a Glow's strength among them).
+    fn firsts(v: &KitValues) -> Vec<f32> {
+        v.pass_values.iter().flatten().map(|u| u.0[0]).collect()
+    }
+
+    #[test]
+    fn forms_read_the_kit_with_their_own_settings_over_it() {
+        let v = with_kit(FAMILY, |kit| kit.unwrap_or_else(|e| panic!("{e}")).values);
+        assert_eq!((v.forms.len(), v.form_dial, v.screen), (3, 0, false));
+        let names: Vec<&str> = v.forms.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["FIRST", "SECOND", "THIRD"]);
+        // FIRST names nothing: the kit as written.
+        let a = &v.forms[0].values;
+        assert_eq!((a.name.as_str(), a.text.as_str(), a.upper, a.copies), ("FAMILY", "ONE", true, 2));
+        assert_eq!((a.shape.font.clone(), a.shape.weight, a.shape.axes.clone()), (v.shape.font.clone(), Some(820.0), vec![(u32::from_be_bytes(*b"wdth"), 84.0)]));
+        assert_eq!((a.picture, a.fov, a.dist, a.colors, a.shape.wrap), (v.picture, 72.0, Some(10.0), v.colors, None));
+        assert_eq!((a.passes.len(), firsts(a)), (v.passes.len(), firsts(&v)));
+        assert!(!a.passes.is_empty() && firsts(a).contains(&0.3), "the kit's glow: {:?}", firsts(a));
+        // SECOND: its words, case, whole font (no wdth from the kit),
+        // copies, one colour, its whole camera, a wrap, no picture, on
+        // screen, its own glow; the kit's name and dials.
+        let b = &v.forms[1].values;
+        assert_eq!((b.name.as_str(), b.text.as_str(), b.upper, b.lower, b.copies), ("FAMILY", "two words here", false, true, 3));
+        assert_eq!((b.shape.font.clone(), b.shape.weight, b.shape.axes.clone()), (FontSource::Bundled("inter".into()), Some(900.0), vec![]));
+        assert_eq!((b.colors[0], b.colors[1], b.colors[3]), (v.colors[0], v.colors[1], v.colors[3]));
+        assert!((b.colors[2].x - 60.0 / 255.0).abs() < 1e-3 && b.colors[2] != v.colors[2], "{:?}", b.colors[2]);
+        assert_eq!((b.fov, b.dist, b.shape.wrap, b.picture, b.screen), (30.0, None, Some(4.0), None, true));
+        assert_eq!(b.dials, v.dials);
+        assert_eq!(b.passes, a.passes, "the same glow, at its own strength");
+        assert!(firsts(b).contains(&0.25) && !firsts(b).contains(&0.3), "{:?}", firsts(b));
+        // THIRD: its words, no post passes, the kit's font and case.
+        let c = &v.forms[2].values;
+        assert_eq!((c.text.as_str(), c.upper, c.shape.weight, c.shape.axes.len(), c.passes.len(), c.pass_values.len()), ("third", true, Some(820.0), 1, 0, 0));
+        // A kit without forms has none, and reads as before.
+        let plain = with_kit("Kinetic{ text: \"A\" dials: {x_amt: 0.2} }", |kit| kit.unwrap().values);
+        assert!(plain.forms.is_empty() && plain.text == "A" && !plain.screen);
+        // `screen: true` on a kit; `form_dial` names the dial.
+        let on = with_kit("Kinetic{ screen: true picture: {} dials: {a_amt: 0.0 pick: 0.9} form_dial: @pick forms: [{}, {text: \"B\"}] }", |kit| kit.unwrap().values);
+        assert!(on.screen && on.forms[0].values.screen && on.form_dial == 1);
+    }
+
+    #[test]
+    fn a_form_sets_values_only() {
+        let err = |src: &str| with_kit(src, |kit| kit.err().expect("an error"));
+        assert!(err("Kinetic{ dials: {form: 0.0} forms: [{look: fn() -> vec4 { return vec4(1.0, 1.0, 1.0, 1.0) }}] }").contains("forms[0]: `look` is a fn"));
+        assert!(err("Kinetic{ dials: {form: 0.0} forms: [{}, {fnt: @inter}] }").contains("forms[1]: `fnt` is not a setting"));
+        assert!(err("Kinetic{ dials: {form: 0.0} forms: [{dials: {a_amt: 0.1}}] }").contains("`dials` is not a setting"));
+        assert!(err("Kinetic{ dials: {form: 0.0} form_dial: @nope forms: [{}] }").contains("form_dial: @nope"));
+        assert!(err("Kinetic{ forms: [{}, {}] }").contains("no dial"));
+        assert!(err("Kinetic{ dials: {form: 0.0} forms: [{material: @wood}] }").contains("forms[0]: material"));
+    }
 }

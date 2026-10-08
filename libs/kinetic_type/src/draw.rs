@@ -10,10 +10,12 @@
 //! 4 cube, 5 floor, 6 surface), `nrm` (world normal), `wpos`, `lpos` (glyph-local),
 //! `luv` (uv in the glyph's ink box), the record's `color`, `attr`, `info`
 //! (t, word, line, index), the frame's `time beat phase pulse bar energy`,
-//! the dials `p` (and each by its name, `self.swing()`), the palette
+//! the dials `p` (p1..p4; dials 5..16 are `p5_8`, `p9_12`, `p13_16`, and
+//! each is also its name, `self.swing()`), the palette
 //! `col_a col_b col_c col_bg`, `self.eye()`, `self.content(uv)` (the
-//! picture under the layer) and the stock finishes (`finish(mat, …)`,
-//! `shade`, `env`, `spec`, `hue`, `key`, `rim`).
+//! picture under the layer), `self.on_screen` (0 while a picture kit draws
+//! into its picture, 1 on the screen; kit.rs `screen`) and the stock
+//! finishes (`finish(mat, …)`, `shade`, `env`, `spec`, `hue`, `key`, `rim`).
 
 use makepad_draw::*;
 
@@ -56,6 +58,10 @@ script_mod! {
         energy: uniform(0.0)
         bpm: uniform(120.0)
         p: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        // dials 5..16 (a kit with more than four)
+        p5_8: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p9_12: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p13_16: uniform(vec4(0.5, 0.5, 0.5, 0.5))
         // bass, mid, high, level (0..1)
         bands: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         col_a: uniform(vec4(1.0, 1.0, 1.0, 1.0))
@@ -71,6 +77,9 @@ script_mod! {
         k_share: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // xy = the target in pixels, z = the time the text last changed
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
+        // The pass: 0 while a picture kit draws into its picture, 1 on the
+        // screen (a kit without a picture, or `screen: true`).
+        on_screen: uniform(1.0)
 
         face: varying(float)
         nrm: varying(vec3f)
@@ -360,6 +369,9 @@ script_mod! {
         energy: uniform(0.0)
         bpm: uniform(120.0)
         p: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p5_8: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p9_12: uniform(vec4(0.5, 0.5, 0.5, 0.5))
+        p13_16: uniform(vec4(0.5, 0.5, 0.5, 0.5))
         // bass, mid, high, level (0..1)
         bands: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         col_a: uniform(vec4(1.0, 1.0, 1.0, 1.0))

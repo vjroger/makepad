@@ -50,9 +50,22 @@ mod.kin.curve_entry = fn(i) {
     out[i] = c
 }
 
-// A dial's shader accessor, `self.<dial>()`, for the first four dials
-// (p1..p4 are self.p.x..w).
+// A dial's shader accessor, `self.<dial>()`: the first four dials are
+// self.p.x..w (p1..p4), the next twelve self.p5_8, self.p9_12 and
+// self.p13_16.
 mod.kin.dial_x = fn() -> float { return self.p.x }
 mod.kin.dial_y = fn() -> float { return self.p.y }
 mod.kin.dial_z = fn() -> float { return self.p.z }
 mod.kin.dial_w = fn() -> float { return self.p.w }
+mod.kin.dial_5 = fn() -> float { return self.p5_8.x }
+mod.kin.dial_6 = fn() -> float { return self.p5_8.y }
+mod.kin.dial_7 = fn() -> float { return self.p5_8.z }
+mod.kin.dial_8 = fn() -> float { return self.p5_8.w }
+mod.kin.dial_9 = fn() -> float { return self.p9_12.x }
+mod.kin.dial_10 = fn() -> float { return self.p9_12.y }
+mod.kin.dial_11 = fn() -> float { return self.p9_12.z }
+mod.kin.dial_12 = fn() -> float { return self.p9_12.w }
+mod.kin.dial_13 = fn() -> float { return self.p13_16.x }
+mod.kin.dial_14 = fn() -> float { return self.p13_16.y }
+mod.kin.dial_15 = fn() -> float { return self.p13_16.z }
+mod.kin.dial_16 = fn() -> float { return self.p13_16.w }
