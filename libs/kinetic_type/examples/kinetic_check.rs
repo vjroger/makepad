@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! MAKEPAD_HIDE_WINDOWS=1 kinetic_check strip <kit.splash> --out sheet.png [--text "..."] [--count 8]
-//!     [--from 0] [--step 0.25 (beats)] [--bpm 120] [--width 480] [--cols 4] [--sing] [--p1 0.5]..[--p10 0.5]
+//!     [--from 0] [--step 0.25 (beats)] [--bpm 120] [--width 480] [--height (16:9)] [--ss 1|2] [--cols 4] [--sing] [--p1 0.5]..[--p10 0.5]
 //! MAKEPAD_HIDE_WINDOWS=1 kinetic_check bench <kit.splash> [--text "..."] [--frames 240]
 //! ```
 //!
@@ -11,7 +11,10 @@
 //! (spectrum, levels, hits). `--sing` sweeps the karaoke progress 0..1 across the strip. Frame k is
 //! at beat `from + k * step`; time = beat * 60 / bpm. `--texts "A|B|C"
 //! --every 1` shows the texts in turn, one every `every` beats (a feed:
-//! lyric words, a clock), each change stamped at its beat.
+//! lyric words, a clock), each change stamped at its beat. Any dial is
+//! `--p1`..`--p10` (the frame's dials); `--p1 "0.2|0.8"` steps a dial
+//! through its values the same way, one every `every` beats (a FORM turned
+//! during the strip).
 
 use makepad_kinetic_type::*;
 use makepad_widgets::makepad_zune_png::makepad_zune_core::bit_depth::BitDepth;
@@ -39,7 +42,12 @@ script_mod! {
             self.fb0 = self.pixel()
         }
         pixel: fn() {
-            let c = self.tex.sample_nearest(self.pos)
+            // Four taps a quarter pixel either way: the average of a 2x2
+            // block when the kit drew at twice the size (`--ss 2`), the
+            // one texel four times when it drew at the output size.
+            let o = vec2(0.25, 0.25) / self.rect_size
+            let c = (self.tex.sample_nearest(self.pos + vec2(0.0 - o.x, 0.0 - o.y)) + self.tex.sample_nearest(self.pos + vec2(o.x, 0.0 - o.y))
+                + self.tex.sample_nearest(self.pos + vec2(0.0 - o.x, o.y)) + self.tex.sample_nearest(self.pos + vec2(o.x, o.y))) * 0.25
             return vec4(clamp(c.xyz, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), 1.0)
         }
     }
@@ -103,12 +111,17 @@ struct Job {
     size: (u32, u32),
     cols: usize,
     sing: bool,
-    dials: [Option<f32>; makepad_kinetic_type::kit::MAX_DIALS],
+    /// `--p1`..`--p10`: each dial's value, or its values one per `every`
+    /// beats (empty: the kit's default).
+    dials: Vec<Vec<f32>>,
     bench: usize,
     texts: Vec<String>,
     every: f32,
     /// Play the deterministic music bed into the audio input.
     bed: bool,
+    /// Supersampling: the kit draws at this many times the output size and
+    /// the encode averages it down (1 or 2).
+    ss: u32,
 }
 
 enum State {
@@ -159,10 +172,7 @@ impl KineticHost {
         let Some(file) = args.get(2).cloned() else { finish(Err("usage: kinetic_check strip|bench <kit.splash> [options]".into())) };
         let kit = std::fs::read_to_string(&file).unwrap_or_else(|e| finish(Err(format!("{file}: {e}"))));
         let width = argf(args, "--width", 480.0) as u32;
-        let mut dials = [None; makepad_kinetic_type::kit::MAX_DIALS];
-        for (k, d) in dials.iter_mut().enumerate() {
-            *d = arg(args, &format!("--p{}", k + 1)).and_then(|v| v.parse().ok());
-        }
+        let dials: Vec<Vec<f32>> = (1..=makepad_kinetic_type::kit::MAX_DIALS).map(|k| arg(args, &format!("--p{k}")).map_or(Vec::new(), |v| v.split('|').filter_map(|x| x.trim().parse().ok()).collect())).collect();
         self.job = Some(Job {
             kit,
             file,
@@ -172,7 +182,7 @@ impl KineticHost {
             from: argf(args, "--from", 0.0),
             step: argf(args, "--step", 0.5),
             bpm: argf(args, "--bpm", 120.0),
-            size: (width, width * 9 / 16),
+            size: (width, argf(args, "--height", (width * 9 / 16) as f32) as u32),
             cols: argf(args, "--cols", 4.0) as usize,
             sing: args.iter().any(|a| a == "--sing"),
             dials,
@@ -180,9 +190,18 @@ impl KineticHost {
             texts: arg(args, "--texts").map(|t| t.split('|').map(|s| s.replace("\\n", "\n")).collect()).unwrap_or_default(),
             every: argf(args, "--every", 1.0).max(0.01),
             bed: args.iter().any(|a| a == "--bed"),
+            ss: argf(args, "--ss", 1.0).clamp(1.0, 2.0) as u32,
         });
         self.state = Some(State::Load);
         self.next_frame = cx.new_next_frame();
+    }
+
+    /// Every dial at `beat` (`--pN`, or its value for the `every`-beat
+    /// slot the beat is in; None: the kit's default).
+    fn dials_at(&self, beat: f32) -> [Option<f32>; makepad_kinetic_type::kit::MAX_DIALS] {
+        let job = self.job.as_ref().unwrap();
+        let slot = (beat / job.every).floor().max(0.0) as usize;
+        std::array::from_fn(|k| job.dials.get(k).filter(|l| !l.is_empty()).map(|l| l[slot % l.len()]))
     }
 
     fn frame_of(&self, k: usize) -> KineticFrame {
@@ -196,7 +215,7 @@ impl KineticHost {
             energy: 0.5,
             bands: [0.5, 0.4, 0.3],
             audio: None,
-            dials: job.dials,
+            dials: self.dials_at(beat),
             karaoke: if job.sing { Karaoke::Progress((k as f32 + 0.5) / n as f32) } else { Karaoke::None },
             content: None,
         }
@@ -233,7 +252,8 @@ impl KineticHost {
         cx.begin_pass(ep, Some(1.0));
         el.begin_always(cx);
         let view = self.view.as_mut().unwrap();
-        if let Some(out) = view.render(cx, size, &frame) {
+        let ss = self.job.as_ref().map_or(1, |j| j.ss);
+        if let Some(out) = view.render(cx, (size.0 * ss, size.1 * ss), &frame) {
             self.encode.draw_vars.set_texture(0, &out);
         }
         self.encode.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dsize });

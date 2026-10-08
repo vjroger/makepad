@@ -11,10 +11,12 @@
 //! `luv` (uv in the glyph's ink box), the record's `color`, `attr`, `info`
 //! (t, word, line, index), the frame's `time beat phase pulse bar energy`,
 //! the dials `p` (p1..p4), `p_b` (p5..p8) and `p_c.xy` (p9, p10), each
-//! also by its name (`self.swing()`), the palette
+//! also by its name (`self.swing()`; `p_c.zw` the eleventh and twelfth a
+//! kit holds at their defaults, kit.rs), the palette
 //! `col_a col_b col_c col_bg`, `self.eye()`, `self.content(uv)` (the
-//! picture under the layer) and the stock finishes (`finish(mat, …)`,
-//! `shade`, `env`, `spec`, `hue`, `key`, `rim`).
+//! picture under the layer), `self.on_screen` (0 while a picture kit draws
+//! into its picture, 1 on the screen; kit.rs `screen`) and the stock
+//! finishes (`finish(mat, …)`, `shade`, `env`, `spec`, `hue`, `key`, `rim`).
 
 use makepad_draw::*;
 
@@ -57,7 +59,8 @@ script_mod! {
         energy: uniform(0.0)
         bpm: uniform(120.0)
         p: uniform(vec4(0.5, 0.5, 0.5, 0.5))
-        // The dials past the fourth: p5..p8, then p9 and p10 in xy.
+        // The dials past the fourth: p5..p8, then p9 and p10 in xy (zw:
+        // the eleventh and twelfth, held at their defaults).
         p_b: uniform(vec4(0.5, 0.5, 0.5, 0.5))
         p_c: uniform(vec4(0.5, 0.5, 0.0, 0.0))
         // bass, mid, high, level (0..1)
@@ -75,6 +78,9 @@ script_mod! {
         k_share: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // xy = the target in pixels, z = the time the text last changed
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
+        // The pass: 0 while a picture kit draws into its picture, 1 on the
+        // screen (a kit without a picture, or `screen: true`).
+        on_screen: uniform(1.0)
 
         face: varying(float)
         nrm: varying(vec3f)
@@ -364,7 +370,8 @@ script_mod! {
         energy: uniform(0.0)
         bpm: uniform(120.0)
         p: uniform(vec4(0.5, 0.5, 0.5, 0.5))
-        // The dials past the fourth: p5..p8, then p9 and p10 in xy.
+        // The dials past the fourth: p5..p8, then p9 and p10 in xy (zw:
+        // the eleventh and twelfth, held at their defaults).
         p_b: uniform(vec4(0.5, 0.5, 0.5, 0.5))
         p_c: uniform(vec4(0.5, 0.5, 0.0, 0.0))
         // bass, mid, high, level (0..1)

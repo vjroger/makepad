@@ -29,7 +29,8 @@ pub struct KineticFrame {
     /// Bass, mid, high (0..1).
     pub bands: [f32; 3],
     /// The kit's dials p1..p10, in its order, where the host sets them
-    /// (`None`: the kit's own default).
+    /// (`None`: the value [`KineticView::set_dials`] gave, else the kit's
+    /// own default).
     pub dials: [Option<f32>; MAX_DIALS],
     pub karaoke: Karaoke,
     /// The picture under the layer (glass, backdrops).
@@ -70,10 +71,18 @@ const DIAL_ACCESSORS: [&str; MAX_DIALS] = ["dial_x", "dial_y", "dial_z", "dial_w
 /// The kernel param of each dial slot.
 const DIAL_PARAMS: [&str; MAX_DIALS] = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10"];
 
-/// The dials a frame runs with, p1..p10: the host's value where it sets
-/// one, else the kit's default, else 0.5.
-pub(crate) fn dial_values(values: &KitValues, frame: &KineticFrame) -> [f32; MAX_DIALS] {
-    std::array::from_fn(|k| frame.dials[k].or_else(|| values.dials.get(k).map(|d| d.1)).unwrap_or(0.5))
+/// The dials a frame runs with, p1..p10: the frame's value where the host
+/// sets one, else the host's [`KineticView::set_dials`] value (`host`),
+/// else the kit's default, else 0.5.
+pub(crate) fn dial_values(values: &KitValues, host: &[Option<f32>], frame: &KineticFrame) -> [f32; MAX_DIALS] {
+    std::array::from_fn(|k| frame.dials[k].or_else(|| host.get(k).copied().flatten()).or_else(|| values.dials.get(k).map(|d| d.1)).unwrap_or(0.5))
+}
+
+/// `self.p_c` in the shaders: p9 and p10, then the eleventh and twelfth
+/// dials a kit holds at their defaults (0 without them).
+fn p_c(values: &KitValues, p: &[f32; MAX_DIALS]) -> [f32; 4] {
+    let held = |k: usize| values.held.get(k).map_or(0.0, |d| d.1);
+    [p[8], p[9], held(0), held(1)]
 }
 
 /// The dials into a kernel call: `p1..p10`, and each of `named` (the
@@ -89,7 +98,8 @@ pub(crate) fn set_dial_params(call: &mut Call<'_>, p: &[f32; MAX_DIALS], named: 
 
 /// The draw members of a kit: its shader fns (`backdrop`'s draw takes
 /// only the helpers, not the glyph stage's own `look`, `floor`, `deform`)
-/// and an accessor `self.<dial>()` per dial it does not write itself.
+/// and an accessor `self.<dial>()` per dial it does not write itself (a
+/// held dial's returns its default).
 pub(crate) fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue)> {
     let own = kit.shader_fns(vm);
     let mut out: Vec<(LiveId, ScriptValue)> = own
@@ -108,6 +118,11 @@ pub(crate) fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, 
         }
         if let Some(m) = module {
             out.push((id, vm.bx.heap.value(m, LiveId::from_str(DIAL_ACCESSORS[k]).into(), NoTrap)));
+        }
+    }
+    for (id, f) in kit.held_fns(vm) {
+        if !own.iter().any(|(n, _)| *n == id) {
+            out.push((id, f));
         }
     }
     out
@@ -320,6 +335,29 @@ pub struct KineticView {
     kit_font: crate::FontSource,
     /// Letters alone over a clear frame ([`KineticView::set_overlay`]).
     overlay: bool,
+    /// A host's values for the kit's dials, in the order declared
+    /// ([`KineticView::set_dials`]); `None` (or past the end) keeps the
+    /// kit's default. A frame's `dials` win over these.
+    host_dials: Vec<Option<f32>>,
+    /// The last frame's dials, which win over `host_dials` when the form
+    /// is picked.
+    frame_dials: [Option<f32>; MAX_DIALS],
+    /// The kit's forms (kit.rs `forms`; empty without), the one shown
+    /// (`values` holds its settings) and the dial that picks it.
+    forms: Vec<kit::Form>,
+    form: usize,
+    form_dial: usize,
+    /// The form changed: lay the text out again (render does it when the
+    /// host does not call `set_text` first).
+    relayout: bool,
+    /// The text the host last asked for, as given.
+    asked: Option<String>,
+    /// What the host set over the kit's (its form's) own: palette, font,
+    /// weight and axes, applied again when the form changes.
+    colors_over: Option<[Vec4f; 4]>,
+    font_over: Option<crate::FontSource>,
+    weight_over: Option<f32>,
+    axes_over: Vec<(u32, f32)>,
     draw: DrawKineticGlyph,
     backdrop: Option<DrawKineticBackdrop>,
     glyph_kernel: Arc<Kernel>,
@@ -382,7 +420,9 @@ impl KineticView {
             };
             Ok((glyph, camera, curve))
         })?;
-        let values = kit.values;
+        let mut values = kit.values;
+        let forms = std::mem::take(&mut values.forms);
+        let form_dial = values.form_dial;
         let pass = DrawPass::new_with_name(cx, "kinetic");
         // The pass keeps the camera this view sets (not the 2D ortho).
         pass.set_keep_camera_matrix(cx, true);
@@ -390,10 +430,21 @@ impl KineticView {
         let depth = Texture::new_with_format(cx, TextureFormat::DepthD32 { size: TextureSize::Auto, initial: true });
         let mut graph = GraphRunner::default();
         graph.set_passes(&values.passes);
-        Ok(Self {
+        let mut view = Self {
             kit_colors: values.colors,
             kit_font: values.shape.font.clone(),
             overlay: false,
+            host_dials: Vec::new(),
+            frame_dials: [None; MAX_DIALS],
+            forms,
+            form: 0,
+            form_dial,
+            relayout: false,
+            asked: None,
+            colors_over: None,
+            font_over: None,
+            weight_over: None,
+            axes_over: Vec::new(),
             values,
             draw,
             backdrop,
@@ -420,7 +471,76 @@ impl KineticView {
             graph,
             stats: FrameStats::default(),
             errors: Vec::new(),
-        })
+        };
+        // A kit with forms starts in the form its dial's default picks.
+        if !view.forms.is_empty() {
+            let k = view.pick_form();
+            view.apply_form(k);
+        }
+        Ok(view)
+    }
+
+    /// The form the form dial picks: its value (the kit's default, the
+    /// host's, the last frame's) split into equal parts.
+    fn pick_form(&self) -> usize {
+        let n = self.forms.len();
+        let d = self.form_dial;
+        let mut v = self.values.dials.get(d).map_or(0.0, |x| x.1);
+        if let Some(Some(over)) = self.host_dials.get(d) {
+            v = *over;
+        }
+        if let Some(Some(over)) = self.frame_dials.get(d) {
+            v = *over;
+        }
+        ((v.clamp(0.0, 1.0) * n as f32) as usize).min(n.max(1) - 1)
+    }
+
+    /// Show form `k`: its settings with the host's choices over them, its
+    /// post passes, the records fresh and the text laid out again (on the
+    /// next `set_text`, or in `render`), as if the kit had just loaded with
+    /// this text.
+    fn apply_form(&mut self, k: usize) {
+        let Some(f) = self.forms.get(k) else { return };
+        let mut v = f.values.clone();
+        self.kit_colors = v.colors;
+        self.kit_font = v.shape.font.clone();
+        if let Some(c) = self.colors_over {
+            v.colors = c;
+        }
+        if let Some(font) = &self.font_over {
+            v.shape.font = font.clone();
+        }
+        v.shape.weight = self.weight_over.or(v.shape.weight);
+        for (tag, x) in &self.axes_over {
+            match v.shape.axes.iter_mut().find(|(t, _)| t == tag) {
+                Some(a) => a.1 = *x,
+                None => v.shape.axes.push((*tag, *x)),
+            }
+        }
+        // (a no-op when the passes are the same; their values are per frame)
+        self.graph.set_passes(&v.passes);
+        self.values = v;
+        self.form = k;
+        self.text = None;
+        self.records = Records::default();
+        self.relayout = true;
+    }
+
+    /// Follow the form dial (a kit with forms): a new form is applied now
+    /// and laid out on the next `set_text` or `render`.
+    fn follow_form(&mut self) {
+        if self.forms.is_empty() {
+            return;
+        }
+        let k = self.pick_form();
+        if k != self.form {
+            self.apply_form(k);
+        }
+    }
+
+    /// The form shown (0 for a kit without forms) and its name.
+    pub fn form(&self) -> (usize, &str) {
+        (self.form, self.forms.get(self.form).map_or("", |f| f.name.as_str()))
     }
 
     /// The text as the kit shows it (its case applied).
@@ -444,6 +564,9 @@ impl KineticView {
     /// builds `shapes::build(&view.spec(text))` on its pool and hands the
     /// result to [`Self::install`]). `now` stamps the glyphs that changed.
     pub fn set_text(&mut self, cx: &mut Cx, text: &str, now: f32) {
+        if self.asked.as_deref() != Some(text) {
+            self.asked = Some(text.to_string());
+        }
         let shown = self.shown(text);
         if self.text.as_deref() == Some(shown.as_str()) {
             return;
@@ -462,6 +585,7 @@ impl KineticView {
         let chars = set.elements.iter().map(|e| e.char_index).filter(|c| *c != usize::MAX).max().map_or(0, |m| m + 1);
         self.records.set(&set, self.values.copies, now, chars, self.values.dying.is_some());
         self.text_at = now;
+        self.relayout = false;
         self.surface = None;
         if let Some((u, v, copies)) = self.values.surface {
             let id = set.shapes.len();
@@ -492,6 +616,7 @@ impl KineticView {
     /// A host's palette (bg, a, b, c) over the kit's own (`None`: the
     /// kit's): a VJ console's colour override, a game's team colours.
     pub fn set_colors(&mut self, colors: Option<[Vec4f; 4]>) {
+        self.colors_over = colors;
         self.values.colors = colors.unwrap_or(self.kit_colors);
     }
 
@@ -501,10 +626,24 @@ impl KineticView {
         self.overlay = overlay;
     }
 
+    /// A host's values for ALL of the kit's dials, in the order the kit
+    /// declares them (up to [`MAX_DIALS`]; a held dial past the tenth
+    /// keeps its default): `None` keeps that dial at the kit's default. A
+    /// frame's [`KineticFrame::dials`] still set any over these. Kept until
+    /// set again.
+    pub fn set_dials(&mut self, values: &[Option<f32>]) {
+        self.host_dials.clear();
+        self.host_dials.extend_from_slice(&values[..values.len().min(MAX_DIALS)]);
+        self.follow_form();
+    }
+
     /// A host's font in place of the kit's own (`None`: the kit's): a
     /// document's font for a kinetic title. The text is rebuilt on the next
     /// `set_text` when it changes.
     pub fn set_font(&mut self, font: Option<crate::FontSource>) {
+        if self.font_over != font {
+            self.font_over = font.clone();
+        }
         let font = font.unwrap_or_else(|| self.kit_font.clone());
         if font != self.values.shape.font {
             self.values.shape.font = font;
@@ -513,6 +652,16 @@ impl KineticView {
     }
 
     pub fn set_axes(&mut self, weight: Option<f32>, axes: &[(u32, f32)]) {
+        // Kept, to set them again over a new form's.
+        if weight.is_some() {
+            self.weight_over = weight;
+        }
+        for (tag, v) in axes {
+            match self.axes_over.iter_mut().find(|(t, _)| t == tag) {
+                Some(a) => a.1 = *v,
+                None => self.axes_over.push((*tag, *v)),
+            }
+        }
         let weight = weight.or(self.values.shape.weight);
         let mut merged = self.values.shape.axes.clone();
         for (tag, v) in axes {
@@ -553,14 +702,16 @@ impl KineticView {
 
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: &[f32; MAX_DIALS], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4], share: [f32; 4]) {
+    fn set_uniforms<D: std::ops::DerefMut<Target = DrawVars>>(values: &KitValues, dv: &mut D, cx: &Cx, s: &[f32; 7], p: &[f32; MAX_DIALS], bands: [f32; 4], misc: [f32; 4], view: [f32; 4], text: [f32; 4], share: [f32; 4], on_screen: f32) {
         dv.set_uniform(cx, live_id!(k_share), &share);
+        // The glyph draw's pass (the backdrop has none).
+        dv.set_uniform(cx, live_id!(on_screen), &[on_screen]);
         for (k, name) in ["time", "beat", "phase", "pulse", "bar", "energy", "bpm"].iter().enumerate() {
             dv.set_uniform(cx, LiveId::from_str(name), &[s[k]]);
         }
         dv.set_uniform(cx, live_id!(p), &p[0..4]);
         dv.set_uniform(cx, live_id!(p_b), &p[4..8]);
-        dv.set_uniform(cx, live_id!(p_c), &[p[8], p[9], 0.0, 0.0]);
+        dv.set_uniform(cx, live_id!(p_c), &p_c(values, p));
         dv.set_uniform(cx, live_id!(bands), &bands);
         let c = &values.colors;
         dv.set_uniform(cx, live_id!(col_bg), &[c[0].x, c[0].y, c[0].z, c[0].w]);
@@ -575,6 +726,17 @@ impl KineticView {
     /// Animate and draw one frame into the target (`px` pixels); returns
     /// the picture (after the kit's passes).
     pub fn render(&mut self, cx: &mut Cx2d, px: (u32, u32), frame: &KineticFrame) -> Option<Texture> {
+        // ---- the form (a kit with forms): the frame's dials pick it, and a
+        // new one lays the text out again before anything reads the set.
+        self.frame_dials = frame.dials;
+        self.follow_form();
+        if self.relayout {
+            if let Some(text) = self.asked.clone() {
+                let at = self.text_at;
+                self.set_text(cx.cx, &text, at);
+            }
+            self.relayout = false;
+        }
         let set = self.set.as_ref()?;
         let t0 = Cx::monotonic_now();
         // ---- signals
@@ -592,7 +754,7 @@ impl KineticView {
         let (bmin, bmax) = set.bounds;
         let (width, height) = ((bmax[0] - bmin[0]).max(0.001), (bmax[1] - bmin[1]).max(0.001));
         let size = self.values.shape.size;
-        let p = dial_values(&self.values, frame);
+        let p = dial_values(&self.values, &self.host_dials, frame);
         // ---- records and the animator
         if self.records.dying > 0 && self.values.dying.is_none_or(|d| frame.time - self.text_at > d) {
             self.records.retire_dying();
@@ -753,8 +915,11 @@ impl KineticView {
         let glyphs = Glyphs { set, buckets: &self.buckets, geometries: &self.geometries, out: &self.out, stride, floor: self.floor.zip(self.values.floor.map(|f| f.1)), surface: None, floor_y, centre, width, height, size };
         // With a picture the glyphs draw flat into it (an orthographic
         // view `view` cap heights tall about the origin), and the frame is
-        // the backdrop reading it.
-        if let Some((pw, ph, _)) = picture {
+        // the backdrop reading it. A form without a picture, after one
+        // with, keeps the pass empty at 16 x 16, so its targets give their
+        // memory back (a kit without forms never does that).
+        let pic_pass = picture.map(|(w, h, _)| (w, h)).or(self.picture.as_ref().map(|_| (16, 16)));
+        if let Some((pw, ph)) = pic_pass {
             let pp = self.picture.get_or_insert_with(|| Picture::new(cx.cx));
             let psize = dvec2(pw as f64, ph as f64);
             pp.pass.set_size(cx.cx, psize);
@@ -774,12 +939,14 @@ impl KineticView {
             proj.v[14] = -near / (far - near);
             pp.pass.set_camera(cx.cx, view, proj);
             pp.list.begin_always(cx);
-            let pview = [pw as f32, ph as f32, self.text_at, 1.0];
-            Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, pview, textu, share);
-            if let Some(a) = &frame.audio {
-                bind_audio(cx.cx, &mut self.draw.draw_vars, a);
+            if picture.is_some() {
+                let pview = [pw as f32, ph as f32, self.text_at, 1.0];
+                Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, pview, textu, share, 0.0);
+                if let Some(a) = &frame.audio {
+                    bind_audio(cx.cx, &mut self.draw.draw_vars, a);
+                }
+                calls += glyphs.draw(cx, &mut self.draw);
             }
-            calls += glyphs.draw(cx, &mut self.draw);
             pp.list.end(cx);
             cx.end_pass(&pp.pass);
         }
@@ -793,7 +960,7 @@ impl KineticView {
         self.pass.set_camera(cx.cx, view, projection);
         self.list.begin_always(cx);
         if let Some(b) = self.backdrop.as_mut().filter(|_| !self.overlay) {
-            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, &p, bands, misc, viewu, textu, share);
+            Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, &p, bands, misc, viewu, textu, share, 1.0);
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);
             }
@@ -806,7 +973,7 @@ impl KineticView {
             b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px });
             calls += 1;
         }
-        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, viewu, textu, share);
+        Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, viewu, textu, share, 1.0);
         if let Some(c) = &frame.content {
             self.draw.draw_vars.set_texture(0, c);
         }
@@ -821,13 +988,15 @@ impl KineticView {
             let np = self.values.curve_points.unwrap_or(2) as f32;
             self.draw.draw_vars.set_uniform(cx.cx, live_id!(k_curve), &[self.curve.3, np, 0.0, 0.0]);
         }
-        if picture.is_none() {
+        // A picture kit's glyphs drew into its picture; with `screen` they
+        // draw here too, in the frame's camera (`self.on_screen` 1).
+        if picture.is_none() || self.values.screen {
             calls += glyphs.draw(cx, &mut self.draw);
         }
         calls += Glyphs { surface: self.surface, ..glyphs }.draw_surface(cx, &mut self.draw);
         self.list.end(cx);
         cx.end_pass(&self.pass);
-        if let (Some(pp), Some(_)) = (&self.picture, picture) {
+        if let (Some(pp), Some(_)) = (&self.picture, pic_pass) {
             pp.pass.set_pass_parent(cx.cx, self.pass.draw_pass_id());
         }
         // ---- the kit's passes
@@ -860,4 +1029,171 @@ impl KineticView {
 /// off as `exp(-5 phase)` (`phase` 0..1 through the beat).
 pub fn beat_pulse(phase: f32) -> f32 {
     (-phase * 5.0).exp()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FontSource;
+
+    const CHANGED: usize = 24;
+
+    fn view(cx: &mut Cx) -> KineticView {
+        cx.with_vm(|vm| {
+            makepad_draw::script_mod(vm);
+            script_mod(vm);
+        });
+        KineticView::new(cx, crate::kit::tests::FAMILY, "family_test").unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The form dial (here a host's `set_dials`, as Stage sets every dial
+    /// a frame) picks the form; the next `set_text` lays its text out with
+    /// its settings, fresh records, the text's arrival kept; what the host
+    /// set (words, font, palette) still wins.
+    #[test]
+    fn the_form_dial_lays_the_text_out_as_its_form() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut v = view(&mut cx);
+        assert_eq!(v.form(), (0, "FIRST"));
+        v.set_text(&mut cx, "", 2.0);
+        let set = v.set.as_ref().unwrap();
+        assert_eq!((set.elements.len(), v.records.count, v.values.copies), (3, 6, 2), "ONE, two copies");
+        assert!(v.values.picture.is_some() && !v.values.screen);
+        let first_font = v.values.shape.font.clone();
+        // Turn the dial to the second third: SECOND.
+        v.set_dials(&[Some(0.5)]);
+        assert_eq!(v.form(), (1, "SECOND"));
+        assert!(v.text.is_none() && v.relayout, "laid out again on the next set_text");
+        v.set_text(&mut cx, "", 2.0);
+        let set = v.set.as_ref().unwrap();
+        assert_eq!(v.text.as_deref(), Some("two words here"));
+        assert!(set.lines >= 3, "wrapped at 4 caps: {} lines", set.lines);
+        assert_eq!((set.elements.len(), v.records.count), (12, 36), "three copies");
+        assert!((0..v.records.count).all(|i| v.records.data[i * GLYPH_WORDS + CHANGED] == -1e9), "fresh records, as if just loaded");
+        assert_eq!((v.text_at, v.values.picture, v.values.screen, v.values.fov), (2.0, None, true, 30.0));
+        assert_eq!(v.values.shape.font, FontSource::Bundled("inter".into()));
+        // The host's words win over the form's (in the form's case).
+        v.set_text(&mut cx, "Host Words", 3.0);
+        assert_eq!(v.text.as_deref(), Some("host words"));
+        // The host's palette and font win over every form's.
+        let pal = [vec4(0.1, 0.2, 0.3, 1.0); 4];
+        v.set_colors(Some(pal));
+        v.set_font(Some(FontSource::Bundled("mono".into())));
+        v.set_dials(&[Some(0.9)]);
+        assert_eq!(v.form(), (2, "THIRD"));
+        assert_eq!((v.values.colors, v.values.shape.font.clone(), v.values.passes.len()), (pal, FontSource::Bundled("mono".into()), 0));
+        // Back to the kit's own: THIRD's (the kit's) colours and font.
+        v.set_colors(None);
+        v.set_font(None);
+        assert_eq!((v.values.colors[2], v.values.shape.font.clone()), (v.forms[0].values.colors[2], first_font));
+        v.set_text(&mut cx, "", 4.0);
+        assert_eq!(v.text.as_deref(), Some("THIRD"));
+        // The same value again: no new layout.
+        v.set_dials(&[Some(0.95)]);
+        assert!(!v.relayout && v.text.is_some());
+    }
+
+    /// A view of the kit `src` (named `file`).
+    fn view_of(cx: &mut Cx, src: &str, file: &str) -> KineticView {
+        cx.with_vm(|vm| {
+            makepad_draw::script_mod(vm);
+            script_mod(vm);
+        });
+        KineticView::new(cx, src, file).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Run the view's animator over one element with the dials `p`: the
+    /// draw record's `pos`, `scale` and `color`.
+    fn animate(v: &KineticView, p: &[f32; MAX_DIALS]) -> [f32; 10] {
+        let at = |name: &str| v.layout.fields.iter().find(|f| f.name == name).map(|f| f.offset as usize).unwrap();
+        let recs = vec![0.0f32; GLYPH_WORDS];
+        let spec = [0.0f32; BANDS];
+        let mut out = vec![0.0f32; v.layout.stride as usize];
+        let mut call = v.glyph_kernel.call();
+        call.input("spectrum", &spec).unwrap();
+        call.input("glyphs", &recs).unwrap();
+        call.output("out", &mut out).unwrap();
+        set_dial_params(&mut call, p, &v.values.dials);
+        call.run(1).unwrap();
+        drop(call);
+        let (pos, scale, color) = (at("pos"), at("scale"), at("color"));
+        [out[pos], out[pos + 1], out[pos + 2], out[scale], out[scale + 1], out[scale + 2], out[color], out[color + 1], out[color + 2], out[color + 3]]
+    }
+
+    /// A kit with forms and eight dials: the frame's form dial shows the
+    /// second form, and there the animator reads every dial by its name
+    /// (the frame's value for each) and the shaders have each dial's
+    /// accessor.
+    #[test]
+    fn a_form_reaches_every_dial_by_name() {
+        const SRC: &str = "Kinetic{\n  text: \"AB\"\n  dials: {form: 0.1 a_amt: 0.11 b_amt: 0.12 c_amt: 0.13 d_amt: 0.14 e_amt: 0.15 f_amt: 0.16 g_amt: 0.17}\n  forms: [{name: \"ONE\"}, {name: \"TWO\" text: \"CD\" copies: 2}]\n  glyph: fn(g, o) {\n    o.pos = vec3(form, a_amt, b_amt)\n    o.scale = vec3(c_amt, d_amt, e_amt)\n    o.color = vec4(f_amt, g_amt, p8, p9)\n  }\n}\n";
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut v = view_of(&mut cx, SRC, "eight_dials_test");
+        assert_eq!(v.form(), (0, "ONE"));
+        let mut frame = KineticFrame::default();
+        for (k, d) in frame.dials.iter_mut().enumerate().take(8) {
+            *d = Some(0.6 + 0.04 * k as f32);
+        }
+        // What render does first: the frame's dials pick the form.
+        v.frame_dials = frame.dials;
+        v.follow_form();
+        assert_eq!(v.form(), (1, "TWO"));
+        v.set_text(&mut cx, "", 0.0);
+        assert_eq!((v.text.as_deref(), v.values.copies), (Some("CD"), 2), "the second form's settings");
+        assert_eq!(v.values.dials.len(), 8, "the form carries the kit's dials");
+        let p = dial_values(&v.values, &v.host_dials, &frame);
+        let want: Vec<f32> = (0..8).map(|k| 0.6 + 0.04 * k as f32).collect();
+        assert_eq!(p[..8], want[..]);
+        assert_eq!(p[8..], [0.5, 0.5], "past the eight: 0.5");
+        let o = animate(&v, &p);
+        assert_eq!(o[..8], want[..], "form, a_amt..g_amt by name");
+        assert_eq!((o[8], o[9]), (want[7], 0.5), "p8 (g_amt), p9 (past the eight)");
+        let members: Vec<String> = cx.with_vm(|vm| {
+            let kit = kit::load(vm, SRC, "eight_dials_test").unwrap();
+            members(vm, &kit, false).iter().map(|(id, _)| id.to_string()).collect()
+        });
+        for name in ["form", "a_amt", "b_amt", "c_amt", "d_amt", "e_amt", "f_amt", "g_amt"] {
+            assert!(members.iter().any(|m| m == name), "`self.{name}()` in the shaders: {members:?}");
+        }
+    }
+
+    /// A kit with twelve dials has ten: the frame and `set_dials` turn
+    /// those, while the eleventh and twelfth stay at their defaults, by
+    /// name in the animator and the shaders and as `self.p_c.zw`.
+    #[test]
+    fn a_twelve_dial_kit_holds_its_eleventh_and_twelfth() {
+        const SRC: &str = "Kinetic{\n  dials: {d1_amt: 0.1 d2_amt: 0.1 d3_amt: 0.1 d4_amt: 0.1 d5_amt: 0.1 d6_amt: 0.1 d7_amt: 0.1 d8_amt: 0.1 d9_amt: 0.1 d10_amt: 0.2 trail: 0.35 spread: 0.65}\n  glyph: fn(g, o) {\n    o.pos = vec3(d10_amt, trail, spread)\n    o.scale = vec3(p10, d1_amt, p1)\n  }\n}\n";
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut v = view_of(&mut cx, SRC, "twelve_dials_test");
+        let names: Vec<&str> = v.values.dials.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names.len(), MAX_DIALS);
+        assert_eq!((names[0], names[9]), ("d1_amt", "d10_amt"));
+        assert_eq!(v.values.held, vec![("trail".to_string(), 0.35), ("spread".to_string(), 0.65)]);
+        // At rest: the defaults, the held two too.
+        let rest = dial_values(&v.values, &v.host_dials, &KineticFrame::default());
+        assert_eq!(p_c(&v.values, &rest), [0.1, 0.2, 0.35, 0.65]);
+        assert_eq!(animate(&v, &rest)[..6], [0.2, 0.35, 0.65, 0.2, 0.1, 0.1]);
+        // A host turning twelve: the ten move, the eleventh and twelfth stay.
+        v.set_dials(&[Some(0.9); 12]);
+        let mut frame = KineticFrame::default();
+        frame.dials[9] = Some(0.8);
+        let p = dial_values(&v.values, &v.host_dials, &frame);
+        assert_eq!(p, [0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.8], "set_dials' ten, the frame's tenth over it");
+        assert_eq!(p_c(&v.values, &p), [0.9, 0.8, 0.35, 0.65]);
+        assert_eq!(animate(&v, &p)[..6], [0.8, 0.35, 0.65, 0.8, 0.9, 0.9], "the tenth by name, the held two at their defaults, p10, the first by name, p1");
+        // The shaders: an accessor per dial, the held two returning their
+        // defaults.
+        let held: Vec<(String, f32)> = cx.with_vm(|vm| {
+            let kit = kit::load(vm, SRC, "twelve_dials_test").unwrap();
+            let m = members(vm, &kit, false);
+            for k in 1..=10 {
+                assert!(m.iter().any(|(id, _)| id.to_string() == format!("d{k}_amt")), "`self.d{k}_amt()`");
+            }
+            m.iter().filter(|(id, _)| ["trail", "spread"].contains(&id.to_string().as_str())).map(|(id, f)| (id.to_string(), vm.call(*f, &[]).as_number().unwrap_or(-1.0) as f32)).collect()
+        });
+        assert_eq!(held, vec![("trail".to_string(), 0.35), ("spread".to_string(), 0.65)]);
+        // A form dial is one of the ten.
+        let e = cx.with_vm(|vm| kit::load(vm, "Kinetic{ dials: {a1: 0.1 a2: 0.1 a3: 0.1 a4: 0.1 a5: 0.1 a6: 0.1 a7: 0.1 a8: 0.1 a9: 0.1 a10: 0.1 a11: 0.1} form_dial: @a11 forms: [{}, {}] }", "held_form").err()).expect("refused");
+        assert!(e.contains("form_dial: @a11 is past the tenth"), "{e}");
+    }
 }

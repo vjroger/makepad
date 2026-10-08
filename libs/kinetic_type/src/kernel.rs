@@ -10,7 +10,8 @@
 //! `bass mid high` (0..1 bands), `floor_y` (the floor's height),
 //! `view_w view_h` (a picture's world extent, 0 without one), `band(f)`
 //! (the spectrum at log frequency f 0..1, the host's 32 bands), the
-//! dials `p1..p10` and each dial by its own name;
+//! dials `p1..p10` and each dial by its own name (a dial the kit holds
+//! past the tenth too, at its default: no host sets it);
 //! `time` is the kernel's own time input. The `kinetic` module
 //! (kinetic.splash) is imported unqualified.
 
@@ -103,7 +104,7 @@ pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &Layout) -> Result<A
     for k in 0..crate::kit::MAX_DIALS {
         decls.push(param(&format!("p{}", k + 1), dials.get(k).map_or(0.5, |d| d.1), 1000.0));
     }
-    for (name, d) in dials {
+    for (name, d) in dials.iter().chain(&kit.values.held) {
         decls.push(param(name, *d, 1000.0));
     }
     let k = VmKernel { decls, entry, entry_fn, math: MathMode::Fast, uses: vec!["kinetic".into()], bind: vec![(bind.0.to_string(), bind.1)] };
@@ -228,7 +229,7 @@ mod tests {
             frame.dials[3] = Some(0.75);
             frame.dials[4] = Some(0.85);
             frame.dials[5] = Some(0.9);
-            let p = crate::view::dial_values(&kit.values, &frame);
+            let p = crate::view::dial_values(&kit.values, &[], &frame);
             assert_eq!(p, [0.1, 0.2, 0.3, 0.75, 0.85, 0.9, 0.5, 0.5, 0.5, 0.5], "the kit's defaults, the host's fourth to sixth, 0.5 past the list");
             let k = compile(vm, &kit, Which::Glyph, &out_layout()).unwrap_or_else(|e| panic!("{e}"));
             let recs = vec![0.0f32; 40];
@@ -249,11 +250,11 @@ mod tests {
         for name in ["alpha_amt", "beta_amt", "gamma_amt", "delta_amt", "eps_amt", "zeta_amt"] {
             assert!(members.iter().any(|m| m == name), "`self.{name}()` in the shaders: {members:?}");
         }
-        // Ten is the most a kit declares.
+        // Ten are the dials a kit has: an eleventh is held, not refused.
         let eleven = (0..11).map(|k| format!("d{k}_amt: 0.5")).collect::<Vec<_>>().join(" ");
-        let e = with_kit(&format!("Kinetic{{ dials: {{{eleven}}} }}"), |_, kit| kit.err()).expect("eleven dials refused");
-        assert!(e.contains(&format!("{} at most", crate::kit::MAX_DIALS)), "{e}");
+        let held = with_kit(&format!("Kinetic{{ dials: {{{eleven}}} }}"), |_, kit| kit.map(|k| (k.values.dials.len(), k.values.held)));
+        assert_eq!(held, Ok((crate::kit::MAX_DIALS, vec![("d10_amt".to_string(), 0.5)])));
         let ten = (0..10).map(|k| format!("d{k}_amt: 0.5")).collect::<Vec<_>>().join(" ");
-        assert_eq!(with_kit(&format!("Kinetic{{ dials: {{{ten}}} }}"), |_, kit| kit.map(|k| k.values.dials.len())), Ok(10));
+        assert_eq!(with_kit(&format!("Kinetic{{ dials: {{{ten}}} }}"), |_, kit| kit.map(|k| (k.values.dials.len(), k.values.held.len()))), Ok((10, 0)));
     }
 }
