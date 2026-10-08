@@ -100,6 +100,16 @@ script_mod! {
                                     play_pause := Button{text: "Pause"}
                                     front_view := Button{text: "Front view"}
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0 y: 0.5}
+                                    Label{text: "Style"}
+                                    style := DropDown{labels: ["Points" "Horizontal lines" "Vertical lines" "Grid"]}
+                                }
+                                line_width := PanelSlider{text: "Line width (cells)" min: 0.02 max: 2.0 default: 0.25}
                                 Label{width: Fill text: "Or drop a video / model file on the window. Drag to orbit, wheel to dolly."}
                                 Hr{}
                             }
@@ -122,9 +132,7 @@ script_mod! {
                                 Label{text: "Point cloud"}
                                 depth_amount := PanelSlider{text: "Depth amount (far/near)" min: 1.0 max: 12.0 default: 4.0}
                                 points_per_row := PanelSlider{text: "Points per row" min: 64.0 max: 1280.0 step: 16.0 default: 384.0 precision: 0}
-                                style := DropDown{labels: ["Points" "Horizontal lines" "Vertical lines" "Grid"]}
                                 point_size := PanelSlider{text: "Point size (cells)" min: 0.3 max: 4.0 default: 1.15}
-                                line_width := PanelSlider{text: "Line width (cells)" min: 0.02 max: 2.0 default: 0.25}
                                 edge_cut := PanelSlider{text: "Edge cut (0 = off)" min: 0.0 max: 0.5 default: 0.0}
                                 fov := PanelSlider{text: "Field of view (deg)" min: 20.0 max: 100.0 step: 1.0 default: 50.0 precision: 0}
                                 Hr{}
