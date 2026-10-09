@@ -45,6 +45,12 @@ impl KineticHost {
         self.view.as_mut()
     }
 
+    /// The kit's view once it is made (its first frame); `None` before,
+    /// or when the kit failed.
+    pub fn built(&self) -> Option<&KineticView> {
+        self.view.as_ref()
+    }
+
     /// Why the kit does not draw: its build error, else the view's first
     /// error.
     pub fn error(&self) -> Option<&str> {

@@ -518,7 +518,7 @@ impl KineticView {
         if let Some(Some(over)) = self.frame_dials.get(d) {
             v = *over;
         }
-        ((v.clamp(0.0, 1.0) * n as f32) as usize).min(n.max(1) - 1)
+        kit::form_at(v, n)
     }
 
     /// Show form `k`: its settings with the host's choices over them, its
@@ -656,10 +656,19 @@ impl KineticView {
     /// frame the kit's framing and `camera_fn` give the camera, `over`
     /// takes it and the frame is drawn with what it gives: the glyphs, the
     /// floor and the surface in it, and a backdrop reading `self.eye()` or
-    /// `self.ray(uv)`. A picture's own flat pass is not turned. Kept until
+    /// `self.ray(uv)`. It reaches only a form shown that draws through the
+    /// camera ([`KitValues::turns_with_camera`]): not a picture form
+    /// without a grid or a screen pass (its frame is a flat card), nor a
+    /// `flat` kit. A picture's own flat pass is never turned. Kept until
     /// set again.
     pub fn set_camera_over(&mut self, over: Option<CameraOver>) {
         self.camera_over = over;
+    }
+
+    /// The host's hand as the form shown takes it: `None` without one, or
+    /// where the form does not turn with the camera.
+    fn camera_hand(&self) -> Option<&CameraOver> {
+        self.camera_over.as_ref().filter(|_| self.values.turns_with_camera())
     }
 
     /// A host's values for ALL of the kit's dials, in the order the kit
@@ -931,7 +940,7 @@ impl KineticView {
             }
         }
         // The host's hand on it last, after the kit's own framing.
-        if let Some(over) = &self.camera_over {
+        if let Some(over) = self.camera_hand() {
             camera_through(&mut cam, over.as_ref());
         }
         let share = [cam[12], cam[13], cam[14], cam[15]];
@@ -1151,6 +1160,40 @@ mod tests {
         });
         assert_eq!(seen.get(), Some(KineticCamera { eye: vec3f(0.1, 1.3, 7.7), target: vec3f(0.25, -0.5, 0.0), up: vec3f(0.0, 1.0, 0.0), fov: 34.0 }));
         assert_eq!(cam, [2.25, -0.5, 0.0, 0.25, -0.5, 0.0, 0.0, 0.0, 1.0, 17.0, 0.3, 0.0, 0.11, 0.22, 0.33, 0.44]);
+    }
+
+    /// The host's hand reaches the form shown only when it draws through
+    /// the camera: not a picture form read flat by the backdrop, nor any
+    /// form of a `flat` kit; turning the form dial moves it on and off.
+    #[test]
+    fn a_hosts_hand_reaches_only_a_form_that_turns_with_the_camera() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let hand = || -> Option<CameraOver> { Some(Box::new(|c| c)) };
+        let mut v = view_of(&mut cx, "Kinetic{
+  text: \"AB\"
+  picture: {}
+  dials: {form: 0.1 a_amt: 0.5}
+  forms: [{name: \"CARD\"}, {name: \"WORDS\" picture: nil}, {name: \"GLOBE\" grid: {u: 8 v: 4}}]
+}
+", "hand_test");
+        v.set_camera_over(hand());
+        assert_eq!(v.form().1, "CARD");
+        assert!(v.camera_hand().is_none(), "a flat picture: the hand does not reach it");
+        v.set_dials(&[Some(0.5)]);
+        assert_eq!(v.form().1, "WORDS");
+        assert!(v.camera_hand().is_some(), "the glyphs in the frame");
+        v.set_dials(&[Some(0.9)]);
+        assert_eq!(v.form().1, "GLOBE");
+        assert!(v.camera_hand().is_some(), "a grid printed with the picture");
+        v.set_camera_over(None);
+        assert!(v.camera_hand().is_none());
+        let mut flat = view_of(&mut cx, "Kinetic{
+  text: \"AB\"
+  flat: true
+}
+", "flat_test");
+        flat.set_camera_over(hand());
+        assert!(flat.camera_hand().is_none(), "a flat design keeps its own camera");
     }
 
     /// A view of the kit `src` (named `file`).

@@ -20,6 +20,7 @@
 //!     curve: {points: 256 closed: true up: [0, 1, 0]}  curve_fn: fn(c) { c.pos = ... }   // a path at c.u, even by arc length
 //!     dying: 0.8                          // a shorter text's surplus stays 0.8 s (g.dying = 1)
 //!     screen: true                        // a picture kit's glyphs also draw on the screen (below)
+//!     flat: true                          // a flat design: a host's hand on the camera does not reach it (below)
 //!     forms: [{name: "WALL"}, {name: "DISC" text: "SPIN" font: @bold wrap: 12 post: []}]   // per-form settings (below)
 //!     form_dial: @form                    // the dial that picks the form (default: the first)
 //!     look: fn() -> vec4 { ... }         // every other fn: the glyph shader
@@ -76,6 +77,19 @@
 //! nil`: no picture pass at all, its glyphs on the screen as in a kit
 //! without a picture (`self.on_screen` 1); `screen: true` is for a form
 //! that draws both.
+//!
+//! THE CAMERA AND A HOST. A host may put its hand on the frame's camera
+//! (a VJ deck's view gizmo turning, panning and dollying it:
+//! [`crate::view::KineticView::set_camera_over`]). It reaches a kit, or the
+//! form shown, that draws through that camera
+//! ([`KitValues::turns_with_camera`]): one without a picture, or with a
+//! `grid` or `screen: true`. A picture kit with neither draws its picture
+//! through its own fixed flat camera and its frame is the backdrop reading
+//! it at screen uv, a flat card the hand does not turn. `flat: true` (the
+//! kit's, not a form's) says the same of a kit whose letters do draw
+//! through the camera but whose other parts the backdrop draws at screen
+//! uv where those letters stand under the kit's own camera (a box the text
+//! rides in): turning the camera would slide the letters off them.
 //!
 //! DIALS. The first ten a kit declares are its dials, p1..p10: a host
 //! turns them ([`crate::view::KineticFrame::dials`]), the kernels read
@@ -262,6 +276,10 @@ pub struct KitValues {
     /// `screen: true`: a picture kit's glyphs also draw on the screen
     /// (`self.on_screen` 1 there, 0 in the picture).
     pub screen: bool,
+    /// `flat: true`: a flat design, its backdrop drawn at screen uv where
+    /// its letters stand under its own camera; a host's hand on the camera
+    /// does not reach it (the kit's; a form keeps it).
+    pub flat: bool,
     pub passes: Vec<makepad_render_graph::PassDecl>,
     pub pass_values: Vec<makepad_render_graph::PassValues>,
     /// `forms: [...]`: each form's settings (the kit's with the form's
@@ -269,6 +287,30 @@ pub struct KitValues {
     pub forms: Vec<Form>,
     /// The dial that picks the form (`form_dial: @name`; the first).
     pub form_dial: usize,
+}
+
+impl KitValues {
+    /// These settings draw through the frame's camera, so a host's hand on
+    /// it moves the picture: no picture (the glyphs draw in the frame), a
+    /// `grid` or a `screen` pass, and not `flat`. A picture kit with
+    /// neither draws its picture through its own fixed flat camera, and its
+    /// frame is the backdrop reading the picture at screen uv.
+    pub fn turns_with_camera(&self) -> bool {
+        !self.flat && (self.picture.is_none() || self.screen || self.surface.is_some())
+    }
+
+    /// The settings a view shows first: the form the form dial's default
+    /// picks ([`form_at`]), or these without forms.
+    pub fn shown_first(&self) -> &KitValues {
+        let at = self.dials.get(self.form_dial).map_or(0.0, |d| d.1);
+        self.forms.get(form_at(at, self.forms.len())).map_or(self, |f| &f.values)
+    }
+}
+
+/// The form a form dial at `value` picks of `forms`: the dial (0..1)
+/// split into equal parts, the first part the first form.
+pub fn form_at(value: f32, forms: usize) -> usize {
+    ((value.clamp(0.0, 1.0) * forms as f32) as usize).min(forms.max(1) - 1)
 }
 
 /// One of a kit's `forms` (see the module docs): its label and its
@@ -687,6 +729,7 @@ fn read_layer(vm: &mut ScriptVm, src: Src) -> Result<KitValues, String> {
         pingpong,
         dying: f(vm, "dying").filter(|d| *d > 0.0).map(|d| d.min(30.0)),
         screen: f(vm, "screen").is_some_and(|v| v > 0.5),
+        flat: f(vm, "flat").is_some_and(|v| v > 0.5),
         passes,
         pass_values,
         forms: Vec::new(),
@@ -773,5 +816,29 @@ pub(crate) mod tests {
         assert!(err("Kinetic{ dials: {form: 0.0} form_dial: @nope forms: [{}] }").contains("form_dial: @nope"));
         assert!(err("Kinetic{ forms: [{}, {}] }").contains("no dial"));
         assert!(err("Kinetic{ dials: {form: 0.0} forms: [{material: @wood}] }").contains("forms[0]: material"));
+        assert!(err("Kinetic{ dials: {form: 0.0} forms: [{}, {flat: true}] }").contains("forms[1]: `flat` is not a setting"), "flat is the kit's");
+    }
+
+    /// Which settings a host's hand on the camera moves: a kit or form that
+    /// draws through the frame's camera (no picture, a grid, a screen pass),
+    /// never a `flat` kit, which every form keeps; and the form a view shows
+    /// first is the one the form dial's default picks.
+    #[test]
+    fn a_kit_says_whether_it_turns_with_the_camera() {
+        let turns = |src: &str| with_kit(src, |kit| kit.unwrap_or_else(|e| panic!("{e}")).values.turns_with_camera());
+        assert!(turns("Kinetic{ text: \"A\" }"), "the glyphs draw in the frame");
+        assert!(!turns("Kinetic{ picture: {} }"), "a flat picture read by the backdrop");
+        assert!(turns("Kinetic{ picture: {} grid: {u: 8 v: 4} }"), "a grid printed with the picture");
+        assert!(turns("Kinetic{ picture: {} screen: true }"), "the glyphs on the screen too");
+        assert!(!turns("Kinetic{ text: \"A\" flat: true }"), "a flat design");
+        assert!(!turns("Kinetic{ grid: {u: 8 v: 4} flat: true }"));
+        let v = with_kit("Kinetic{ flat: true picture: {} dials: {form: 0.6 a_amt: 0.0} forms: [{}, {picture: nil}, {grid: {u: 8 v: 4}}] }", |kit| kit.unwrap().values);
+        assert!(v.flat && v.forms.iter().all(|f| f.values.flat && !f.values.turns_with_camera()), "every form keeps the kit's flat");
+        // The form dial's default (0.6 of three forms) shows the second.
+        let v = with_kit("Kinetic{ picture: {} dials: {form: 0.6 a_amt: 0.0} forms: [{}, {picture: nil}, {}] }", |kit| kit.unwrap().values);
+        assert!(!v.turns_with_camera() && v.shown_first().turns_with_camera() && v.shown_first().picture.is_none());
+        assert_eq!((form_at(0.0, 3), form_at(0.34, 3), form_at(0.6, 3), form_at(1.0, 3), form_at(0.5, 0)), (0, 1, 1, 2, 0));
+        let plain = with_kit("Kinetic{ picture: {} }", |kit| kit.unwrap().values);
+        assert!(std::ptr::eq(plain.shown_first(), &plain), "without forms: the kit's own");
     }
 }
