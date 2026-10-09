@@ -2900,9 +2900,13 @@ pub struct Slider {
     /// Then again on an overlay over the body, at the same rect, with
     /// `backdrop_layer` at 1 and the window's blurred scene bound as
     /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
-    /// exists): the glass. A material that turns this on declares
-    /// `backdrop_layer` and the scene's slots and draws its glass in the
-    /// second layer only. False, the default, draws once and binds nothing.
+    /// exists): the glass. Drawn inside something that is already on an
+    /// overlay (a pane of glass), the face's first layer is on that overlay
+    /// too and so not in the capture, which holds what lies behind that
+    /// pane: the second layer then has `backdrop_layer` at 2. A material
+    /// that turns this on declares `backdrop_layer` and the scene's slots
+    /// and draws its glass in the second layer only. False, the default,
+    /// draws once and binds nothing.
     #[live]
     backdrop: bool,
     #[rust]
@@ -3135,8 +3139,10 @@ impl Slider {
 
     /// The face's second layer (see `backdrop`): the same instance again at
     /// the face's rect, on an overlay of its own unless one is being drawn
-    /// already, with the window's blurred scene bound. Added as an aligned
-    /// instance, so a parent that aligns the face afterwards moves both.
+    /// already (then `backdrop_layer` is 2, not 1: the first layer is not in
+    /// the capture), with the window's blurred scene bound. Added as an
+    /// aligned instance, so a parent that aligns the face afterwards moves
+    /// both.
     fn draw_backdrop_layer(&mut self, cx: &mut Cx2d) {
         let rect = self.draw_bg.area().rect(cx);
         let own_list = !cx.is_drawing_overlay();
@@ -3147,7 +3153,8 @@ impl Slider {
         }
         let snapshot = request_window_gauss(cx);
         bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
-        self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[1.0]);
+        let layer = if own_list { 1.0 } else { 2.0 };
+        self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[layer]);
         self.draw_bg.rect_pos = rect.pos.into();
         self.draw_bg.rect_size = rect.size.into();
         self.draw_bg.draw_vars.append_group_id = cx.draw_call_group_background().0;
@@ -4367,6 +4374,17 @@ mod backdrop_tests {
                         width: 300.
                         draw_bg +: {backdrop_layer: uniform(-1.0)}
                     }
+                    pane := View{
+                        width: 320.
+                        height: Fit
+                        show_bg: true
+                        backdrop: true
+                        on_glass := SliderFader{
+                            width: 300.
+                            backdrop: true
+                            draw_bg +: {backdrop_layer: uniform(-1.0)}
+                        }
+                    }
                 }
             });
             WidgetRef::script_from_value(vm, value)
@@ -4425,5 +4443,16 @@ mod backdrop_tests {
         assert!(plain.backdrop_list.is_none());
         let (_, plain_layer) = layer_of(&cx, &plain, plain.draw_bg.area());
         assert_eq!(plain_layer, -1.0);
+
+        // On a pane of glass both layers are on the pane's overlay, so the
+        // body under the glass is not in the capture: the glass says so.
+        let on_glass = root.widget(&cx, ids!(on_glass));
+        let on_glass = on_glass.borrow::<Slider>().unwrap();
+        let (body_list, body_layer) = layer_of(&cx, &on_glass, on_glass.draw_bg.area());
+        let (over_list, over_layer) = layer_of(&cx, &on_glass, on_glass.backdrop_area);
+        assert_eq!(body_layer, 0.0);
+        assert_eq!(over_layer, 2.0, "the glass over a body that is not in the capture");
+        assert_eq!(body_list, over_list, "both on the pane's overlay");
+        assert!(on_glass.backdrop_list.is_none(), "no overlay of its own");
     }
 }

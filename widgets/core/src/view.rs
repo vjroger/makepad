@@ -2,6 +2,7 @@ use {
     crate::makepad_draw::event::{DigitId, FingerLongPressEvent},
     crate::{
         animator::*,
+        gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
         makepad_derive_widget::*,
         makepad_draw::*,
         makepad_script::{ScriptFnRef, ScriptIp},
@@ -78,6 +79,18 @@ pub struct View {
 
     #[live(false)]
     pub show_bg: bool,
+
+    /// True with `show_bg`, the view is a pane of glass over what the
+    /// window draws behind it: the view and everything in it are drawn on an
+    /// overlay of their own over the body (inline when it is already drawing
+    /// in one), and the window's blurred scene is bound to `draw_bg` as
+    /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
+    /// exists), so its face can show the window behind it blurred. Being on
+    /// an overlay, the pane covers whatever its parent draws after it in the
+    /// body. A cached view (`optimize`) draws as before. False, the default,
+    /// binds nothing.
+    #[live(false)]
+    pub backdrop: bool,
 
     #[layout]
     pub layout: Layout,
@@ -165,6 +178,12 @@ pub struct View {
     area: Area,
     #[rust]
     draw_list: Option<DrawList2d>,
+    /// The overlay a pane of glass (`backdrop`) draws on, and whether it is
+    /// open across the draw steps of this draw.
+    #[rust]
+    backdrop_list: Option<DrawList2d>,
+    #[rust]
+    backdrop_open: bool,
 
     #[rust]
     texture_cache: Option<ViewTextureCache>,
@@ -336,6 +355,11 @@ impl ScriptHook for View {
         }
 
         vm.cx_mut().widget_tree_mark_dirty(self.uid);
+        // A pane of glass built or restyled and not drawn yet: the window
+        // captures on the frame it first paints in, as a glass surface's.
+        if self.backdrop && self.show_bg && !apply.is_animate() {
+            arm_gauss_capture(vm.cx_mut());
+        }
         // Dynamic children emitted by on_render have no declaration in this
         // source vec. Re-render them against the new style too, preserving edits.
         if matches!(apply,Apply::ScriptReapply) && !self.applying_style_render && self.on_render.as_object()!=ScriptObject::ZERO {
@@ -705,6 +729,83 @@ mod contextual_size_tests {
         ));
         assert!(!cx.passes[pass_id].live_with_parent);
         });
+    }
+}
+
+/// A PANE OF GLASS: a view with `backdrop` is drawn, with everything in
+/// it, on an overlay over the body, so the window's capture holds what lies
+/// behind it and its face can read that blurred.
+#[cfg(test)]
+mod backdrop_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: DVec2 = dvec2(400.0, 300.0);
+
+    /// A window-less pass with the overlay a window keeps.
+    fn draw(cx: &mut Cx, root: &WidgetRef, pass: &DrawPass, body: &mut DrawList2d, overlay: &Overlay) {
+        pass.set_size(cx, SIZE);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        body.begin_always(&mut cx2d);
+        overlay.begin(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        overlay.end(&mut cx2d);
+        body.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    fn list_of(cx: &Cx, area: Area) -> DrawListId {
+        area.valid_instance(cx).expect("drawn").draw_list_id
+    }
+
+    #[test]
+    fn a_pane_of_glass_and_what_is_in_it_draw_over_the_body() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pane := View{
+                        width: 200.
+                        height: 100.
+                        show_bg: true
+                        backdrop: true
+                        inner := View{width: 50. height: 20. show_bg: true}
+                    }
+                    plain := View{width: 200. height: 100. show_bg: true}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let mut body = DrawList2d::new(&mut cx);
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        draw(&mut cx, &root, &pass, &mut body, &overlay);
+        draw(&mut cx, &root, &pass, &mut body, &overlay);
+
+        let pane = root.widget(&cx, ids!(pane));
+        let pane = pane.borrow::<View>().unwrap();
+        let inner = root.widget(&cx, ids!(inner));
+        let inner = inner.borrow::<View>().unwrap();
+        let plain = root.widget(&cx, ids!(plain));
+        let plain = plain.borrow::<View>().unwrap();
+        let glass = pane.backdrop_list.as_ref().map(|list| list.id());
+        assert!(glass.is_some(), "the pane opened an overlay of its own");
+        assert_eq!(Some(list_of(&cx, pane.area)), glass, "its face is on it");
+        assert_eq!(Some(list_of(&cx, inner.area)), glass, "and so is what is in it");
+        assert_eq!(list_of(&cx, plain.area), body.id(), "a view that does not ask stays in the body");
+        assert!(plain.backdrop_list.is_none());
+        assert!(!pane.backdrop_open, "the overlay is closed when the pane is done");
     }
 }
 
@@ -1538,6 +1639,19 @@ impl Widget for View {
 
             self.defer_walks.clear();
 
+            // A pane of glass goes on an overlay of its own, so the window's
+            // capture holds what lies behind it and not the pane.
+            if self.backdrop
+                && self.show_bg
+                && matches!(self.optimize, ViewOptimize::None)
+                && !cx.is_drawing_overlay()
+            {
+                self.backdrop_list
+                    .get_or_insert_with(|| DrawList2d::new(cx))
+                    .begin_overlay_reuse(cx);
+                self.backdrop_open = true;
+            }
+
             match self.optimize {
                 ViewOptimize::Texture => {
                     let walk = self.walk_from_previous_size(cx, walk);
@@ -1643,6 +1757,10 @@ impl Widget for View {
                 /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }*/
+                if self.backdrop {
+                    let snapshot = request_window_gauss(cx);
+                    bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
+                }
                 self.draw_bg
                     .begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             } else {
@@ -1746,6 +1864,11 @@ impl Widget for View {
                         } else {*/
                         cx.set_pass_area(&texture_cache.pass, area);
                         //}
+                    }
+                }
+                if std::mem::take(&mut self.backdrop_open) {
+                    if let Some(list) = self.backdrop_list.as_mut() {
+                        list.end(cx);
                     }
                 }
                 self.draw_state.end();
