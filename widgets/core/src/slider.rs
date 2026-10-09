@@ -3138,8 +3138,8 @@ impl Slider {
     }
 
     /// The face's second layer (see `backdrop`): the same instance again at
-    /// the face's rect, on an overlay of its own unless one is being drawn
-    /// already (then `backdrop_layer` is 2, not 1: the first layer is not in
+    /// the face's rect, on an overlay of its own begun under the plain ones
+    /// (so popups paint over it) unless one is being drawn already (then `backdrop_layer` is 2, not 1: the first layer is not in
     /// the capture), with the window's blurred scene bound. Added as an
     /// aligned instance, so a parent that aligns the face afterwards moves
     /// both.
@@ -3149,7 +3149,7 @@ impl Slider {
         if own_list {
             self.backdrop_list
                 .get_or_insert_with(|| DrawList2d::new(cx))
-                .begin_overlay_reuse(cx);
+                .begin_overlay_under(cx);
         }
         let snapshot = request_window_gauss(cx);
         bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);

@@ -270,6 +270,12 @@ pub const OVERLAY_Z_STEP: f32 = 8.0;
 /// 14 units of headroom below 100.
 pub const OVERLAY_Z_MAX: f32 = 64.0;
 
+/// What a plain overlay's paint-order stamp carries over one begun with
+/// [`DrawList2d::begin_overlay_under`]: every plain overlay of a frame (a
+/// popup, a menu, a tooltip, a modal) paints after every overlay begun under
+/// them, whichever was drawn first. Far above any frame's count of overlays.
+pub const OVERLAY_ORDER_PLAIN: u64 = 1 << 48;
+
 /// The depth floor for an overlay at `nesting`, counted from 1 for the
 /// outermost. See [`OVERLAY_Z_BASE`], [`OVERLAY_Z_STEP`], [`OVERLAY_Z_MAX`].
 pub fn overlay_z_lift(nesting: usize) -> f32 {
@@ -301,6 +307,19 @@ impl DrawList2d {
 
     pub fn begin_overlay_reuse(&mut self, cx: &mut Cx2d) {
         self.begin_overlay_inner(cx, false)
+    }
+
+    /// Begin an overlay that paints under every plain overlay of the frame,
+    /// and among the others begun this way in draw order. For a pane of
+    /// glass: it is on an overlay so that the window's capture holds what lies
+    /// behind it, not so that it covers anything, and a popup, a menu, a
+    /// tooltip or a modal opened from anywhere, before it or after it in the
+    /// draw, still has to paint over it. The depth floor is a plain
+    /// overlay's.
+    pub fn begin_overlay_under(&mut self, cx: &mut Cx2d) {
+        self.begin_overlay_inner(cx, false);
+        let seq = cx.overlay_seq;
+        cx.draw_lists[self.draw_list.id()].overlay_order = seq;
     }
 
     /// Begin an overlay draw list: it composites after the body of the pass,
@@ -345,7 +364,7 @@ impl DrawList2d {
         // another actually means. `Overlay::end` sorts by this.
         cx.overlay_seq += 1;
         let seq = cx.overlay_seq;
-        cx.draw_lists[self.draw_list.id()].overlay_order = seq;
+        cx.draw_lists[self.draw_list.id()].overlay_order = OVERLAY_ORDER_PLAIN + seq;
 
         if !self.overlay_active {
             self.overlay_active = true;

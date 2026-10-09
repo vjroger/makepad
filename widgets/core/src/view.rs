@@ -87,8 +87,10 @@ pub struct View {
     /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
     /// exists), so its face can show the window behind it blurred. Being on
     /// an overlay, the pane covers whatever its parent draws after it in the
-    /// body. A cached view (`optimize`) draws as before. False, the default,
-    /// binds nothing.
+    /// body; it is begun under the plain overlays
+    /// (`DrawList2d::begin_overlay_under`), so a popup, a menu, a tooltip or
+    /// a modal still paints over it, wherever it was opened from. A cached
+    /// view (`optimize`) draws as before. False, the default, binds nothing.
     #[live(false)]
     pub backdrop: bool,
 
@@ -806,6 +808,83 @@ mod backdrop_tests {
         assert_eq!(list_of(&cx, plain.area), body.id(), "a view that does not ask stays in the body");
         assert!(plain.backdrop_list.is_none());
         assert!(!pane.backdrop_open, "the overlay is closed when the pane is done");
+    }
+
+    /// Where each list under the window's overlay paints, first to last.
+    fn paint_order(cx: &Cx, overlay: &Overlay) -> Vec<DrawListId> {
+        let list = &cx.draw_lists[overlay.draw_list.id()];
+        let order: Vec<usize> = match &list.draw_item_reorder {
+            Some(order) => order.clone(),
+            None => (0..list.draw_items.len()).collect(),
+        };
+        order.into_iter().filter_map(|i| list.draw_items[i].sub_list()).collect()
+    }
+
+    /// A popup paints over every pane of glass, whether it was opened from a
+    /// toolbar pane drawn before the pane it falls over or from inside that
+    /// pane itself: the panes are begun under the plain overlays.
+    #[test]
+    fn a_popup_paints_over_every_pane_wherever_it_was_opened() {
+        use crate::drop_down::*;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    toolbar := View{
+                        width: Fill
+                        height: Fit
+                        show_bg: true
+                        backdrop: true
+                        top_pick := DropDown{width: 150.}
+                    }
+                    pane := View{
+                        width: Fill
+                        height: 250.
+                        show_bg: true
+                        backdrop: true
+                        inner_pick := DropDown{width: 150.}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let labels = || vec!["One".to_string(), "Two".to_string(), "Three".to_string()];
+        root.drop_down(&cx, ids!(top_pick)).set_labels(&mut cx, labels());
+        root.drop_down(&cx, ids!(inner_pick)).set_labels(&mut cx, labels());
+        let pass = DrawPass::new(&mut cx);
+        let mut body = DrawList2d::new(&mut cx);
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        draw(&mut cx, &root, &pass, &mut body, &overlay);
+        let panes: Vec<DrawListId> = [ids!(toolbar), ids!(pane)]
+            .iter()
+            .map(|id| {
+                let view = root.widget(&cx, *id);
+                let view = view.borrow::<View>().unwrap();
+                view.backdrop_list.as_ref().expect("a pane of glass").id()
+            })
+            .collect();
+        let over_the_panes = |cx: &Cx| {
+            let order = paint_order(cx, &overlay);
+            let last_pane = order.iter().rposition(|id| panes.contains(id)).expect("the panes paint");
+            let popups: Vec<usize> = (0..order.len()).filter(|i| !panes.contains(&order[*i])).collect();
+            assert!(!popups.is_empty(), "no popup was drawn, so this test proves nothing");
+            popups.iter().all(|i| *i > last_pane)
+        };
+
+        for pick in [ids!(top_pick), ids!(inner_pick)] {
+            let widget = root.widget(&cx, pick);
+            widget.borrow_mut::<DropDown>().unwrap().set_active(&mut cx);
+            draw(&mut cx, &root, &pass, &mut body, &overlay);
+            assert!(over_the_panes(&cx), "the list opened from {pick:?} paints under a pane");
+            widget.borrow_mut::<DropDown>().unwrap().set_closed(&mut cx);
+            draw(&mut cx, &root, &pass, &mut body, &overlay);
+        }
     }
 }
 
@@ -1648,7 +1727,7 @@ impl Widget for View {
             {
                 self.backdrop_list
                     .get_or_insert_with(|| DrawList2d::new(cx))
-                    .begin_overlay_reuse(cx);
+                    .begin_overlay_under(cx);
                 self.backdrop_open = true;
             }
 
