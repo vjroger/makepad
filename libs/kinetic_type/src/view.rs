@@ -85,9 +85,9 @@ impl ScreenOver {
     }
 }
 
-/// The backdrop's `flat_uv`: the frame uv `q` (0,0 top left) shows this
-/// place of the kit's own frame under `over`, a frame `aspect` wide per
-/// unit of height.
+/// The flat hand's law: the frame uv `q` (0,0 top left) shows this place
+/// of the kit's own frame under `over`, a frame `aspect` wide per unit of
+/// height (before the mirror fold, [`flat_tiles`]).
 pub fn flat_uv(q: [f32; 2], aspect: f32, over: &ScreenOver) -> [f32; 2] {
     let a = aspect.max(0.001);
     let ([c, s, px, py], [_, z, _, _]) = ScreenOver::uniforms(Some(*over));
@@ -96,8 +96,46 @@ pub fn flat_uv(q: [f32; 2], aspect: f32, over: &ScreenOver) -> [f32; 2] {
     [r[0] / a + 0.5, r[1] + 0.5]
 }
 
-/// The glyph draw's `flat_clip`: a clip-space position (x right, y up, w)
+/// The backdrop's `flat_frame`: where the kit's own frame uv `p` lands
 /// under `over`, the other way round from [`flat_uv`].
+pub fn flat_frame(p: [f32; 2], aspect: f32, over: &ScreenOver) -> [f32; 2] {
+    let a = aspect.max(0.001);
+    let ([c, s, px, py], [_, z, _, _]) = ScreenOver::uniforms(Some(*over));
+    let d = [(p[0] - 0.5) * a * z, (p[1] - 0.5) * z];
+    let r = [c * d[0] + s * d[1] + px, c * d[1] - s * d[0] - py];
+    [r[0] / a + 0.5, r[1] + 0.5]
+}
+
+/// The most mirror tiles [`flat_tiles`] lays.
+pub const MAX_FLAT_TILES: usize = 64;
+
+/// The mirror tiles of the kit's own frame the frame meets under `over`:
+/// the backdrop draws one quad per tile `(i, j)` (the kit's frame uv
+/// square `[i, i+1] x [j, j+1]`, its uv reflected), so past the frame's
+/// edge it shows mirror tiled, never an edge, a stretch or a void.
+pub fn flat_tiles(aspect: f32, over: &ScreenOver) -> Vec<(i32, i32)> {
+    let seen = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|q| flat_uv(q, aspect, over));
+    let span = |k: usize| {
+        let lo = seen.iter().map(|p| p[k]).fold(f32::INFINITY, f32::min);
+        let hi = seen.iter().map(|p| p[k]).fold(f32::NEG_INFINITY, f32::max);
+        let lo = if lo.is_finite() { lo.floor() as i32 } else { 0 };
+        let hi = if hi.is_finite() { (hi.ceil() as i32 - 1).max(lo) } else { lo };
+        (lo, hi)
+    };
+    let ((i0, i1), (j0, j1)) = (span(0), span(1));
+    let mut tiles = Vec::new();
+    for j in j0..=j1 {
+        for i in i0..=i1 {
+            if tiles.len() < MAX_FLAT_TILES {
+                tiles.push((i, j));
+            }
+        }
+    }
+    tiles
+}
+
+/// The glyph draw's `flat_clip`: a clip-space position (x right, y up, w)
+/// under `over`, as [`flat_frame`] places a frame uv.
 pub fn flat_clip(v: [f32; 4], aspect: f32, over: &ScreenOver) -> [f32; 4] {
     let a = aspect.max(0.001);
     let ([c, s, px, py], [_, z, _, _]) = ScreenOver::uniforms(Some(*over));
@@ -1039,7 +1077,8 @@ impl KineticView {
         let bands = [frame.bands[0], frame.bands[1], frame.bands[2], frame.energy];
         let textu = [size, set.lines as f32, n as f32, set.words as f32];
         let mut calls = 0;
-        let (flat, flat_on) = ScreenOver::uniforms(self.screen_hand());
+        let hand = self.screen_hand();
+        let (flat, flat_on) = ScreenOver::uniforms(hand);
         let glyphs = Glyphs { set, buckets: &self.buckets, geometries: &self.geometries, out: &self.out, stride, floor: self.floor.zip(self.values.floor.map(|f| f.1)), surface: None, floor_y, centre, width, height, size };
         // With a picture the glyphs draw flat into it (an orthographic
         // view `view` cap heights tall about the origin), and the frame is
@@ -1102,7 +1141,16 @@ impl KineticView {
             if let Some(pp) = &self.picture {
                 Self::bind_picture(cx.cx, &mut b.draw_super.draw_vars, pp, picture);
             }
-            b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px });
+            match hand {
+                // Under a flat hand: one quad per mirror tile, (i, j) in
+                // the quad's `rect_pos` (the backdrop's vertex places it).
+                Some(over) => {
+                    for (i, j) in flat_tiles(px.0 as f32 / px.1.max(1) as f32, &over) {
+                        b.draw_super.draw_abs(cx, Rect { pos: dvec2(i as f64, j as f64), size: size_px });
+                    }
+                }
+                None => b.draw_super.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: size_px }),
+            }
             calls += 1;
         }
         Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, viewu, textu, share, 1.0);
@@ -1330,6 +1378,9 @@ mod tests {
             let back = flat_uv(shown, aspect, &over);
             assert!((back[0] - p[0]).abs() < 1e-5 && (back[1] - p[1]).abs() < 1e-5, "{p:?} -> {shown:?} -> {back:?}");
             assert_eq!((q[2], q[3]), (clip[2], clip[3]), "depth and w kept");
+            // The backdrop places the same point where the glyph lands.
+            let placed = flat_frame(p, aspect, &over);
+            assert!((placed[0] - shown[0]).abs() < 1e-5 && (placed[1] - shown[1]).abs() < 1e-5, "{placed:?} vs {shown:?}");
         }
         let quarter = ScreenOver { roll: std::f32::consts::FRAC_PI_2, pan_x: 0.0, pan_y: 0.0, zoom: 1.0 };
         // Square units: half a frame height right of the centre goes up.
@@ -1339,6 +1390,43 @@ mod tests {
         let lift = ScreenOver { roll: 0.0, pan_x: 0.0, pan_y: 0.25, zoom: 1.0 };
         let centre = flat_uv([0.5, 0.25], aspect, &lift);
         assert!((centre[0] - 0.5).abs() < 1e-6 && (centre[1] - 0.5).abs() < 1e-6, "a quarter frame up: the centre shows there");
+    }
+
+    /// The backdrop's mirror tiles cover the frame under any hand: every
+    /// frame point lies in a tile the frame meets, and there its uv is the
+    /// law folded into 0..1.
+    #[test]
+    fn the_flat_tiles_cover_the_frame_folded() {
+        let mirror = |v: f32| {
+            let f = v - 2.0 * (v * 0.5).floor();
+            if f >= 1.0 { 2.0 - f } else { f }
+        };
+        for (over, aspect) in [
+            (ScreenOver { roll: 0.0, pan_x: 0.0, pan_y: 0.0, zoom: 0.5 }, 16.0 / 9.0),
+            (ScreenOver { roll: 0.52, pan_x: 0.0, pan_y: 0.0, zoom: 0.5 }, 16.0 / 9.0),
+            (ScreenOver { roll: -2.6, pan_x: 2.0, pan_y: -2.0, zoom: 0.5 }, 9.0 / 16.0),
+            (ScreenOver { roll: 1.1, pan_x: 0.4, pan_y: 0.3, zoom: 2.0 }, 2.35),
+        ] {
+            let tiles = flat_tiles(aspect, &over);
+            assert!(!tiles.is_empty() && tiles.len() <= MAX_FLAT_TILES, "{}", tiles.len());
+            for y in 0..=10 {
+                for x in 0..=10 {
+                    let q = [x as f32 / 10.0, y as f32 / 10.0];
+                    let p = flat_uv(q, aspect, &over);
+                    let tile = (p[0].floor() as i32, p[1].floor() as i32);
+                    let on_edge = (p[0] - p[0].round()).abs() < 1e-4 || (p[1] - p[1].round()).abs() < 1e-4;
+                    assert!(on_edge || tiles.contains(&tile), "{q:?} -> {p:?} in no tile under {over:?}");
+                    // Inside the tile the vertex's corner uv, reflected and
+                    // interpolated, is the law folded.
+                    let local = [p[0] - tile.0 as f32, p[1] - tile.1 as f32];
+                    let corner = |i: i32, t: f32| if i.rem_euclid(2) == 0 { t } else { 1.0 - t };
+                    let uv = [corner(tile.0, local[0]), corner(tile.1, local[1])];
+                    assert!((uv[0] - mirror(p[0])).abs() < 1e-4 && (uv[1] - mirror(p[1])).abs() < 1e-4, "{uv:?} vs {p:?}");
+                }
+            }
+        }
+        // Zoomed out to half, the kit's frame and its eight reflections.
+        assert_eq!(flat_tiles(16.0 / 9.0, &ScreenOver { roll: 0.0, pan_x: 0.0, pan_y: 0.0, zoom: 0.5 }).len(), 9);
     }
 
     /// A view of the kit `src` (named `file`).

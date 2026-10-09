@@ -414,19 +414,34 @@ script_mod! {
         k_flat_on: uniform(vec4(0.0, 1.0, 0.0, 0.0))
         vertex: fn() {
             self.pos = self.geom.pos
-            if self.k_flat_on.x > 0.5 {
-                self.pos = self.flat_uv(self.geom.pos)
-            }
             self.vertex_pos = vec4(self.geom.pos.x * 2.0 - 1.0, 1.0 - self.geom.pos.y * 2.0, 0.99999, 1.0)
+            // Under a host's flat hand this quad is one mirror tile of the
+            // kit's frame, (i, j) in `rect_pos` (view.rs `flat_tiles`): its
+            // corners placed by the hand, their uv reflected, so past the
+            // frame's edge the backdrop shows mirror tiled and its own uv
+            // never leaves 0..1 (exact: the map is affine on each tile).
+            if self.k_flat_on.x > 0.5 {
+                let p = self.rect_pos + self.geom.pos
+                let q = self.flat_frame(p)
+                self.pos = self.flat_mirror(p)
+                self.vertex_pos = vec4(q.x * 2.0 - 1.0, 1.0 - q.y * 2.0, 0.99999, 1.0)
+            }
         }
-        // The host's hand on a flat frame undone: the place `q` (0,0 top
-        // left) shows under it, interpolated exactly (the map is affine)
-        // (view.rs `flat_uv`).
-        flat_uv: fn(q: vec2) -> vec2 {
+        // Where the kit's own frame uv `p` lands under the host's flat hand
+        // (0,0 top left; view.rs `flat_frame`).
+        flat_frame: fn(p: vec2) -> vec2 {
             let a = max(self.k_view.x / max(self.k_view.y, 1.0), 0.001)
-            let m = vec2((q.x - 0.5) * a - self.k_flat.z, q.y - 0.5 + self.k_flat.w)
-            let r = vec2(self.k_flat.x * m.x - self.k_flat.y * m.y, self.k_flat.y * m.x + self.k_flat.x * m.y) / max(self.k_flat_on.y, 0.01)
+            let z = max(self.k_flat_on.y, 0.01)
+            let d = vec2((p.x - 0.5) * a * z, (p.y - 0.5) * z)
+            let c = self.k_flat.x
+            let s = self.k_flat.y
+            let r = vec2(c * d.x + s * d.y + self.k_flat.z, c * d.y - s * d.x - self.k_flat.w)
             return vec2(r.x / a + 0.5, r.y + 0.5)
+        }
+        // Mirror tiling: 0..1 as it is, 1..2 reflected, and so on both ways.
+        flat_mirror: fn(u: vec2) -> vec2 {
+            let f = u - 2.0 * floor(u * 0.5)
+            return f + step(vec2(1.0, 1.0), f) * (vec2(2.0, 2.0) - 2.0 * f)
         }
         content: fn(uv: vec2) -> vec4 {
             if self.k_misc.y < 0.5 {
