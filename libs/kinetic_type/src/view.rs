@@ -1227,7 +1227,7 @@ mod tests {
         KineticView::new(cx, crate::kit::tests::FAMILY, "family_test").unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// The form dial (here a host's `set_dials`, as Stage sets every dial
+    /// The form dial (here a host's `set_dials`, as a host sets every dial
     /// a frame) picks the form; the next `set_text` lays its text out with
     /// its settings, fresh records, the text's arrival kept; what the host
     /// set (words, font, palette) still wins.
