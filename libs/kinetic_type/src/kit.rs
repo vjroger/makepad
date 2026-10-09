@@ -625,6 +625,7 @@ fn read_layer(vm: &mut ScriptVm, src: Src) -> Result<KitValues, String> {
         "time", "seed", "count", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "pos", "rot", "scale", "shear", "color", "attr", "info", "shape", "face", "nrm", "wpos", "lpos", "luv", "p", "p_b", "p_c", "bands",
         "key", "rim", "cap", "n", "vd", "eye", "content", "screen_uv", "finish", "shade", "env", "spec", "hue", "fog", "look", "floor", "deform", "backdrop", "picture", "ink",
         "qrot", "qturn", "hash1", "phase", "pulse", "beat", "bar", "bpm", "energy", "fwidth", "ray", "plane_hit", "text_plane", "k_share", "dying", "on_screen",
+        "k_flat", "k_flat_on", "flat_clip", "flat_uv",
     ];
     for (name, _) in &dials {
         let module_fn = crate::kernel::KINETIC_MODULE.lines().filter_map(|l| l.strip_prefix("fn ")).any(|l| l.split('(').next() == Some(name.as_str()));

@@ -56,6 +56,56 @@ pub struct KineticCamera {
 /// view gizmo turning, panning and dollying it).
 pub type CameraOver = Box<dyn Fn(KineticCamera) -> KineticCamera>;
 
+/// A host's hand on a FLAT frame ([`KineticView::set_screen_over`]): the
+/// whole frame scaled by `zoom`, turned by `roll` (radians,
+/// counterclockwise) and moved by `pan_x`, `pan_y` (frame heights, right
+/// and up), about the frame's centre and in square units, the way a VJ
+/// deck's flat view gizmo moves a picture that has no camera to turn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenOver {
+    pub roll: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub zoom: f32,
+}
+
+impl ScreenOver {
+    /// The draws' `k_flat` and `k_flat_on`: (cos, sin, pan x, pan y) and
+    /// (1, zoom, 0, 0); without a hand (0 in `k_flat_on.x`) the draws run
+    /// as they always did.
+    fn uniforms(over: Option<ScreenOver>) -> ([f32; 4], [f32; 4]) {
+        match over {
+            Some(o) => {
+                let (s, c) = o.roll.sin_cos();
+                let zoom = if o.zoom.is_finite() { o.zoom.max(0.01) } else { 1.0 };
+                ([c, s, o.pan_x, o.pan_y], [1.0, zoom, 0.0, 0.0])
+            }
+            None => ([1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]),
+        }
+    }
+}
+
+/// The backdrop's `flat_uv`: the frame uv `q` (0,0 top left) shows this
+/// place of the kit's own frame under `over`, a frame `aspect` wide per
+/// unit of height.
+pub fn flat_uv(q: [f32; 2], aspect: f32, over: &ScreenOver) -> [f32; 2] {
+    let a = aspect.max(0.001);
+    let ([c, s, px, py], [_, z, _, _]) = ScreenOver::uniforms(Some(*over));
+    let m = [(q[0] - 0.5) * a - px, q[1] - 0.5 + py];
+    let r = [(c * m[0] - s * m[1]) / z, (s * m[0] + c * m[1]) / z];
+    [r[0] / a + 0.5, r[1] + 0.5]
+}
+
+/// The glyph draw's `flat_clip`: a clip-space position (x right, y up, w)
+/// under `over`, the other way round from [`flat_uv`].
+pub fn flat_clip(v: [f32; 4], aspect: f32, over: &ScreenOver) -> [f32; 4] {
+    let a = aspect.max(0.001);
+    let ([c, s, px, py], [_, z, _, _]) = ScreenOver::uniforms(Some(*over));
+    let x = z * (c * v[0] - s / a * v[1]) + 2.0 * px / a * v[3];
+    let y = z * (s * a * v[0] + c * v[1]) + 2.0 * py * v[3];
+    [x, y, v[2], v[3]]
+}
+
 /// The camera record (eye, target, up, fov, roll, share) through `over`:
 /// its eye, target, up and fov become what `over` gives, the rest stay.
 fn camera_through(cam: &mut [f32; 16], over: &dyn Fn(KineticCamera) -> KineticCamera) {
@@ -360,6 +410,8 @@ pub struct KineticView {
     overlay: bool,
     /// A host's hand on the frame's camera ([`KineticView::set_camera_over`]).
     camera_over: Option<CameraOver>,
+    /// A host's hand on a flat frame ([`KineticView::set_screen_over`]).
+    screen_over: Option<ScreenOver>,
     /// A host's values for the kit's dials, in the order declared
     /// ([`KineticView::set_dials`]); `None` (or past the end) keeps the
     /// kit's default. A frame's `dials` win over these.
@@ -460,6 +512,7 @@ impl KineticView {
             kit_font: values.shape.font.clone(),
             overlay: false,
             camera_over: None,
+            screen_over: None,
             host_dials: Vec::new(),
             frame_dials: [None; MAX_DIALS],
             forms,
@@ -671,6 +724,25 @@ impl KineticView {
         self.camera_over.as_ref().filter(|_| self.values.turns_with_camera())
     }
 
+    /// A host's hand on a FLAT frame (`None`: as the kit draws it): the
+    /// backdrop's screen uv and the glyphs drawn in the frame, moved,
+    /// turned and scaled together ([`ScreenOver`]), so a box drawn at
+    /// screen uv keeps the letters standing in it. It reaches only a form
+    /// shown that does not turn with the camera
+    /// ([`KitValues::turns_with_camera`] false: a picture form read flat by
+    /// the backdrop, any form of a `flat` kit), the forms
+    /// [`Self::set_camera_over`] does not reach; a picture's own flat pass
+    /// is never moved. Kept until set again.
+    pub fn set_screen_over(&mut self, over: Option<ScreenOver>) {
+        self.screen_over = over;
+    }
+
+    /// The host's flat hand as the form shown takes it: `None` without
+    /// one, or where the form turns with the camera.
+    fn screen_hand(&self) -> Option<ScreenOver> {
+        self.screen_over.filter(|_| !self.values.turns_with_camera())
+    }
+
     /// A host's values for ALL of the kit's dials, in the order the kit
     /// declares them (up to [`MAX_DIALS`]; a held dial past the tenth
     /// keeps its default): `None` keeps that dial at the kit's default. A
@@ -766,6 +838,12 @@ impl KineticView {
         dv.set_uniform(cx, live_id!(k_misc), &misc);
         dv.set_uniform(cx, live_id!(k_text), &text);
         dv.set_uniform(cx, live_id!(k_view), &view);
+    }
+
+    /// The host's flat hand on a draw ([`ScreenOver::uniforms`]).
+    fn set_flat<D: std::ops::DerefMut<Target = DrawVars>>(dv: &mut D, cx: &Cx, flat: [f32; 4], on: [f32; 4]) {
+        dv.set_uniform(cx, live_id!(k_flat), &flat);
+        dv.set_uniform(cx, live_id!(k_flat_on), &on);
     }
 
     /// Animate and draw one frame into the target (`px` pixels); returns
@@ -961,6 +1039,7 @@ impl KineticView {
         let bands = [frame.bands[0], frame.bands[1], frame.bands[2], frame.energy];
         let textu = [size, set.lines as f32, n as f32, set.words as f32];
         let mut calls = 0;
+        let (flat, flat_on) = ScreenOver::uniforms(self.screen_hand());
         let glyphs = Glyphs { set, buckets: &self.buckets, geometries: &self.geometries, out: &self.out, stride, floor: self.floor.zip(self.values.floor.map(|f| f.1)), surface: None, floor_y, centre, width, height, size };
         // With a picture the glyphs draw flat into it (an orthographic
         // view `view` cap heights tall about the origin), and the frame is
@@ -991,6 +1070,9 @@ impl KineticView {
             if picture.is_some() {
                 let pview = [pw as f32, ph as f32, self.text_at, 1.0];
                 Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, pview, textu, share, 0.0);
+                // The picture's own flat pass is never moved.
+                let (off, off_on) = ScreenOver::uniforms(None);
+                Self::set_flat(&mut self.draw, cx.cx, off, off_on);
                 if let Some(a) = &frame.audio {
                     bind_audio(cx.cx, &mut self.draw.draw_vars, a);
                 }
@@ -1010,6 +1092,7 @@ impl KineticView {
         self.list.begin_always(cx);
         if let Some(b) = self.backdrop.as_mut().filter(|_| !self.overlay) {
             Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, &p, bands, misc, viewu, textu, share, 1.0);
+            Self::set_flat(&mut b.draw_super, cx.cx, flat, flat_on);
             if let Some(c) = &frame.content {
                 b.draw_super.draw_vars.set_texture(0, c);
             }
@@ -1023,6 +1106,7 @@ impl KineticView {
             calls += 1;
         }
         Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, &p, bands, misc, viewu, textu, share, 1.0);
+        Self::set_flat(&mut self.draw, cx.cx, flat, flat_on);
         if let Some(c) = &frame.content {
             self.draw.draw_vars.set_texture(0, c);
         }
@@ -1194,6 +1278,67 @@ mod tests {
 ", "flat_test");
         flat.set_camera_over(hand());
         assert!(flat.camera_hand().is_none(), "a flat design keeps its own camera");
+    }
+
+    /// The host's flat hand reaches exactly the forms the camera hand does
+    /// not: a picture form read flat and any form of a `flat` kit; the form
+    /// dial moves it on and off.
+    #[test]
+    fn a_hosts_flat_hand_reaches_only_a_form_that_keeps_its_camera() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let hand = Some(ScreenOver { roll: 0.4, pan_x: 0.2, pan_y: -0.1, zoom: 0.8 });
+        let mut v = view_of(&mut cx, "Kinetic{
+  text: \"AB\"
+  picture: {}
+  dials: {form: 0.1 a_amt: 0.5}
+  forms: [{name: \"CARD\"}, {name: \"WORDS\" picture: nil}, {name: \"GLOBE\" grid: {u: 8 v: 4}}]
+}
+", "flat_hand_test");
+        v.set_screen_over(hand);
+        assert_eq!(v.form().1, "CARD");
+        assert_eq!(v.screen_hand(), hand, "a flat picture takes the flat hand");
+        v.set_dials(&[Some(0.5)]);
+        assert_eq!(v.screen_hand(), None, "the glyphs in the frame turn with the camera instead");
+        v.set_dials(&[Some(0.9)]);
+        assert_eq!(v.screen_hand(), None, "a grid printed with the picture");
+        v.set_dials(&[Some(0.1)]);
+        v.set_screen_over(None);
+        assert_eq!(v.screen_hand(), None);
+        let mut flat = view_of(&mut cx, "Kinetic{
+  text: \"AB\"
+  flat: true
+}
+", "flat_kit_hand_test");
+        flat.set_screen_over(hand);
+        assert_eq!(flat.screen_hand(), hand, "a flat design moves as a whole");
+        // No hand: the draws' stock values.
+        assert_eq!(ScreenOver::uniforms(None), ([1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]));
+    }
+
+    /// The backdrop's map and the glyphs' are one map: a place of the kit's
+    /// frame drawn as a glyph lands where the backdrop shows that place;
+    /// a quarter turn puts the frame's right at its top; a move up moves.
+    #[test]
+    fn the_flat_hand_moves_the_backdrop_and_the_glyphs_together() {
+        let aspect = 16.0 / 9.0;
+        let over = ScreenOver { roll: 0.7, pan_x: 0.3, pan_y: -0.2, zoom: 0.6 };
+        // The kit's frame uv p, as clip space with any w.
+        for (p, w) in [([0.2f32, 0.7f32], 1.0f32), ([0.9, 0.1], 3.5), ([0.5, 0.5], 0.4)] {
+            let clip = [(p[0] * 2.0 - 1.0) * w, (1.0 - p[1] * 2.0) * w, 0.3 * w, w];
+            let q = flat_clip(clip, aspect, &over);
+            let shown = [(q[0] / q[3]) * 0.5 + 0.5, 0.5 - (q[1] / q[3]) * 0.5];
+            let back = flat_uv(shown, aspect, &over);
+            assert!((back[0] - p[0]).abs() < 1e-5 && (back[1] - p[1]).abs() < 1e-5, "{p:?} -> {shown:?} -> {back:?}");
+            assert_eq!((q[2], q[3]), (clip[2], clip[3]), "depth and w kept");
+        }
+        let quarter = ScreenOver { roll: std::f32::consts::FRAC_PI_2, pan_x: 0.0, pan_y: 0.0, zoom: 1.0 };
+        // Square units: half a frame height right of the centre goes up.
+        let right = [2.0 * 0.5 / aspect, 0.0, 0.0, 1.0];
+        let up = flat_clip(right, aspect, &quarter);
+        assert!(up[0].abs() < 1e-6 && (up[1] - 1.0).abs() < 1e-6, "{up:?}");
+        let lift = ScreenOver { roll: 0.0, pan_x: 0.0, pan_y: 0.25, zoom: 1.0 };
+        let centre = flat_uv([0.5, 0.25], aspect, &lift);
+        assert!((centre[0] - 0.5).abs() < 1e-6 && (centre[1] - 0.5).abs() < 1e-6, "a quarter frame up: the centre shows there");
     }
 
     /// A view of the kit `src` (named `file`).

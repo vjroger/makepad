@@ -81,6 +81,12 @@ script_mod! {
         // The pass: 0 while a picture kit draws into its picture, 1 on the
         // screen (a kit without a picture, or `screen: true`).
         on_screen: uniform(1.0)
+        // A host's hand on a flat frame (view.rs `set_screen_over`): the
+        // frame turned, moved and scaled about its centre in square units.
+        // k_flat = (cos and sin of the turn, the move right and up in frame
+        // heights), k_flat_on = (1 while the hand is on, the scale, 0, 0).
+        k_flat: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        k_flat_on: uniform(vec4(0.0, 1.0, 0.0, 0.0))
 
         face: varying(float)
         nrm: varying(vec3f)
@@ -159,6 +165,24 @@ script_mod! {
             self.face = self.geom.geom_pad
             self.luv = self.geom.geom_uv
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * vec4(wp.x, wp.y, wp.z, 1.0))
+            // A flat frame under a host's hand: the glyph lands where the
+            // backdrop shows the place it stands in (the same map).
+            if self.k_flat_on.x > 0.5 && self.on_screen > 0.5 {
+                self.vertex_pos = self.flat_clip(self.vertex_pos)
+            }
+        }
+
+        // The host's hand on a flat frame in clip space (x right, y up, w
+        // kept): the frame scaled, turned counterclockwise and moved about
+        // its centre, the turn in square units (view.rs `flat_clip`).
+        flat_clip: fn(v: vec4) -> vec4 {
+            let a = max(self.k_view.x / max(self.k_view.y, 1.0), 0.001)
+            let z = max(self.k_flat_on.y, 0.01)
+            let c = self.k_flat.x
+            let s = self.k_flat.y
+            let x = z * (c * v.x - s / a * v.y) + 2.0 * self.k_flat.z / a * v.w
+            let y = z * (s * a * v.x + c * v.y) + 2.0 * self.k_flat.w * v.w
+            return vec4(x, y, v.z, v.w)
         }
 
         // ---- signals and helpers for looks ----
@@ -385,9 +409,24 @@ script_mod! {
         // The kit's camera_fn `c.share` (four values it works out a frame).
         k_share: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         k_view: uniform(vec4(1920.0, 1080.0, 0.0, 0.0))
+        // A host's hand on a flat frame, as on the glyph draw.
+        k_flat: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        k_flat_on: uniform(vec4(0.0, 1.0, 0.0, 0.0))
         vertex: fn() {
             self.pos = self.geom.pos
+            if self.k_flat_on.x > 0.5 {
+                self.pos = self.flat_uv(self.geom.pos)
+            }
             self.vertex_pos = vec4(self.geom.pos.x * 2.0 - 1.0, 1.0 - self.geom.pos.y * 2.0, 0.99999, 1.0)
+        }
+        // The host's hand on a flat frame undone: the place `q` (0,0 top
+        // left) shows under it, interpolated exactly (the map is affine)
+        // (view.rs `flat_uv`).
+        flat_uv: fn(q: vec2) -> vec2 {
+            let a = max(self.k_view.x / max(self.k_view.y, 1.0), 0.001)
+            let m = vec2((q.x - 0.5) * a - self.k_flat.z, q.y - 0.5 + self.k_flat.w)
+            let r = vec2(self.k_flat.x * m.x - self.k_flat.y * m.y, self.k_flat.y * m.x + self.k_flat.x * m.y) / max(self.k_flat_on.y, 0.01)
+            return vec2(r.x / a + 0.5, r.y + 0.5)
         }
         content: fn(uv: vec2) -> vec4 {
             if self.k_misc.y < 0.5 {
