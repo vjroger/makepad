@@ -40,6 +40,29 @@ pub struct KineticFrame {
     pub audio: Option<AudioFrame>,
 }
 
+/// The camera a frame is drawn with: the kit's framing of its text after
+/// its `camera_fn`, what a host's hand on it ([`CameraOver`]) is given.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KineticCamera {
+    pub eye: Vec3f,
+    pub target: Vec3f,
+    pub up: Vec3f,
+    /// The vertical field of view (degrees).
+    pub fov: f32,
+}
+
+/// A host's hand on the frame's camera ([`KineticView::set_camera_over`]):
+/// the kit's camera in, the one the frame is drawn with out (a VJ deck's
+/// view gizmo turning, panning and dollying it).
+pub type CameraOver = Box<dyn Fn(KineticCamera) -> KineticCamera>;
+
+/// The camera record (eye, target, up, fov, roll, share) through `over`:
+/// its eye, target, up and fov become what `over` gives, the rest stay.
+fn camera_through(cam: &mut [f32; 16], over: &dyn Fn(KineticCamera) -> KineticCamera) {
+    let c = over(KineticCamera { eye: vec3f(cam[0], cam[1], cam[2]), target: vec3f(cam[3], cam[4], cam[5]), up: vec3f(cam[6], cam[7], cam[8]), fov: cam[9] });
+    cam[..10].copy_from_slice(&[c.eye.x, c.eye.y, c.eye.z, c.target.x, c.target.y, c.target.z, c.up.x, c.up.y, c.up.z, c.fov]);
+}
+
 /// Log bands of the animators' spectrum.
 pub const BANDS: usize = makepad_audio_reactive::SPECTRUM_BANDS;
 
@@ -335,6 +358,8 @@ pub struct KineticView {
     kit_font: crate::FontSource,
     /// Letters alone over a clear frame ([`KineticView::set_overlay`]).
     overlay: bool,
+    /// A host's hand on the frame's camera ([`KineticView::set_camera_over`]).
+    camera_over: Option<CameraOver>,
     /// A host's values for the kit's dials, in the order declared
     /// ([`KineticView::set_dials`]); `None` (or past the end) keeps the
     /// kit's default. A frame's `dials` win over these.
@@ -434,6 +459,7 @@ impl KineticView {
             kit_colors: values.colors,
             kit_font: values.shape.font.clone(),
             overlay: false,
+            camera_over: None,
             host_dials: Vec::new(),
             frame_dials: [None; MAX_DIALS],
             forms,
@@ -624,6 +650,16 @@ impl KineticView {
     /// banner over play, a title over footage); off, the kit's whole frame.
     pub fn set_overlay(&mut self, overlay: bool) {
         self.overlay = overlay;
+    }
+
+    /// A host's hand on the frame's camera (`None`: the kit's own): each
+    /// frame the kit's framing and `camera_fn` give the camera, `over`
+    /// takes it and the frame is drawn with what it gives: the glyphs, the
+    /// floor and the surface in it, and a backdrop reading `self.eye()` or
+    /// `self.ray(uv)`. A picture's own flat pass is not turned. Kept until
+    /// set again.
+    pub fn set_camera_over(&mut self, over: Option<CameraOver>) {
+        self.camera_over = over;
     }
 
     /// A host's values for ALL of the kit's dials, in the order the kit
@@ -894,6 +930,10 @@ impl KineticView {
                 }
             }
         }
+        // The host's hand on it last, after the kit's own framing.
+        if let Some(over) = &self.camera_over {
+            camera_through(&mut cam, over.as_ref());
+        }
         let share = [cam[12], cam[13], cam[14], cam[15]];
         let view = Mat4f::look_at(vec3f(cam[0], cam[1], cam[2]), vec3f(cam[3], cam[4], cam[5]), vec3f(cam[6], cam[7], cam[8]));
         let near = (dist * 0.02).max(0.01);
@@ -1091,6 +1131,26 @@ mod tests {
         // The same value again: no new layout.
         v.set_dials(&[Some(0.95)]);
         assert!(!v.relayout && v.text.is_some());
+    }
+
+    /// A host's hand on the camera gets the kit's eye, target, up and fov
+    /// from the camera record and puts back what it gives; the roll and the
+    /// kit's share stay. A hand that gives back what it got leaves the
+    /// record bit for bit.
+    #[test]
+    fn a_hosts_hand_on_the_camera_moves_the_pose_and_keeps_the_share() {
+        let kit = [0.1f32, 1.3, 7.7, 0.25, -0.5, 0.0, 0.0, 1.0, 0.0, 34.0, 0.3, 0.0, 0.11, 0.22, 0.33, 0.44];
+        let mut cam = kit;
+        camera_through(&mut cam, &|c| c);
+        assert_eq!(cam.map(f32::to_bits), kit.map(f32::to_bits), "an identity hand changes nothing");
+        let seen = std::cell::Cell::new(None);
+        let mut cam = kit;
+        camera_through(&mut cam, &|c| {
+            seen.set(Some(c));
+            KineticCamera { eye: vec3f(c.target.x + 2.0, c.target.y, c.target.z), target: c.target, up: vec3f(0.0, 0.0, 1.0), fov: c.fov * 0.5 }
+        });
+        assert_eq!(seen.get(), Some(KineticCamera { eye: vec3f(0.1, 1.3, 7.7), target: vec3f(0.25, -0.5, 0.0), up: vec3f(0.0, 1.0, 0.0), fov: 34.0 }));
+        assert_eq!(cam, [2.25, -0.5, 0.0, 0.25, -0.5, 0.0, 0.0, 0.0, 1.0, 17.0, 0.3, 0.0, 0.11, 0.22, 0.33, 0.44]);
     }
 
     /// A view of the kit `src` (named `file`).
