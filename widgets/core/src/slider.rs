@@ -1,5 +1,6 @@
 use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
     makepad_derive_widget::*,
     makepad_draw::*,
     text_input::{TextInput, TextInputAction},
@@ -2892,6 +2893,25 @@ pub struct Slider {
     #[rust]
     cap_motion: CapMotion,
 
+    /// True, the face is drawn twice, for a material with glass in it that
+    /// shows the window blurred behind it. First in the body, as always,
+    /// with the uniform `backdrop_layer` at 0 and nothing of the window
+    /// bound: what lies under the glass, which the window then captures.
+    /// Then again on an overlay over the body, at the same rect, with
+    /// `backdrop_layer` at 1 and the window's blurred scene bound as
+    /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
+    /// exists): the glass. A material that turns this on declares
+    /// `backdrop_layer` and the scene's slots and draws its glass in the
+    /// second layer only. False, the default, draws once and binds nothing.
+    #[live]
+    backdrop: bool,
+    #[rust]
+    backdrop_list: Option<DrawList2d>,
+    /// The face's second instance, on the overlay. The face's own area,
+    /// which the pointer is tested against, stays the first.
+    #[rust]
+    backdrop_area: Area,
+
     #[live]
     bind: String,
 
@@ -2925,6 +2945,30 @@ impl ScriptHook for Slider {
         self.set_internal(self.default);
         vm.with_cx_mut(|cx| {
             self.update_text_input(cx);
+        });
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if !self.backdrop {
+            return;
+        }
+        vm.with_cx_mut(|cx| {
+            if apply.is_animate() {
+                // An animation frame writes the animated inputs into the
+                // face's own instance in place; the second one, over the
+                // backdrop, would keep the old ones until the next draw.
+                self.draw_bg.redraw(cx);
+            } else {
+                // Built or restyled and not drawn yet: the window captures
+                // on the frame this first paints in, as a glass surface's.
+                arm_gauss_capture(cx);
+            }
         });
     }
 }
@@ -3045,6 +3089,12 @@ impl Slider {
         };
         self.draw_bg.cap_px = self.cap_size as f32;
         self.draw_bg.inset_px = self.track_inset as f32;
+        if self.backdrop {
+            // The body's layer never reads the window: it is part of the
+            // scene the window captures, and the second layer reads that.
+            bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, None);
+            self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[0.0]);
+        }
         self.draw_bg.begin(cx, walk, self.layout);
 
         if let Flow::Right { wrap: false, .. } = self.layout.flow {
@@ -3067,6 +3117,9 @@ impl Slider {
         }
 
         self.draw_bg.end(cx);
+        if self.backdrop {
+            self.draw_backdrop_layer(cx);
+        }
         // The track's travel in points, for the motion's springs, which
         // work in points so a long fader and a short one feel the same.
         if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
@@ -3077,6 +3130,35 @@ impl Slider {
             };
             let travel = self.cap_travel(extent).max(1.0);
             self.cap_motion.resize(travel);
+        }
+    }
+
+    /// The face's second layer (see `backdrop`): the same instance again at
+    /// the face's rect, on an overlay of its own unless one is being drawn
+    /// already, with the window's blurred scene bound. Added as an aligned
+    /// instance, so a parent that aligns the face afterwards moves both.
+    fn draw_backdrop_layer(&mut self, cx: &mut Cx2d) {
+        let rect = self.draw_bg.area().rect(cx);
+        let own_list = !cx.is_drawing_overlay();
+        if own_list {
+            self.backdrop_list
+                .get_or_insert_with(|| DrawList2d::new(cx))
+                .begin_overlay_reuse(cx);
+        }
+        let snapshot = request_window_gauss(cx);
+        bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
+        self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[1.0]);
+        self.draw_bg.rect_pos = rect.pos.into();
+        self.draw_bg.rect_size = rect.size.into();
+        self.draw_bg.draw_vars.append_group_id = cx.draw_call_group_background().0;
+        if self.draw_bg.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_bg.draw_vars);
+            self.backdrop_area = cx.update_area_refs(self.backdrop_area, new_area);
+        }
+        if own_list {
+            if let Some(list) = self.backdrop_list.as_mut() {
+                list.end(cx);
+            }
         }
     }
 
@@ -4223,5 +4305,125 @@ mod fader_tests {
         send(&mut cx, &root, &release(at + Vec2d { x: 0.0, y: -40.0 }));
         cx.fingers.first_mouse_button = None;
         assert!(value_of(&upright) > 0.5, "the drag moved the value");
+    }
+}
+
+/// THE BACKDROP LAYER. A face whose material has glass in it is drawn twice:
+/// in the body, which the window captures, and again over it on an overlay,
+/// where the glass reads that capture. The pointer is tested against the
+/// first alone.
+#[cfg(test)]
+mod backdrop_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: Vec2d = Vec2d { x: 400.0, y: 300.0 };
+
+    /// A window-less pass with the overlay a window keeps.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    glass := SliderFader{
+                        width: 300.
+                        backdrop: true
+                        draw_bg +: {backdrop_layer: uniform(-1.0)}
+                    }
+                    plain := SliderFader{
+                        width: 300.
+                        draw_bg +: {backdrop_layer: uniform(-1.0)}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// The list an instance was drawn into and the `backdrop_layer` its
+    /// draw call carries.
+    fn layer_of(cx: &Cx, slider: &Slider, area: Area) -> (DrawListId, f32) {
+        let inst = area.valid_instance(cx).expect("drawn").clone();
+        let call = cx.draw_lists[inst.draw_list_id].draw_items[inst.draw_item_id]
+            .kind
+            .draw_call()
+            .expect("a draw call");
+        let (offset, _) = slider
+            .draw_bg
+            .draw_vars
+            .uniform_range(cx, live_id!(backdrop_layer))
+            .expect("the material declares backdrop_layer");
+        (inst.draw_list_id, call.dyn_uniforms[offset])
+    }
+
+    #[test]
+    fn a_backdrop_face_draws_under_the_glass_then_the_glass_over_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = scene(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        target.draw(&mut cx, &root);
+
+        let glass = root.widget(&cx, ids!(glass));
+        let glass = glass.borrow::<Slider>().unwrap();
+        let face = glass.draw_bg.area();
+        let (body_list, body_layer) = layer_of(&cx, &glass, face);
+        let (over_list, over_layer) = layer_of(&cx, &glass, glass.backdrop_area);
+        assert_eq!(body_layer, 0.0, "the body's layer is what lies under the glass");
+        assert_eq!(over_layer, 1.0, "the second is the glass");
+        assert_ne!(body_list, over_list, "and it is drawn on a list of its own");
+        assert_eq!(
+            Some(over_list),
+            glass.backdrop_list.as_ref().map(|list| list.id()),
+            "the slider's overlay list"
+        );
+        assert_eq!(
+            face.rect(&cx),
+            glass.backdrop_area.rect(&cx),
+            "both layers cover the same rect"
+        );
+
+        // A face that does not ask is drawn once, as before, and its
+        // material keeps whatever it declared.
+        let plain = root.widget(&cx, ids!(plain));
+        let plain = plain.borrow::<Slider>().unwrap();
+        assert_eq!(plain.backdrop_area, Area::Empty);
+        assert!(plain.backdrop_list.is_none());
+        let (_, plain_layer) = layer_of(&cx, &plain, plain.draw_bg.area());
+        assert_eq!(plain_layer, -1.0);
     }
 }
