@@ -257,6 +257,33 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
     cx.global::<GaussWindowGlobal>().request(window_id)
 }
 
+/// [`request_window_gauss`] for a shader that shows the window's scene
+/// sharp and moves it, such as glass that bends what lies under it: only a
+/// capture made in this very frame, and `None` on a frame that did not
+/// capture. A blurred backdrop can show the last capture on such a frame
+/// unnoticed; a sharp one would show a picture that is no longer there. It
+/// asks for a capture all the same, so the next frame has one.
+pub fn request_window_scene(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
+    if !cx.is_drawing_overlay() {
+        return None;
+    }
+    let redraw_id = cx.redraw_id;
+    let global = cx.global::<GaussWindowGlobal>();
+    if let Some((pass, _)) = global.scope_in(redraw_id).last().copied() {
+        let entry = global.captures.entry(pass).or_default();
+        entry.requested_this_frame = true;
+        return if entry.capture_active { entry.snapshot.clone() } else { None };
+    }
+    let window_id = cx.get_current_window_id()?;
+    let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
+    entry.requested_this_frame = true;
+    if entry.capture_active {
+        entry.snapshot.clone()
+    } else {
+        None
+    }
+}
+
 /// Bind a snapshot's scene and pyramid to a shader that samples the window
 /// behind it, or clear the slots so it paints its fallback face. For shaders
 /// outside the glass family that sample the window themselves, such as a
