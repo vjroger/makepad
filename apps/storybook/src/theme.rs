@@ -43,12 +43,12 @@ impl PartialEq for Choice {
 /// it, and so the catalogue names none of them itself.
 /// The sheets whose design frames the catalogue's panes as windows: the
 /// segment display's windows set into its black plate, the handheld's
-/// screens in its shell, the frosted sheet's panes of glass over its ground.
-/// Under every other sheet the panes are clear and the window's own ground
+/// screens in its shell, the frosted sheet's panes of glass over its ground,
+/// the liquid sheet's panes of light glass over its blobs. Under every other sheet the panes are clear and the window's own ground
 /// shows through them, as it always did; a sheet whose ground is its design
 /// (the futuristic metal hull, the cyberpunk board) would lose it under a
 /// pane of panel.
-const FRAMING_SHEETS: &[&str] = &["lcd", "handheld", "frosted"];
+const FRAMING_SHEETS: &[&str] = &["lcd", "handheld", "frosted", "liquid"];
 
 /// Whether the catalogue's panes are drawn as the sheet's panels.
 pub fn frames_panes() -> bool {
