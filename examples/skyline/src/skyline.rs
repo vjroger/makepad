@@ -174,8 +174,8 @@ script_mod! {
                 // top beacon
                 let ax = (lx - acx) / max(pxc, 0.0001)
                 let ay = (ang - atop) / px
-                let beacon = exp(-(ax * ax + ay * ay) / 3.0) * ant_on
-                em = em + vec3(1.0, 0.08, 0.03) * (beacon * self.lights * 0.8 * lit * step(0.0, hh))
+                let beacon = exp(-(ax * ax + ay * ay) / 3.0) * ant_on * step(0.85, self.rnd(ci, 10.0, layer))
+                em = em + vec3(1.0, 0.08, 0.03) * (beacon * self.lights * 0.35 * lit * step(0.0, hh))
             }
             return vec4(em.x, em.y, em.z, m)
         }
