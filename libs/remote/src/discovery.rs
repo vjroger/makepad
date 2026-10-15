@@ -207,12 +207,13 @@ pub fn apps() -> Vec<App> {
     out
 }
 
-/// `spec` is a pid or an app name; of several with that name the most recent (highest pid).
+/// `spec` is a pid, an app name (of several with that name the most recent, highest pid) or the
+/// socket a startup line printed (`tcp:127.0.0.1:<port>` on Windows, whose token is here).
 pub fn find(spec: &str) -> Option<App> {
     let list = apps();
     match spec.parse::<u32>() {
         Ok(pid) => list.into_iter().find(|a| a.pid == pid),
-        Err(_) => list.into_iter().rfind(|a| a.app == spec),
+        Err(_) => list.into_iter().rfind(|a| a.app == spec || a.socket == spec),
     }
 }
 
