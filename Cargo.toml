@@ -103,6 +103,7 @@ workspace.members = [
     "examples/aichat",
     "examples/pdf",
     "examples/shader",
+    "examples/skyline",
     "examples/raytrace",
     "examples/text_input",
     "examples/text_atlas_stress",
