@@ -18,29 +18,12 @@ script_mod! {
 
     mod.widgets.DrawSkyline = set_type_default() do #(DrawSkyline::script_shader(vm)) {
         ..mod.draw.DrawQuad
-        seed: 1.0
-        horizon: 0.72
-        mountain_amt: 1.0
-        mountain_height: 0.10
-        city_amt: 1.0
-        city_height: 1.0
-        city_density: 0.7
-        tree_amt: 1.0
-        tree_height: 0.012
-        tree_conifer: 0.7
-        lights: 3.0
-        window_density: 0.45
-        glow: 0.5
-        haze: 0.7
-        mountain_cover: 0.45
-        mountain_center: 0.15
-        city_cover: 0.30
-        city_center: 0.55
-        tree_cover: 0.55
-        tree_center: 0.30
-        treeline: 0.05
-        land_cover: 0.80
-        land_center: 0.40
+        p0: vec4(1.0, 0.72, 1.0, 0.1)
+        p1: vec4(1.0, 1.0, 0.7, 1.0)
+        p2: vec4(0.012, 0.7, 3.0, 0.45)
+        p3: vec4(0.5, 0.7, 0.45, 0.15)
+        p4: vec4(0.3, 0.55, 0.55, 0.3)
+        p5: vec4(0.05, 0.8, 0.4, 0.0)
         sil_color: vec4(0.004, 0.006, 0.012, 1.0)
         haze_color: vec4(0.045, 0.060, 0.100, 1.0)
 
@@ -59,7 +42,7 @@ script_mod! {
         }
         // Hash of (cell id, stream) in 0..1, per layer seed.
         rnd: fn(id: float, stream: float, layer: float) -> float {
-            let s = u32(self.seed * 131.0 + layer * 7919.0)
+            let s = u32(self.p0.x * 131.0 + layer * 7919.0)
             let h = self.hash2(self.hash2(u32(id + 4096.0), u32(stream) + 17u), s)
             return f32(h >> 8u) * 0.000000059604644775390625
         }
@@ -122,8 +105,8 @@ script_mod! {
 
             // Low frequency density: where the downtown cores are.
             let env_n = self.fbm(u, 3.0, layer + 50.0)
-            let env = self.region(u, self.city_center, self.city_cover, layer + 70.0)
-            let core = smoothstep(0.30, 0.8, env_n * (0.55 + 0.9 * self.city_density)) * env
+            let env = self.region(u, self.p4.y, self.p4.x, layer + 70.0)
+            let core = smoothstep(0.30, 0.8, env_n * (0.55 + 0.9 * self.p1.z)) * env
 
             let r_h = self.rnd(ci, 2.0, layer)
             let r_w = self.rnd(ci, 3.0, layer)
@@ -137,7 +120,7 @@ script_mod! {
             let r_x = self.rnd(ci, 11.0, layer)
             let tall = pow(r_h, 1.0 + 3.0 * r_x) * core
             var hh = hmax * (0.10 + 0.9 * tall) * (0.45 + 0.55 * core)
-            hh = hh * (0.55 + 0.45 * self.city_density) * self.city_amt * smoothstep(0.1, 0.5, env)
+            hh = hh * (0.55 + 0.45 * self.p1.z) * self.p1.x * smoothstep(0.1, 0.5, env)
             let w = mix(0.28, 0.97, pow(r_w, 0.7))
             let left = (1.0 - w) * 0.5 * (0.6 + 0.8 * r_j)
             let right = left + w
@@ -180,7 +163,7 @@ script_mod! {
                 let wyi = floor(wyf)
                 let fx = wxf - wxi
                 let fy = wyf - wyi
-                let prob = clamp(self.window_density * (0.15 + 1.1 * r_b), 0.0, 1.0)
+                let prob = clamp(self.p2.w * (0.15 + 1.1 * r_b), 0.0, 1.0)
                 let rw = self.rnd3(ci + wxi * 13.0, wyi, 9.0, layer)
                 // Lit windows come in floors: a floor is either mostly on or mostly off.
                 let rr = self.rnd3(ci, wyi, 11.0, layer)
@@ -198,12 +181,12 @@ script_mod! {
                 let wc = mix(warm, cool, step(0.8, fract(rw * 91.7)))
                 let bright = 0.5 + 0.9 * fract(rw * 37.3)
                 let in_b = max(mx * self.cover(h1 - ang, px), mc * crown_on * self.cover(hh - ang, px))
-                em = mix(warm, wc, res) * (wpat * mix(0.8, bright, res) * self.lights * lit * in_b * step(0.0, ang))
+                em = mix(warm, wc, res) * (wpat * mix(0.8, bright, res) * self.p2.z * lit * in_b * step(0.0, ang))
                 // top beacon
                 let ax = (lx - acx) / max(pxc, 0.0001)
                 let ay = (ang - atop) / px
                 let beacon = exp(-(ax * ax + ay * ay) / 3.0) * ant_on * step(0.85, self.rnd(ci, 10.0, layer))
-                em = em + vec3(1.0, 0.08, 0.03) * (beacon * self.lights * 0.35 * lit * step(0.0, hh))
+                em = em + vec3(1.0, 0.08, 0.03) * (beacon * self.p2.z * 0.35 * lit * step(0.0, hh))
             }
             return vec4(em.x, em.y, em.z, m)
         }
@@ -229,7 +212,7 @@ script_mod! {
                 let d = abs(2.0 * lx - 1.0)
                 let spire = ht * pow(max(1.0 - d, 0.0), 0.85)
                 let round = ht * 0.8 * sqrt(max(1.0 - d * d, 0.0)) * (0.85 + 0.15 * r_s)
-                let prof = mix(round, spire, step(r_s, self.tree_conifer))
+                let prof = mix(round, spire, step(r_s, self.p2.y))
                 best = max(best, self.cover(base + prof - ang, px))
             }
             return best * smoothstep(0.05, 0.3, reg)
@@ -239,7 +222,7 @@ script_mod! {
             let u = self.pos.x
             let v = self.pos.y
             let ar = self.rect_size.y / self.rect_size.x
-            let ang = (self.horizon - v) * ar * 6.2831853
+            let ang = (self.p0.y - v) * ar * 6.2831853
             let px = ar * 6.2831853 / self.rect_size.y
 
             var col = vec3(0.0, 0.0, 0.0)
@@ -249,54 +232,54 @@ script_mod! {
             let hz = vec3(self.haze_color.x, self.haze_color.y, self.haze_color.z)
 
             // City glow dome, additive, behind everything.
-            let cenv = self.region(u, self.city_center, self.city_cover, 270.0)
-            let gcore = smoothstep(0.35, 0.8, self.fbm(u, 3.0, 50.0) * (0.55 + 0.9 * self.city_density)) * cenv
-            let dome = exp(-max(ang, 0.0) / (0.05 * self.city_height)) * gcore * self.glow * self.city_amt
+            let cenv = self.region(u, self.p4.y, self.p4.x, 270.0)
+            let gcore = smoothstep(0.35, 0.8, self.fbm(u, 3.0, 50.0) * (0.55 + 0.9 * self.p1.z)) * cenv
+            let dome = exp(-max(ang, 0.0) / (0.05 * self.p1.y)) * gcore * self.p3.x * self.p1.x
             col = col + vec3(1.0, 0.55, 0.25) * (dome * 0.10)
 
             // Mountains, three ridges far -> near, with trees up to the treeline.
             for k in 0..3 {
                 let t = (2.0 - f32(k)) / 2.0
                 let hrel = 0.45 + 0.55 * f32(k) / 2.0
-                let menv = self.region(u, self.mountain_center + 0.02 * (f32(k) - 1.0), self.mountain_cover, 20.0 + f32(k) * 10.0)
+                let menv = self.region(u, self.p3.w + 0.02 * (f32(k) - 1.0), self.p3.z, 20.0 + f32(k) * 10.0)
                 // Alpine and rolling stretches along the same range.
                 let peaky = smoothstep(0.2, 0.8, self.fbm(u, 2.0 + f32(k), 30.0 + f32(k) * 10.0))
                 let shape = self.ridge(u, 3.0 + f32(k) * 2.0, 20.0 + f32(k) * 10.0)
-                let hr = self.mountain_amt * self.mountain_height * menv * (0.12 + 0.88 * peaky) * (0.3 + 0.7 * shape) * hrel
+                let hr = self.p0.z * self.p0.w * menv * (0.12 + 0.88 * peaky) * (0.3 + 0.7 * shape) * hrel
                 let m = self.cover(hr - ang, px)
-                col = mix(col, mix(sil, hz, t * self.haze * 0.9 + 0.1), m)
+                col = mix(col, mix(sil, hz, t * self.p3.y * 0.9 + 0.1), m)
                 a = max(a, m)
 
-                let treg = self.region(u, self.tree_center, self.tree_cover, 400.0 + f32(k) * 10.0)
-                let base = min(hr, self.treeline)
-                let tm = self.trees(u, ang, px, 260.0 + 130.0 * f32(k), 410.0 + f32(k) * 10.0, self.tree_height * self.tree_amt * (0.5 + 0.25 * f32(k)), base, treg)
-                col = mix(col, mix(sil, hz, t * self.haze * 0.45), tm)
+                let treg = self.region(u, self.p4.w, self.p4.z, 400.0 + f32(k) * 10.0)
+                let base = min(hr, self.p5.x)
+                let tm = self.trees(u, ang, px, 260.0 + 130.0 * f32(k), 410.0 + f32(k) * 10.0, self.p2.x * self.p1.w * (0.5 + 0.25 * f32(k)), base, treg)
+                col = mix(col, mix(sil, hz, t * self.p3.y * 0.45), tm)
                 a = max(a, tm)
             }
 
             // Cities: far, mid, near. Windows get larger and brighter closer up.
-            let cfar = self.city(u, ang, px, 360.0, 100.0, 0.035 * self.city_height, 0.0016, 1.0)
-            var cc = mix(sil, hz, 0.55 * self.haze + 0.1)
+            let cfar = self.city(u, ang, px, 360.0, 100.0, 0.035 * self.p1.y, 0.0016, 1.0)
+            var cc = mix(sil, hz, 0.55 * self.p3.y + 0.1)
             col = mix(col, cc, cfar.w) + vec3(cfar.x, cfar.y, cfar.z) * 0.8
             a = max(a, cfar.w)
 
-            let cmid = self.city(u, ang, px, 200.0, 200.0, 0.070 * self.city_height, 0.0024, 1.0)
-            cc = mix(sil, hz, 0.28 * self.haze + 0.05)
+            let cmid = self.city(u, ang, px, 200.0, 200.0, 0.070 * self.p1.y, 0.0024, 1.0)
+            cc = mix(sil, hz, 0.28 * self.p3.y + 0.05)
             col = mix(col, cc, cmid.w) + vec3(cmid.x, cmid.y, cmid.z)
             a = max(a, cmid.w)
 
-            let cnear = self.city(u, ang, px, 110.0, 300.0, 0.115 * self.city_height, 0.0034, 1.0)
-            cc = mix(sil, hz, 0.06 * self.haze)
+            let cnear = self.city(u, ang, px, 110.0, 300.0, 0.115 * self.p1.y, 0.0034, 1.0)
+            cc = mix(sil, hz, 0.06 * self.p3.y)
             col = mix(col, cc, cnear.w) + vec3(cnear.x, cnear.y, cnear.z)
             a = max(a, cnear.w)
 
             // Land, or flat sea where there is none.
-            let lenv = self.region(u, self.land_center, self.land_cover, 600.0)
+            let lenv = self.region(u, self.p5.z, self.p5.y, 600.0)
             let gh = (0.0035 + 0.0025 * self.fbm(u, 24.0, 500.0)) * lenv
 
             // Treeline in front of the city, standing on the ground.
-            let freg = self.region(u, self.tree_center, self.tree_cover, 450.0)
-            let tm = self.trees(u, ang, px, 520.0, 400.0, self.tree_height * self.tree_amt, gh, freg)
+            let freg = self.region(u, self.p4.w, self.p4.z, 450.0)
+            let tm = self.trees(u, ang, px, 520.0, 400.0, self.p2.x * self.p1.w, gh, freg)
             col = mix(col, sil, tm)
             a = max(a, tm)
 
@@ -320,52 +303,18 @@ script_mod! {
 pub struct DrawSkyline {
     #[deref]
     draw_super: DrawQuad,
-    #[live(1.0)]
-    pub seed: f32,
-    #[live(0.72)]
-    pub horizon: f32,
-    #[live(1.0)]
-    pub mountain_amt: f32,
-    #[live(0.10)]
-    pub mountain_height: f32,
-    #[live(1.0)]
-    pub city_amt: f32,
-    #[live(1.0)]
-    pub city_height: f32,
-    #[live(0.7)]
-    pub city_density: f32,
-    #[live(1.0)]
-    pub tree_amt: f32,
-    #[live(0.012)]
-    pub tree_height: f32,
-    #[live(0.7)]
-    pub tree_conifer: f32,
-    #[live(3.0)]
-    pub lights: f32,
-    #[live(0.45)]
-    pub window_density: f32,
-    #[live(0.5)]
-    pub glow: f32,
-    #[live(0.7)]
-    pub haze: f32,
-    #[live(0.45)]
-    pub mountain_cover: f32,
-    #[live(0.15)]
-    pub mountain_center: f32,
-    #[live(0.30)]
-    pub city_cover: f32,
-    #[live(0.55)]
-    pub city_center: f32,
-    #[live(0.55)]
-    pub tree_cover: f32,
-    #[live(0.30)]
-    pub tree_center: f32,
-    #[live(0.05)]
-    pub treeline: f32,
-    #[live(0.80)]
-    pub land_cover: f32,
-    #[live(0.40)]
-    pub land_center: f32,
+    #[live]
+    pub p0: Vec4f,
+    #[live]
+    pub p1: Vec4f,
+    #[live]
+    pub p2: Vec4f,
+    #[live]
+    pub p3: Vec4f,
+    #[live]
+    pub p4: Vec4f,
+    #[live]
+    pub p5: Vec4f,
     #[live]
     pub sil_color: Vec4f,
     #[live]
@@ -399,29 +348,29 @@ impl SkylineView {
     pub fn set_param(&mut self, name: &str, v: f32) -> bool {
         let d = &mut self.draw_bg;
         match name {
-            "seed" => d.seed = v,
-            "horizon" => d.horizon = v,
-            "mountain_amt" => d.mountain_amt = v,
-            "mountain_height" => d.mountain_height = v,
-            "city_amt" => d.city_amt = v,
-            "city_height" => d.city_height = v,
-            "city_density" => d.city_density = v,
-            "tree_amt" => d.tree_amt = v,
-            "tree_height" => d.tree_height = v,
-            "tree_conifer" => d.tree_conifer = v,
-            "lights" => d.lights = v,
-            "window_density" => d.window_density = v,
-            "glow" => d.glow = v,
-            "haze" => d.haze = v,
-            "mountain_cover" => d.mountain_cover = v,
-            "mountain_center" => d.mountain_center = v,
-            "city_cover" => d.city_cover = v,
-            "city_center" => d.city_center = v,
-            "tree_cover" => d.tree_cover = v,
-            "tree_center" => d.tree_center = v,
-            "treeline" => d.treeline = v,
-            "land_cover" => d.land_cover = v,
-            "land_center" => d.land_center = v,
+            "seed" => d.p0.x = v,
+            "horizon" => d.p0.y = v,
+            "mountain_amt" => d.p0.z = v,
+            "mountain_height" => d.p0.w = v,
+            "city_amt" => d.p1.x = v,
+            "city_height" => d.p1.y = v,
+            "city_density" => d.p1.z = v,
+            "tree_amt" => d.p1.w = v,
+            "tree_height" => d.p2.x = v,
+            "tree_conifer" => d.p2.y = v,
+            "lights" => d.p2.z = v,
+            "window_density" => d.p2.w = v,
+            "glow" => d.p3.x = v,
+            "haze" => d.p3.y = v,
+            "mountain_cover" => d.p3.z = v,
+            "mountain_center" => d.p3.w = v,
+            "city_cover" => d.p4.x = v,
+            "city_center" => d.p4.y = v,
+            "tree_cover" => d.p4.z = v,
+            "tree_center" => d.p4.w = v,
+            "treeline" => d.p5.x = v,
+            "land_cover" => d.p5.y = v,
+            "land_center" => d.p5.z = v,
             _ => return false,
         }
         true
