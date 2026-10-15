@@ -347,11 +347,17 @@ script_mod! {
             let edge = (self.sun_color * (back * mix(1.0, 3.14159265, self.lin_ctl.x) * 0.45) + self.sun_sky * 0.8) * (e * e * e * amb_occ * rim / 255.0)
             return base * (1.0 - fc) + env * (fc * amb_occ) + sun * (glint * fc) + edge
         }
+        // Every discard of this shader goes through here, as in
+        // DrawSceneSkinned: a pipeline that can discard costs a tile GPU its
+        // hidden-surface removal for everything it draws, so a part that can
+        // never cut a pixel (the base layer of an unmasked material) draws
+        // through the lane's variant with this emptied (renderer/variants.rs).
+        clip: fn() { discard() }
         pixel: fn() {
-            if self.fur_mask() < 0.5 { discard() }
+            if self.fur_mask() < 0.5 { self.clip() }
             let tex = self.tex.sample_repeat(self.v_uv)
             let alpha=tex.w*self.v_color.w*self.material_alpha
-            if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{discard()}
+            if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{self.clip()}
             let albedo = self.color_adjust(self.to_lin(tex.xyz)*self.to_lin(self.v_color.xyz), self.tint, self.color_adjust_ctl)
             // Same occlusion idiom as DrawSceneSkinned: per-fragment atlas
             // sample, world-anchored hash dither against 8-bit banding,
@@ -446,9 +452,9 @@ script_mod! {
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
                 if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao)}
                 let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
-                return self.csm_debug_view(self.gi_display(vec4(mix(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.fog_color,self.scene_fog(self.v_fog,self.v_csm.xyz,self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+                return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.v_fog,self.v_csm.xyz,self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
             }
-            return self.csm_debug_view(self.gi_display(vec4(mix(lit, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density)), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(lit, self.v_fog, self.v_csm.xyz, self.fog_density), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
         }
 
         fragment: fn() {

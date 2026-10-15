@@ -839,10 +839,10 @@ pub fn sh9_irradiance(c: &[[f32; 3]; 9], n: [f32; 3]) -> [f32; 3] {
     e
 }
 
-/// The render lane's IBL texture (see `builtin.rs`): the prefiltered atlas
-/// rows, then one meta row holding the nine SH9 irradiance coefficients
-/// (texels 0..8) and `(levels, level_height, intensity, rotation)` in texel
-/// 9. RGBA f32, row-major, for `TextureFormat::VecRGBAf32`.
+/// The render lane's IBL texture (see `builtin.rs`): one meta row holding
+/// the nine SH9 irradiance coefficients (texels 0..8) and `(levels,
+/// level_height, intensity, rotation)` in texel 9, then the prefiltered
+/// atlas rows. RGBA f32, row-major, for `TextureFormat::VecRGBAf32`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IblTexture {
     pub width: usize,
@@ -862,16 +862,28 @@ pub fn ibl_texture(env: &EnvMap, intensity: f32, rotation_deg: f32) -> IblTextur
 /// by `key` (a name for this one map's content): every scene lighting with
 /// the same map shares one CPU prefilter, which takes a large part of a
 /// second (more on a browser's UI thread). A host can run it ahead of the
-/// first draw, behind its loader.
+/// first draw, behind its loader, on a worker: the store is taken with
+/// `try_lock` and a spin (held for a map lookup), never a wait, which a
+/// browser's main thread may not do.
 pub fn prefiltered(key: u64, env: &EnvMap) -> std::sync::Arc<(EnvAtlas, [[f32; 3]; 9])> {
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-    static KEPT: Mutex<Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>> = Mutex::new(None);
-    if let Some(kept) = KEPT.lock().unwrap().as_ref().and_then(|kept| kept.get(&key)) {
+    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+    type Kept = Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>;
+    static KEPT: Mutex<Kept> = Mutex::new(None);
+    fn kept() -> MutexGuard<'static, Kept> {
+        loop {
+            match KEPT.try_lock() {
+                Ok(guard) => return guard,
+                Err(TryLockError::Poisoned(error)) => return error.into_inner(),
+                Err(TryLockError::WouldBlock) => std::hint::spin_loop(),
+            }
+        }
+    }
+    if let Some(kept) = kept().as_ref().and_then(|kept| kept.get(&key)) {
         return kept.clone();
     }
     let made = Arc::new((prefilter(env, 256, 6), sh9(env)));
-    KEPT.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, made.clone());
+    kept().get_or_insert_with(HashMap::new).insert(key, made.clone());
     made
 }
 
@@ -886,19 +898,19 @@ pub fn pack_ibl(atlas: &EnvAtlas, sh: &[[f32; 3]; 9], intensity: f32, rotation_d
     let width = atlas.width.max(10);
     let height = atlas.height + 1;
     let mut data = vec![0.0f32; width * height * 4];
-    for y in 0..atlas.height {
-        for x in 0..atlas.width {
-            let c = atlas.data[y * atlas.width + x];
-            data[(y * width + x) * 4..(y * width + x) * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 1.0]);
-        }
-    }
-    let meta = atlas.height * width * 4;
     for (i, c) in sh.iter().enumerate() {
-        data[meta + i * 4..meta + i * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 1.0]);
+        data[i * 4..i * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 1.0]);
     }
     let intensity = if intensity.is_finite() { intensity.max(0.0) } else { 0.0 };
     let rotation = if rotation_deg.is_finite() { rotation_deg.to_radians() } else { 0.0 };
-    data[meta + 36..meta + 40].copy_from_slice(&[atlas.levels as f32, atlas.level_height as f32, intensity, rotation]);
+    data[36..40].copy_from_slice(&[atlas.levels as f32, atlas.level_height as f32, intensity, rotation]);
+    for y in 0..atlas.height {
+        for x in 0..atlas.width {
+            let c = atlas.data[y * atlas.width + x];
+            let o = ((y + 1) * width + x) * 4;
+            data[o..o + 4].copy_from_slice(&[c[0], c[1], c[2], 1.0]);
+        }
+    }
     IblTexture { width, height, data }
 }
 
@@ -1122,19 +1134,77 @@ mod tests {
     }
 
     #[test]
-    fn the_lane_texture_carries_the_atlas_then_sh9_and_its_meta() {
+    fn the_lane_texture_carries_sh9_and_its_meta_then_the_atlas() {
         let env = EnvMap::procedural(&EnvPreset::Studio, 64, 1.0, 0.0);
         let atlas = prefilter(&env, 32, 4);
         let sh = sh9(&env);
         let t = pack_ibl(&atlas, &sh, 2.0, 90.0);
         assert_eq!((t.width, t.height), (atlas.width, atlas.height + 1));
         assert_eq!(t.data.len(), t.width * t.height * 4);
-        let meta = atlas.height * t.width * 4;
-        assert_eq!(&t.data[meta..meta + 3], &sh[0]);
-        assert_eq!(t.data[meta + 36], atlas.levels as f32);
-        assert_eq!(t.data[meta + 37], atlas.level_height as f32);
-        assert_eq!(t.data[meta + 38], 2.0);
-        assert!((t.data[meta + 39] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
-        assert_eq!(&t.data[0..3], &atlas.data[0][0..3]);
+        assert_eq!(&t.data[0..3], &sh[0]);
+        assert_eq!(&t.data[32..35], &sh[8]);
+        assert_eq!(t.data[36], atlas.levels as f32);
+        assert_eq!(t.data[37], atlas.level_height as f32);
+        assert_eq!(t.data[38], 2.0);
+        assert!((t.data[39] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        let row1 = t.width * 4;
+        assert_eq!(&t.data[row1..row1 + 3], &atlas.data[0][0..3]);
+        let last = (t.height * t.width - 1) * 4;
+        assert_eq!(&t.data[last..last + 3], &atlas.data[atlas.data.len() - 1][0..3]);
+    }
+
+    /// The shader's reads of the lane texture (builtin.rs `mat_ibl_meta` and
+    /// `mat_ibl_level`) on the CPU: `size()` is the texture's size and
+    /// sampling is nearest at normalized coordinates.
+    struct ShaderReads<'a> {
+        t: &'a IblTexture,
+    }
+
+    impl ShaderReads<'_> {
+        fn nearest(&self, u: f32, v: f32) -> [f32; 4] {
+            let x = ((u * self.t.width as f32).floor().max(0.0) as usize).min(self.t.width - 1);
+            let y = ((v * self.t.height as f32).floor().max(0.0) as usize).min(self.t.height - 1);
+            let o = (y * self.t.width + x) * 4;
+            [self.t.data[o], self.t.data[o + 1], self.t.data[o + 2], self.t.data[o + 3]]
+        }
+
+        fn meta(&self, i: f32) -> [f32; 4] {
+            self.nearest((i + 0.5) / self.t.width as f32, 0.5 / self.t.height as f32)
+        }
+
+        fn level(&self, uv: [f32; 2], k: f32) -> [f32; 3] {
+            let (w, rows) = (self.t.width as f32, self.t.height as f32);
+            let h = self.meta(9.0)[1];
+            let px = uv[0] * w - 0.5;
+            let py = (uv[1] * h - 0.5).max(0.0).min(h - 1.0);
+            let (x0, y0) = (px.floor(), py.floor());
+            let (fx, fy) = (px - x0, py - y0);
+            let xa = (x0 - (x0 / w).floor() * w + 0.5) / w;
+            let xb = (x0 + 1.0 - ((x0 + 1.0) / w).floor() * w + 0.5) / w;
+            let ya = (1.0 + k * h + y0 + 0.5) / rows;
+            let yb = (1.0 + k * h + (y0 + 1.0).min(h - 1.0) + 0.5) / rows;
+            let mix = |a: [f32; 4], b: [f32; 4], f: f32| [0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * f);
+            let a = mix(self.nearest(xa, ya), self.nearest(xb, ya), fx);
+            let b = mix(self.nearest(xa, yb), self.nearest(xb, yb), fx);
+            [0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * fy)
+        }
+    }
+
+    #[test]
+    fn the_shader_reads_the_texels_pack_ibl_wrote() {
+        let env = EnvMap::procedural(&EnvPreset::Sunset, 64, 1.0, 0.0);
+        let atlas = prefilter(&env, 32, 4);
+        let sh = sh9(&env);
+        let t = pack_ibl(&atlas, &sh, 2.0, 90.0);
+        let exact = ShaderReads { t: &t };
+        assert_eq!(exact.meta(9.0), [atlas.levels as f32, atlas.level_height as f32, 2.0, 90f32.to_radians()]);
+        for k in 0..atlas.levels {
+            for (x, y) in [(0, 0), (5, 3), (atlas.width - 1, atlas.level_height - 1)] {
+                let uv = [(x as f32 + 0.5) / atlas.width as f32, (y as f32 + 0.5) / atlas.level_height as f32];
+                let want = atlas.data[(k * atlas.level_height + y) * atlas.width + x];
+                let got = exact.level(uv, k as f32);
+                assert!((0..3).all(|c| (got[c] - want[c]).abs() <= 1e-4 * want[c].abs().max(1.0)), "level {k} ({x}, {y}): {got:?} vs {want:?}");
+            }
+        }
     }
 }

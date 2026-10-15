@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::json::*;
 use crate::makepad_live_id::*;
@@ -7,6 +8,7 @@ use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StackBases {
     pub loops: usize,
@@ -17,6 +19,7 @@ pub struct StackBases {
     pub slots: usize,
 }
 
+#[relax_api(plain)]
 #[derive(Debug)]
 pub struct LoopValues {
     pub value_id: LiveId,
@@ -31,6 +34,7 @@ pub struct LoopValues {
     pub range_cache: Option<(f64, f64)>,
 }
 
+#[relax_api(plain)]
 #[derive(Debug)]
 pub struct TryFrame {
     pub push_nil: bool,
@@ -39,6 +43,7 @@ pub struct TryFrame {
     pub bases: StackBases,
 }
 
+#[relax_api(plain)]
 #[derive(Debug)]
 pub struct LoopFrame {
     pub values: Option<LoopValues>,
@@ -47,6 +52,7 @@ pub struct LoopFrame {
     pub bases: StackBases,
 }
 
+#[relax_api(plain)]
 pub struct CallFrame {
     pub bases: StackBases,
     pub args: OpcodeArgs,
@@ -88,7 +94,9 @@ impl Into<ScriptValue> for ScriptMe {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default, Debug, Clone, Copy)]
+#[repr(transparent)]
 pub struct ScriptThreadId(pub(crate) u32);
 
 impl ScriptThreadId {
@@ -97,6 +105,7 @@ impl ScriptThreadId {
     }
 }
 
+#[relax_api(handle)]
 #[allow(unused)]
 pub struct ScriptThread {
     pub(crate) is_paused: bool,
@@ -132,6 +141,9 @@ pub struct ScriptThread {
     //pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
     pub(crate) thread_id: ScriptThreadId,
+    /// Edit mode, while a program loads: the names read and where (see
+    /// `crate::literal::LoadTrace::name_reads`). None otherwise.
+    pub(crate) name_reads: Option<Box<crate::literal::NameReads>>,
 }
 
 impl ScriptThread {
@@ -158,6 +170,7 @@ impl ScriptThread {
             instruction_limit_remaining: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
+            name_reads: None,
         }
     }
 
@@ -412,6 +425,9 @@ impl ScriptThread {
     // lets resolve an id to a ScriptValue
     #[inline]
     pub fn scope_value(&mut self, heap: &ScriptHeap, id: LiveId) -> ScriptValue {
+        if let Some(reads) = &mut self.name_reads {
+            reads.record(id, self.trap.ip.body, self.trap.ip.index);
+        }
         heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }
 
@@ -442,6 +458,7 @@ impl ScriptThread {
 /// Wrapper around Vec<ScriptThread> with a current thread index.
 /// This allows accessing the current thread without borrowing the entire container,
 /// enabling split borrows between threads and other fields like heap/code.
+#[relax_api(handle)]
 pub struct ScriptThreads {
     threads: Vec<ScriptThread>,
     current: usize,
@@ -482,7 +499,7 @@ impl ScriptThreads {
 
     /// Get a mutable reference to the current thread using cached pointer
     /// SAFETY: The pointer is kept in sync with the current index and thread vector
-    #[inline(always)]
+    #[inline]
     pub fn cur(&mut self) -> &mut ScriptThread {
         assert!(
             !self.cur_ptr.is_null(),
@@ -501,7 +518,7 @@ impl ScriptThreads {
 
     /// Get an immutable reference to the current thread using cached pointer
     /// SAFETY: The pointer is kept in sync with the current index and thread vector
-    #[inline(always)]
+    #[inline]
     pub fn cur_ref(&self) -> &ScriptThread {
         assert!(
             !self.cur_ptr.is_null(),

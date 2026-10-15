@@ -10,7 +10,6 @@ use {
         },
         makepad_live_id::*,
         makepad_math::*,
-        thread::lock_from_ui,
     },
     std::sync::Arc,
     std::sync::Mutex,
@@ -109,6 +108,13 @@ pub(crate) enum InternalDragEvent {
 }
 
 impl CxDragDrop {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn cancel_internal_drag(&mut self) -> bool {
+        let active = self.internal_drag_items.take().is_some();
+        let suspended = self.suspended_drag_items.take().is_some();
+        active || suspended
+    }
+
     pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
         assert!(self.internal_drag_items.is_none(), "start drag twice");
         self.internal_drag_items = Some(Arc::new(items));
@@ -183,12 +189,12 @@ impl Event {
             Event::Drag(event) => {
                 let rect = area.clipped_rect(cx);
                 if area == cx.drag_drop.drag_area {
-                    if !*lock_from_ui(&event.handled)
+                    if !*event.handled.lock().unwrap_or_else(|e| e.into_inner())
                         && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin)
                     {
                         //log!("drag_hist_with_options: Drag, in drag area, event handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
-                        *lock_from_ui(&event.handled) = true;
+                        *event.handled.lock().unwrap_or_else(|e| e.into_inner()) = true;
                         DragHit::Drag(DragHitEvent {
                             rect,
                             modifiers: event.modifiers,
@@ -209,12 +215,12 @@ impl Event {
                         })
                     }
                 } else {
-                    if !*lock_from_ui(&event.handled)
+                    if !*event.handled.lock().unwrap_or_else(|e| e.into_inner())
                         && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin)
                     {
                         //log!("drag_hits_with_options: Drag, not in drag_area, event not handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
-                        *lock_from_ui(&event.handled) = true;
+                        *event.handled.lock().unwrap_or_else(|e| e.into_inner()) = true;
                         DragHit::Drag(DragHitEvent {
                             modifiers: event.modifiers,
                             rect,
@@ -231,12 +237,12 @@ impl Event {
             }
             Event::Drop(event) => {
                 let rect = area.clipped_rect(cx);
-                if !*lock_from_ui(&event.handled)
+                if !*event.handled.lock().unwrap_or_else(|e| e.into_inner())
                     && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin)
                 {
                     //log!("drag_hits_with_options: Drop, event not handled and rect {:?} contains ({},{}) in margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                     cx.drag_drop.next_drag_area = Area::default();
-                    *lock_from_ui(&event.handled) = true;
+                    *event.handled.lock().unwrap_or_else(|e| e.into_inner()) = true;
                     DragHit::Drop(DropHitEvent {
                         modifiers: event.modifiers,
                         rect,

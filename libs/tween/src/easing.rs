@@ -123,6 +123,9 @@ pub enum Easing {
         /// Second control point y.
         y2: f64,
     },
+    /// Material's emphasized easing, i.e., Android's `fast_out_extra_slow_in`,
+    /// which Android uses for its activity transitions (`Ease::Emphasized`).
+    Emphasized,
     // --- GSAP / CSS family ---
     /// CSS `cubic-bezier(x1, y1, x2, y2)` solved precisely (Newton, then
     /// bisection, to 1e-12 in x). Build it with [`Easing::css`], which clamps x1 and x2.
@@ -185,10 +188,11 @@ pub enum Easing {
     SmootherStep,
     // --- document family: Motion's named eases (`@ease_out_expo`, `@hold`,
     // `spring(k, d)`), shared by Motion, its 3D scenes and the kinetic kits ---
-    /// `2^(10(p-1))` rescaled to run exactly from 0 to 1 (no snap, no blend):
-    /// `@ease_*_expo` in Motion documents. `out` and `inOut` are made from
+    /// The classic exponential: `in` is `2^(10p - 10)` (0 at p = 0), so `out`
+    /// is `1 - 2^(-10p)` (1 at p = 1): `@ease_*_expo` in Motion documents and
+    /// `ease(@ease_out_expo, u)` in their code. `out` and `inOut` are made from
     /// `in` (`1 - in(1 - p)`, the halves of `in(2p)`).
-    ExpoExact {
+    ExpoClassic {
         /// Which end the ease acts on.
         dir: EaseDir,
     },
@@ -545,6 +549,24 @@ impl Easing {
                 (-a * b + b * a * t2) / (a * t2 - b)
             }
             Self::Bezier { x1, y1, x2, y2 } => parity_bezier(x1, y1, x2, y2, t),
+            Self::Emphasized => {
+                // Android's path is the emphasized-accelerate curve up to 40% at a sixth of
+                // the time, then the emphasized-decelerate curve for the rest. Solved precisely:
+                // the loose parity solver steps backwards on these steep curves.
+                const SPLIT_TIME: f64 = 1.0 / 6.0;
+                const SPLIT_PROGRESS: f64 = 0.4;
+                if t <= 0. {
+                    return 0.;
+                }
+                if t >= 1. {
+                    return 1.;
+                }
+                if t < SPLIT_TIME {
+                    return SPLIT_PROGRESS * precise_bezier(0.3, 0.0, 0.8, 0.15, t / SPLIT_TIME);
+                }
+                let t = (t - SPLIT_TIME) / (1. - SPLIT_TIME);
+                SPLIT_PROGRESS + (1. - SPLIT_PROGRESS) * precise_bezier(0.05, 0.7, 0.1, 1.0, t)
+            }
             Self::CubicBezier { x1, y1, x2, y2 } => precise_bezier(x1, y1, x2, y2, t),
             Self::Back { dir, overshoot } => {
                 let out = |p: f64| back_out(overshoot, p);
@@ -600,16 +622,16 @@ impl Easing {
                 (t * t * t * (t * (t * 6.0 - 15.0) + 10.0)).clamp(0.0, 1.0)
             }
             Self::Custom(f) => (f.0)(t),
-            Self::ExpoExact { dir } => {
+            Self::ExpoClassic { dir } => {
                 let p = t.clamp(0.0, 1.0);
                 match dir {
-                    EaseDir::In => expo_exact_in(p),
-                    EaseDir::Out => 1.0 - expo_exact_in(1.0 - p),
+                    EaseDir::In => expo_classic_in(p),
+                    EaseDir::Out => 1.0 - expo_classic_in(1.0 - p),
                     EaseDir::InOut => {
                         if p < 0.5 {
-                            0.5 * expo_exact_in(2.0 * p)
+                            0.5 * expo_classic_in(2.0 * p)
                         } else {
-                            1.0 - 0.5 * expo_exact_in(2.0 - 2.0 * p)
+                            1.0 - 0.5 * expo_classic_in(2.0 - 2.0 * p)
                         }
                     }
                 }
@@ -921,13 +943,13 @@ fn expo_in(p: f64) -> f64 {
     2.0f64.powf(10.0 * (p - 1.0)) * p + p * p * p * p * p * p * (1.0 - p)
 }
 
-/// `2^(10(p-1))` rescaled so it starts at exactly 0 and ends at exactly 1.
+/// The classic exponential in, `2^(10p - 10)`, exactly 0 at p = 0.
 #[inline]
-fn expo_exact_in(p: f64) -> f64 {
+fn expo_classic_in(p: f64) -> f64 {
     if p <= 0.0 {
         0.0
     } else {
-        (2.0f64.powf(10.0 * p - 10.0) - 2.0f64.powf(-10.0)) / (1.0 - 2.0f64.powf(-10.0))
+        2.0f64.powf(10.0 * p - 10.0)
     }
 }
 

@@ -121,7 +121,7 @@ fn prepared_from_stream(mut mesh: StreamMesh, merge: bool) -> Result<(PreparedSt
         // the layers.
         mesh_indices: std::sync::Arc::new(vec![0; triangles * 3]),
         authored_collisions: Default::default(), collider_parts: Default::default(), occluder_parts: Default::default(),
-        anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, min: mesh.min, max: mesh.max, prelit: false,
+        anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, liquids: Default::default(), min: mesh.min, max: mesh.max, prelit: false,
     }, casts, scene, merged_bytes))
 }
 
@@ -529,6 +529,12 @@ impl Renderer {
     /// tail fades (`budget_authored_lights`). Also sets the night factor the
     /// window glow reads. Call before `build_frame_lights`.
     pub(super) fn stream_lights(&mut self, eye: Vec3f, sun_dir_y: f32) {
+        let before = self.host_asset_lights.len();
+        self.stream_lights_inner(eye, sun_dir_y);
+        self.stream_light_count = self.host_asset_lights.len() - before;
+    }
+
+    fn stream_lights_inner(&mut self, eye: Vec3f, sun_dir_y: f32) {
         let Some(st) = self.stream.as_mut() else { return };
         let t = ((0.22 - sun_dir_y) / 0.3).clamp(0.0, 1.0);
         st.night = t * t * (3.0 - 2.0 * t);

@@ -18,6 +18,7 @@ mod merge;
 mod order;
 mod panics;
 mod peephole;
+pub mod waits;
 pub mod profile;
 pub mod units;
 
@@ -223,6 +224,11 @@ pub fn wasm_optimize_checked(
     run("bulk", &mut module, &mut bytes, &|module| {
         bulk::run(module);
     });
+    // A shared memory's waits, spinning where a thread may not block (a
+    // browser's main thread: see `waits`).
+    run("waits", &mut module, &mut bytes, &|module| {
+        waits::run(module);
+    });
     let sites = std::cell::RefCell::new(Vec::new());
     // What the panic sites point at in the data, cleared once they are gone.
     let panic_data = if opts.panic_trap { data::Objects::find(&module) } else { data::Objects::default() };
@@ -289,6 +295,18 @@ pub fn wasm_optimize_checked(
     report.functions_after = module.funcs.len() + module.num_imported_funcs() as usize;
     report.output_bytes = bytes.len();
     Ok((bytes, report))
+}
+
+/// The module with its shared-memory waits guarded (see `waits`): what
+/// every threaded web build ships, optimised or not. A module with no
+/// shared memory, or no waits, comes back as it was.
+pub fn wasm_guard_waits(buf: &[u8]) -> Result<Vec<u8>, String> {
+    let mut module = ir::decode(buf)?;
+    if waits::run(&mut module) == 0 {
+        return Ok(buf.to_vec());
+    }
+    ir::validate_module(&module).map_err(|msg| format!("guarded module does not validate: {msg}"))?;
+    Ok(encode::encode(&module))
 }
 
 /// The module with a coverage probe at every function entry (see

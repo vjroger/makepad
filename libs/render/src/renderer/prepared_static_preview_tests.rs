@@ -10,7 +10,7 @@ fn triangle() -> StaticModel {
         min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
         parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
         ground_ao: None, draw_layers: Vec::new(), detail_png: None, detail_scale: [1.0, 1.0],
-        prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None,
+        prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, liquids: Vec::new(), liquid_ranges: Vec::new(),
         pbr: Default::default(),
     }
 }
@@ -46,7 +46,7 @@ fn preparation_retains_geometry_and_derives_collision_off_ui() {
     assert_eq!(prepared.main.indices, [0, 1, 2]);
     assert_eq!(prepared.mesh_indices.as_ref(), &prepared.main.indices);
     assert_eq!(prepared.positions.len(), 3);
-    assert!(!prepared.collider_parts.is_empty());
+    assert!(!prepared.collider_parts.boxes().is_empty());
     assert_eq!(prepared.upload_bytes(), (3 * crate::model::MODEL_VERTEX_FLOATS + 3) * 4 + 12);
     let other_pane = prepared.clone();
     assert_eq!(other_pane.main.indices, prepared.main.indices);
@@ -71,8 +71,8 @@ fn attachment_clips_are_independent_and_aggregate_light_admission_is_atomic() {
     let model=crate::StaticModel::parse_glb(&crate::asset_morph::tests::fixture(false,true)).unwrap();
     let part=&model.anim_parts[0];
     let mut states=ModelStates::default();
-    states.clips.insert(ModelTarget::Attachment(0),ModelClipPlayback{name:Some("pulse".into()),time:1.,looping:false,weight:1.});
-    states.clips.insert(ModelTarget::Attachment(1),ModelClipPlayback{name:Some("pulse".into()),time:0.5,looping:false,weight:1.});
+    states.clips.insert(StateTarget::Attachment(0),ModelClipPlayback{name:Some("pulse".into()),time:1.,looping:false,weight:1.});
+    states.clips.insert(StateTarget::Attachment(1),ModelClipPlayback{name:Some("pulse".into()),time:0.5,looping:false,weight:1.});
     assert_eq!(states.transform(&ModelTarget::Attachment(0),"fixture",part).v[12],2.);
     assert_eq!(states.transform(&ModelTarget::Attachment(1),"fixture",part).v[12],0.);
     let mut renderer=Renderer::default();renderer.set_clustered_lighting(true);

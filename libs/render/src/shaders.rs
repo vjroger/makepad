@@ -16,6 +16,7 @@ mod grass;
 mod foliage;
 mod skinned_gpu;
 mod world;
+mod water;
 mod lm_depth;
 mod lm_gather;
 mod lm_encode;
@@ -35,6 +36,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     foliage::script_mod(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
+    water::script_mod(vm);
     lm_depth::script_mod(vm);
     lm_gather::script_mod(vm);
     lm_encode::script_mod(vm)
@@ -52,6 +54,7 @@ pub(crate) const SHADER_SOURCE: &str = concat!(
     include_str!("shaders/pbr.rs"),
     include_str!("shaders/skinned_gpu.rs"),
     include_str!("shaders/world.rs"),
+    include_str!("shaders/water.rs"),
     include_str!("shaders/lm_depth.rs"),
     include_str!("shaders/lm_gather.rs"),
     include_str!("shaders/lm_encode.rs"),
@@ -317,10 +320,7 @@ pub struct DrawSceneSkinned {
     /// layer's material; 0 everywhere else draws exactly as before.
     /// y = the PBR lane's shading terms (`makepadShading`), packed as
     /// rim * 255 * 65536 + clearcoat * 255 * 256 + flake * 255 (0 = plain;
-    /// `MaterialSurface::packed_shading`). Packed into this
-    /// spare lane on purpose: the model lanes' instance stream is at the
-    /// vertex-attribute limit (31 on Metal, 32 on common Vulkan GPUs; one
-    /// more vec4 lost the Vulkan device in race).
+    /// `MaterialSurface::packed_shading`).
     #[live(vec2(0.0, 0.0))]
     pub tex_mag: Vec2f,
 }
@@ -1192,13 +1192,13 @@ mod shader_registration_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = {
                     ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw,
                 }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
@@ -1249,11 +1249,12 @@ mod shader_registration_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
+            makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
             crate::fast_gi::script_mod(vm);
@@ -1273,13 +1274,68 @@ mod shader_registration_tests {
         });
     }
 
+    /// The water surface compiles on every backend, and its texture
+    /// bindings fit the WebGL2 fragment budget with room to spare.
+    #[test]
+    fn water_shader_compiles_on_every_backend() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.capture_errors();
+            makepad_draw::script_mod(vm);
+            vm.heap_mut().new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
+            });
+            vm.heap_mut().new_module(id!(widgets));
+            makepad_render_graph::pass_stdlib(vm);
+            crate::local_shadows::sampling::script_mod(vm);
+            crate::clustered::script_mod(vm);
+            crate::fast_gi::script_mod(vm);
+            super::script_mod(vm);
+            crate::local_shadows::script_mod(vm);
+            crate::custom_material::register(vm);
+            let setup_errors = vm.take_errors();
+            assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
+            // The water itself, and every lit lane that now sees through it
+            // (`scene_fogged`).
+            for (name, result) in [
+                ("water", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneWater)})),
+                ("cube", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCube)})),
+                ("alpha", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneAlpha)})),
+                ("terrain", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneTerrain)})),
+                ("model", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinned)})),
+                ("pbr", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawScenePbr)})),
+                ("skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinnedGpu)})),
+                ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
+                ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
+                ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
+            ] {
+                let errors = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
+                assert!(errors.is_empty(), "{name}: {errors}");
+            }
+            for (name,result) in [
+                ("water GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"glsl",false)})),
+                ("water HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"hlsl",false)})),
+                ("water Metal",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"metal",false)})),
+            ] {
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
+                assert!(source.contains("detail_tex"),"{name}: missing ripple map");
+            }
+            let water = DrawSceneWater::script_new_with_default(vm);
+            let id = water.draw_vars.draw_shader_id.expect("registered water shader");
+            let textures = &vm.cx().draw_shaders[id.index].mapping.textures;
+            assert_eq!(textures.len(), 3, "sky, ripples, seabed");
+        });
+    }
+
     #[test]
     fn cube_family_script_shaders_compile_without_errors() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = {
                     ..mod.std,
@@ -1290,7 +1346,8 @@ mod shader_registration_tests {
                     draw:mod.draw,
                 }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
+            makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
             crate::fast_gi::script_mod(vm);
@@ -1319,14 +1376,10 @@ mod shader_registration_tests {
             let alpha_errors = script_eval!(vm, {
                 mod.shader.test_compile_draw_errors(mod.draw.DrawSceneAlpha)
             });
-            let cube_errors = vm
-                .bx
-                .heap
+            let cube_errors = vm.heap()
                 .string_with(cube_errors, |_heap, value| value.to_string())
                 .expect("cube compile result should be a string");
-            let alpha_errors = vm
-                .bx
-                .heap
+            let alpha_errors = vm.heap()
                 .string_with(alpha_errors, |_heap, value| value.to_string())
                 .expect("alpha compile result should be a string");
             let setup_errors = vm.take_errors();
@@ -1352,7 +1405,7 @@ mod shader_registration_tests {
                 ("lamp depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepth)})),
                 ("lamp depth inside", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepthInside)})),
             ] {
-                let errors = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                let errors = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(errors.is_empty(), "{name}: {errors}");
             }
             // Cross-target Rust checks do not compile runtime Splash
@@ -1367,7 +1420,7 @@ mod shader_registration_tests {
                 ("city HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCity, "hlsl", false)})),
                 ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
             ] {
-                let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                let source = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
                 assert!(source.contains("cluster_lights"), "{name}: missing clustered shader");
             }
@@ -1382,7 +1435,7 @@ mod shader_registration_tests {
                 ("grass GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneGrass,"glsl",false)})),
                 ("grass HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneGrass,"hlsl",false)})),
             ] {
-                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("gi_"),"{name}: missing GI code");
             }
@@ -1392,7 +1445,7 @@ mod shader_registration_tests {
                 ("lamp depth HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLmLampDepth,"hlsl",false)})),
                 ("local skin depth HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLocalShadowSkinned,"hlsl",false)})),
             ] {
-                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("morph_map"),"{name}: missing morph deformation");
             }
@@ -1421,11 +1474,11 @@ mod shader_registration_tests {
             let mapping = &cx.draw_shaders[id.index].mapping;
             assert_eq!(mapping.textures[0].id, live_id!(tex));
             assert_eq!(mapping.textures[1].id, live_id!(ao_map));
-            // Vertex attributes: every backend packs the geometry and the
-            // instance records into vec4 chunks, one attribute each. Metal
-            // allows 31, common Vulkan GPUs 32; one vec4 over it lost the
-            // Vulkan device in race (2026-09-29). New per-draw data must ride
-            // a spare lane, never a new instance field.
+            // Vertex attributes: only the geometry is fetched as vertex
+            // attributes (vec4 chunks); the backends read instance records
+            // from the instance buffer by instance index (GL ES and WebGL 2
+            // read what does not fit their attributes from a texture), so a
+            // record has no attribute limit.
             let lanes = [
                 ("model", DrawSceneSkinned::script_new_with_default(vm).draw_vars.draw_shader_id),
                 ("pbr", DrawScenePbr::script_new_with_default(vm).skinned.draw_vars.draw_shader_id),
@@ -1436,8 +1489,9 @@ mod shader_registration_tests {
             ];
             for (name, id) in lanes {
                 let m = &vm.cx().draw_shaders[id.expect("registered").index].mapping;
-                let n = m.geometries.total_slots.div_ceil(4) + m.instances.total_slots.div_ceil(4);
-                assert!(n <= 31, "{name}: {n} vertex attributes (Metal allows 31)");
+                let n = m.geometries.total_slots.div_ceil(4);
+                let limit = makepad_draw::makepad_platform::draw_shader_layout::MAX_VERTEX_ATTRIBUTES;
+                assert!(n <= limit, "{name}: {n} geometry vertex attributes (the limit is {limit})");
             }
         });
     }

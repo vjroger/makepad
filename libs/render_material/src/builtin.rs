@@ -48,13 +48,13 @@ script_mod! {
     }
 
     // ---- IBL (ibl.rs builds the texture) ------------------------------
-    // detail_map holds the prefiltered atlas: `levels` equirect levels of
-    // `level_height` rows (roughness k / (levels - 1)), then one meta row:
-    // texels 0..8 the SH9 irradiance coefficients, texel 9 = (levels,
-    // level_height, intensity, rotation in radians).
+    // detail_map holds one meta row: texels 0..8 the SH9 irradiance
+    // coefficients, texel 9 = (levels, level_height, intensity, rotation in
+    // radians); then the prefiltered atlas: `levels` equirect levels of
+    // `level_height` rows (roughness k / (levels - 1)).
     mod.draw.mat_ibl_meta = fn(i: float) -> vec4 {
         let size = self.detail_map.size()
-        return self.detail_map.sample_nearest(vec2((i + 0.5) / size.x, (size.y - 0.5) / size.y))
+        return self.detail_map.sample_nearest(vec2((i + 0.5) / size.x, 0.5 / size.y))
     }
     mod.draw.mat_ibl_dir = fn(d: vec3) -> vec3 {
         let r = self.mat_ibl_meta(9.0).w
@@ -76,8 +76,8 @@ script_mod! {
         let fy = py - y0
         let xa = (x0 - floor(x0 / w) * w + 0.5) / w
         let xb = (x0 + 1.0 - floor((x0 + 1.0) / w) * w + 0.5) / w
-        let ya = (k * h + y0 + 0.5) / size.y
-        let yb = (k * h + min(y0 + 1.0, h - 1.0) + 0.5) / size.y
+        let ya = (1.0 + k * h + y0 + 0.5) / size.y
+        let yb = (1.0 + k * h + min(y0 + 1.0, h - 1.0) + 0.5) / size.y
         let a = mix(self.detail_map.sample_nearest(vec2(xa, ya)).xyz, self.detail_map.sample_nearest(vec2(xb, ya)).xyz, fx)
         let b = mix(self.detail_map.sample_nearest(vec2(xa, yb)).xyz, self.detail_map.sample_nearest(vec2(xb, yb)).xyz, fx)
         return mix(a, b, fy)
@@ -131,8 +131,8 @@ pub enum Builtin {
 pub fn register(vm: &mut ScriptVm) {
     let draw = script_eval!(vm, { mod.draw });
     if let Some(draw) = draw.as_object() {
-        let present = vm.bx.heap.value(draw, id!(mat_compose_hooked).into(), NoTrap);
-        if present.as_object().is_some_and(|o| vm.bx.heap.is_fn(o)) {
+        let present = vm.value(draw, id!(mat_compose_hooked));
+        if present.as_object().is_some_and(|o| vm.is_fn(o)) {
             return;
         }
     }
@@ -160,5 +160,5 @@ pub fn overrides(vm: &mut ScriptVm, builtin: Builtin) -> Vec<(LiveId, ScriptObje
             (id!(mat_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_ambient }))),
         ],
     };
-    pairs.into_iter().filter_map(|(id, o)| o.filter(|o| vm.bx.heap.is_fn(*o)).map(|o| (id, o))).collect()
+    pairs.into_iter().filter_map(|(id, o)| o.filter(|o| vm.is_fn(*o)).map(|o| (id, o))).collect()
 }

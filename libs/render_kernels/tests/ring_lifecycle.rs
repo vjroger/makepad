@@ -13,23 +13,26 @@
 //! slots retire only after their fences; a job begun under the old layout
 //! cannot publish.
 
-use makepad_render_kernels::compute::kernel::{FieldTy, Layout, LayoutField};
-use makepad_render_kernels::compute::sched::{Job, JobHandle, Priority};
-use makepad_render_kernels::compute::admission::{JobBudget, Origin};
+use makepad_render_kernels::compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_render_kernels::compute::kernel::FieldTy;
+use makepad_render_kernels::dispatch::sched::{Job, JobHandle, Priority};
+use makepad_render_kernels::dispatch::admission::{JobBudget, Origin};
 use makepad_render_kernels::{engine, FrameFences, ManualFences, OutputRing, PublishError, SlotState, Topology, WriteLease};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn inst_a() -> Layout {
-    Layout { name: "Inst".into(), stride: 4, fields: vec![LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "tag".into(), ty: FieldTy::I32, offset: 3 }] }
+fn inst_a() -> LayoutView<'static> {
+    LayoutView { name: "Inst", stride: 4, fields: &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "tag", ty: FieldTy::I32, offset: 3 }] }
 }
 
-fn inst_b() -> Layout {
-    let mut l = inst_a();
-    l.stride = 6;
-    l.fields.push(LayoutField { name: "birth".into(), ty: FieldTy::Vec2, offset: 4 });
-    l
+fn inst_b() -> LayoutView<'static> {
+    const FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "tag", ty: FieldTy::I32, offset: 3 },
+        LayoutFieldView { name: "birth", ty: FieldTy::Vec2, offset: 4 },
+    ];
+    LayoutView { name: "Inst", stride: 6, fields: FIELDS }
 }
 
 const SRC_A: &str = "let out = output(Inst)\nlet frame = param(0)\nfn instance(i) { out[i].pos = vec3(float(i), frame, 0.5)\n out[i].tag = 1 }";
@@ -92,7 +95,7 @@ fn slots_under_delayed_fences_and_a_hot_reload_under_load() {
                 let mut job = Job::new(if lease.layout() == layout { kernel.clone() } else { kernel_a.clone() }, count);
                 job.set_param("frame", frame as f32);
                 job.output_u32("out", data).unwrap();
-                let h = engine().scheduler().submit(job, Priority::Near, Origin::Host, JobBudget { wall: Duration::from_secs(10) }).unwrap_or_else(|(_, e)| panic!("{}", e));
+                let h = engine().scheduler().submit(job, Priority::Near, Origin::Host, JobBudget::UNLIMITED).unwrap_or_else(|(_, e)| panic!("{}", e));
                 running = Some((h, lease, count, layout));
             }
         }
@@ -168,7 +171,7 @@ fn an_emitted_index_buffer_is_validated_before_publish() {
         job.set_param("bad", bad);
         job.output_u32("v", vec![0; 15]).unwrap();
         job.output_u32("ix", vec![0; 15]).unwrap();
-        let mut job = engine().run(job, Priority::MustComplete, Duration::from_secs(5)).unwrap_or_else(|(_, e)| panic!("{}", e));
+        let mut job = engine().run(job, Priority::MustComplete).unwrap_or_else(|(_, e)| panic!("{}", e));
         lease.set_data(job.take_output_u32("v").unwrap());
         *lease.indices_mut() = job.take_output_u32("ix").unwrap();
         assert_eq!(ring.publish(lease, 5, &fences).is_ok(), ok);

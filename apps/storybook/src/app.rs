@@ -111,15 +111,32 @@ script_mod! {
         height: Fill
         flow: Down
 
-        toolbar := mod.storybook.CatalogueToolbar{}
+        // The panes are panels, so a sheet draws them as it draws its
+        // panels (a bezelled window, a soft card) and the window's own
+        // ground shows between them. Not inset panels: most sheets draw an
+        // inset panel as their sunken well, and a well the size of a pane
+        // is not what any of them meant (the futuristic metal sheet's is a
+        // pocket of circuit board). Only the sheets whose design frames
+        // the panes draw them (theme::frames_panes): under the others the
+        // panes are clear and the window's own ground shows, as it did.
+        toolbar_pane := PanelView{
+            show_bg: #(crate::theme::frames_panes())
+            width: Fill
+            height: Fit
+            margin: Inset{left: 6. right: 6. top: 6. bottom: 4.}
+            toolbar := mod.storybook.CatalogueToolbar{}
+        }
 
         split := Splitter{
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(260.)
-            a: View{
+            size: 6.
+            a: PanelView{
+                show_bg: #(crate::theme::frames_panes())
                 width: Fill
                 height: Fill
                 flow: Down
+                margin: Inset{left: 6. right: 2. top: 4. bottom: 6.}
                 // Star the story on the canvas; list the starred ones only.
                 star_row := View{
                     width: Fill
@@ -145,18 +162,23 @@ script_mod! {
             b: Splitter{
                 axis: SplitterAxis.Horizontal
                 align: SplitterAlign.FromB(380.)
-                a: View{
+                size: 6.
+                a: PanelView{
+                    show_bg: #(crate::theme::frames_panes())
                     width: Fill
                     height: Fill
                     padding: theme.mspace_2
+                    margin: Inset{left: 2. right: 2. top: 4. bottom: 6.}
                     canvas := mod.storybook.StoryCanvas{}
                 }
-                b: View{
+                b: PanelView{
+                    show_bg: #(crate::theme::frames_panes())
                     width: Fill
                     height: Fill
                     flow: Down
                     spacing: theme.space_2
                     padding: theme.mspace_2
+                    margin: Inset{left: 2. right: 6. top: 4. bottom: 6.}
                     tabs := View{
                         width: Fill
                         height: Fit
@@ -1170,7 +1192,7 @@ mod tests {
             let src = probe.script_source();
 
             // The block is readable back by name off the instance.
-            let block = vm.bx.heap.value(src, id!(tight).into(), NoTrap);
+            let block = vm.value(src, id!(tight));
             assert!(block.is_object(), "tight must read back as an object");
 
             // The rank is an integer. `as_f64` answers None for an integer
@@ -1181,7 +1203,7 @@ mod tests {
             // reading ranks with any single-type accessor finds none of them and
             // builds no ladder, with no error anywhere. `as_number` is the only
             // accessor that covers every numeric representation.
-            let rank = vm.bx.heap.value(src, id!(give_up).into(), NoTrap);
+            let rank = vm.value(src, id!(give_up));
             assert_eq!(rank.as_number(), Some(1.0), "give_up reads through as_number");
             assert_eq!(rank.as_i32(), None, "and is NOT an i32");
             assert_eq!(rank.as_f64(), None, "and is NOT an f64");
@@ -1242,7 +1264,7 @@ mod tests {
             assert!(vm.take_errors().is_empty());
             let root = WidgetRef::script_from_value(vm, value);
             let probe = root.widget(vm.cx_mut(), ids!(probe));
-            let block = vm.bx.heap.value(probe.script_source(), id!(tight).into(), NoTrap);
+            let block = vm.value(probe.script_source(), id!(tight));
             (root, probe, block)
         });
 

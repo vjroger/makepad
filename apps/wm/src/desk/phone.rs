@@ -780,7 +780,7 @@ impl WmDesk {
         }
         // Only windows in the layout join Recents: a tile client launched by
         // the home page stays out until the person opens it.
-        for c in state.layout.clients_on(state.layout.active) {
+        for c in state.layout().clients_on(state.layout().active) {
             if !state.phone.order.contains(&c) {state.phone.order.push(c);}
         }
         self.style=state.style.clone();
@@ -1012,14 +1012,7 @@ impl WmDesk {
         // What the simulated bars pick their ink against.
         self.phone_ui.band_luma=band_luma;
         self.phone_ui.draw_overlay(cx,state,screen,backdrop);
-        // The super-app's first run: what is streaming out of the APK,
-        // above the dock while the home page shows.
-        if let Some(text)=state.provision.clone() {
-            if state.phone.home_visible() {
-                let fade=(1.0-state.phone.openness).clamp(0.0,1.0) as f32;
-                self.phone_ui.draw_provision_band(cx,screen,state.phone.chrome,state.style.target,state.style.dark,fade,&text);
-            }
-        }
+        self.phone_ui.draw_settings_page(cx,state,screen);
     }
     pub(super) fn handle_phone_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         if let Event::Signal=event {self.take_band_readbacks(cx);}

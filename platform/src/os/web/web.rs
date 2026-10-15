@@ -21,7 +21,7 @@ use {
             StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
             StorageRequestKind, StorageResult, StorageStat,
         },
-        thread::{lock_from_ui, SignalToUI},
+        thread::SignalToUI,
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::{
@@ -318,10 +318,38 @@ impl Cx {
                 }
 
                 live_id!(ToWasmTouchUpdate) => {
-                    let mut e: TouchUpdateEvent = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
+                    let update = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm);
+                    let cancelled: Vec<_> = update.touches.iter()
+                        .filter(|touch| touch.state == 4).map(|touch| touch.uid as u64).collect();
+                    let mut e: TouchUpdateEvent = update.into();
                     let window_id = e.window_id;
                     for touch in e.touches.iter_mut() {
                         self.dpi_override_scale(&mut touch.abs, window_id);
+                    }
+                    for touch in e.touches.iter().filter(|touch| cancelled.contains(&touch.uid)) {
+                        let digit_id = live_id_num!(touch, touch.uid).into();
+                        self.fingers.cancel_digit(digit_id);
+                        self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
+                            window_id,
+                            digit_id,
+                            device: crate::event::DigitDevice::Touch { uid: touch.uid },
+                            abs: touch.abs,
+                            time: e.time,
+                            modifiers: e.modifiers,
+                        }));
+                    }
+                    if !cancelled.is_empty() {
+                        if self.drag_drop.cancel_internal_drag() {
+                            self.call_event_handler(&Event::DragEnd);
+                            self.drag_drop.cycle_drag();
+                        }
+                        let stopped: Vec<_> = e.touches.iter()
+                            .filter(|touch| cancelled.contains(&touch.uid)).cloned().collect();
+                        self.fingers.process_touch_update_end(&stopped);
+                        e.touches.retain(|touch| !cancelled.contains(&touch.uid));
+                    }
+                    if e.touches.is_empty() {
+                        continue;
                     }
                     self.fingers.process_touch_update_start(e.time, &e.touches);
                     let e = Event::TouchUpdate(e);
@@ -615,6 +643,13 @@ impl Cx {
                     let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
                     self.os.webgl_shaders_pending =
                         self.os.webgl_shaders_pending.saturating_sub(tw.count);
+                    self.os.webgl_shaders_waiting =
+                        self.os.webgl_shaders_waiting.saturating_sub(tw.waited);
+                }
+
+                live_id!(ToWasmWebGLShadersLinked) => {
+                    let tw = ToWasmWebGLShadersLinked::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_waiting += tw.count;
                 }
 
                 live_id!(ToWasmPaintDirty) => {
@@ -929,7 +964,7 @@ impl Cx {
 
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
-                    lock_from_ui(&self.os.web_audio()).to_wasm_audio_device_list(tw);
+                    self.os.web_audio().lock().unwrap_or_else(|e| e.into_inner()).to_wasm_audio_device_list(tw);
                 }
                 live_id!(ToWasmMidiPortList) => {
                     let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
@@ -1029,9 +1064,10 @@ impl Cx {
 
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        let pass_time = self.pass_time(time);
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id].set_time(time as f32, uniforms_gen);
+            self.passes[*draw_pass_id].set_time(pass_time, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -1448,10 +1484,7 @@ impl Cx {
                         video_id_hi: video_id.hi(),
                     });
                 }
-                CxOsOp::UpdateVideoSurfaceTexture(_) => {
-                    // On web, texture updates happen in the JS animation frame loop
-                }
-                // New ops — no-op on Web (not yet wired to JS)
+
                 CxOsOp::AttachCameraNativePreview { .. }
                 | CxOsOp::UpdateCameraNativePreview { .. }
                 | CxOsOp::DetachCameraNativePreview { .. } => {}
@@ -1544,6 +1577,7 @@ impl CxOsApi for Cx {
             ToWasmRedrawAll::to_js_code(),
             ToWasmGpuReset::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
+            ToWasmWebGLShadersLinked::to_js_code(),
             ToWasmRetainedUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
@@ -1745,6 +1779,9 @@ pub struct CxOs {
     /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
     /// on those programs are dropped by the browser side.
     pub(crate) webgl_shaders_pending: usize,
+    /// Of those, the ones linked and waiting for their first draw
+    /// (`ToWasmWebGLShadersLinked`, first draws spread).
+    pub(crate) webgl_shaders_waiting: usize,
     /// The page measures frames' GPU time (`gpu_frame_timer` is on).
     pub(crate) gpu_timer_on: bool,
     pub(crate) gpu_timer_frame: u64,
@@ -1777,6 +1814,7 @@ impl Default for CxOs {
             index_buffers: 0,
             vaos: 0,
             webgl_shaders_pending: 0,
+            webgl_shaders_waiting: 0,
             gpu_timer_on: false,
             gpu_timer_frame: 0,
             completion_pending: 0,

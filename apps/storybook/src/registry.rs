@@ -362,7 +362,7 @@ mod tests {
     /// The approved tree: every category in order, every component in order
     /// inside it, and every page in order inside its component.
     const TREE: &[(&str, &[(&str, &[&str])])] = &[
-        ("Overview", &[("Welcome", &["Welcome"]), ("Coverage", &["Coverage"]), ("Large text", &["Overview"]), ("Kitchen sink", &["Overview", "States", "Instruments"])]),
+        ("Overview", &[("Welcome", &["Welcome"]), ("Coverage", &["Coverage"]), ("Large text", &["Overview"]), ("Kitchen sink", &["Overview", "States"])]),
         (
             "Foundations",
             &[
@@ -398,7 +398,7 @@ mod tests {
                 ("PageFlip", &["Overview"]),
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
-                ("ScreenView", &["Overview"]),
+                ("ScreenView", &["Overview", "Ripples"]),
                 ("Material", &["Overview"]),
                 ("Splash", &["Overview"]),
             ],

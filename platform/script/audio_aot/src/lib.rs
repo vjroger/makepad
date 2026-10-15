@@ -1,8 +1,8 @@
 //! Splash audio shaders: instruments and effects written as small Splash
 //! functions, compiled ahead of time (at edit time, on a worker thread)
-//! into realtime-safe code for the audio thread. The math_aot concept
-//! (platform/script/math_aot/MATH_AOT.md) grown with logic and state; the
-//! plan of record is local/agent_state/edits/design/AUDIO-SHADERS.md.
+//! into realtime-safe code for the audio thread by the Splash compute core
+//! (makepad-script-compute); the plan of record is
+//! local/agent_state/edits/design/AUDIO-SHADERS.md.
 //!
 //! ```text
 //! shader source --[parse]--> AST --[lower: types, inlining, math]--> AIR
@@ -15,7 +15,10 @@
 //! exactly specified, and math functions are polynomials made of those ops
 //! (no libm on the audio path), so a score renders the same samples on
 //! every machine, offline or live.
+use makepad_relax_api::relax_api;
 
+pub mod boundary;
+pub use boundary::AudioShaderRef;
 pub mod fuse;
 mod guide;
 pub mod wasm;
@@ -24,41 +27,98 @@ pub mod wasm;
 // core's; audio is one of its front ends.
 #[cfg(target_arch = "aarch64")]
 pub use makepad_script_compute::arm64;
+/// The host's native backend (compute's own on AArch64, the shared back end on x86-64).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use makepad_script_compute::host_native;
 pub use makepad_script_compute::{ir, lower, parse, Backend, ShaderError};
 
 pub use guide::GUIDE;
 pub use fuse::{fuse, FuseError, FuseNode, Port};
 pub use lower::{header, Kind, ParamInfo, StateVar, CONTROL_BLOCK, CTX_FRAME, CTX_PARAMS, CTX_RATE, MAX_FRAMES};
 
+use boundary::forever;
+use makepad_script_compute::boundary::ParamInfoView;
 use std::sync::Arc;
 
-/// A compiled audio shader. Immutable and shareable; all mutable data
-/// (ctx, state, scratch) belongs to the caller, allocated off the audio
-/// thread.
+/// A compiled audio shader's plain face: what callers read, laid out so
+/// that Relax-compiled code reads it itself instead of calling into the
+/// compiler's code. It is the first field of its [`AudioShaderBody`] (the
+/// programs and machine code) and derefs to it. Immutable and shareable;
+/// all mutable data (ctx, state, scratch) belongs to the caller, allocated
+/// off the audio thread.
+#[relax_api(plain)]
+#[repr(C)]
 pub struct AudioShader {
     pub kind: Kind,
+    params: &'static [ParamInfoView<'static>],
+    state_vars: &'static [boundary::StateVarView<'static>],
+    state_init: &'static [u32],
+    /// A counting build ([`compile_counting`]): the ctx word each run
+    /// stores the ops it counted in ([`NO_COUNT_WORD`]: not a counting build).
+    count_word: u32,
+    /// Scratch words `run` needs (the interpreter's registers and frame).
+    scratch_words: usize,
+    /// The body this face is the first field of.
+    body: *const AudioShaderBody,
+}
+
+// SAFETY: the face is immutable, and `body` points to the allocation it
+// lives in, which is shared across threads the same way.
+unsafe impl Send for AudioShader {}
+unsafe impl Sync for AudioShader {}
+
+const NO_COUNT_WORD: u32 = u32::MAX;
+
+/// A compiled audio shader's programs and machine code: the compiler's own
+/// state, reached through [`AudioShader`]'s deref.
+#[relax_api(handle)]
+#[repr(C)]
+pub struct AudioShaderBody {
+    /// First: see [`AudioShader`].
+    pub(crate) head: AudioShader,
     params: Vec<ParamInfo>,
+    param_views: Box<[ParamInfoView<'static>]>,
     state_init: Box<[u32]>,
     state_vars: Vec<StateVar>,
+    state_var_views: Box<[boundary::StateVarView<'static>]>,
     shared: Box<[u32]>,
     render: ir::Program,
-    #[cfg(target_arch = "aarch64")]
-    native: Option<arm64::Code>,
-    /// [`AudioShader::program_key`], computed on first use.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    native: Option<host_native::Code>,
+    /// [`AudioShaderBody::program_key`], computed on first use.
     key: std::sync::OnceLock<u64>,
 }
 
+impl std::ops::Deref for AudioShader {
+    type Target = AudioShaderBody;
+    #[inline]
+    fn deref(&self) -> &AudioShaderBody {
+        // SAFETY: an AudioShader only exists as the first field of an
+        // AudioShaderBody, which `body` points to.
+        unsafe { &*self.body }
+    }
+}
+
 /// Compiles with the fastest backend available on this host.
-pub fn compile(code: &str) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
+#[inline(always)]
+pub fn compile(code: &str) -> Result<AudioShaderRef, Vec<ShaderError>> {
     compile_with(code, Backend::Native)
 }
 
 /// Compiles for a given backend (`Native` falls back to the interpreter
 /// when the host has no native backend).
-pub fn compile_with(code: &str, backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
-    let toks = parse::lex(code).map_err(|e| vec![e])?;
-    let items = parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
-    compile_items(&items, code.len(), backend)
+#[inline(always)]
+pub fn compile_with(code: &str, backend: Backend) -> Result<AudioShaderRef, Vec<ShaderError>> {
+    boundary::compile_audio(code, backend, false).into_result()
+}
+
+/// Compiles natively with the render program counting the ops it runs
+/// (`makepad_script_compute::work`): the same samples, and
+/// [`Instance::ops`] says how much work they took, the same on every
+/// machine. For tools ([`check`]); a host plays [`compile`]'s build.
+#[inline(always)]
+pub fn compile_counting(code: &str) -> Result<AudioShaderRef, Vec<ShaderError>> {
+    boundary::compile_audio(code, Backend::Native, true).into_result()
 }
 
 /// The prelude: DSP building blocks every shader sees (see prelude.splash).
@@ -69,14 +129,19 @@ fn prelude_items(user_len: usize) -> Vec<parse::Item> {
 }
 
 /// Compiles a parsed shader (also the back half of [`fuse::fuse`]).
-pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
+pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Backend, counting: bool) -> Result<Arc<AudioShaderBody>, Vec<ShaderError>> {
     // Prelude items the shader does not redefine come first (a shader's
     // state may be a prelude struct), then the shader's own.
     let names: std::collections::HashSet<String> = items.iter().map(|i| i.name().to_string()).collect();
     let mut all: Vec<parse::Item> = prelude_items(user_len).into_iter().filter(|i| !names.contains(i.name())).collect();
     all.extend(items.iter().cloned());
-    let lowered = lower::lower(&all, user_len + 1).map_err(|e| vec![e])?;
-    let ctx_words = CTX_PARAMS as usize + lowered.params.len();
+    let mut lowered = lower::lower(&all, user_len + 1).map_err(|e| vec![e])?;
+    let mut ctx_words = CTX_PARAMS as usize + lowered.params.len();
+    let count_word = counting.then(|| {
+        makepad_script_compute::work::count_runs(&mut lowered.render, ctx_words as u32);
+        ctx_words += 1;
+        ctx_words as u32 - 1
+    });
     let state_words = lowered.state_init.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = |p: &ir::Program, init: bool| ir::Regions {
@@ -95,7 +160,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
     if shared.is_empty() {
         shared.push(0);
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let native_ok = backend == Backend::Native;
     // Tables: run init() once (natively when possible: it can be big).
     if let Some(init) = &lowered.init {
@@ -106,10 +171,10 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
         let mut state = vec![0u32; state_words.max(1)];
         let zeros = [0f32; 1];
         let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
             if native_ok {
-                if let Some(code) = arm64::compile(init) {
+                if let Some(code) = host_native::compile(init) {
                     // SAFETY: `shared` is this init's own table vector.
                     unsafe { code.run(&mut ctx, &mut state, shared.as_mut_ptr(), [&zeros, &zeros], [&mut o0, &mut o1], 1) };
                 } else {
@@ -119,24 +184,44 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
                 run_init_interp(init, &mut ctx, &mut state, &mut shared);
             }
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             let _ = (&zeros, &mut o0, &mut o1, backend);
             run_init_interp(init, &mut ctx, &mut state, &mut shared);
         }
     }
-    #[cfg(target_arch = "aarch64")]
-    let native = if native_ok { arm64::compile(&lowered.render) } else { None };
-    let shader = Arc::new(AudioShader {
-        kind: lowered.kind,
-        params: lowered.params,
-        state_init: lowered.state_init.into_boxed_slice(),
-        state_vars: lowered.state_vars,
-        shared: shared.into_boxed_slice(),
-        render: lowered.render,
-        #[cfg(target_arch = "aarch64")]
-        native,
-        key: std::sync::OnceLock::new(),
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let native = if native_ok { host_native::compile(&lowered.render) } else { None };
+    let (params, state_vars) = (lowered.params, lowered.state_vars);
+    let state_init = lowered.state_init.into_boxed_slice();
+    // SAFETY (all four views): the names and boxes they borrow belong to the
+    // body built below and are never changed or dropped before it; an
+    // AudioShader hands them out only for the length of a borrow of itself.
+    let param_views: Box<[ParamInfoView<'static>]> = params.iter().map(|p| ParamInfoView { name: unsafe { forever(p.name.as_str()) }, default: p.default, min: p.min, max: p.max }).collect();
+    let state_var_views: Box<[boundary::StateVarView<'static>]> = state_vars.iter().map(|v| boundary::StateVarView { name: unsafe { forever(v.name.as_str()) }, sig: unsafe { forever(v.sig.as_str()) }, offset: v.offset, words: v.words }).collect();
+    let shader = Arc::new_cyclic(|body| {
+        let head = AudioShader {
+            kind: lowered.kind,
+            params: unsafe { forever(&*param_views) },
+            state_vars: unsafe { forever(&*state_var_views) },
+            state_init: unsafe { forever(&*state_init) },
+            count_word: count_word.unwrap_or(NO_COUNT_WORD),
+            scratch_words: lowered.render.scratch_words(),
+            body: body.as_ptr(),
+        };
+        AudioShaderBody {
+            head,
+            params,
+            param_views,
+            state_init,
+            state_vars,
+            state_var_views,
+            shared: shared.into_boxed_slice(),
+            render: lowered.render,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            native,
+            key: std::sync::OnceLock::new(),
+        }
     });
     // The key is what a browser host's audio thread looks the generated
     // code up by: computed here, never first on the audio thread.
@@ -157,87 +242,65 @@ fn run_init_interp(init: &ir::Program, ctx: &mut [u32], state: &mut [u32], share
 
 impl std::fmt::Debug for AudioShader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AudioShader({:?}, {} params, {} state words, {:?})", self.kind, self.params.len(), self.state_init.len(), self.backend())
+        write!(f, "AudioShader({:?}, {} params, {} state words)", self.kind, self.params.len(), self.state_init.len())
     }
 }
 
 impl AudioShader {
-    pub fn params(&self) -> &[ParamInfo] {
-        &self.params
-    }
+    #[inline]
+    pub fn kind(&self) -> Kind { self.kind }
 
+    #[inline]
+    pub fn param_count(&self) -> usize { self.params.len() }
+
+    #[inline]
+    pub fn param_view(&self, index: usize) -> ParamInfoView<'_> { self.params[index] }
+
+    #[inline]
     pub fn param_index(&self, name: &str) -> Option<usize> {
         self.params.iter().position(|p| p.name == name)
     }
 
-    pub fn state_vars(&self) -> &[StateVar] {
-        &self.state_vars
-    }
-
+    #[inline]
     pub fn state_words(&self) -> usize {
         self.state_init.len()
     }
 
+    /// The initial image of a voice or effect state.
+    #[inline]
+    pub fn state_init(&self) -> &[u32] {
+        self.state_init
+    }
+
+    #[inline]
     pub fn ctx_words(&self) -> usize {
-        CTX_PARAMS as usize + self.params.len()
+        CTX_PARAMS as usize + self.params.len() + (self.count_word != NO_COUNT_WORD) as usize
+    }
+
+    /// The ctx word a counting build stores the ops each run counted in.
+    #[inline]
+    pub fn count_word(&self) -> Option<u32> {
+        (self.count_word != NO_COUNT_WORD).then_some(self.count_word)
     }
 
     /// Scratch words `run` needs (the interpreter's registers and frame).
+    #[inline]
     pub fn scratch_words(&self) -> usize {
-        self.render.scratch_words()
+        self.scratch_words
     }
 
-    pub fn backend(&self) -> Backend {
-        #[cfg(target_arch = "aarch64")]
-        if self.native.is_some() {
-            return Backend::Native;
-        }
-        Backend::Interp
-    }
-
-    /// The AIR render program (for tests and tools).
-    pub fn program(&self) -> &ir::Program {
-        &self.render
-    }
-
-    /// The render program's identity across hosts (the compute core's
-    /// `kernel::program_key`): a build tool compiles a document's shaders
-    /// to wasm ahead of time under these keys, and the browser host links
-    /// them by key ([`wasm::link`]).
-    pub fn program_key(&self) -> u64 {
-        *self.key.get_or_init(|| makepad_script_compute::kernel::program_key(&self.render))
-    }
-
-    /// The shared tables (built by `init()`; the render program reads them).
-    pub fn shared_table(&self) -> &[u32] {
-        &self.shared
-    }
-
-    /// Bytes of native code, if any.
-    pub fn native_code_bytes(&self) -> usize {
-        #[cfg(target_arch = "aarch64")]
-        if let Some(code) = &self.native {
-            return code.len();
-        }
-        0
-    }
-
-    /// A fresh ctx block: the sample rate and every param at its default.
-    pub fn new_ctx(&self, sample_rate: f32) -> Box<[u32]> {
-        let mut ctx = vec![0u32; self.ctx_words()].into_boxed_slice();
+    /// Fills a caller-owned ctx block of [`AudioShader::ctx_words`] words:
+    /// the sample rate and every param at its default. The caller allocates
+    /// ctx, state ([`AudioShader::state_words`], then
+    /// [`AudioShader::reset_state`]) and scratch ([`AudioShader::scratch_words`],
+    /// zeroed) off the audio thread and keeps them for the instance's life.
+    pub fn init_ctx(&self, ctx: &mut [u32], sample_rate: f32) {
+        assert!(ctx.len() == self.ctx_words(), "ctx is ctx_words() words");
+        ctx.fill(0);
         ctx[CTX_RATE as usize] = sample_rate.to_bits();
         for (k, p) in self.params.iter().enumerate() {
             ctx[CTX_PARAMS as usize + k] = p.default.to_bits();
         }
-        ctx
-    }
-
-    pub fn new_state(&self) -> Box<[u32]> {
-        self.state_init.clone()
-    }
-
-    pub fn new_scratch(&self) -> Box<[u32]> {
-        vec![0u32; self.scratch_words()].into_boxed_slice()
     }
 
     /// Sets a param's target (it ramps there over the next control block).
@@ -250,7 +313,7 @@ impl AudioShader {
 
     /// Resets a voice or effect state to its initial image (no allocation).
     pub fn reset_state(&self, state: &mut [u32]) {
-        state.copy_from_slice(&self.state_init);
+        state.copy_from_slice(self.state_init);
     }
 
     /// Starts a note on a voice state: reset, then note inputs; `frame` is
@@ -277,13 +340,13 @@ impl AudioShader {
         state[..h].copy_from_slice(&old_state[..h]);
         let mut all = self.kind == old.kind;
         for (k, p) in self.params.iter().enumerate() {
-            if let Some(j) = old.param_index(&p.name) {
+            if let Some(j) = old.param_index(p.name) {
                 let (a, b) = (h + 2 * k, h + 2 * j);
                 state[a] = old_state[b];
                 state[a + 1] = old_state[b + 1];
             }
         }
-        for v in &self.state_vars {
+        for v in self.state_vars {
             match old.state_vars.iter().find(|o| o.name == v.name && o.sig == v.sig) {
                 Some(o) => {
                     let (a, b) = (v.offset as usize, o.offset as usize);
@@ -314,18 +377,80 @@ impl AudioShader {
     pub fn stopped(&self, state: &[u32]) -> bool {
         state[header::STOP as usize] != 0
     }
+}
 
+impl AudioShaderBody {
+    pub fn params(&self) -> &[ParamInfo] {
+        &self.params
+    }
+
+    pub fn state_vars(&self) -> &[StateVar] {
+        &self.state_vars
+    }
+
+    pub fn backend(&self) -> Backend {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if self.native.is_some() {
+            return Backend::Native;
+        }
+        Backend::Interp
+    }
+
+    /// The AIR render program (for tests and tools).
+    pub fn program(&self) -> &ir::Program {
+        &self.render
+    }
+
+    /// The render program's identity across hosts (the compute core's
+    /// `kernel::program_key`): a build tool compiles a document's shaders
+    /// to wasm ahead of time under these keys, and the browser host links
+    /// them by key ([`wasm::link`]).
+    pub fn program_key(&self) -> u64 {
+        *self.key.get_or_init(|| makepad_script_compute::kernel::program_key(&self.render))
+    }
+
+    /// The shared tables (built by `init()`; the render program reads them).
+    pub fn shared_table(&self) -> &[u32] {
+        &self.shared
+    }
+
+    /// Bytes of native code, if any.
+    pub fn native_code_bytes(&self) -> usize {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if let Some(code) = &self.native {
+            return code.len();
+        }
+        0
+    }
+
+    /// The reference interpreter, whatever the backend.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_interp(&self, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], in_l: &[f32], in_r: &[f32], out_l: &mut [f32], out_r: &mut [f32], n: usize) {
+        let (ins, outs) = ([in_l, in_r], [out_l, out_r]);
+        let n = n.min(MAX_FRAMES as usize);
+        let mut mem = ir::Mem { ctx, state, shared: ir::Shared::Read(&self.shared), bufs: &[] };
+        let [o0, o1] = outs;
+        let mut io = ir::Io { ins, outs: [o0, o1] };
+        ir::run(&self.render, scratch, &mut mem, &mut io, n as u32);
+    }
+}
+
+/// The run entry: the one door the audio thread renders through.
+#[relax_api]
+impl AudioShaderBody {
     /// Renders `n` frames (1..=MAX_FRAMES), ADDING into `outs`. `ctx`
     /// holds the absolute frame of the first one (`CTX_FRAME`). Realtime
     /// safe: no allocation, no locks, bounded time.
-    pub fn run(&self, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: usize) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(&self, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], in_l: &[f32], in_r: &[f32], out_l: &mut [f32], out_r: &mut [f32], n: usize) {
+        let (ins, outs) = ([in_l, in_r], [out_l, out_r]);
         let n = n.min(MAX_FRAMES as usize);
         if n == 0 {
             return;
         }
-        assert!(ctx.len() == self.ctx_words() && state.len() == self.state_init.len());
+        assert!(ctx.len() == self.head.ctx_words() && state.len() == self.state_init.len());
         assert!(ins[0].len() >= n && ins[1].len() >= n && outs[0].len() >= n && outs[1].len() >= n);
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(code) = &self.native {
             // SAFETY-relevant contract: `run` only touches the slices
             // passed here, with every access clamped into them.
@@ -341,44 +466,53 @@ impl AudioShader {
             wasm::run_slot(self, slot, ctx, state, scratch, ins, outs, n);
             return;
         }
-        self.run_interp(ctx, state, scratch, ins, outs, n);
-    }
-
-    /// The reference interpreter, whatever the backend.
-    pub fn run_interp(&self, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: usize) {
-        let n = n.min(MAX_FRAMES as usize);
-        let mut mem = ir::Mem { ctx, state, shared: ir::Shared::Read(&self.shared), bufs: &[] };
-        let [o0, o1] = outs;
-        let mut io = ir::Io { ins, outs: [o0, o1] };
-        ir::run(&self.render, scratch, &mut mem, &mut io, n as u32);
+        let [out_l, out_r] = outs;
+        self.run_interp(ctx, state, scratch, ins[0], ins[1], out_l, out_r, n);
     }
 }
 
 /// One playable instance (a voice or an effect) with its own frame
 /// counter: the simple host for tests, tools and offline renders.
+#[relax_api(plain)]
 pub struct Instance {
-    pub shader: Arc<AudioShader>,
+    pub shader: AudioShaderRef,
     pub ctx: Box<[u32]>,
     pub state: Box<[u32]>,
     scratch: Box<[u32]>,
     frame: u32,
     zeros: Box<[f32]>,
+    ops: u64,
 }
 
 impl Instance {
-    pub fn new(shader: Arc<AudioShader>, sample_rate: f32) -> Self {
+    pub fn new(shader: AudioShaderRef, sample_rate: f32) -> Self {
+        let mut ctx = vec![0u32; shader.ctx_words()].into_boxed_slice();
+        shader.init_ctx(&mut ctx, sample_rate);
         Instance {
-            ctx: shader.new_ctx(sample_rate),
-            state: shader.new_state(),
-            scratch: shader.new_scratch(),
+            ctx,
+            state: shader.state_init().into(),
+            scratch: vec![0u32; shader.scratch_words()].into_boxed_slice(),
             frame: 0,
             zeros: vec![0.0; MAX_FRAMES as usize].into_boxed_slice(),
+            ops: 0,
             shader,
         }
     }
 
     pub fn frame(&self) -> u32 {
         self.frame
+    }
+
+    /// The ops this instance's runs counted so far (a [`compile_counting`]
+    /// build; 0 otherwise).
+    pub fn ops(&self) -> u64 {
+        self.ops
+    }
+
+    fn counted(&mut self) {
+        if let Some(w) = self.shader.count_word() {
+            self.ops += self.ctx[w as usize] as u64;
+        }
     }
 
     pub fn set_param(&mut self, name: &str, value: f32) -> bool {
@@ -407,7 +541,8 @@ impl Instance {
             let k = (n - done).min(MAX_FRAMES as usize);
             self.ctx[CTX_FRAME as usize] = self.frame;
             let zeros = &self.zeros[..k];
-            self.shader.run(&mut self.ctx, &mut self.state, &mut self.scratch, [zeros, zeros], [&mut l[done..done + k], &mut r[done..done + k]], k);
+            self.shader.run(&mut self.ctx, &mut self.state, &mut self.scratch, zeros, zeros, &mut l[done..done + k], &mut r[done..done + k], k);
+            self.counted();
             self.frame = self.frame.wrapping_add(k as u32);
             done += k;
         }
@@ -424,15 +559,24 @@ impl Instance {
                 &mut self.ctx,
                 &mut self.state,
                 &mut self.scratch,
-                [&in_l[done..done + k], &in_r[done..done + k]],
-                [&mut out_l[done..done + k], &mut out_r[done..done + k]],
+                &in_l[done..done + k],
+                &in_r[done..done + k],
+                &mut out_l[done..done + k],
+                &mut out_r[done..done + k],
                 k,
             );
+            self.counted();
             self.frame = self.frame.wrapping_add(k as u32);
             done += k;
         }
     }
 }
+
+/// What [`check`] calls expensive: ops a voice (or an effect) runs a frame,
+/// counted, so the same shader is expensive or not on every machine. About
+/// 4% of an Apple M-series core at 48 kHz; the shipped library's dearest
+/// counts 3.2k (drive), its instruments up to 1.8k (techno_kick).
+pub const EXPENSIVE_OPS_PER_FRAME: f64 = 4096.0;
 
 /// What [`check`] found: a compile plus an offline audition of a test
 /// phrase, for the editor and the AI composer's shader tools.
@@ -451,8 +595,9 @@ pub struct CheckReport {
     pub nonfinite: usize,
     /// Share of samples at or above full scale.
     pub clipped: f32,
-    /// Native cost of one instance, ns per frame (48 kHz: 20833 = one core).
-    pub ns_per_frame: f64,
+    /// What one instance runs a frame, in counted ops (the same on every
+    /// machine; see [`EXPENSIVE_OPS_PER_FRAME`]).
+    pub ops_per_frame: f64,
     /// Instruments: seconds from the last release until the voice stopped
     /// or went quiet (-80 dB); None if it never did within 8 s.
     pub tail_secs: Option<f32>,
@@ -465,13 +610,13 @@ pub struct CheckReport {
 /// signal (a saw chord with clicks). Off the audio thread.
 pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
     const RATE: f32 = 48000.0;
-    let shader = compile(code)?;
+    let shader = compile_counting(code)?;
     let secs = 3.0;
     let n = (secs * RATE) as usize;
     let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
     let mut tail_secs = None;
-    let t0 = std::time::Instant::now();
     let mut instance_frames = 0usize;
+    let ops: u64;
     match shader.kind {
         Kind::Instrument => {
             let notes = [48.0f32, 52.0, 55.0];
@@ -515,6 +660,7 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
                 }
                 at += k;
             }
+            ops = voices.iter().map(Instance::ops).sum();
             let end = stopped_at.unwrap_or(last_loud).max(release_at);
             if end < n - 128 {
                 tail_secs = Some((end - release_at) as f32 / RATE);
@@ -538,9 +684,10 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
             }
             inst.process(&il, &ir, &mut l, &mut r);
             instance_frames = n;
+            ops = inst.ops();
         }
     }
-    let ns_per_frame = t0.elapsed().as_secs_f64() * 1e9 / instance_frames.max(1) as f64;
+    let ops_per_frame = ops as f64 / instance_frames.max(1) as f64;
     let all = l.iter().chain(r.iter());
     let nonfinite = all.clone().filter(|x| !x.is_finite()).count();
     let finite: Vec<f32> = all.filter(|x| x.is_finite()).copied().collect();
@@ -565,12 +712,12 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
     if shader.kind == Kind::Instrument && tail_secs.is_none() {
         warnings.push("voices never end after release: fade out on `gate == 0.0` (an adsr() does), or call stop()".into());
     }
-    if ns_per_frame > 2000.0 {
-        warnings.push(format!("expensive: {:.0} ns per frame per voice ({:.1}% of a core at 48 kHz)", ns_per_frame, ns_per_frame * 48000.0 / 1e7));
+    if ops_per_frame > EXPENSIVE_OPS_PER_FRAME {
+        warnings.push(format!("expensive: {:.0} ops per frame per voice (the limit is {:.0})", ops_per_frame, EXPENSIVE_OPS_PER_FRAME));
     }
     Ok(CheckReport {
         kind: shader.kind,
-        params: shader.params.clone(),
+        params: shader.params().to_vec(),
         state_words: shader.state_words(),
         backend: shader.backend(),
         peak,
@@ -578,8 +725,9 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
         dc,
         nonfinite,
         clipped,
-        ns_per_frame,
+        ops_per_frame,
         tail_secs,
         warnings,
     })
 }
+

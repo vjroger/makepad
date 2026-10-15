@@ -20,6 +20,7 @@
 //! module needs no `use` (`curve.sample(..)`), and the stdlib shared with
 //! shaders (`std.shared`) is glob-imported by default at the lowest
 //! priority (below the kernel prelude).
+use makepad_relax_api::relax_api;
 
 use crate::parse::*;
 use crate::ShaderError;
@@ -27,7 +28,9 @@ use std::collections::{HashMap, HashSet};
 
 /// A module's text as the host resolved it. `path` is what a `use` names:
 /// `std.noise`, or `lib:id@rev` for `use lib("id", "rev")`.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Module<'a> {
     pub path: &'a str,
     pub source: &'a str,
@@ -612,47 +615,63 @@ fn item_names(it: &Item, out: &mut HashSet<String>) {
 /// call each other unqualified. Once per VM: a VM that has `mod.shared`
 /// already keeps it. The `vm` feature (this crate is otherwise
 /// dependency-free).
+///
+/// True when this call registered it: the host then installs the engine's
+/// natives into it (`makepad_tween_script::install_ease` for `ease` and
+/// `ease_id`, which raise an error until then).
 #[cfg(feature = "vm")]
-pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) {
+pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) -> bool {
     use makepad_script::*;
-    let modules = vm.bx.heap.modules;
-    if vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object().is_some() {
-        return;
+    let modules = vm.modules();
+    if vm.value(modules, id!(shared)).as_object().is_some() {
+        return false;
     }
     let exports: String = SHARED_STD
         .lines()
         .filter_map(|l| l.strip_prefix("fn ").and_then(|r| r.split('(').next()))
         .map(|name| format!("{0}: {0} ", name.trim()))
         .collect();
-    let value = vm.eval(ScriptMod {
-        file: "std.shared".into(),
-        code: format!("use mod.math.*\nuse mod.pod.*\n{SHARED_STD}\n{{{exports}}}\n"),
-        ..Default::default()
-    });
+    let value = vm.eval(ScriptMod::new("", "", "std.shared", 0, 0, &format!("use mod.math.*\nuse mod.pod.*\n{SHARED_STD}\n{{{exports}}}\n"), &[]));
     if let Some(shared) = value.as_object() {
         // `rand_seq(seed, i)`: the i-th draw of a seeded sequence; with `n`, an
         // array of the n draws from i (a table built at load in one call).
         vm.add_method(shared, id_lut!(rand_seq), script_args!(seed = 0.0, i = 0.0, n = NIL), |vm, args| {
-            let num = |vm: &ScriptVm, k: LiveId| vm.bx.heap.value(args, k.into(), NoTrap).as_number();
+            let num = |vm: &ScriptVm, k: LiveId| vm.value(args, k).as_number();
             let (seed, i) = (num(vm, id!(seed)).unwrap_or(0.0), num(vm, id!(i)).unwrap_or(0.0));
             let Some(n) = num(vm, id!(n)) else { return crate::rand::rand_seq(seed, i).into() };
-            let out = vm.bx.heap.new_array();
+            let out = vm.heap_mut().new_array();
             for k in 0..n.clamp(0.0, 16_777_216.0) as u64 {
-                vm.bx.heap.array_push_unchecked(out, crate::rand::rand_seq(seed, i + k as f64).into());
+                vm.heap_mut().array_push_unchecked(out, crate::rand::rand_seq(seed, i + k as f64).into());
             }
             out.into()
         });
         // `hashn(a, b, c, d)`: a stateless hash of 1-4 numbers to 0..1;
         // `vnoise(x, y, seed)`: value noise in -1..1 over its lattice.
         vm.add_method(shared, id_lut!(hashn), script_args!(a = NIL, b = NIL, c = NIL, d = NIL), |vm, args| {
-            let xs: Vec<f64> = [id!(a), id!(b), id!(c), id!(d)].into_iter().filter_map(|k| vm.bx.heap.value(args, k.into(), NoTrap).as_number()).collect();
+            let xs: Vec<f64> = [id!(a), id!(b), id!(c), id!(d)].into_iter().filter_map(|k| vm.value(args, k).as_number()).collect();
             crate::rand::hashn(&xs).into()
         });
         vm.add_method(shared, id_lut!(vnoise), script_args!(x = 0.0, y = 0.0, seed = 0.0), |vm, args| {
-            let num = |k: LiveId| vm.bx.heap.value(args, k.into(), NoTrap).as_number().unwrap_or(0.0);
+            let num = |k: LiveId| vm.value(args, k).as_number().unwrap_or(0.0);
             crate::rand::vnoise(num(id!(x)), num(id!(y)), num(id!(seed))).into()
         });
-        vm.bx.heap.set_value(modules, id!(shared).into(), value, NoTrap);
+        install_ease_placeholder(vm, shared);
+        vm.set_value(modules, id!(shared), value);
+        return true;
+    }
+    false
+}
+
+/// `ease` and `ease_id` until the host installs the real ones
+/// (`makepad_tween_script::install_ease`, which reads libs/tween's table):
+/// a document calling them before that gets this error, not a silent nil.
+#[cfg(feature = "vm")]
+fn install_ease_placeholder(vm: &mut makepad_script::ScriptVm, shared: makepad_script::ScriptObject) {
+    use makepad_script::*;
+    for name in [id_lut!(ease), id_lut!(ease_id)] {
+        vm.add_method(shared, name, script_args!(name = NIL, u = 0.0), |vm, _args| {
+            script_err_not_impl!(vm.trap(), "ease() needs the host to call makepad_tween_script::install_ease(vm) after register_shared_std")
+        });
     }
 }
 
@@ -664,17 +683,20 @@ mod vm_tests {
     fn shared_std_registers_once_with_every_function() {
         let mut host = Box::new(ScriptVmHost::new((), ()));
         let bx = Box::new(ScriptVmBase::new());
-        let mut vm = ScriptVm { host: &mut *host, bx };
+        let mut vm = ScriptVm {
+            host: host.host_context(),
+            bx,
+        };
         super::register_shared_std(&mut vm);
-        let modules = vm.bx.heap.modules;
-        let shared = vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object().expect("mod.shared");
+        let modules = vm.modules();
+        let shared = vm.value(modules, id!(shared)).as_object().expect("mod.shared");
         for name in super::SHARED_STD.lines().filter_map(|l| l.strip_prefix("fn ").and_then(|r| r.split('(').next())) {
-            let f = vm.bx.heap.value(shared, LiveId::from_str(name.trim()).into(), NoTrap);
+            let f = vm.value(shared, LiveId::from_str(name.trim()));
             assert!(!f.is_nil(), "mod.shared.{name}");
         }
-        let draw = vm.bx.heap.value(shared, id!(rand_seq).into(), NoTrap);
+        let draw = vm.value(shared, id!(rand_seq));
         assert!(!draw.is_nil(), "mod.shared.rand_seq");
-        let eval = |vm: &mut ScriptVm, code: &str| vm.eval(ScriptMod { file: "t".into(), code: format!("use mod.math.*\nuse mod.pod.*\nuse mod.shared.*\n{code}"), ..Default::default() }).as_number();
+        let eval = |vm: &mut ScriptVm, code: &str| vm.eval(ScriptMod::new("", "", "t", 0, 0, &format!("use mod.math.*\nuse mod.pod.*\nuse mod.shared.*\n{code}"), &[])).as_number();
         assert_eq!(eval(&mut vm, "rand_seq(42, 1)"), Some(crate::rand::rand_seq(42.0, 1.0)));
         assert_eq!(eval(&mut vm, "hashn(3, 7) + vnoise(0.3, 0.7, 1)"), Some(crate::rand::hashn(&[3.0, 7.0]) + crate::rand::vnoise(0.3, 0.7, 1.0)));
         assert_eq!(eval(&mut vm, "let t = rand_seq(42, 0, 3)\nt[2]"), Some(crate::rand::rand_seq(42.0, 2.0)), "a table of draws");
@@ -690,6 +712,6 @@ mod vm_tests {
             assert!((0.0..1.0).contains(&h) && (0.0..1.0).contains(&h2) && n.abs() <= 1.0, "{p}: {h} {h2} {n}");
         }
         super::register_shared_std(&mut vm);
-        assert_eq!(vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object(), Some(shared), "registered once");
+        assert_eq!(vm.value(modules, id!(shared)).as_object(), Some(shared), "registered once");
     }
 }

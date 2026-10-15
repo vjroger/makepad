@@ -249,6 +249,48 @@ impl CodeDocument {
         self.update_after_edit(None, None, &edits);
     }
 
+    /// Replaces the text between `start` and `end` with `new_text` as it is:
+    /// one undo step, no autoindent, no delimiter injection. For a host
+    /// putting an outside change into the text, where typing's indent rules
+    /// would rewrite what it was given.
+    pub fn replace_range(&self, start: Position, end: Position, new_text: Text) {
+        if self.is_read_only() { return; }
+        let mut history = self.0.history.borrow_mut();
+        let delete_edit = Edit {
+            change: Change::Delete(start, end - start),
+            drift: Drift::Before,
+        };
+        let insert_edit = Edit {
+            change: Change::Insert(start, new_text),
+            drift: Drift::Before,
+        };
+        history.force_new_group();
+        history.push_or_extend_group(
+            SessionId::default(),
+            EditKind::Other,
+            &SelectionSet::default(),
+        );
+        history.apply_edit(delete_edit.clone());
+        history.apply_edit(insert_edit.clone());
+        drop(history);
+        self.update_after_edit(None, None, &[delete_edit, insert_edit]);
+    }
+
+    /// Highlight as the file at `path` (a rename that changed the
+    /// extension): retokenizes in place, keeping the text, history, anchors
+    /// and sessions.
+    pub fn set_language_for_path(&self, path: &str) {
+        let detection = makepad_code_language::detect_path(path, None);
+        let history = self.0.history.borrow();
+        let text = history.as_text();
+        let line_count = text.as_lines().len();
+        let mut tokenizer = Tokenizer::for_detection(detection, line_count);
+        let mut layout = self.0.layout.borrow_mut();
+        layout.tokens = vec![Vec::new(); line_count];
+        tokenizer.update(text, &mut layout.tokens);
+        *self.0.tokenizer.borrow_mut() = tokenizer;
+    }
+
     pub fn as_text(&self) -> Ref<'_, Text> {
         Ref::map(self.0.history.borrow(), |history| history.as_text())
     }
@@ -500,7 +542,7 @@ impl CodeDocument {
                     })
                     .unwrap_or(false)
                 {
-                    desired_indentation_column_count -= 4;
+                    desired_indentation_column_count = desired_indentation_column_count.saturating_sub(4);
                 }
                 self.edit_lines_internal(line, edits, |line| {
                     crate::session::reindent(line, |_| desired_indentation_column_count)

@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -8,6 +8,7 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvg;
+use crate::pointer_field::{FieldArbiter, PointerField};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -126,6 +127,14 @@ script_mod! {
             active: instance(0.0)
             /** the spinner's clock, ramped 0..1 once a second by the time track 0..1 step 0.01 */
             anim_time: instance(0.0)
+            /** the pointer's field over the face, 0..1, written by the widget while cap_field_reach is above zero */
+            cap_field: instance(0.0)
+            /** the pointer along the face from its centre, in points, while the field is up */
+            cap_pointer_along: instance(0.0)
+            /** the pointer across the face from its centre, in points, while the field is up */
+            cap_pointer_across: instance(0.0)
+            /** a clock in seconds while the field is up */
+            cap_time: instance(0.0)
 
             /** spinner arc ink while loading */
             loading_color: uniform(theme.color_label_inner)
@@ -285,7 +294,12 @@ script_mod! {
                 let on = 1.0 - self.disabled
                 if own.a > 0.5 {
                     let d = (host.rgb - own.rgb) * inside * on
-                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(res.a, res.a, res.a))
+                    // Not capped at res.a: a sheet's face is not held to
+                    // premultiplied colour (the light it throws past its
+                    // edge, and a glass face, carry colour above their
+                    // alpha), and capping cut every glow at the rect and
+                    // emptied the outline face.
+                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
                     // Where the sheet's face lets the ground through (glass,
                     // a face that is only its frame), the host's colour is
                     // the body under it, as far as the host moved it: a lit
@@ -1441,6 +1455,16 @@ pub struct Button {
     #[live]
     pub loading: bool,
 
+    /// How far from the face, in points, the pointer's field reaches, for
+    /// a material whose face answers the pointer's approach: the draw gets
+    /// `cap_field`, `cap_pointer_along`, `cap_pointer_across` and
+    /// `cap_time` while it is above zero. Only the nearest two faces on a
+    /// window carry a field at once. Zero (the default) keeps it off.
+    #[live]
+    pub cap_field_reach: f64,
+    #[rust]
+    field: PointerField,
+
     /// Text a click puts on the clipboard; set, it makes this a copy button
     /// that shows `copied_text` for `copied_secs` and raises
     /// `CopyButtonAction::Copied`.
@@ -1656,18 +1680,14 @@ impl Widget for Button {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            let str_val = vm.new_string(self.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying button text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying button text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -1712,6 +1732,10 @@ impl Widget for Button {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
+        }
+
+        if self.cap_field_reach > 0.0 {
+            self.field_event(cx, event);
         }
 
         if let Event::ClearHover = event {
@@ -1863,7 +1887,12 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_label(cx);
+        // An icon-only button has no label part: walking an empty label still
+        // took a turtle step, and the spacing before it pushed the icon off
+        // centre (the width measurement above already counts no label part).
+        if !self.shown_label().is_empty() || !self.description.is_empty() {
+            self.draw_label(cx);
+        }
         self.draw_icon_end.draw_walk(cx, self.icon_end_walk);
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
@@ -1889,6 +1918,39 @@ fn is_activation_key(key_code: KeyCode) -> bool {
 }
 
 impl Button {
+    /// The pointer's field: its frame steps, the pointer read against the
+    /// face (points from the face's centre; the distance to the face's
+    /// edge goes to the arbiter, so faces of every size compete alike),
+    /// and the leave. The material gets the values on the drawn area.
+    fn field_event(&mut self, cx: &mut Cx, event: &Event) {
+        let press = if self.animator_in_state(cx, ids!(hover.down)) { 1.0 } else { 0.0 };
+        if self.field.tick(cx, event, press) {
+            let (f, a, c, t) = self.field.read(press);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_field), &[f]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_pointer_along), &[a]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_pointer_across), &[c]);
+            self.draw_bg.set_instance_on_area(cx, id!(cap_time), &[t]);
+        }
+        match event {
+            Event::MouseMove(e) => {
+                let rect = self.draw_bg.area().rect(cx);
+                if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                    return;
+                }
+                let centre = rect.pos + rect.size * 0.5;
+                let rel = (e.abs.x - centre.x, e.abs.y - centre.y);
+                let dx = (rel.0.abs() - rect.size.x * 0.5).max(0.0);
+                let dy = (rel.1.abs() - rect.size.y * 0.5).max(0.0);
+                let dist = (dx * dx + dy * dy).sqrt();
+                let granted = FieldArbiter::report(e.abs, self.widget_uid().0, dist);
+                let near = dist < self.cap_field_reach && granted;
+                self.field.pointer(cx, rel, near);
+            }
+            Event::MouseLeave(_) => self.field.leave(cx),
+            _ => (),
+        }
+    }
+
     /// The label the face shows right now.
     fn shown_label(&self) -> &str {
         if self.copied && !self.copied_text.is_empty() {
@@ -2136,17 +2198,23 @@ impl ButtonRef {
             .and_then(|inner| inner.released_modifiers(actions))
     }
 
+    /// Redraws only when the button changes: callers re-assert it every frame.
     pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.visible = visible;
-            inner.redraw(cx);
+            if inner.visible != visible {
+                inner.visible = visible;
+                inner.redraw(cx);
+            }
         }
     }
 
+    /// Redraws only when the button changes: callers re-assert it every frame.
     pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.enabled = enabled;
-            inner.redraw(cx);
+            if inner.enabled != enabled {
+                inner.enabled = enabled;
+                inner.redraw(cx);
+            }
         }
     }
 
@@ -2279,9 +2347,7 @@ mod open_tests {
                     mod.shader.test_compile_draw_source(mod.widgets.ButtonFloatingSm.draw_bg, "glsl", false)
                 })),
             ] {
-                let text = vm
-                    .bx
-                    .heap
+                let text = vm.heap()
                     .string_with(value, |_heap, text| text.to_string())
                     .expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");
@@ -2318,9 +2384,7 @@ mod open_tests {
             let value = crate::script_eval!(vm, {
                 mod.shader.test_compile_draw_source(mod.widgets.Button.draw_bg, "glsl", false)
             });
-            let text = vm
-                .bx
-                .heap
+            let text = vm.heap()
                 .string_with(value, |_heap, text| text.to_string())
                 .expect("the compiler answers with source");
             assert!(!text.starts_with("ERRORS:"), "the sheet face did not compile: {text}");

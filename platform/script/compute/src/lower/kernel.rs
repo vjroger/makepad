@@ -18,6 +18,7 @@
 //! Inputs `time` (f32), `seed` and `count` (i32) are always available.
 //! Buffer accesses clamp to the host buffer's real length, so a kernel
 //! cannot read or write outside what the host bound.
+use makepad_relax_api::relax_api;
 
 use super::*;
 
@@ -26,6 +27,9 @@ pub const K_BASE: u32 = 0;
 pub const K_COUNT: u32 = 1;
 pub const K_TIME: u32 = 2;
 pub const K_SEED: u32 = 3;
+/// The ops host calls counted for the input they were actually given
+/// (saturating), added by the runtime to the call's counted work.
+pub const K_HOST_WORK: u32 = 4;
 /// Host buffer 0: the control word (non-zero = stop at the next element),
 /// bound by the runtime to the call's cancel token.
 pub const CONTROL_BUFFER: &str = "#control";
@@ -38,14 +42,19 @@ pub const K_HOST_ERR: u32 = 22;
 /// The op-equivalents one host call may cost for its actual input (0: no
 /// limit); set from admission.
 pub const K_HOST_LIMIT: u32 = 23;
-pub const K_PARAMS: u32 = 24;
+/// What a run's loops counted (see `crate::work`), stored after its
+/// element loop (four-wide code: its lanes summed).
+pub const K_WORK: u32 = 24;
+pub const K_PARAMS: u32 = 25;
 /// Most elements one call may run.
 pub const ELEMENT_CAP: u32 = 1 << 30;
 pub const MAX_BUFFERS: usize = 64;
 /// Worst-case AIR ops per element.
 pub const MAX_COST_PER_ELEMENT: u64 = 2_000_000;
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Access {
     Read,
     Write,
@@ -64,14 +73,18 @@ pub struct BufferDecl {
     pub stride: u32,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ReduceOp {
     Sum,
     Min,
     Max,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum KernelKind {
     /// Writes outputs per element (vertex, instance, element, primitive).
     Map,
@@ -133,7 +146,9 @@ impl KernelCtx {
 }
 
 /// A kernel's math functions (`let math = portable | fast`).
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum MathMode {
     /// f32 Cephes-style polynomials, and a multiply feeding one add or
     /// subtract fused into one rounding (`fuse_fma`): fast, the same bits
@@ -155,20 +170,29 @@ pub struct KernelLowered {
     /// The entry's name (vertex, instance, element, primitive, reduce_*).
     pub entry: String,
     pub program: Program,
+    /// `program` with its calls inlined (counting alike), optimized: what
+    /// native code and the interpreter run.
+    pub flat: Program,
     pub init: Option<Program>,
     pub params: Vec<ParamInfo>,
     pub buffers: Vec<BufferDecl>,
     pub shared_init: Vec<u32>,
     /// Worst-case AIR ops per element.
     pub cost: u64,
+    /// What each element counts by itself (its loops count at run time).
+    pub element_work: u64,
     /// Every write (and every read of a written buffer) touches only the
     /// element's own records: element ranges can run on different threads.
     pub parallel_safe: bool,
+    /// Edit mode: the literals read from hidden parameters, and the live
+    /// ones that stayed constants (source offsets).
+    pub live: Vec<crate::lower::LiveParam>,
+    pub folded: Vec<usize>,
 }
 
 /// A host-defined record layout (a GPU vertex or instance struct from the
 /// shader compiler's reflection): the kernel writes it in place by field.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Layout {
     pub name: String,
     /// Words per record (including padding).
@@ -176,7 +200,7 @@ pub struct Layout {
     pub fields: Vec<LayoutField>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct LayoutField {
     pub name: String,
     pub ty: FieldTy,
@@ -184,7 +208,39 @@ pub struct LayoutField {
     pub offset: u32,
 }
 
+// Host-owned descriptors are copied into the compiler through LayoutView.
+impl Clone for Layout {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self { name: self.name.clone(), stride: self.stride.clone(), fields: self.fields.clone() }
+    }
+}
+
+impl PartialEq for Layout {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.stride == other.stride && self.fields == other.fields
+    }
+}
+
+// Host-owned descriptors are copied into the compiler through LayoutView.
+impl Clone for LayoutField {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self { name: self.name.clone(), ty: self.ty.clone(), offset: self.offset.clone() }
+    }
+}
+
+impl PartialEq for LayoutField {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.ty == other.ty && self.offset == other.offset
+    }
+}
+
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum FieldTy {
     F32,
     I32,
@@ -508,8 +564,9 @@ impl Lowerer {
 }
 
 /// Lowers a kernel.
-pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> Result<KernelLowered, ShaderError> {
+pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], live: Option<crate::lower::LiveLift>) -> Result<KernelLowered, ShaderError> {
     let mut l = new_lowerer(prelude_base, Domain::Kernel);
+    l.live = live;
     l.add_layouts(layouts)?;
     // `let math = portable | fast`: the kernel's math mode.
     let mut math = MathMode::Fast;
@@ -651,8 +708,34 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
     if program.air_cost() > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
     }
+    // Every kernel counts the ops it runs (its budget is counted work): its
+    // program (wasm runs it, with functions) and its inlined form (native
+    // code and the interpreter), counted alike, then optimized.
+    let mut flat = (!program.funcs.is_empty()).then(|| crate::ir::inline_calls(&program));
+    let Some(element_work) = crate::work::count(&mut program) else {
+        return Err(ShaderError::new(0, 1, "internal compiler error: the element loop was not found for work counting".into()));
+    };
+    let flat = match flat.as_mut() {
+        // Without functions the program is its own inlined form.
+        None => program.clone(),
+        Some(flat) => {
+            if crate::work::count(flat) != Some(element_work) {
+                return Err(ShaderError::new(0, 1, "internal compiler error: the inlined program counts differently".into()));
+            }
+            crate::opt::optimize(flat);
+            std::mem::take(flat)
+        }
+    };
     let parallel_safe = !l.kernel.nonlocal;
-    Ok(KernelLowered { kind, math, entry: entry_name, program, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, parallel_safe })
+    let (live, folded) = match l.live.take() {
+        Some(lift) => {
+            let mut live: Vec<crate::lower::LiveParam> = lift.slots.iter().map(|(&(offset, ch), &param)| crate::lower::LiveParam { offset, channel: lift.colours.contains(&offset).then_some(ch), param }).collect();
+            live.sort_by_key(|p| p.param);
+            (live, lift.folded)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok(KernelLowered { kind, math, entry: entry_name, program, flat, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, element_work, parallel_safe, live, folded })
 }
 
 /// Every f32 stored to a host buffer goes through `x != x ? NaN : x`, so

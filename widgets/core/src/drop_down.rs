@@ -1,12 +1,13 @@
 use {
     crate::{
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+        animator::{Animate, Animator, AnimatorImpl},
         makepad_derive_widget::*,
         makepad_draw::*,
         popup_menu::{PopupMenu, PopupMenuAction},
         widget::*,
         widget_async::CxSplashVmExt,
     },
+    crate::makepad_draw::makepad_platform::makepad_script::{ScriptFnRef, ScriptRefOptionExt},
     std::cell::RefCell,
     std::rc::Rc,
 };
@@ -477,6 +478,9 @@ pub struct DropDown {
     source: ScriptObjectRef,
     #[apply_default]
     animator: Animator,
+    /// Called (from script) with the chosen label when the choice changes.
+    #[live]
+    on_change: Option<ScriptFnRef>,
 
     // `redraw`/`walk`/`uid`/`action_data` are the `Widget` derive's helper
     // attributes; this widget hand-writes `WidgetNode` (for `children`), so
@@ -522,6 +526,10 @@ pub struct DropDown {
     /// Popup rows drawn with the disabled palette while remaining selectable.
     #[rust]
     dimmed_items: Vec<bool>,
+
+    /// Popup rows that use the disabled palette and cannot be chosen by input.
+    #[rust]
+    disabled_items: Vec<bool>,
 
     #[live]
     popup_menu_position: PopupMenuPosition,
@@ -714,6 +722,20 @@ pub enum DropDownAction {
 }
 
 impl DropDown {
+    /// The script's `on_change`, with the chosen label.
+    fn emit_change(&mut self, cx: &mut Cx) {
+        let Some(handler) = self.on_change.as_object() else { return };
+        let label = self.labels.get(self.selected_item).cloned().unwrap_or_default();
+        // Nothing to call into if the isolate that minted it is gone.
+        let Some(vm_id) = cx.script_ref_vm_id(&self.source) else { return };
+        cx.with_script_vm_id(vm_id, |vm| {
+            let label = vm.new_string(&label);
+            vm.with_instruction_limit(crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                vm.call(ScriptValue::from(handler), &[ScriptValue::from(label)]);
+            });
+        });
+    }
+
     /// Remove every cached popup minted by one script heap before that heap's
     /// isolate is freed. PopupMenu objects retain script refs (including their
     /// item template), so allowing them to outlive the heap is both a leak and
@@ -795,6 +817,10 @@ impl DropDown {
         self.icons.get(index).and_then(|icon| icon.svg.as_ref())
     }
 
+    fn item_is_disabled(&self, index: usize) -> bool {
+        self.disabled_items.get(index).copied().unwrap_or(false)
+    }
+
     /// Point `draw_icon` at item `index`'s icon and report whether there is one.
     /// Only writes on an actual change: a `ScriptHandleRef` is a GC root, and
     /// re-seating one every frame churns the root table for nothing.
@@ -857,6 +883,12 @@ impl DropDown {
             popup_menu.tree_parent = self.uid;
             popup_menu.icon_column = !self.icons.is_empty();
             popup_menu.begin(cx);
+            popup_menu.fit_width_to_items(
+                cx,
+                self.labels.iter().enumerate().map(|(i, label)| {
+                    (LiveId(i as u64).into(), label.as_str(), self.icon_at(i))
+                }),
+            );
 
             match self.popup_menu_position {
                 PopupMenuPosition::OnSelected => {
@@ -872,6 +904,7 @@ impl DropDown {
                             &item,
                             self.icon_at(i),
                             self.dimmed_items.get(i).copied().unwrap_or(false),
+                            self.item_is_disabled(i),
                         );
                     }
 
@@ -895,6 +928,7 @@ impl DropDown {
                             &item,
                             self.icon_at(i),
                             self.dimmed_items.get(i).copied().unwrap_or(false),
+                            self.item_is_disabled(i),
                         );
                     }
 
@@ -1023,12 +1057,17 @@ impl Widget for DropDown {
                 &mut |cx, action| match action {
                     PopupMenuAction::WasSweeped(_node_id) => {}
                     PopupMenuAction::WasSelected(node_id) => {
-                        self.selected_item = node_id.0 .0 as usize;
+                        let index = node_id.0 .0 as usize;
+                        if index >= self.labels.len() || self.item_is_disabled(index) {
+                            return;
+                        }
+                        self.selected_item = index;
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
                             DropDownAction::Select(self.selected_item),
                         );
+                        self.emit_change(cx);
                         self.draw_bg.redraw(cx);
                         close = true;
                     }
@@ -1070,27 +1109,34 @@ impl Widget for DropDown {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
             }
-            Hit::KeyDown(ke) => match ke.key_code {
+            Hit::KeyDown(ke) if !self.disabled(cx) => match ke.key_code {
                 KeyCode::ArrowUp => {
-                    if self.selected_item > 0 {
-                        self.selected_item -= 1;
+                    if let Some(index) = (0..self.selected_item.min(self.labels.len()))
+                        .rev()
+                        .find(|&index| !self.item_is_disabled(index))
+                    {
+                        self.selected_item = index;
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
                             DropDownAction::Select(self.selected_item),
                         );
+                        self.emit_change(cx);
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
                 }
                 KeyCode::ArrowDown => {
-                    if self.labels.len() > 0 && self.selected_item < self.labels.len() - 1 {
-                        self.selected_item += 1;
+                    if let Some(index) = (self.selected_item.saturating_add(1)..self.labels.len())
+                        .find(|&index| !self.item_is_disabled(index))
+                    {
+                        self.selected_item = index;
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
                             DropDownAction::Select(self.selected_item),
                         );
+                        self.emit_change(cx);
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -1177,6 +1223,18 @@ impl DropDownRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.dimmed_items = dimmed_items;
             inner.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Disable input for these rows and draw them with the disabled palette.
+    /// Missing entries remain enabled. Programmatic selection may still show
+    /// a saved choice that has become unavailable.
+    pub fn set_disabled_items(&self, cx: &mut Cx, disabled_items: Vec<bool>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.disabled_items != disabled_items {
+                inner.disabled_items = disabled_items;
+                inner.draw_bg.redraw(cx);
+            }
         }
     }
 

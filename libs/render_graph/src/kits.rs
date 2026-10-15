@@ -41,8 +41,52 @@ pub fn kit(kind: &str) -> Option<&'static KitDef> {
     KITS.iter().find(|k| k.kind == kind || k.name == kind)
 }
 
+/// A kit parameter's numbers as an editor offers them: the range a control
+/// spans (a soft range: code may write past it), its step, and whether it
+/// is a whole number (a mode, a count). A parameter not listed here is not
+/// a number (a colour, a choice, a texture name).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KitParam {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub whole: bool,
+}
+
+const fn num(min: f64, max: f64, step: f64) -> KitParam {
+    KitParam { min, max, step, whole: false }
+}
+
+const fn whole(min: f64, max: f64) -> KitParam {
+    KitParam { min, max, step: 1.0, whole: true }
+}
+
+/// Each kit's numeric parameters (by the kit's type name), as the kits'
+/// Splash reads them (see each kit's comment above its template).
+const PARAMS: &[(&str, &[(&str, KitParam)])] = &[
+    ("Glow", &[("strength", num(0.0, 2.0, 0.01)), ("radius", num(0.0, 1.0, 0.01)), ("threshold", num(0.0, 2.0, 0.01)), ("gate", whole(0.0, 1.0))]),
+    ("Bloom", &[("strength", num(0.0, 2.0, 0.01)), ("threshold", num(0.0, 2.0, 0.01)), ("knee", num(0.0, 1.0, 0.01)), ("radius", num(0.0, 2.0, 0.01)), ("halation", num(0.0, 1.0, 0.01)), ("compress", num(0.0, 1.0, 0.01))]),
+    ("Shoulder", &[("knee", num(0.0, 1.0, 0.01)), ("white_from", num(0.0, 8.0, 0.1)), ("white_to", num(0.0, 32.0, 0.1)), ("white", num(0.0, 1.0, 0.01))]),
+    ("Halation", &[("strength", num(0.0, 1.0, 0.01)), ("threshold", num(0.0, 2.0, 0.01))]),
+    ("Aberration", &[("amount", num(0.0, 12.0, 0.1)), ("falloff", whole(1.0, 2.0))]),
+    ("Grain", &[("amount", num(0.0, 0.3, 0.005)), ("size", num(0.5, 4.0, 0.1))]),
+    ("Vignette", &[("amount", num(0.0, 1.0, 0.01)), ("softness", num(0.0, 1.0, 0.01)), ("mode", whole(0.0, 1.0))]),
+    ("FramePost", &[("shake", num(0.0, 0.1, 0.001)), ("zoom", num(0.5, 2.0, 0.01)), ("flash", num(0.0, 1.0, 0.01)), ("fade", num(0.0, 1.0, 0.01)), ("invert", num(0.0, 1.0, 0.01)), ("mode", whole(0.0, 1.0))]),
+    ("Lut", &[("amount", num(0.0, 1.0, 0.01)), ("size", whole(2.0, 64.0))]),
+    ("DepthOfField", &[("focus", num(0.0, 50.0, 0.1)), ("aperture", num(0.0, 32.0, 0.1)), ("max_blur", num(0.0, 64.0, 0.5))]),
+    ("Outline", &[("thickness", num(0.0, 8.0, 0.1)), ("threshold", num(0.0, 0.5, 0.005)), ("mode", whole(0.0, 1.0))]),
+    ("Upsample", &[("guide_view", whole(0.0, 1.0)), ("sigma", num(0.0, 0.5, 0.005))]),
+    ("VelocityBlur", &[("amount", num(0.0, 2.0, 0.01)), ("samples", whole(2.0, 32.0))]),
+];
+
+/// The numbers of parameter `param` of kit `kit` (its type name or kind).
+pub fn param(kit: &str, param: &str) -> Option<KitParam> {
+    let name = self::kit(kit)?.name;
+    PARAMS.iter().find(|(k, _)| *k == name)?.1.iter().find(|(p, _)| *p == param).map(|(_, info)| *info)
+}
+
 /// The kits' Splash source for the host module `module` (for example
-/// `mod.m3`), setting defaults on `module.<Name>` and defining
+/// `mod.scene`), setting defaults on `module.<Name>` and defining
 /// `module.kit_<kind>`: all of them, or only the kinds in `only` (a host
 /// that has its own node of the same name leaves that kit out).
 pub fn kit_source(module: &str, only: Option<&[&str]>) -> String {
@@ -97,11 +141,12 @@ $M.BloomTent = {
 
 /// Put the shared filters ([`FILTERS`]) in `mod.draw` (once per VM, before
 /// the draw shaders that spread them). Returns the evaluation errors.
+#[cfg(feature = "gpu")]
 pub fn install_filters(vm: &mut makepad_draw::ScriptVm) -> Vec<String> {
     use makepad_draw::*;
-    vm.bx.captured_errors = Some(Vec::new());
+    vm.capture_errors();
     let code = format!("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n{}true\n", FILTERS.replace("$M", "mod.draw"));
-    let v = vm.eval(ScriptMod { file: "graph://filters".into(), code, ..Default::default() });
+    let v = vm.eval(ScriptMod::new("", "", "graph://filters", 0, 0, &code, &[]));
     let mut errors = vm.take_errors();
     if v.is_err() && errors.is_empty() {
         errors.push("the graph's filters did not evaluate".into());
@@ -452,14 +497,16 @@ $M.kit_lut = fn(p) {
 // ---------------------------------------------------------------- DepthOfField
 // A thin lens: circle of confusion from the view distance against `focus`
 // (metres), `aperture` its size (pixels at 1080p for something at
-// infinity), capped at `max_blur` (pixels at 1080p). A full-resolution
+// infinity), capped at `max_blur` (pixels at 1080p); `range` the in-focus
+// band, the defocus |1 - focus / distance| below which nothing blurs (the
+// blur grows from its edge). A full-resolution
 // gather of 24 taps on a disc, each tap counted where its own blur reaches
 // this pixel and never beyond this pixel's own (a blurred background does
 // not bleed over a sharp foreground, and what is in focus stays sharp).
-$M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16}
+$M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16 range: 0}
 $M.kit_dof = fn(p) {
     return [
-        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur}
+        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur range: p.range}
             pixel: fn() -> vec4 {
                 let px = self.size().y / 1080.0
                 let f = max(self.focus, 0.001)
@@ -467,9 +514,9 @@ $M.kit_dof = fn(p) {
                 var z0 = 100000.0
                 let d0 = self.depth.sample_nearest(self.uv()).x
                 if d0 < 0.99999 {
-                    z0 = self.view_depth(d0)
+                    z0 = self.view_depth_at(self.uv(), d0)
                 }
-                let c0 = min(abs(1.0 - f / max(z0, 0.001)) * self.aperture * px, maxb)
+                let c0 = min(max(abs(1.0 - f / max(z0, 0.001)) - self.range, 0.0) * self.aperture * px, maxb)
                 var sum = self.color.sample_nearest(self.uv())
                 var wsum = 1.0
                 for k in 0..24 {
@@ -479,9 +526,9 @@ $M.kit_dof = fn(p) {
                     var z = 100000.0
                     let d = self.depth.sample_nearest(suv).x
                     if d < 0.99999 {
-                        z = self.view_depth(d)
+                        z = self.view_depth_at(suv, d)
                     }
-                    let sc = min(abs(1.0 - f / max(z, 0.001)) * self.aperture * px, maxb)
+                    let sc = min(max(abs(1.0 - f / max(z, 0.001)) - self.range, 0.0) * self.aperture * px, maxb)
                     let reach = min(sc, c0 + 0.25)
                     let w = clamp(reach - r + 0.5, 0.0, 1.0)
                     sum = sum + self.color.sample_nearest(suv) * w
@@ -646,3 +693,19 @@ $M.kit_velocity_blur = fn(p) {
 }
 "##),
 ];
+
+#[cfg(test)]
+mod param_tests {
+    #[test]
+    fn every_listed_param_is_the_kits_and_its_default_is_in_range() {
+        for (kit, params) in super::PARAMS {
+            let def = super::kit(kit).expect("a kit");
+            for (name, info) in *params {
+                assert!(def.params.contains(name), "{kit}.{name} is no parameter of the kit");
+                assert!(info.min < info.max && info.step > 0.0, "{kit}.{name}");
+            }
+        }
+        assert!(!super::param("bloom", "strength").unwrap().whole);
+        assert!(super::param("Vignette", "mode").unwrap().whole);
+    }
+}

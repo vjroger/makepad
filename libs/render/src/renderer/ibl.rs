@@ -1,7 +1,7 @@
 //! Image-based lighting for Splash materials (KERNELS.md §3.3.3). Opt-in:
 //! `World::environment.ibl` names an environment, the renderer builds its
-//! lane texture once per change (render-material's ibl.rs: the prefiltered
-//! atlas, SH9 and a meta row) and binds it on the detail slot of the
+//! lane texture once per change (render-material's ibl.rs: a meta row with
+//! SH9, then the prefiltered atlas) and binds it on the detail slot of the
 //! materials compiled with IBL. Without it nothing is built or bound, and
 //! every stock lane keeps its analytic sky reflection.
 use super::*;
@@ -137,9 +137,9 @@ impl Renderer {
         if self.ibl.background.is_none() {
             self.ibl.background = cx.cx.try_with_vm(|vm| {
                 makepad_render_material::builtin::register(vm);
-                let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
+                let draw = vm.value(vm.modules(), LiveId::from_str("draw")).as_object();
                 let have = draw.is_some_and(|d| {
-                    let v = vm.bx.heap.value(d, LiveId::from_str("DrawEnvBackground").into(), NoTrap);
+                    let v = vm.value(d, LiveId::from_str("DrawEnvBackground"));
                     !v.is_nil() && !v.is_err()
                 });
                 if !have {

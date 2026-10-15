@@ -106,12 +106,17 @@ script_mod! {
         draw_indent_guide +: {
             color: theme.color_u_2
         }
+        draw_folded +: {
+            color: theme.color_u_2
+        }
         draw_diff_added +: {color: theme.color_success}
         draw_diff_removed +: {color: theme.color_error}
         draw_diff_changed +: {color: theme.color_warning}
         // Find: every match a soft wash, the current one a strong one.
         draw_find_match +: {color: theme.color_focus}
         draw_find_current +: {color: theme.color_focus}
+        // Lines a host lights for a moment (an outside edit), under the text.
+        draw_line_wash +: {color: theme.color_warning}
         draw_decoration +: {
         }
         draw_selection +: {
@@ -217,6 +222,11 @@ struct DrawCodeText {
     outline: f32,
 }
 
+/// A line drawn smaller than this (in logical pixels, a folded line) is
+/// too small to read: it draws as one bar the length of its text instead
+/// of glyph by glyph.
+const LEGIBLE_LINE_HEIGHT: f64 = 4.0;
+
 #[derive(Script, ScriptHook, Animator)]
 pub struct CodeEditor {
     #[source]
@@ -233,6 +243,9 @@ pub struct CodeEditor {
     token_colors: TokenColors,
     #[live]
     draw_indent_guide: DrawIndentGuide,
+    /// A folded line too small to read: one bar.
+    #[live]
+    draw_folded: DrawColor,
     #[live]
     draw_decoration: DrawDecoration,
     #[live]
@@ -245,6 +258,15 @@ pub struct CodeEditor {
     draw_find_match: DrawColor,
     #[live]
     draw_find_current: DrawColor,
+    #[live]
+    draw_line_wash: DrawColor,
+    /// Lines washed in `draw_line_wash`'s colour, each (0-based line range,
+    /// opacity 0..1); a host fades them by lowering the opacity and redrawing.
+    #[rust]
+    pub line_washes: Vec<(Range<usize>, f32)>,
+    /// A line to scroll to the middle of the view (caret untouched).
+    #[rust]
+    center_line: Option<usize>,
     /// Find matches, sorted, each within one line; drawn behind the text.
     #[rust]
     pub find_matches: Vec<(Position, Position)>,
@@ -325,6 +347,11 @@ pub struct CodeEditor {
     /// want to show focused selection colors in child editors.
     #[rust(false)]
     external_selection_focus: bool,
+
+    /// A host drives the caret and selection itself and no input reaches the
+    /// editor: they are drawn as if it had the keys.
+    #[rust(false)]
+    driven: bool,
 }
 
 /// Editor-local logical pixels; ascent/descent are positive distances from baseline.
@@ -364,6 +391,8 @@ pub enum KeepCursorInView {
     LockedCenter(Vec2d, Position, Affinity),
     FontResize(Vec2d),
     JumpToPosition,
+    /// Scroll so the cursor's line sits in the middle of the view.
+    CenterOnPosition,
     Off,
 }
 
@@ -779,6 +808,22 @@ impl CodeEditor {
                 );
                 self.keep_cursor_in_view = KeepCursorInView::Off;
             }
+            // Before the first draw the view has no size: centre next frame.
+            KeepCursorInView::CenterOnPosition if self.viewport_rect.size.y <= 0.0 => {}
+            KeepCursorInView::CenterOnPosition => {
+                let view = self.viewport_rect.size;
+                let scroll = self.scroll_bars.get_scroll_pos();
+                let x = if cursor_pos.x < scroll.x || cursor_pos.x > scroll.x + view.x - self.cell_size.x * 4.0 {
+                    (cursor_pos.x - self.cell_size.x * 10.0).max(0.0)
+                } else {
+                    scroll.x
+                };
+                let y = (cursor_pos.y + self.cell_size.y * 0.5 - view.y * 0.5).max(0.0);
+                // Not clipped to the size laid out last: the lines just
+                // unfolded to show it make the text longer than it was.
+                self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(x, y));
+                self.keep_cursor_in_view = KeepCursorInView::Off;
+            }
             KeepCursorInView::FontResize(last_pos) => {
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = last_pos - new_pos;
@@ -788,6 +833,21 @@ impl CodeEditor {
             }
             KeepCursorInView::Off => {}
         }
+        if let Some(line) = self.center_line {
+            if self.viewport_rect.size.y > 0.0 {
+                let line = line.min(session.document().as_text().as_lines().len().saturating_sub(1));
+                let (_, y) = session.layout().logical_to_normalized_position(
+                    Position { line_index: line, byte_index: 0 },
+                    Affinity::Before,
+                );
+                let y = (y * self.cell_size.y + self.cell_size.y * 0.5 - self.viewport_rect.size.y * 0.5).max(0.0);
+                let x = self.scroll_bars.get_scroll_pos().x;
+                self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(x, y));
+                self.center_line = None;
+            }
+        }
+        let size_pending = self.viewport_rect.size.y <= 0.0
+            && (self.center_line.is_some() || matches!(self.keep_cursor_in_view, KeepCursorInView::CenterOnPosition));
 
         self.scroll_bars.begin(cx, walk, Layout::default());
         let turtle_rect = cx.turtle().rect();
@@ -871,9 +931,16 @@ impl CodeEditor {
         };
         self.draw_bg.draw_abs(cx, bg_rect);
         self.draw_diff_backgrounds(cx, session);
+        self.draw_line_washes(cx, session);
         self.draw_find_layer(cx, session);
         for vars in [&mut self.draw_cursor.draw_vars, &mut self.draw_cursor_bg.draw_vars, &mut self.draw_selection.draw_vars] {
             vars.set_dyn_instance(cx, live_id!(content_opacity), &[self.content_opacity]);
+        }
+        if self.driven {
+            for vars in [&mut self.draw_cursor.draw_vars, &mut self.draw_cursor_bg.draw_vars] {
+                vars.set_dyn_instance(cx, live_id!(focus), &[1.0]);
+            }
+            self.draw_cursor.draw_vars.set_dyn_instance(cx, live_id!(blink), &[0.0]);
         }
         if self.document_read_only {
             // Diff documents allow a steady navigation caret, including deletions.
@@ -931,7 +998,7 @@ impl CodeEditor {
             cx.show_text_ime(self.scroll_bars.area(), ime_pos);
         }
 
-        if folds_moving {
+        if folds_moving || size_pending {
             cx.redraw_area_in_draw(self.scroll_bars.area());
         } else if self.keep_cursor_in_view.is_locked() {
             self.keep_cursor_in_view = KeepCursorInView::Off;
@@ -953,6 +1020,33 @@ impl CodeEditor {
         self.redraw(cx);
     }
 
+    /// Put the cursor at `pos` and scroll its line to the middle of the view.
+    pub fn set_cursor_and_center(&mut self, cx: &mut Cx, pos: Position, session: &mut CodeSession) {
+        session.set_selection(
+            session.clamp_position(pos),
+            Affinity::Before,
+            SelectionMode::Simple,
+            NewGroup::Yes,
+        );
+        self.keep_cursor_in_view = KeepCursorInView::CenterOnPosition;
+        self.redraw(cx);
+    }
+
+    /// Scroll `line` (0-based) to the middle of the view, leaving the caret.
+    pub fn center_line(&mut self, cx: &mut Cx, line: usize) {
+        self.center_line = Some(line);
+        self.redraw(cx);
+    }
+
+    /// The lines drawn last frame (0-based, half-open); empty before the
+    /// first draw.
+    pub fn visible_lines(&self) -> Range<usize> {
+        if self.viewport_rect.size.y <= 0.0 {
+            return 0..0;
+        }
+        self.line_start..self.line_end
+    }
+
     pub fn set_selection_and_scroll(
         &mut self,
         cx: &mut Cx,
@@ -969,6 +1063,15 @@ impl CodeEditor {
         session.move_to(session.clamp_position(end), Affinity::Before, NewGroup::Yes);
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
         self.redraw(cx);
+    }
+
+    /// The text size of code and gutter, in the editor's own pixels (before
+    /// the base font scale). Request a redraw after changing it.
+    pub fn set_font_size(&mut self, size: f32) {
+        if size.is_finite() && size > 0.0 {
+            self.draw_text.text_style.font_size = size;
+            self.draw_gutter.text_style.font_size = size;
+        }
     }
 
     pub fn reset_font_size(&mut self) {
@@ -1019,9 +1122,25 @@ impl CodeEditor {
     /// Set external selection focus without triggering a redraw.
     /// Use this when you know a redraw will happen anyway (e.g., during draw cycle).
     /// Scroll the viewport (a host resetting to the top-left after new text).
+    /// Where the view is scrolled to.
+    pub fn scroll_pos(&self) -> Vec2d {
+        self.scroll_bars.get_scroll_pos()
+    }
+
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) {
         self.scroll_bars.set_scroll_pos(cx, pos);
         self.scroll_bars.redraw(cx);
+    }
+
+    /// Draw the caret (steady) and the selection as if the editor had the
+    /// keys, for a host that moves them itself (a presentation following an
+    /// edit being typed); nothing is editable by input.
+    pub fn set_driven(&mut self, cx: &mut Cx, driven: bool) {
+        self.driven = driven;
+        self.read_only = !driven;
+        self.set_caret_policy(if driven { CaretPolicy::Steady } else { CaretPolicy::Blink });
+        self.set_external_selection_focus_no_redraw(driven);
+        self.redraw(cx);
     }
 
     pub fn set_external_selection_focus_no_redraw(&mut self, focus: bool) {
@@ -1180,7 +1299,7 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    //session.move_to_start_of_line(!shift);
+                    session.home(!shift);
                 } else {
                     session.move_left(!shift);
                 }
@@ -1199,7 +1318,7 @@ impl CodeEditor {
                 ..
             }) => {
                 if control || logo {
-                    //session.move_to_end_of_line(!shift);
+                    session.end(!shift);
                 } else {
                     session.move_right(!shift);
                 }
@@ -1377,6 +1496,17 @@ impl CodeEditor {
                     keyboard_moved_cursor = true;
                 }
             }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyY,
+                modifiers: KeyModifiers { control: true, shift: false, alt: false, .. },
+                ..
+            }) if !self.is_read_only() => {
+                if session.redo() {
+                    self.redraw(cx);
+                    actions.push(CodeEditorAction::TextDidChange);
+                    keyboard_moved_cursor = true;
+                }
+            }
             Hit::KeyDown(ke) => actions.push(CodeEditorAction::UnhandledKeyDown(ke)),
             Hit::FingerDown(FingerDownEvent {
                 abs,
@@ -1521,6 +1651,27 @@ impl CodeEditor {
         })
     }
 
+    fn draw_line_washes(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        if self.line_washes.is_empty() {
+            return;
+        }
+        let line_count = session.document().as_text().as_lines().len();
+        let washes = mem::take(&mut self.line_washes);
+        let color = self.draw_line_wash.color;
+        for (range, opacity) in &washes {
+            let start = range.start.max(self.line_start);
+            let end = range.end.min(self.line_end).min(line_count);
+            self.draw_line_wash.color.w = color.w * opacity.clamp(0.0, 1.0) * self.content_opacity;
+            for row in start..end {
+                if let Some(rect) = self.diff_row_rect(session, row) {
+                    self.draw_line_wash.draw_abs(cx, rect);
+                }
+            }
+        }
+        self.draw_line_wash.color = color;
+        self.line_washes = washes;
+    }
+
     fn draw_diff_backgrounds(&mut self, cx: &mut Cx2d, session: &CodeSession) {
         let decorations = session.document().decorations();
         let start = decorations.partition_point(|decoration| decoration.end().line_index < self.line_start);
@@ -1599,6 +1750,11 @@ impl CodeEditor {
         {
             match element {
                 BlockElement::Line { line, .. } => {
+                    if line.scale() * self.cell_size.y < LEGIBLE_LINE_HEIGHT {
+                        line_index += 1;
+                        origin_y += line.height();
+                        continue;
+                    }
                     self.draw_gutter.font_scale = self.base_font_scale * line.scale() as f32;
                     buf.clear();
                     let diff = session.document().diff_metadata()
@@ -1659,11 +1815,36 @@ impl CodeEditor {
         let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().block_y(self.line_start);
+        // Only the columns in view draw: a long line (a list of hundreds of
+        // numbers) costs what fits in the viewport, not its whole length.
+        let scroll_x = self.scroll_bars.get_scroll_pos().x;
+        let (seen_x0, seen_x1) = (scroll_x - self.cell_size.x * 2.0, scroll_x + self.viewport_rect.size.x + self.cell_size.x * 2.0);
         for element in session
             .layout()
             .block_elements(self.line_start, self.line_end)
         {
             match element {
+                BlockElement::Line { line, .. } if line.scale() * self.cell_size.y < LEGIBLE_LINE_HEIGHT => {
+                    // Too small to read (folded): one bar from its indent to
+                    // its end, within the view.
+                    let columns = line.text().chars().count();
+                    let indent = line.indent_column_count().min(columns);
+                    if columns > indent {
+                        let (x0, y) = line.grid_to_normalized_position(0, indent);
+                        let (x1, _) = line.grid_to_normalized_position(0, columns);
+                        let (x0, x1) = ((x0 * self.cell_size.x).max(seen_x0), (x1 * self.cell_size.x).min(seen_x1));
+                        if x1 > x0 {
+                            let h = (line.scale() * self.cell_size.y * 0.6).max(0.5);
+                            self.draw_folded.color.w = 0.5 * self.content_opacity;
+                            self.draw_folded.draw_abs(cx, Rect {
+                                pos: dvec2(x0 + self.viewport_rect.pos.x, (origin_y + y) * self.cell_size.y + self.viewport_rect.pos.y + (line.scale() * self.cell_size.y - h) * 0.5),
+                                size: dvec2(x1 - x0, h),
+                            });
+                        }
+                    }
+                    line_index += 1;
+                    origin_y += line.height();
+                }
                 BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = self.base_font_scale * line.scale() as f32;
                     let mut token_iter = line.tokens().iter().copied();
@@ -1742,6 +1923,12 @@ impl CodeEditor {
                                         }
                                         let (x, y) = line
                                             .grid_to_normalized_position(row_index, column_index);
+                                        let x_px = x * self.cell_size.x;
+                                        if x_px < seen_x0 || x_px > seen_x1 {
+                                            byte_index += grapheme.len();
+                                            column_index += grapheme.column_count_at(column_index, line.tab_column_count);
+                                            continue;
+                                        }
                                         self.draw_text.draw_abs(
                                             cx,
                                             Vec2d { x, y: origin_y + y } * self.cell_size
@@ -1762,7 +1949,11 @@ impl CodeEditor {
                             } => {
                                 let (x, y) =
                                     line.grid_to_normalized_position(row_index, column_index);
-                                if session.layout().line_byte_range(line_index).contains(&byte_index) {
+                                // (An inlay at the line's end shows too: a
+                                // value written after the line.)
+                                let shown = session.layout().line_byte_range(line_index);
+                                let line_len = session.layout().as_text().as_lines()[line_index].len();
+                                if shown.contains(&byte_index) || (byte_index == shown.end && byte_index == line_len) {
                                     self.draw_text.color = self.token_colors.identifier;
                                     self.draw_text.color.w *= self.content_opacity;
                                     self.draw_text.draw_abs(cx, Vec2d { x, y: origin_y + y } * self.cell_size + self.viewport_rect.pos, text);

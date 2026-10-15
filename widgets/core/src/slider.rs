@@ -1,10 +1,12 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
+    gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
     makepad_derive_widget::*,
     makepad_draw::*,
     text_input::{TextInput, TextInputAction},
     widget::*,
-    widget_async::ScriptAsyncResult,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
+    makepad_draw::makepad_platform::makepad_script::ScriptFnRef,
 };
 
 script_mod! {
@@ -2448,6 +2450,321 @@ pub struct DrawSlider {
     cap_px: f32,
     #[live]
     inset_px: f32,
+    /// The cap's motion, for a material whose cap is a liquid: how far
+    /// the cap's tail trails its head (0 at rest, 1 fully stretched),
+    /// which way along the track it trails (-1 or 1), the press as a
+    /// spring (0 at rest, overshooting past 1 on a press), and the squash
+    /// along and across (1 and 1 but as the tail lands). All at rest unless
+    /// the widget's `cap_viscosity` is above zero.
+    #[live]
+    cap_stretch: f32,
+    #[live(1.0)]
+    cap_dir: f32,
+    #[live]
+    cap_press: f32,
+    #[live(1.0)]
+    cap_squash_along: f32,
+    #[live(1.0)]
+    cap_squash_across: f32,
+    /// The pointer's field over the cap, for a material whose cap answers
+    /// the pointer (a magnetic liquid): its strength 0..1 (a spring toward
+    /// 1 while the pointer is within `cap_field_reach` of the cap, plus the
+    /// press), the pointer's position in the cap's frame in points (along,
+    /// across, from the cap's centre) and a clock in seconds that runs while
+    /// the field is up. All zero unless the widget's `cap_field_reach` is
+    /// above zero.
+    #[live]
+    cap_field: f32,
+    #[live]
+    cap_pointer_along: f32,
+    #[live]
+    cap_pointer_across: f32,
+    #[live]
+    cap_time: f32,
+}
+
+/// One step of a field's place after the pointer `to`: critically damped at
+/// nine radians a second, so it settles in about a third of a second with
+/// no overshoot; `snap` takes it straight there (a held control, or a field
+/// that is down and has nothing to glide from). Answers the new velocity.
+pub(crate) fn field_follow(shown: &mut Option<(f64, f64)>, v: (f64, f64), to: (f64, f64), snap: bool, dt: f64) -> (f64, f64) {
+    let Some(s) = shown.as_mut() else {
+        *shown = Some(to);
+        return (0.0, 0.0);
+    };
+    if snap {
+        *s = to;
+        return (0.0, 0.0);
+    }
+    let (k, c) = (81.0, 18.0);
+    let ax = k * (to.0 - s.0) - c * v.0;
+    let ay = k * (to.1 - s.1) - c * v.1;
+    let v = (v.0 + ax * dt, v.1 + ay * dt);
+    s.0 += v.0 * dt;
+    s.1 += v.1 * dt;
+    v
+}
+
+/// The cap's motion: a head that is the value (or travels to it on a spring
+/// after a jump), a tail that follows the head on a viscous spring, and a
+/// press spring, each stepped on the frames after a kick until all are at
+/// rest. Positions along the track in points, so the springs read the same
+/// at every size.
+#[derive(Default)]
+pub struct CapMotion {
+    head: f64,
+    head_v: f64,
+    tail: Option<f64>,
+    tail_v: f64,
+    press: f64,
+    press_v: f64,
+    last_dir: f64,
+    travel: bool,
+    /// The track's travel in points at the last draw, which the value is
+    /// scaled by.
+    travel_px: f64,
+    next_frame: Option<NextFrame>,
+    last_time: Option<f64>,
+    /// The pointer's field: a hover spring toward 1 while the pointer is
+    /// near, the pointer in the TRACK's frame (along from the track's
+    /// start, across from its middle, in points; the cap moves under it,
+    /// so it is taken into the cap's frame only when the cap is drawn, at
+    /// the value the cap is drawn at), the track's extent it was read
+    /// against, and the clock the field runs.
+    hover: f64,
+    hover_v: f64,
+    hover_target: f64,
+    pointer: Option<(f64, f64)>,
+    extent: f64,
+    /// The release wave, when the widget asks for one (`wave_len` its
+    /// length in seconds, 0 for none): where the cap was let go (the
+    /// track's frame) and how long ago.
+    wave_len: f64,
+    up_at: Option<(f64, f64)>,
+    since_up: f64,
+    /// Where the field is drawn: the pointer followed on a critically
+    /// damped spring, so the field glides after the pointer instead of
+    /// jumping with each pointer event; held at the pointer while the cap
+    /// is held, and taken straight to it while the field is down.
+    shown: Option<(f64, f64)>,
+    shown_v: (f64, f64),
+    time: f64,
+}
+
+impl CapMotion {
+    /// The spring constants for a viscosity 0..1: stiff and quick at 0,
+    /// slow and loose at 1, the tail's (k, c) and the press's (kp, cp).
+    fn constants(viscosity: f64) -> (f64, f64, f64, f64) {
+        let v = viscosity.clamp(0.0, 1.0);
+        let (w0, z) = if v < 0.5 {
+            let t = v * 2.0;
+            (22.0 * (6.0f64 / 22.0).powf(t), 0.57 + (0.7 - 0.57) * t)
+        } else {
+            let t = (v - 0.5) * 2.0;
+            (6.0 * (7.0f64 / 6.0).powf(t), 0.7 + 0.5 * t)
+        };
+        (w0 * w0, 2.0 * z * w0, 4.0 * w0 * w0, 2.0 * 0.6 * 2.0 * w0)
+    }
+
+    fn spring(x: &mut f64, v: &mut f64, target: f64, k: f64, c: f64, dt: f64) {
+        let a = k * (target - *x) - c * *v;
+        *v += a * dt;
+        *x += *v * dt;
+    }
+
+    /// One step: true while anything still moves.
+    pub(crate) fn step(&mut self, dt: f64, value: f64, dragging: bool, viscosity: f64) -> bool {
+        let (k, c, kp, cp) = Self::constants(viscosity);
+        let target = value * self.travel_px;
+        if self.travel {
+            Self::spring(&mut self.head, &mut self.head_v, target, kp, cp, dt);
+            if (self.head - target).abs() < 0.15 && self.head_v.abs() < 3.0 {
+                self.travel = false;
+                self.head = target;
+                self.head_v = 0.0;
+            }
+        } else {
+            self.head = target;
+            self.head_v = 0.0;
+        }
+        let head = self.head;
+        let mut tail = self.tail.unwrap_or(head);
+        Self::spring(&mut tail, &mut self.tail_v, head, k, c, dt);
+        self.tail = Some(tail);
+        let press_target = if dragging { 1.0 } else { 0.0 };
+        Self::spring(&mut self.press, &mut self.press_v, press_target, kp, cp, dt);
+        let gap = head - tail;
+        if gap.abs() > 0.05 {
+            self.last_dir = if gap > 0.0 { 1.0 } else { -1.0 };
+        }
+        // The field: critically damped so it settles without crossing
+        // zero, and its clock runs while it is up.
+        Self::spring(&mut self.hover, &mut self.hover_v, self.hover_target, 40.0, 12.7, dt);
+        self.hover = self.hover.max(0.0);
+        if self.field() > 0.001 {
+            self.time += dt;
+        }
+        if let Some(p) = self.pointer {
+            let snap = dragging || self.field() < 0.001;
+            self.shown_v = field_follow(&mut self.shown, self.shown_v, p, snap, dt);
+        }
+        let wave = self.wave_running();
+        if wave {
+            self.since_up += dt;
+            if self.reported_field() <= 0.001 {
+                self.time += dt;
+            }
+        }
+        wave
+            || self.travel
+            || dragging
+            || self.tail_v.abs() > 0.5
+            || gap.abs() > 0.05
+            || self.press_v.abs() > 1e-3
+            || (self.press - press_target).abs() > 1e-3
+            || self.hover_v.abs() > 1e-3
+            || (self.hover - self.hover_target).abs() > 1e-3
+            || self.field() > 0.001
+    }
+
+    /// The field's strength: most of the hover plus the press, never below
+    /// zero nor above one.
+    pub(crate) fn field(&self) -> f64 {
+        (0.7 * self.hover + self.press).clamp(0.0, 1.0)
+    }
+
+    /// What the material reads: stretch, direction, press, squash along,
+    /// squash across; and the value the cap is drawn at.
+    pub(crate) fn read(&self, value: f64, radius: f64, dragging: bool) -> (f32, f32, f32, f32, f32, f64) {
+        let tail = self.tail.unwrap_or(self.head);
+        let gap = self.head - tail;
+        let dir = if self.last_dir == 0.0 { 1.0 } else { self.last_dir };
+        let r = radius.max(1.0);
+        let stretch = (gap.abs() / (1.69 * r)).min(1.0);
+        let sq = -gap * dir;
+        let (sqa, sqx) = if sq > 0.0 && !dragging {
+            let sr = (sq / r).min(0.6);
+            (1.0 - sr, 1.0 + 0.36 * sr)
+        } else {
+            (1.0, 1.0)
+        };
+        let drawn = if self.travel && self.travel_px > 0.0 {
+            (self.head / self.travel_px).clamp(0.0, 1.0)
+        } else {
+            value
+        };
+        (stretch as f32, dir as f32, self.press as f32, sqa as f32, sqx as f32, drawn)
+    }
+
+    /// The track's travel in points at this draw: a new length scales the
+    /// positions with it rather than snapping them.
+    pub(crate) fn resize(&mut self, travel: f64) {
+        if (travel - self.travel_px).abs() > 0.5 {
+            if self.travel_px > 0.0 {
+                let k = travel / self.travel_px;
+                self.head *= k;
+                if let Some(t) = self.tail.as_mut() {
+                    *t *= k;
+                }
+            }
+            self.travel_px = travel;
+        }
+    }
+
+    /// Starts the motion on the next frame: after a press, a release, a
+    /// drag move, or (`jump`) a value that arrived without a drag, which
+    /// the cap then travels to.
+    pub(crate) fn kick(&mut self, cx: &mut Cx, jump: bool, value: f64) {
+        if jump && self.travel_px > 0.0 {
+            let target = value * self.travel_px;
+            if (self.head - target).abs() > 0.2 {
+                self.travel = true;
+            }
+        }
+        if self.next_frame.is_none() {
+            self.last_time = None;
+            self.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// One step on the motion's frame, and the next frame asked for while
+    /// anything still moves. True when it stepped, so the caller redraws.
+    pub(crate) fn tick(&mut self, cx: &mut Cx, event: &Event, value: f64, dragging: bool, viscosity: f64) -> bool {
+        let Some(nf) = self.next_frame else {
+            return false;
+        };
+        let Some(ne) = nf.is_event(event) else {
+            return false;
+        };
+        self.next_frame = None;
+        let dt = match self.last_time {
+            Some(t) => (ne.time - t).clamp(0.001, 0.05),
+            None => 1.0 / 60.0,
+        };
+        self.last_time = Some(ne.time);
+        if self.step(dt, value, dragging, viscosity) {
+            self.next_frame = Some(cx.new_next_frame());
+        }
+        true
+    }
+
+    /// The cap is let go: with a release wave asked for, the wave starts at
+    /// the pointer's place now (the track's frame).
+    pub(crate) fn release(&mut self, cx: &mut Cx, wave_len: f64) {
+        self.wave_len = wave_len.max(0.0);
+        if self.wave_len <= 0.0 {
+            self.up_at = None;
+            return;
+        }
+        self.up_at = self.shown.or(self.pointer);
+        self.since_up = 0.0;
+        if self.next_frame.is_none() {
+            self.last_time = None;
+            self.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// A pressed cap has no wave from its last release any more.
+    pub(crate) fn press(&mut self) {
+        self.up_at = None;
+    }
+
+    fn wave_running(&self) -> bool {
+        self.wave_len > 0.0 && self.up_at.is_some() && self.since_up < self.wave_len
+    }
+
+    /// The field the material is handed. Usually the hover and the press
+    /// (`field`); for a widget with a release wave, the press while held
+    /// and then the wave, 1 when the cap is let go and falling away to 0
+    /// over the wave's length, eased so it lingers, with no field from the
+    /// hover alone.
+    pub(crate) fn reported_field(&self) -> f64 {
+        if self.wave_len <= 0.0 {
+            return self.field();
+        }
+        let held = self.press.clamp(0.0, 1.0);
+        let wave = if self.wave_running() {
+            let k = 1.0 - (self.since_up / self.wave_len).clamp(0.0, 1.0);
+            k * k
+        } else {
+            0.0
+        };
+        held.max(wave)
+    }
+
+    /// Where the field is, the track's frame: the release's place while a
+    /// release wave runs, else the pointer followed.
+    pub(crate) fn place(&self) -> Option<(f64, f64)> {
+        if self.wave_running() {
+            return self.up_at;
+        }
+        self.shown.or(self.pointer)
+    }
+
+    /// Whether the motion drives the cap right now: a frame is pending.
+    pub(crate) fn moving(&self) -> bool {
+        self.next_frame.is_some()
+    }
 }
 
 #[derive(Script, Widget, Animator)]
@@ -2465,6 +2782,13 @@ pub struct Slider {
 
     #[live(DragAxis::Horizontal)]
     pub axis: DragAxis,
+
+    /// Called (from script) with the value on each step of a slide, and
+    /// at its end.
+    #[live]
+    on_change: ScriptFnRef,
+    #[live]
+    on_commit: ScriptFnRef,
 
     #[layout]
     layout: Layout,
@@ -2551,6 +2875,55 @@ pub struct Slider {
     #[live]
     track_inset: f64,
 
+    /// Above zero, the cap moves like a liquid: its tail follows the head
+    /// on a spring this viscous (0 stiff, 1 slow), a press spreads it on a
+    /// spring, and a value that jumps (a reset, a wheel step, a host's
+    /// write) sends the cap travelling to it. The material reads the
+    /// motion from `cap_stretch`, `cap_dir`, `cap_press` and the two
+    /// `cap_squash_*` instances. Zero, the default, draws every frame at
+    /// rest and never asks for another.
+    #[live]
+    cap_viscosity: f64,
+    /// Above zero, the pointer's field reaches this far (in points) from
+    /// the cap: the material gets `cap_field`, `cap_pointer_along`,
+    /// `cap_pointer_across` and `cap_time`, and the widget follows the
+    /// pointer over the whole window while it is near. Zero, the default,
+    /// tracks nothing.
+    #[live]
+    cap_field_reach: f64,
+    /// Above zero (seconds), with a pointer field: the field is the press
+    /// while the cap is held and, when it is let go, a wave from where it
+    /// was let go that dies away over this long, its place held there; the
+    /// hover alone raises no field. For a material that answers a touch
+    /// like water. Zero, the default, keeps the field of the hover.
+    #[live]
+    cap_release_wave: f64,
+    #[rust]
+    cap_motion: CapMotion,
+
+    /// True, the face is drawn twice, for a material with glass in it that
+    /// shows the window blurred behind it. First in the body, as always,
+    /// with the uniform `backdrop_layer` at 0 and nothing of the window
+    /// bound: what lies under the glass, which the window then captures.
+    /// Then again on an overlay over the body, at the same rect, with
+    /// `backdrop_layer` at 1 and the window's blurred scene bound as
+    /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
+    /// exists): the glass. Drawn inside something that is already on an
+    /// overlay (a pane of glass), the face's first layer is on that overlay
+    /// too and so not in the capture, which holds what lies behind that
+    /// pane: the second layer then has `backdrop_layer` at 2. A material
+    /// that turns this on declares `backdrop_layer` and the scene's slots
+    /// and draws its glass in the second layer only. False, the default,
+    /// draws once and binds nothing.
+    #[live]
+    backdrop: bool,
+    #[rust]
+    backdrop_list: Option<DrawList2d>,
+    /// The face's second instance, on the overlay. The face's own area,
+    /// which the pointer is tested against, stays the first.
+    #[rust]
+    backdrop_area: Area,
+
     #[live]
     bind: String,
 
@@ -2586,6 +2959,30 @@ impl ScriptHook for Slider {
             self.update_text_input(cx);
         });
     }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if !self.backdrop {
+            return;
+        }
+        vm.with_cx_mut(|cx| {
+            if apply.is_animate() {
+                // An animation frame writes the animated inputs into the
+                // face's own instance in place; the second one, over the
+                // backdrop, would keep the old ones until the next draw.
+                self.draw_bg.redraw(cx);
+            } else {
+                // Built or restyled and not drawn yet: the window captures
+                // on the frame this first paints in, as a glass surface's.
+                arm_gauss_capture(cx);
+            }
+        });
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2605,6 +3002,18 @@ pub enum SliderAction {
 }
 
 impl Slider {
+    fn emit_slide(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let value = self.to_external();
+        cx.widget_action(uid, SliderAction::Slide(value));
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_change.clone(), &[ScriptValue::from_f64(value)]);
+    }
+
+    fn emit_end_slide(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let value = self.to_external();
+        cx.widget_action(uid, SliderAction::EndSlide(value));
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_commit.clone(), &[ScriptValue::from_f64(value)]);
+    }
+
     fn to_external(&self) -> f64 {
         taper_to_value(self.taper, self.relative_value, self.min, self.max, self.default, self.step)
     }
@@ -2646,12 +3055,54 @@ impl Slider {
     }
 
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_bg.slide_pos = self.relative_value as f32;
+        // The cap's motion: at rest (and off) it reads 0, 1, 0, 1, 1 and
+        // the cap is drawn at the value; travelling, the cap is drawn at
+        // its head and the value bar follows it.
+        let drawn = if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
+            let (stretch, dir, press, sqa, sqx, drawn) =
+                self.cap_motion.read(self.relative_value, self.cap_size * 0.5, self.dragging.is_some());
+            self.draw_bg.cap_stretch = stretch;
+            self.draw_bg.cap_dir = dir;
+            self.draw_bg.cap_press = press;
+            self.draw_bg.cap_squash_along = sqa;
+            self.draw_bg.cap_squash_across = sqx;
+            if self.cap_field_reach > 0.0 {
+                // The pointer and the release are kept in the track's frame;
+                // the cap is where it is drawn now.
+                let cap_at = fader_cap_center(drawn, self.cap_motion.extent, self.cap_size, self.track_inset);
+                let (pa, pc) = match self.cap_motion.place() {
+                    Some((a, c)) => (a - cap_at, c),
+                    None => (0.0, 0.0),
+                };
+                self.draw_bg.cap_field = self.cap_motion.reported_field() as f32;
+                self.draw_bg.cap_pointer_along = pa as f32;
+                self.draw_bg.cap_pointer_across = pc as f32;
+                self.draw_bg.cap_time = self.cap_motion.time as f32;
+            } else {
+                self.draw_bg.cap_field = 0.0;
+                self.draw_bg.cap_pointer_along = 0.0;
+                self.draw_bg.cap_pointer_across = 0.0;
+                self.draw_bg.cap_time = 0.0;
+            }
+            drawn
+        } else {
+            self.draw_bg.cap_stretch = 0.0;
+            self.draw_bg.cap_dir = 1.0;
+            self.draw_bg.cap_press = 0.0;
+            self.draw_bg.cap_squash_along = 1.0;
+            self.draw_bg.cap_squash_across = 1.0;
+            self.draw_bg.cap_field = 0.0;
+            self.draw_bg.cap_pointer_along = 0.0;
+            self.draw_bg.cap_pointer_across = 0.0;
+            self.draw_bg.cap_time = 0.0;
+            self.relative_value
+        };
+        self.draw_bg.slide_pos = drawn as f32;
         let origin =
             taper_to_travel(self.taper, self.default, self.min, self.max, self.default, self.step);
         self.draw_bg.origin_pos = origin as f32;
         self.draw_bg.arc_origin = if self.arc_from_origin { 1.0 } else { 0.0 };
-        let (lo, hi) = fill_span(origin, self.relative_value, self.arc_from_origin);
+        let (lo, hi) = fill_span(origin, drawn, self.arc_from_origin);
         self.draw_bg.fill_lo = lo as f32;
         self.draw_bg.fill_hi = hi as f32;
         // The face and the drag read the same `axis`, so a fader cannot be
@@ -2662,6 +3113,12 @@ impl Slider {
         };
         self.draw_bg.cap_px = self.cap_size as f32;
         self.draw_bg.inset_px = self.track_inset as f32;
+        if self.backdrop {
+            // The body's layer never reads the window: it is part of the
+            // scene the window captures, and the second layer reads that.
+            bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, None);
+            self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[0.0]);
+        }
         self.draw_bg.begin(cx, walk, self.layout);
 
         if let Flow::Right { wrap: false, .. } = self.layout.flow {
@@ -2684,6 +3141,52 @@ impl Slider {
         }
 
         self.draw_bg.end(cx);
+        if self.backdrop {
+            self.draw_backdrop_layer(cx);
+        }
+        // The track's travel in points, for the motion's springs, which
+        // work in points so a long fader and a short one feel the same.
+        if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
+            let size = self.draw_bg.area().rect(cx).size;
+            let extent = match self.axis {
+                DragAxis::Horizontal => size.x - self.draw_bg.label_size as f64,
+                DragAxis::Vertical => size.y,
+            };
+            let travel = self.cap_travel(extent).max(1.0);
+            self.cap_motion.resize(travel);
+        }
+    }
+
+    /// The face's second layer (see `backdrop`): the same instance again at
+    /// the face's rect, on an overlay of its own begun under the plain ones
+    /// (so popups paint over it) unless one is being drawn already (then `backdrop_layer` is 2, not 1: the first layer is not in
+    /// the capture), with the window's blurred scene bound. Added as an
+    /// aligned instance, so a parent that aligns the face afterwards moves
+    /// both.
+    fn draw_backdrop_layer(&mut self, cx: &mut Cx2d) {
+        let rect = self.draw_bg.area().rect(cx);
+        let own_list = !cx.is_drawing_overlay();
+        if own_list {
+            self.backdrop_list
+                .get_or_insert_with(|| DrawList2d::new(cx))
+                .begin_overlay_under(cx);
+        }
+        let snapshot = request_window_gauss(cx);
+        bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
+        let layer = if own_list { 1.0 } else { 2.0 };
+        self.draw_bg.draw_vars.set_uniform(cx, live_id!(backdrop_layer), &[layer]);
+        self.draw_bg.rect_pos = rect.pos.into();
+        self.draw_bg.rect_size = rect.size.into();
+        self.draw_bg.draw_vars.append_group_id = cx.draw_call_group_background().0;
+        if self.draw_bg.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_bg.draw_vars);
+            self.backdrop_area = cx.update_area_refs(self.backdrop_area, new_area);
+        }
+        if own_list {
+            if let Some(list) = self.backdrop_list.as_mut() {
+                list.end(cx);
+            }
+        }
     }
 
     pub fn value(&self) -> f64 {
@@ -2696,6 +3199,7 @@ impl Slider {
         // the old one instead said yes for a value that quantises or clamps
         // onto the travel already in effect, and then repainted for nothing.
         if self.set_internal(v) {
+            self.cap_motion_kick(cx, true);
             self.update_text_input(cx);
             // And draw the material again. `update_text_input` only dirties
             // the readout's own area, which was the whole repaint a caller
@@ -2710,8 +3214,75 @@ impl Slider {
     /// Snap back to the DSL `default:` value, as a title-click reset does.
     pub fn reset_to_default(&mut self, cx: &mut Cx) {
         self.set_internal(self.default);
+        self.cap_motion_kick(cx, true);
         self.update_text_input(cx);
         self.draw_bg.redraw(cx);
+    }
+
+    /// Starts the cap's motion on the next frame, if the widget has a
+    /// viscosity: after a press, a release, a drag move, or (`jump`) a
+    /// value that arrived without a drag, which the cap then travels to.
+    fn cap_motion_kick(&mut self, cx: &mut Cx, jump: bool) {
+        if self.cap_viscosity <= 0.0 && self.cap_field_reach <= 0.0 {
+            return;
+        }
+        self.cap_motion.kick(cx, jump, self.relative_value);
+    }
+
+    /// The pointer, wherever it is on the window, read against the cap:
+    /// within the field's reach of the cap's centre the field's target is
+    /// one, beyond it zero; its position in the cap's frame is handed to
+    /// the material. Points; `a` runs up the screen on a vertical control.
+    fn cap_field_pointer(&mut self, cx: &mut Cx, abs: Vec2d) {
+        if self.cap_field_reach <= 0.0 {
+            return;
+        }
+        let rect = self.draw_bg.area().rect(cx);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return;
+        }
+        // Along runs from the track's start, which on a horizontal control
+        // is past the label.
+        let (extent, along, across) = match self.axis {
+            DragAxis::Horizontal => (
+                rect.size.x - self.draw_bg.label_size as f64,
+                abs.x - rect.pos.x - self.draw_bg.label_size as f64,
+                abs.y - (rect.pos.y + rect.size.y * 0.5),
+            ),
+            DragAxis::Vertical => (
+                rect.size.y,
+                (rect.pos.y + rect.size.y) - abs.y,
+                abs.x - (rect.pos.x + rect.size.x * 0.5),
+            ),
+        };
+        let cap_at = fader_cap_center(self.relative_value, extent, self.cap_size, self.track_inset);
+        let rel = (along - cap_at, across);
+        let at = (along, across);
+        // The distance to the cap's edge goes to the arbiter: only the
+        // nearest two controls on the window carry a field at once.
+        let dist = ((rel.0 * rel.0 + rel.1 * rel.1).sqrt() - self.cap_size * 0.5).max(0.0);
+        let granted = crate::pointer_field::FieldArbiter::report(abs, self.widget_uid().0, dist);
+        let near = dist < self.cap_field_reach + self.cap_size * 0.5 && granted;
+        let target = if near { 1.0 } else { 0.0 };
+        let moved = match self.cap_motion.pointer {
+            Some(p) => (p.0 - at.0).abs() > 0.01 || (p.1 - at.1).abs() > 0.01,
+            None => true,
+        };
+        self.cap_motion.pointer = Some(at);
+        self.cap_motion.extent = extent;
+        if target != self.cap_motion.hover_target || (moved && self.cap_motion.field() > 0.001) {
+            self.cap_motion.hover_target = target;
+            self.cap_motion_kick(cx, false);
+        }
+    }
+
+    /// One step of the cap's motion on its frame, and the next frame asked
+    /// for while anything still moves.
+    fn cap_motion_tick(&mut self, cx: &mut Cx, event: &Event) {
+        let dragging = self.dragging.is_some();
+        if self.cap_motion.tick(cx, event, self.relative_value, dragging, self.cap_viscosity) {
+            self.draw_bg.redraw(cx);
+        }
     }
 }
 
@@ -2741,8 +3312,7 @@ impl Widget for Slider {
         }
         if method == live_id!(set_value) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if let Some(v) = value.as_f64() {
                     vm.with_cx_mut(|cx| {
                         self.set_value(cx, v);
@@ -2757,6 +3327,17 @@ impl Widget for Slider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        self.cap_motion_tick(cx, event);
+        match event {
+            Event::MouseMove(e) => self.cap_field_pointer(cx, e.abs),
+            Event::MouseLeave(_) if self.cap_field_reach > 0.0 => {
+                if self.cap_motion.hover_target != 0.0 {
+                    self.cap_motion.hover_target = 0.0;
+                    self.cap_motion_kick(cx, false);
+                }
+            }
+            _ => (),
+        }
 
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
@@ -2840,10 +3421,11 @@ impl Widget for Slider {
                     if delta != 0.0 && self.dragging.is_none() {
                         self.relative_value = (self.relative_value + delta).max(0.0).min(1.0);
                         self.set_internal(self.to_external());
+                        self.cap_motion_kick(cx, true);
                         self.draw_bg.redraw(cx);
                         self.update_text_input(cx);
-                        cx.widget_action(uid, SliderAction::Slide(self.to_external()));
-                        cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                        self.emit_slide(cx, uid);
+                        self.emit_end_slide(cx, uid);
                     }
                     // The wheel a slider took is spent: a list or a
                     // panel scrolling by the same wheel behind it -- an
@@ -2862,6 +3444,7 @@ impl Widget for Slider {
                 // rect,
                 device,
                 tap_count,
+                digit_id,
                 ..
             }) if device.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(disabled.on)) {
@@ -2869,7 +3452,7 @@ impl Widget for Slider {
                 }
                 if tap_count == 2 {
                     self.reset_to_default(cx);
-                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                    self.emit_slide(cx, uid);
                     return ();
                 }
                 // cx.set_key_focus(self.slider.area());
@@ -2885,6 +3468,9 @@ impl Widget for Slider {
                 self.dragging = Some(self.relative_value);
                 self.drag_from = None;
                 self.drag_travelled = self.relative_value;
+                self.cap_motion.press();
+                self.cap_motion_kick(cx, false);
+                cx.claim_finger_drag(digit_id);
                 cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
@@ -2904,6 +3490,10 @@ impl Widget for Slider {
                 }
                 self.dragging = None;
                 self.drag_from = None;
+                self.cap_motion_kick(cx, false);
+                if self.cap_field_reach > 0.0 {
+                    self.cap_motion.release(cx, self.cap_release_wave);
+                }
                 // A TAP on the label puts the control back to its DSL
                 // default.
                 //
@@ -2934,7 +3524,7 @@ impl Widget for Slider {
                     self.reset_to_default(cx);
                     cx.widget_action(uid, SliderAction::Reset(self.to_external()));
                 }
-                cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                self.emit_end_slide(cx, uid);
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
@@ -2975,9 +3565,10 @@ impl Widget for Slider {
                     );
                     self.relative_value = self.drag_travelled.max(0.0).min(1.0);
                     self.set_internal(self.to_external());
+                    self.cap_motion_kick(cx, false);
                     self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
-                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                    self.emit_slide(cx, uid);
                 }
             }
             _ => (),
@@ -3594,7 +4185,7 @@ mod fader_tests {
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let _ = vm.take_errors();
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             let _ = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
@@ -3742,5 +4333,147 @@ mod fader_tests {
         send(&mut cx, &root, &release(at + Vec2d { x: 0.0, y: -40.0 }));
         cx.fingers.first_mouse_button = None;
         assert!(value_of(&upright) > 0.5, "the drag moved the value");
+    }
+}
+
+/// THE BACKDROP LAYER. A face whose material has glass in it is drawn twice:
+/// in the body, which the window captures, and again over it on an overlay,
+/// where the glass reads that capture. The pointer is tested against the
+/// first alone.
+#[cfg(test)]
+mod backdrop_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: Vec2d = Vec2d { x: 400.0, y: 300.0 };
+
+    /// A window-less pass with the overlay a window keeps.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    glass := SliderFader{
+                        width: 300.
+                        backdrop: true
+                        draw_bg +: {backdrop_layer: uniform(-1.0)}
+                    }
+                    plain := SliderFader{
+                        width: 300.
+                        draw_bg +: {backdrop_layer: uniform(-1.0)}
+                    }
+                    pane := View{
+                        width: 320.
+                        height: Fit
+                        show_bg: true
+                        backdrop: true
+                        on_glass := SliderFader{
+                            width: 300.
+                            backdrop: true
+                            draw_bg +: {backdrop_layer: uniform(-1.0)}
+                        }
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// The list an instance was drawn into and the `backdrop_layer` its
+    /// draw call carries.
+    fn layer_of(cx: &Cx, slider: &Slider, area: Area) -> (DrawListId, f32) {
+        let inst = area.valid_instance(cx).expect("drawn").clone();
+        let call = cx.draw_lists[inst.draw_list_id].draw_items[inst.draw_item_id]
+            .kind
+            .draw_call()
+            .expect("a draw call");
+        let (offset, _) = slider
+            .draw_bg
+            .draw_vars
+            .uniform_range(cx, live_id!(backdrop_layer))
+            .expect("the material declares backdrop_layer");
+        (inst.draw_list_id, call.dyn_uniforms[offset])
+    }
+
+    #[test]
+    fn a_backdrop_face_draws_under_the_glass_then_the_glass_over_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = scene(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        target.draw(&mut cx, &root);
+
+        let glass = root.widget(&cx, ids!(glass));
+        let glass = glass.borrow::<Slider>().unwrap();
+        let face = glass.draw_bg.area();
+        let (body_list, body_layer) = layer_of(&cx, &glass, face);
+        let (over_list, over_layer) = layer_of(&cx, &glass, glass.backdrop_area);
+        assert_eq!(body_layer, 0.0, "the body's layer is what lies under the glass");
+        assert_eq!(over_layer, 1.0, "the second is the glass");
+        assert_ne!(body_list, over_list, "and it is drawn on a list of its own");
+        assert_eq!(
+            Some(over_list),
+            glass.backdrop_list.as_ref().map(|list| list.id()),
+            "the slider's overlay list"
+        );
+        assert_eq!(
+            face.rect(&cx),
+            glass.backdrop_area.rect(&cx),
+            "both layers cover the same rect"
+        );
+
+        // A face that does not ask is drawn once, as before, and its
+        // material keeps whatever it declared.
+        let plain = root.widget(&cx, ids!(plain));
+        let plain = plain.borrow::<Slider>().unwrap();
+        assert_eq!(plain.backdrop_area, Area::Empty);
+        assert!(plain.backdrop_list.is_none());
+        let (_, plain_layer) = layer_of(&cx, &plain, plain.draw_bg.area());
+        assert_eq!(plain_layer, -1.0);
+
+        // On a pane of glass both layers are on the pane's overlay, so the
+        // body under the glass is not in the capture: the glass says so.
+        let on_glass = root.widget(&cx, ids!(on_glass));
+        let on_glass = on_glass.borrow::<Slider>().unwrap();
+        let (body_list, body_layer) = layer_of(&cx, &on_glass, on_glass.draw_bg.area());
+        let (over_list, over_layer) = layer_of(&cx, &on_glass, on_glass.backdrop_area);
+        assert_eq!(body_layer, 0.0);
+        assert_eq!(over_layer, 2.0, "the glass over a body that is not in the capture");
+        assert_eq!(body_list, over_list, "both on the pane's overlay");
+        assert!(on_glass.backdrop_list.is_none(), "no overlay of its own");
     }
 }

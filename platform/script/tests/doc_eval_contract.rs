@@ -8,11 +8,14 @@ use std::time::{Duration, Instant};
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 fn script(name: &str, code: &str) -> ScriptMod {
-    ScriptMod { file: format!("doc_contract_{name}"), code: code.to_string(), ..Default::default() }
+    ScriptMod::new("", "", &format!("doc_contract_{name}"), 0, 0, &code, &[])
 }
 
 fn call(vm: &mut ScriptVm, root: ScriptValue, name: LiveId, args: &[ScriptValue]) -> (ScriptValue, EvalReport, Vec<String>) {
@@ -39,14 +42,15 @@ fn runaway_loads_hit_a_limit_and_report_it() {
 }
 
 #[test]
-fn the_time_limit_is_a_backstop_behind_the_instruction_count() {
+fn a_bounded_evaluation_has_no_wall_clock_limit() {
+    // A busy machine never fails a correct document: no run budget is
+    // installed, and the host's own (none here) is left as it was.
     let vm = &mut test_vm();
-    let limits = EvalLimits { time: Duration::from_millis(20), ..EvalLimits::DOC_LOAD.with_instructions(usize::MAX / 2) };
-    let t0 = Instant::now();
-    let (_, report) = vm.eval_bounded(&limits, |vm| vm.eval(script("time", "loop {}\n;")));
-    assert!(report.limit.as_deref().is_some_and(|l| l.contains("time")), "{report:?}");
-    assert!(t0.elapsed() < Duration::from_millis(500));
-    // The previous (absent) run budget is restored.
+    let (_, report) = vm.eval_bounded(&EvalLimits::DOC_FRAME, |vm| {
+        assert!(vm.bx.run_budget.is_none());
+        vm.eval(script("busy", "var n = 0\nfor i in 0..100000 { n = n + i }\nn"))
+    });
+    assert!(report.limit.is_none(), "{report:?}");
     assert!(vm.bx.run_budget.is_none());
 }
 

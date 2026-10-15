@@ -12,11 +12,12 @@
 //!
 //! cargo run --release -p makepad-script-compute --example bench_dispatch
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::kernel::{compile, Kernel};
-use makepad_script_compute::admission::{JobBudget, Origin};
-use makepad_script_compute::sched::{Executor, Job, Priority, Scheduler, SchedulerConfig, ThreadExecutor};
+use makepad_script_compute_sched::admission::{JobBudget, Origin};
+use makepad_script_compute_sched::sched::{Executor, Job, Priority, Scheduler, SchedulerConfig, ThreadExecutor};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const CHEAP: &str = "let x = input(f32)\nlet y = output(f32)\nlet a = param(2.0)\nfn element(i) { y[i] = x[i] * a + 1.0 }";
 const NOISE: &str = "let W = 1024\nlet base = input(f32)\nlet pos = output(vec3)\nlet hgt = output(f32)\nlet amp = param(6.0)\nfn vertex(i) { let x = float(i % W)\n let z = float(i / W)\n let h = base[i] + fbm2(vec2(x, z) * 0.01, 4, 2.0, 0.5) * amp\n pos[i] = vec3(x, h, z)\n hgt[i] = h }";
@@ -40,7 +41,7 @@ fn time(mut f: impl FnMut()) -> f64 {
     }).collect())
 }
 
-fn bind<'a>(k: &'a Kernel, cheap: bool, input: &'a [f32], out: &'a mut [f32], out2: &'a mut [f32]) -> makepad_script_compute::kernel::Call<'a> {
+fn bind<'a>(k: &'a Kernel, cheap: bool, input: &'a [f32], out: &'a mut [f32], out2: &'a mut [f32]) -> makepad_script_compute_sched::kernel::Call<'a> {
     let mut c = k.call();
     if cheap {
         c.input("x", input).unwrap();
@@ -89,7 +90,7 @@ fn main() {
                 job.output("pos", vec![0.0; (3 * n).max(1)]).unwrap();
                 job.output("hgt", vec![0.0; n.max(1)]).unwrap();
             }
-            let budget = JobBudget { wall: Duration::from_secs(10) };
+            let budget = JobBudget::UNLIMITED;
             let ts = time(|| {
                 sched.run_sync(&mut job, Origin::Host, budget).unwrap();
             });

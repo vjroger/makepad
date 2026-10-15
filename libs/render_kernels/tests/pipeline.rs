@@ -4,10 +4,9 @@
 
 use makepad_platform::draw_shader_layout::{Layout as ShaderLayout, LayoutField, LayoutKind, LayoutPacking, PodType};
 use makepad_platform::makepad_live_id::LiveId;
-use makepad_render_kernels::compute::sched::{InlineExecutor, Priority};
+use makepad_render_kernels::dispatch::sched::{InlineExecutor, Priority};
 use makepad_render_kernels::pipeline::Count;
 use makepad_render_kernels::{engine, kernel_layout, ManualFences, OutputRing, Pipeline, PipelineError, Topology};
-use std::time::Duration;
 
 const HEIGHTS: &str = "let h = output(f32)\nlet n = param(64)\nfn vertex(i) { let x = float(i % int(n))\n let z = float(i / int(n))\n h[i] = sin(x * 0.3) * cos(z * 0.2) * 4.0 }";
 const NORMALS: &str = "let h = input(f32)\nlet nrm = output(vec3)\nlet n = param(64)\nfn vertex(i) { let w = int(n)\n let x = i % w\n let z = i / w\n let l = h[z * w + max(x - 1, 0)]\n let r = h[z * w + min(x + 1, w - 1)]\n let d = h[max(z - 1, 0) * w + x]\n let u = h[min(z + 1, w - 1) * w + x]\n nrm[i] = normalize(vec3(l - r, 2.0, d - u)) }";
@@ -26,7 +25,7 @@ fn passes_chain_by_buffer_name_the_same_on_any_thread_count() {
         if threads == 1 {
             p.run(&InlineExecutor, 1).unwrap();
         } else {
-            p.run_on(engine(), Priority::Near, Duration::from_secs(10)).unwrap();
+            p.run_on(engine(), Priority::Near).unwrap();
         }
         (p.take_buffer("h").unwrap(), p.take_buffer("nrm").unwrap())
     };
@@ -54,7 +53,7 @@ fn ping_pong_repeats_smooth_a_state_buffer() {
     p.pass(makepad_render_kernels::compile(src, &[], &[]).unwrap(), Count::Records { buffer: "a".into(), stride: 1 });
     p.repeat(5).ping_pong("a", "b");
     p.set_buffer("a", init.iter().map(|x| x.to_bits()).collect());
-    p.run_on(engine(), Priority::Far, Duration::from_secs(10)).unwrap();
+    p.run_on(engine(), Priority::Far).unwrap();
     let got = words(p.buffer("a").unwrap());
     let mut want = init.clone();
     for _ in 0..5 {
@@ -81,12 +80,13 @@ fn emitted_records_land_in_the_draw_shaders_reflected_layout() {
     };
     let seg = kernel_layout("Seg", &shader).unwrap();
     let src = "let s = emit_buffer(Seg, 3)\nfn primitive(i) { for k in 0..3 { if k < i % 4 { let r = Seg{}\n r.a = vec3(float(i), float(k), 0.0)\n r.width = 0.25\n r.birth = float(i) * 0.5\n r.seed = i * 16 + k\n emit(s, r) } } }";
-    let kernel = makepad_render_kernels::compile(src, &[seg], &[]).unwrap();
+    let seg_fields = seg.field_views();
+    let kernel = makepad_render_kernels::compile(src, &[seg.view(&seg_fields)], &[]).unwrap();
     let n = 20_000usize;
     let mut p = Pipeline::new();
     p.pass(kernel.clone(), Count::Fixed(n));
     // i % 4 == 3 wants three records: exactly the three slots.
-    p.run_on(engine(), Priority::Near, Duration::from_secs(10)).unwrap();
+    p.run_on(engine(), Priority::Near).unwrap();
     let total = p.emitted("s").unwrap();
     assert_eq!(total, (0..n).map(|i| i % 4).sum::<usize>());
     // Into a ring slot: the draw reads the records in element order.
@@ -110,6 +110,7 @@ fn emitted_records_land_in_the_draw_shaders_reflected_layout() {
     let over = "let s = emit_buffer(Seg, 2)\nfn primitive(i) { for k in 0..3 { let r = Seg{}\n r.width = 1.0\n emit(s, r) } }";
     let shader_seg = kernel_layout("Seg", &shader).unwrap();
     let mut p = Pipeline::new();
-    p.pass(makepad_render_kernels::compile(over, &[shader_seg], &[]).unwrap(), Count::Fixed(10));
+    let shader_seg_fields = shader_seg.field_views();
+    p.pass(makepad_render_kernels::compile(over, &[shader_seg.view(&shader_seg_fields)], &[]).unwrap(), Count::Fixed(10));
     assert!(matches!(p.run(&InlineExecutor, 1), Err(PipelineError::Overflow { .. })));
 }
