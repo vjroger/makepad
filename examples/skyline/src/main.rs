@@ -52,6 +52,17 @@ script_mod! {
                         window_density := Param{text: "Lit windows" min: 0.0 max: 1.0 default: 0.45}
                         glow := Param{text: "City glow" min: 0.0 max: 2.0 default: 0.5}
                         haze := Param{text: "Haze" min: 0.0 max: 1.0 default: 0.7}
+                        Hr{}
+                        H4{text: "Where (360 degrees)"}
+                        land_cover := Param{text: "Land covers" min: 0.0 max: 1.0 default: 0.8}
+                        land_center := Param{text: "Land at" min: 0.0 max: 1.0 default: 0.4}
+                        mountain_cover := Param{text: "Mountains cover" min: 0.0 max: 1.0 default: 0.45}
+                        mountain_center := Param{text: "Mountains at" min: 0.0 max: 1.0 default: 0.15}
+                        city_cover := Param{text: "City covers" min: 0.0 max: 1.0 default: 0.3}
+                        city_center := Param{text: "City at" min: 0.0 max: 1.0 default: 0.55}
+                        tree_cover := Param{text: "Trees cover" min: 0.0 max: 1.0 default: 0.55}
+                        tree_center := Param{text: "Trees at" min: 0.0 max: 1.0 default: 0.3}
+                        treeline := Param{text: "Treeline height" min: 0.0 max: 0.3 default: 0.05}
                     }
                     // Checkerboard-free dark sky stand-in: the strip is transparent.
                     stage := SolidView{
@@ -68,6 +79,8 @@ script_mod! {
 const PARAMS: &[&str] = &[
     "horizon", "mountain_amt", "mountain_height", "city_amt", "city_height", "city_density",
     "tree_amt", "tree_height", "tree_conifer", "lights", "window_density", "glow", "haze",
+    "mountain_cover", "mountain_center", "city_cover", "city_center", "tree_cover", "tree_center",
+    "treeline", "land_cover", "land_center",
 ];
 
 #[derive(Script, ScriptHook)]

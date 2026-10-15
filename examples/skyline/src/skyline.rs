@@ -32,6 +32,15 @@ script_mod! {
         window_density: 0.45
         glow: 0.5
         haze: 0.7
+        mountain_cover: 0.45
+        mountain_center: 0.15
+        city_cover: 0.30
+        city_center: 0.55
+        tree_cover: 0.55
+        tree_center: 0.30
+        treeline: 0.05
+        land_cover: 0.80
+        land_center: 0.40
         sil_color: vec4(0.004, 0.006, 0.012, 1.0)
         haze_color: vec4(0.045, 0.060, 0.100, 1.0)
 
@@ -85,6 +94,16 @@ script_mod! {
             return clamp(d / px + 0.5, 0.0, 1.0)
         }
 
+        // Where on the 360 degrees a feature exists: `cov` is the fraction of the
+        // circle it spans, `center` where it sits (both 0..1). The edges wobble.
+        region: fn(u: float, center: float, cov: float, layer: float) -> float {
+            let d = abs(fract(u - center + 0.5) - 0.5)
+            let wob = (self.fbm(u, 6.0, layer) - 0.5) * 0.14
+            let half = cov * 0.5
+            let m = smoothstep(half + 0.035, half - 0.035, d + wob)
+            return max(m, step(0.999, cov))
+        }
+
         // Mountain ridge: elevation of the ridge line at `u`.
         ridge: fn(u: float, base: float, layer: float) -> float {
             let n = self.fbm(u, base, layer)
@@ -103,7 +122,8 @@ script_mod! {
 
             // Low frequency density: where the downtown cores are.
             let env_n = self.fbm(u, 3.0, layer + 50.0)
-            let core = smoothstep(0.35, 0.8, env_n * (0.55 + 0.9 * self.city_density))
+            let env = self.region(u, self.city_center, self.city_cover, layer + 70.0)
+            let core = smoothstep(0.30, 0.8, env_n * (0.55 + 0.9 * self.city_density)) * env
 
             let r_h = self.rnd(ci, 2.0, layer)
             let r_w = self.rnd(ci, 3.0, layer)
@@ -114,18 +134,23 @@ script_mod! {
             let r_b = self.rnd(ci, 8.0, layer)
 
             // Some cells are low blocks, tall ones only appear in the core.
-            let tall = pow(r_h, 2.4) * core
+            let r_x = self.rnd(ci, 11.0, layer)
+            let tall = pow(r_h, 1.0 + 3.0 * r_x) * core
             var hh = hmax * (0.10 + 0.9 * tall) * (0.45 + 0.55 * core)
-            hh = hh * (0.55 + 0.45 * self.city_density + 0.0)
-            hh = hh * self.city_amt
-            let w = 0.55 + 0.4 * r_w
+            hh = hh * (0.55 + 0.45 * self.city_density) * self.city_amt * smoothstep(0.1, 0.5, env)
+            let w = mix(0.28, 0.97, pow(r_w, 0.7))
             let left = (1.0 - w) * 0.5 * (0.6 + 0.8 * r_j)
             let right = left + w
 
             let h1 = hh * (0.70 + 0.2 * r_t)
             // body
             let mx = smoothstep(left - pxc, left + pxc, lx) * smoothstep(right + pxc, right - pxc, lx)
-            var m = mx * self.cover(h1 - ang, px)
+            // Roof shapes: some towers get a pointed top, some a sloped roof.
+            let r_s = self.rnd(ci, 12.0, layer)
+            let bx = (lx - left) / w
+            let tri = 1.0 - abs(2.0 * bx - 1.0)
+            let roof = step(r_s, 0.18) * 0.25 * hh * tri + step(0.18, r_s) * step(r_s, 0.34) * 0.18 * hh * bx
+            var m = mx * self.cover(h1 + roof - ang, px)
             // crown (setback)
             let cw = w * (0.38 + 0.3 * r_t)
             let cl = left + (w - cw) * (0.3 + 0.4 * r_j)
@@ -184,8 +209,11 @@ script_mod! {
         }
 
         // ---- trees: two overlapping rows of conifers / round crowns ----
-        trees: fn(u: float, ang: float, px: float, cells: float, layer: float, hmax: float) -> float {
+        // They stand on `base` (the ground or a mountain's flank) and only exist
+        // where `reg` says so, in clumps, shrinking toward the edges of a forest.
+        trees: fn(u: float, ang: float, px: float, cells: float, layer: float, hmax: float, base: float, reg: float) -> float {
             var best = 0.0
+            let clump = 0.3 + 0.7 * smoothstep(0.30, 0.65, self.fbm(u, 23.0, layer + 95.0))
             for row in 0..2 {
                 let off = 0.5 * f32(row)
                 let x = u * cells + off
@@ -194,15 +222,17 @@ script_mod! {
                 if ci >= cells { ci = ci - cells }
                 let r_h = self.rnd(ci, 2.0, layer + f32(row) * 11.0)
                 let r_s = self.rnd(ci, 3.0, layer + f32(row) * 11.0)
-                let env = 0.45 + 0.55 * self.fbm(u, 7.0, layer + 90.0)
-                let ht = hmax * env * (0.55 + 0.45 * r_h) * (1.0 - 0.18 * f32(row))
+                let r_v = self.rnd(ci, 4.0, layer + f32(row) * 11.0)
+                let env = 0.35 + 0.65 * self.fbm(u, 7.0, layer + 90.0)
+                let size = 0.30 + 0.70 * pow(r_h, 0.7) * (0.55 + 0.45 * r_v)
+                let ht = hmax * env * clump * size * smoothstep(0.05, 0.6, reg) * (1.0 - 0.18 * f32(row))
                 let d = abs(2.0 * lx - 1.0)
                 let spire = ht * pow(max(1.0 - d, 0.0), 0.85)
                 let round = ht * 0.8 * sqrt(max(1.0 - d * d, 0.0)) * (0.85 + 0.15 * r_s)
                 let prof = mix(round, spire, step(r_s, self.tree_conifer))
-                best = max(best, self.cover(prof - ang, px))
+                best = max(best, self.cover(base + prof - ang, px))
             }
-            return best
+            return best * smoothstep(0.05, 0.3, reg)
         }
 
         pixel: fn() {
@@ -219,19 +249,29 @@ script_mod! {
             let hz = vec3(self.haze_color.x, self.haze_color.y, self.haze_color.z)
 
             // City glow dome, additive, behind everything.
-            let gcore = smoothstep(0.35, 0.8, self.fbm(u, 3.0, 50.0) * (0.55 + 0.9 * self.city_density))
+            let cenv = self.region(u, self.city_center, self.city_cover, 270.0)
+            let gcore = smoothstep(0.35, 0.8, self.fbm(u, 3.0, 50.0) * (0.55 + 0.9 * self.city_density)) * cenv
             let dome = exp(-max(ang, 0.0) / (0.05 * self.city_height)) * gcore * self.glow * self.city_amt
             col = col + vec3(1.0, 0.55, 0.25) * (dome * 0.10)
 
-            // Mountains, three ridges far -> near.
+            // Mountains, three ridges far -> near, with trees up to the treeline.
             for k in 0..3 {
                 let t = (2.0 - f32(k)) / 2.0
                 let hrel = 0.45 + 0.55 * f32(k) / 2.0
-                let hr = self.mountain_amt * self.mountain_height * (0.35 + 0.65 * self.ridge(u, 3.0 + f32(k) * 2.0, 20.0 + f32(k) * 10.0)) * hrel
+                let menv = self.region(u, self.mountain_center + 0.02 * (f32(k) - 1.0), self.mountain_cover, 20.0 + f32(k) * 10.0)
+                // Alpine and rolling stretches along the same range.
+                let peaky = smoothstep(0.2, 0.8, self.fbm(u, 2.0 + f32(k), 30.0 + f32(k) * 10.0))
+                let shape = self.ridge(u, 3.0 + f32(k) * 2.0, 20.0 + f32(k) * 10.0)
+                let hr = self.mountain_amt * self.mountain_height * menv * (0.12 + 0.88 * peaky) * (0.3 + 0.7 * shape) * hrel
                 let m = self.cover(hr - ang, px)
-                let c = mix(sil, hz, t * self.haze * 0.9 + 0.1)
-                col = mix(col, c, m)
+                col = mix(col, mix(sil, hz, t * self.haze * 0.9 + 0.1), m)
                 a = max(a, m)
+
+                let treg = self.region(u, self.tree_center, self.tree_cover, 400.0 + f32(k) * 10.0)
+                let base = min(hr, self.treeline)
+                let tm = self.trees(u, ang, px, 260.0 + 130.0 * f32(k), 410.0 + f32(k) * 10.0, self.tree_height * self.tree_amt * (0.5 + 0.25 * f32(k)), base, treg)
+                col = mix(col, mix(sil, hz, t * self.haze * 0.45), tm)
+                a = max(a, tm)
             }
 
             // Cities: far, mid, near. Windows get larger and brighter closer up.
@@ -250,15 +290,18 @@ script_mod! {
             col = mix(col, cc, cnear.w) + vec3(cnear.x, cnear.y, cnear.z)
             a = max(a, cnear.w)
 
-            // Treeline in front of the city.
-            let tm = self.trees(u, ang, px, 520.0, 400.0, self.tree_height * self.tree_amt)
+            // Land, or flat sea where there is none.
+            let lenv = self.region(u, self.land_center, self.land_cover, 600.0)
+            let gh = (0.0035 + 0.0025 * self.fbm(u, 24.0, 500.0)) * lenv
+
+            // Treeline in front of the city, standing on the ground.
+            let freg = self.region(u, self.tree_center, self.tree_cover, 450.0)
+            let tm = self.trees(u, ang, px, 520.0, 400.0, self.tree_height * self.tree_amt, gh, freg)
             col = mix(col, sil, tm)
             a = max(a, tm)
 
-            // Ground.
-            let gh = 0.0035 + 0.0025 * self.fbm(u, 24.0, 500.0)
             let gm = self.cover(gh - ang, px)
-            col = mix(col, sil * 0.6, gm)
+            col = mix(col, mix(sil * 0.35, sil * 0.6, lenv), gm)
             a = max(a, gm)
 
             return vec4(col.x, col.y, col.z, a)
@@ -305,6 +348,24 @@ pub struct DrawSkyline {
     pub glow: f32,
     #[live(0.7)]
     pub haze: f32,
+    #[live(0.45)]
+    pub mountain_cover: f32,
+    #[live(0.15)]
+    pub mountain_center: f32,
+    #[live(0.30)]
+    pub city_cover: f32,
+    #[live(0.55)]
+    pub city_center: f32,
+    #[live(0.55)]
+    pub tree_cover: f32,
+    #[live(0.30)]
+    pub tree_center: f32,
+    #[live(0.05)]
+    pub treeline: f32,
+    #[live(0.80)]
+    pub land_cover: f32,
+    #[live(0.40)]
+    pub land_center: f32,
     #[live]
     pub sil_color: Vec4f,
     #[live]
@@ -352,6 +413,15 @@ impl SkylineView {
             "window_density" => d.window_density = v,
             "glow" => d.glow = v,
             "haze" => d.haze = v,
+            "mountain_cover" => d.mountain_cover = v,
+            "mountain_center" => d.mountain_center = v,
+            "city_cover" => d.city_cover = v,
+            "city_center" => d.city_center = v,
+            "tree_cover" => d.tree_cover = v,
+            "tree_center" => d.tree_center = v,
+            "treeline" => d.treeline = v,
+            "land_cover" => d.land_cover = v,
+            "land_center" => d.land_center = v,
             _ => return false,
         }
         true
