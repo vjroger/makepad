@@ -157,20 +157,23 @@ script_mod! {
                 let fy = wyf - wyi
                 let prob = clamp(self.window_density * (0.15 + 1.1 * r_b), 0.0, 1.0)
                 let rw = self.rnd3(ci + wxi * 13.0, wyi, 9.0, layer)
-                let on = step(rw, prob)
+                // Lit windows come in floors: a floor is either mostly on or mostly off.
+                let rr = self.rnd3(ci, wyi, 11.0, layer)
+                let row_on = step(rr, 0.25 + 0.6 * prob)
+                let on = row_on * step(rw, 0.88)
                 // aa in window-cell units
                 let aax = px / wsz
                 let shape = smoothstep(0.18 - aax, 0.18 + aax, fx) * smoothstep(0.82 + aax, 0.82 - aax, fx) * smoothstep(0.2 - aax, 0.2 + aax, fy) * smoothstep(0.72 + aax, 0.72 - aax, fy)
                 // Below ~2px a window is just a speck: blend to its average.
                 let res = clamp((wsz / px - 1.5) / 2.0, 0.0, 1.0)
-                let avg = 0.36
-                let wpat = mix(avg, shape, res)
+                let avg = prob * 0.42
+                let wpat = mix(avg, on * shape, res)
                 let warm = vec3(1.0, 0.62, 0.28)
                 let cool = vec3(0.62, 0.80, 1.0)
                 let wc = mix(warm, cool, step(0.8, fract(rw * 91.7)))
                 let bright = 0.5 + 0.9 * fract(rw * 37.3)
                 let in_b = max(mx * self.cover(h1 - ang, px), mc * crown_on * self.cover(hh - ang, px))
-                em = wc * (on * wpat * bright * self.lights * lit * in_b * step(0.0, ang))
+                em = mix(warm, wc, res) * (wpat * mix(0.8, bright, res) * self.lights * lit * in_b * step(0.0, ang))
                 // top beacon
                 let ax = (lx - acx) / max(pxc, 0.0001)
                 let ay = (ang - atop) / px
