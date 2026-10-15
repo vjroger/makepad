@@ -92,8 +92,9 @@ impl Cx {
         { 0 }
     }
 
-    /// Whether a draw shader can draw now. Metal builds pipelines
-    /// asynchronously and leaves a draw out of the frame until they exist;
+    /// Whether a draw shader can draw now: the HAL said its pipeline is
+    /// built. The HAL builds pipelines asynchronously (Metal; D3D11 on its
+    /// compile workers) and leaves a draw out of the frame until they exist;
     /// a caller with a fallback (another shader for the same geometry) asks
     /// this and keeps drawing the fallback until the new one is ready, so
     /// content never vanishes while a shader compiles. `float16` asks for
