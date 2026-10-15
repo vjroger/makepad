@@ -350,6 +350,8 @@ impl FrameBuilder {
     /// data, uniform buffers upload again, shared and retained instance buffers are made again
     /// (the retained ones' draw items are returned: they upload on their next draw); render
     /// targets keep their ids and are painted again. Frames the old device dropped count as done.
+    /// On Windows the pipelines are not ready again until the HAL, which builds each anew on the
+    /// new device, answers it once more.
     pub(crate) fn device_reset(&mut self, reupload: impl Fn(usize, u64) -> bool) -> Vec<(usize, usize)> {
         let slots: Vec<usize> = self.tex.iter().filter(|(slot, r)| reupload(**slot, r.gen)).map(|(slot, _)| *slot).collect();
         for slot in slots {
@@ -371,6 +373,12 @@ impl FrameBuilder {
         }
         for (window, serial) in &self.window_submitted {
             self.window_completed.insert(*window, *serial);
+        }
+        // a PipelineReady (or PipelineFailed) per pipeline follows the DeviceReset; until then
+        // D3D11 leaves its draws out
+        #[cfg(windows)]
+        for p in &mut self.pipes {
+            p.ready = false;
         }
         inst
     }
@@ -1690,6 +1698,30 @@ mod tests {
         assert!(fb.pipeline_waited_for(1));
         assert_eq!(fb.pipeline_failed(bad_id), Some((1, true)));
         assert!(!fb.pipeline_waited_for(1), "a failed pipeline never holds a picture");
+        assert_eq!(fb.pipelines_pending(), 0);
+    }
+
+    /// A device reset: the HAL builds every pipeline again on the new device and answers each
+    /// once more, so none is ready (a pass with a picture waits for it) until its answer; a
+    /// failed one stays failed.
+    #[cfg(windows)]
+    #[test]
+    fn after_a_device_reset_a_pipeline_is_pending_until_it_answers_again() {
+        let mut fb = FrameBuilder::default();
+        let ok_id = Id::new(0, 1);
+        let bad_id = Id::new(1, 1);
+        fb.pipes.push(PipeRec { id: ok_id, first_shader: 0, ready: false, drawn_unready: false, failed: false, pick: None });
+        fb.pipes.push(PipeRec { id: bad_id, first_shader: 1, ready: false, drawn_unready: false, failed: false, pick: None });
+        fb.pipeline_ready(ok_id);
+        fb.pipeline_failed(bad_id);
+        assert!(fb.pipeline_is_ready(0));
+        assert_eq!(fb.pipelines_pending(), 0);
+        fb.device_reset(|_, _| false);
+        assert!(!fb.pipeline_is_ready(0), "built again on the new device: not ready until it answers");
+        assert_eq!(fb.pipelines_pending(), 1, "a failed pipeline stays failed");
+        assert!(fb.pipeline_waited_for(0), "a pass with a picture waits for it");
+        assert!(fb.pipeline_ready(ok_id), "its answer repaints the pass that waited");
+        assert!(fb.pipeline_is_ready(0));
         assert_eq!(fb.pipelines_pending(), 0);
     }
 

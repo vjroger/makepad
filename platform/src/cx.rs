@@ -1257,16 +1257,22 @@ mod memory_budget_tests {
 
 impl Cx {
     /// True while the platform is still compiling draw shaders it was handed
-    /// and is therefore dropping (WebGL) their draw calls. Native backends
-    /// build pipelines inside the paint that first uses them and never
-    /// answer true. An offscreen bake that captures pixels polls this before
-    /// trusting a frame: a capture drawn while its program links is black.
+    /// and is therefore dropping their draw calls: WebGL's programs, and on
+    /// Windows a shader queued for its pipeline or a pipeline the HAL still
+    /// compiles (D3D11 compiles on its workers and leaves the draws out until
+    /// then). Other native backends answer false. An offscreen bake that
+    /// captures pixels polls this before trusting a frame: a capture drawn
+    /// while its program links is black.
     pub fn draw_shaders_pending(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
             self.os.webgl_shaders_pending > 0
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(windows)]
+        {
+            !self.draw_shaders.compile_set.is_empty() || self.pipelines_pending() > 0
+        }
+        #[cfg(not(any(target_arch = "wasm32", windows)))]
         {
             false
         }
@@ -1283,7 +1289,11 @@ impl Cx {
             let waiting = self.os.webgl_shaders_waiting.min(self.os.webgl_shaders_pending);
             (self.os.webgl_shaders_pending - waiting, waiting)
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(windows)]
+        {
+            (self.draw_shaders.compile_set.len() + self.pipelines_pending(), 0)
+        }
+        #[cfg(not(any(target_arch = "wasm32", windows)))]
         {
             (0, 0)
         }
