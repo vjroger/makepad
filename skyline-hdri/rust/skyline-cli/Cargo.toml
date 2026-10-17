@@ -1,0 +1,12 @@
+[package]
+name = "skyline-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "skyline"
+path = "src/main.rs"
+
+[dependencies]
+skyline-core = { path = "../skyline-core" }

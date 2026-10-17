@@ -1,0 +1,17 @@
+{
+  "name": "skyline-hdri",
+  "version": "0.1.0",
+  "description": "360\u00b0 skyline plates (terrain + buildings) from any viewpoint, for HDRI/skybox compositing",
+  "type": "module",
+  "scripts": {
+    "start": "npx -y serve -l 8080 .",
+    "test": "node --test test/",
+    "mock": "node test/fixtures/server.mjs 8765",
+    "test:browser": "node --test test/gpu.test.mjs test/ui.test.mjs",
+    "test:rust": "node --test test/rust-crosscheck.test.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "^1.56.0"
+  }
+}

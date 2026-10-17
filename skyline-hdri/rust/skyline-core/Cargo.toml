@@ -1,0 +1,8 @@
+[package]
+name = "skyline-core"
+version = "0.1.0"
+edition = "2021"
+description = "360-degree skyline plates (terrain + buildings) from any viewpoint; std-only"
+license = "MIT"
+
+[dependencies]

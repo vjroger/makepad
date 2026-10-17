@@ -1,0 +1,66 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>GPU vs CPU march test</title></head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+import { prepareScene, renderCPU } from '../src/engine/index.js';
+import { GpuSkylineRenderer } from '../src/gpu/renderer.js';
+
+const q = new URLSearchParams(location.search);
+const base = q.get('base') || location.origin;
+const W = +(q.get('width') || 512);
+const maxDistance = +(q.get('maxDistance') || 60000);
+const log = (m) => { document.getElementById('log').textContent += m + '\n'; };
+
+window.result = null;
+(async () => {
+  try {
+    const t0 = performance.now();
+    const scene = await prepareScene({
+      lat: +(q.get('lat') || 52), lon: +(q.get('lon') || 5), width: W, maxDistance, eyeHeight: 1.7,
+      buildings: { enabled: q.get('buildings') !== '0', allRadius: 2500, tallRadius: 30000 },
+    }, { tileUrl: base + '/terrain/{z}/{x}/{y}.png', overpassUrls: [base + '/overpass'], useCache: false, concurrency: 16,
+         onProgress: (p) => { if (p.stage === 'tiles' && p.done === p.total) log('tiles ' + p.total); } });
+    log(`scene ready in ${(performance.now() - t0).toFixed(0)} ms, tiers ${scene.tiers.length}, eyeZ ${scene.eyeZ.toFixed(2)}, buildings ${scene.stats.buildings.count}`);
+    const canvas = document.createElement('canvas');
+    const gpu = new GpuSkylineRenderer(canvas);
+    gpu.uploadScene(scene);
+    const t1 = performance.now();
+    const g = await gpu.render(scene.params, { stripRows: 64 });
+    log(`gpu render ${(performance.now() - t1).toFixed(0)} ms`);
+    const t2 = performance.now();
+    const c = renderCPU(scene);
+    log(`cpu render ${(performance.now() - t2).toFixed(0)} ms`);
+    const H = W / 2, n = W * H;
+    let covMismatch = 0, clsMismatch = 0, both = 0;
+    const relErr = [], nrmErr = [];
+    let maxAltErr = 0;
+    for (let i = 0; i < n; i++) {
+      const a = g.coverage[i] > 0, b = c.coverage[i] > 0;
+      if (a !== b) { covMismatch++; continue; }
+      if (!a) continue;
+      both++;
+      if (g.classId[i] !== c.classId[i]) clsMismatch++;
+      relErr.push(Math.abs(g.depth[i] - c.depth[i]) / c.depth[i]);
+      const dot = g.normal[i * 3] * c.normal[i * 3] + g.normal[i * 3 + 1] * c.normal[i * 3 + 1] + g.normal[i * 3 + 2] * c.normal[i * 3 + 2];
+      nrmErr.push(Math.acos(Math.max(-1, Math.min(1, dot))) * 180 / Math.PI);
+      maxAltErr = Math.max(maxAltErr, Math.abs(g.altitude[i] - c.altitude[i]));
+    }
+    relErr.sort((x, y) => x - y); nrmErr.sort((x, y) => x - y);
+    const pct = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(p * arr.length))] : 0;
+    let bandErr = 0;
+    for (let i = 0; i < g.bands.length; i++) bandErr = Math.max(bandErr, Math.abs(g.bands[i] - c.bands[i]));
+    window.result = {
+      W, H, n, both, covMismatch, clsMismatch,
+      depthRelMedian: pct(relErr, 0.5), depthRel99: pct(relErr, 0.99), depthRelMax: relErr[relErr.length - 1] || 0,
+      normalDegMedian: pct(nrmErr, 0.5), normalDeg99: pct(nrmErr, 0.99), maxAltErr, bandErrDeg: bandErr * 180 / Math.PI,
+      gpuMs: g.renderMs, cpuMs: c.renderMs, horizonSample: Array.from(g.horizon.slice(0, 4)),
+    };
+    log(JSON.stringify(window.result, null, 1));
+  } catch (err) {
+    log('ERROR ' + err.message + '\n' + err.stack);
+    window.result = { error: err.message };
+  }
+})();
+</script>
+</body></html>

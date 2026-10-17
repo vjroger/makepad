@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skyline HDRI plates</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="">
+<style>
+  :root { --bg: #14161a; --panel: #1c1f25; --line: #2b3038; --text: #e6e8ec; --muted: #9aa3ad; --accent: #4fa3ff; --ok: #5ec27a; --warn: #e8b34b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-columns: 380px 1fr; grid-template-rows: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 12px 14px 24px; }
+  main { display: flex; flex-direction: column; min-width: 0; }
+  h1 { font-size: 15px; margin: 0 0 8px; letter-spacing: .2px; }
+  h1 small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  #map { height: 240px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; background: #0c0e11; }
+  fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px 6px; margin: 0 0 8px; }
+  legend { color: var(--muted); padding: 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; align-items: center; margin-bottom: 4px; }
+  .row.three { grid-template-columns: 1fr 1fr 1fr; }
+  label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); font-size: 11.5px; }
+  label.inline { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 12.5px; }
+  input, select, button { font: inherit; color: var(--text); background: #0f1114; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+  input[type=number] { width: 100%; }
+  input[type=checkbox] { width: auto; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #06111f; border-color: var(--accent); font-weight: 600; padding: 8px 10px; width: 100%; margin: 4px 0 6px; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  .search { display: flex; gap: 6px; margin-bottom: 8px; }
+  .search input { flex: 1; }
+  #progress { height: 6px; background: #0f1114; border-radius: 3px; overflow: hidden; margin: 6px 0 4px; }
+  #progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  #status { color: var(--muted); min-height: 1.4em; white-space: pre-wrap; }
+  #stats { color: var(--muted); font-size: 11.5px; white-space: pre-wrap; margin-top: 4px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .toolbar .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+  .toolbar button:disabled { opacity: .45; cursor: default; }
+  #view { flex: 1; position: relative; overflow: auto; background:
+    repeating-conic-gradient(#1a1d22 0 25%, #202329 0 50%) 0 0 / 24px 24px; }
+  #view.sky { background: linear-gradient(#17345f, #5a8ac4 48%, #c9d6e4 50%, #6d6a60 52%, #2a2824); }
+  #preview { display: block; width: 100%; height: auto; image-rendering: auto; }
+  #readout { position: absolute; left: 10px; bottom: 10px; background: rgba(10,12,15,.8); padding: 6px 8px; border-radius: 4px; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--text); pointer-events: none; white-space: pre; }
+  .hint { color: var(--muted); font-size: 11.5px; margin: 2px 0 6px; }
+  a { color: var(--accent); }
+  .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Skyline HDRI plates <small>terrain + buildings → 360° mask</small></h1>
+  <div class="search"><input id="q" placeholder="Search a place (Nominatim) or click the map"><button id="go">Go</button></div>
+  <div id="map"></div>
+  <fieldset><legend>Viewpoint</legend>
+    <div class="row">
+      <label>Latitude <input id="lat" type="number" step="0.000001" value="52.090700"></label>
+      <label>Longitude <input id="lon" type="number" step="0.000001" value="5.121400"></label>
+    </div>
+    <div class="row">
+      <label>Eye height above ground (m) <input id="eyeHeight" type="number" step="0.1" value="1.7"></label>
+      <label>Absolute altitude (m, optional) <input id="eyeAltitude" type="number" step="0.1" placeholder="auto"></label>
+    </div>
+    <label class="inline"><input id="eyeOnRoof" type="checkbox"> If inside a building, stand on its roof</label>
+  </fieldset>
+  <fieldset><legend>Plate</legend>
+    <div class="row three">
+      <label>Width <select id="width"><option>1024</option><option>2048</option><option selected>4096</option><option>8192</option></select></label>
+      <label>Heading offset (°) <input id="heading" type="number" step="1" value="0"></label>
+      <label>Vertical exaggeration <input id="vexag" type="number" step="0.1" value="1"></label>
+    </div>
+    <div class="row">
+      <label>Max distance <select id="maxDistance"><option value="50000">50 km</option><option value="100000">100 km</option><option value="250000" selected>250 km</option><option value="1000000">1000 km</option></select></label>
+      <label>Far-tier quality <select id="quality"><option value="normal" selected>normal</option><option value="high">high (4× tiles)</option></select></label>
+    </div>
+  </fieldset>
+  <fieldset><legend>Buildings (OpenStreetMap)</legend>
+    <label class="inline"><input id="bEnabled" type="checkbox" checked> Include buildings</label>
+    <div class="row three">
+      <label>All within (m) <input id="bAll" type="number" step="100" value="2500"></label>
+      <label>Tall within (m) <input id="bTall" type="number" step="1000" value="30000"></label>
+      <label>Tall means ≥ (m) <input id="bThr" type="number" step="1" value="35"></label>
+    </div>
+    <div class="row">
+      <label>Height scale <input id="bScale" type="number" step="0.05" value="1"></label>
+      <label>Overpass mirror <select id="overpass"><option value="auto" selected>auto (local proxy, then public mirrors)</option><option value="/overpass">local proxy only (skyline --serve)</option><option value="https://overpass-api.de/api/interpreter">overpass-api.de</option><option value="https://overpass.private.coffee/api/interpreter">overpass.private.coffee</option><option value="https://overpass.kumi.systems/api/interpreter">overpass.kumi.systems</option></select></label>
+    </div>
+  </fieldset>
+  <fieldset><legend>Preview shading (RGB of the RGBA export)</legend>
+    <div class="row three">
+      <label>Mode <select id="mode"><option value="shaded" selected>shaded + haze</option><option value="flat">flat white</option><option value="class">class colours</option></select></label>
+      <label>Sun azimuth (°) <input id="sunAz" type="number" step="1" value="225"></label>
+      <label>Sun elevation (°) <input id="sunEl" type="number" step="1" value="35"></label>
+    </div>
+    <div class="row">
+      <label>Haze distance (m) <input id="haze" type="number" step="1000" value="60000"></label>
+      <label>Engine <select id="engine"><option value="gpu" selected>GPU (WebGL2)</option><option value="cpu">CPU reference (slow)</option></select></label>
+    </div>
+  </fieldset>
+  <button id="render" class="primary">Render plate</button>
+  <div id="progress"><i></i></div>
+  <div id="status">Pick a spot and render.</div>
+  <div id="stats"></div>
+  <p class="hint">Terrain: <a href="https://registry.opendata.aws/terrain-tiles" target="_blank" rel="noopener">AWS Terrain Tiles</a> (Mapzen). Buildings: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors via Overpass. Plate: x = azimuth (centre = north, east to the right), y = elevation (+90° top).</p>
+</aside>
+<main>
+  <div class="toolbar">
+    <label class="inline"><input id="compositeToggle" type="checkbox"> Composite over a sky gradient</label>
+    <span class="sep"></span>
+    <button id="dl-rgba" disabled>RGBA PNG</button>
+    <button id="dl-mask" disabled>Mask PNG (white)</button>
+    <button id="dl-depth" disabled>Depth 16-bit PNG</button>
+    <button id="dl-normal" disabled>Normal PNG</button>
+    <button id="dl-sdf" disabled>SDF PNG</button>
+    <label class="inline">spread <input id="sdfSpread" type="number" value="64" step="8" style="width:64px"> px</label>
+    <span class="sep"></span>
+    <button id="dl-exr" disabled>EXR (all layers)</button>
+    <button id="dl-exr-compact" disabled>EXR (A + Z)</button>
+    <button id="dl-svg" disabled>SVG bands</button>
+    <button id="dl-json" disabled>JSON meta</button>
+  </div>
+  <div id="view">
+    <canvas id="preview" width="2048" height="1024"></canvas>
+    <div id="readout">hover the plate for azimuth / elevation / depth</div>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin=""></script>
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>

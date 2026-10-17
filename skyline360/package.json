@@ -1,0 +1,28 @@
+{
+  "name": "skyline360",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pick a real area, build its 3D skyline, render a 360° HDRI from a viewpoint inside it.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/singlefile.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "serve": "npx serve dist -l 5173",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:render": "node --import tsx test/render.e2e.ts"
+  },
+  "dependencies": {
+    "earcut": "3.2.4",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/three": "0.185.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.50.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}
