@@ -350,8 +350,8 @@ impl FrameBuilder {
     /// data, uniform buffers upload again, shared and retained instance buffers are made again
     /// (the retained ones' draw items are returned: they upload on their next draw); render
     /// targets keep their ids and are painted again. Frames the old device dropped count as done.
-    /// On Windows the pipelines are not ready again until the HAL, which builds each anew on the
-    /// new device, answers it once more.
+    /// The pipelines are not ready again until the HAL, which builds each anew on the new device
+    /// (`DeviceReset::rebuild_pipelines`), answers it once more.
     pub(crate) fn device_reset(&mut self, reupload: impl Fn(usize, u64) -> bool) -> Vec<(usize, usize)> {
         let slots: Vec<usize> = self.tex.iter().filter(|(slot, r)| reupload(**slot, r.gen)).map(|(slot, _)| *slot).collect();
         for slot in slots {
@@ -375,8 +375,7 @@ impl FrameBuilder {
             self.window_completed.insert(*window, *serial);
         }
         // a PipelineReady (or PipelineFailed) per pipeline follows the DeviceReset; until then
-        // D3D11 leaves its draws out
-        #[cfg(windows)]
+        // the HAL leaves its draws out
         for p in &mut self.pipes {
             p.ready = false;
         }
@@ -1704,7 +1703,6 @@ mod tests {
     /// A device reset: the HAL builds every pipeline again on the new device and answers each
     /// once more, so none is ready (a pass with a picture waits for it) until its answer; a
     /// failed one stays failed.
-    #[cfg(windows)]
     #[test]
     fn after_a_device_reset_a_pipeline_is_pending_until_it_answers_again() {
         let mut fb = FrameBuilder::default();

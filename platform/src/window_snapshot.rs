@@ -97,9 +97,11 @@ impl Cx {
     /// compile workers) and leaves a draw out of the frame until they exist;
     /// a caller with a fallback (another shader for the same geometry) asks
     /// this and keeps drawing the fallback until the new one is ready, so
-    /// content never vanishes while a shader compiles. `float16` asks for
-    /// the RGBA16Float (HDR target) pipeline too, and starts building it.
-    /// True where the backend compiles synchronously.
+    /// content never vanishes while a shader compiles. A shader that is
+    /// queued, compiling, failed or rebuilding after a device reset is not
+    /// ready (see [`Cx::draw_shaders_pending`] for the any-shader answer).
+    /// `float16` is ignored natively: the target format is part of the
+    /// shader. On the web it is always true; ask draw_shaders_pending there.
     pub fn draw_shader_ready(&self, shader: crate::draw_shader::DrawShaderId, float16: bool) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {

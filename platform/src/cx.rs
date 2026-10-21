@@ -1258,44 +1258,40 @@ mod memory_budget_tests {
 impl Cx {
     /// True while the platform is still compiling draw shaders it was handed
     /// and is therefore dropping their draw calls: WebGL's programs, and on
-    /// Windows a shader queued for its pipeline or a pipeline the HAL still
-    /// compiles (D3D11 compiles on its workers and leaves the draws out until
-    /// then). Other native backends answer false. An offscreen bake that
-    /// captures pixels polls this before trusting a frame: a capture drawn
-    /// while its program links is black.
+    /// the native HAL a shader queued for its pipeline or a pipeline the HAL
+    /// has not answered yet (Metal, D3D11 and Vulkan compile on workers and
+    /// leave the draws out until then; a failed pipeline waits for nothing).
+    /// An offscreen bake that captures pixels polls this before trusting a
+    /// frame: a capture drawn while its pipelines build is missing draws.
+    /// A shader's own [`Cx::draw_shader_ready`] can be true while this is
+    /// still true (another shader, or the pipeline for picking, is building).
     pub fn draw_shaders_pending(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
             self.os.webgl_shaders_pending > 0
         }
-        #[cfg(windows)]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             !self.draw_shaders.compile_set.is_empty() || self.pipelines_pending() > 0
-        }
-        #[cfg(not(any(target_arch = "wasm32", windows)))]
-        {
-            false
         }
     }
 
     /// Of the draw shaders [`Cx::draw_shaders_pending`] waits for, how many
-    /// are compiling (the browser's parallel compile), and how many are
-    /// built and wait for their first draw (first draws spread,
-    /// [`Cx::spread_first_draws`]): a host drawing ahead of showing gives
-    /// the first time to draw again, the second a draw that uses them.
+    /// are compiling (the browser's parallel compile; natively the queued
+    /// shaders and the HAL's unanswered pipelines), and how many are built
+    /// and wait for their first draw (first draws spread,
+    /// [`Cx::spread_first_draws`]; WebGL only): a host drawing ahead of
+    /// showing gives the first time to draw again, the second a draw that
+    /// uses them.
     pub fn draw_shaders_compiling_and_waiting(&self) -> (usize, usize) {
         #[cfg(target_arch = "wasm32")]
         {
             let waiting = self.os.webgl_shaders_waiting.min(self.os.webgl_shaders_pending);
             (self.os.webgl_shaders_pending - waiting, waiting)
         }
-        #[cfg(windows)]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             (self.draw_shaders.compile_set.len() + self.pipelines_pending(), 0)
-        }
-        #[cfg(not(any(target_arch = "wasm32", windows)))]
-        {
-            (0, 0)
         }
     }
 
