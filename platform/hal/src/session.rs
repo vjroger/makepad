@@ -17,7 +17,8 @@ use crate::buffers::{pack_strs, unpack_forward, DomainInfo, EventQueue};
 use crate::codec::ArenaSink;
 use crate::ledger::{Kind, Ledger, LedgerEntry};
 use crate::types::*;
-use std::collections::{BTreeMap, HashMap};
+use crate::FastMap;
+use std::collections::BTreeMap;
 
 /// Session 0: the host.
 pub const HOST: u32 = 0;
@@ -36,14 +37,14 @@ pub struct Entry<T> {
 /// Objects of one kind, keyed by (session, index).
 #[derive(Debug)]
 pub struct Table<T> {
-    map: HashMap<(u32, u32), Entry<T>>,
+    map: FastMap<(u32, u32), Entry<T>>,
     /// last destroyed generation per slot: a create or use with an older one is stale
-    retired: HashMap<(u32, u32), u32>,
+    retired: FastMap<(u32, u32), u32>,
 }
 
 impl<T> Default for Table<T> {
     fn default() -> Self {
-        Table { map: HashMap::new(), retired: HashMap::new() }
+        Table { map: FastMap::default(), retired: FastMap::default() }
     }
 }
 
@@ -178,7 +179,9 @@ pub struct BufferObj {
 pub struct PipelineObj {
     pub dialect: u32,
     pub desc: PipelineDesc,
-    pub code_len: usize,
+    /// The `PipelineCreate` blob as received (header, code, bindings, vertex layout): frame
+    /// capture replays exactly this code.
+    pub blob: std::sync::Arc<[u8]>,
 }
 
 /// An opaque host panel. Its pixels and the application's pixels have separate
@@ -288,12 +291,12 @@ pub struct Session {
     pub app_key: u64,
     /// the dpi factor the backend reported for this session's windows
     pub dpi: f32,
-    pub strings: HashMap<StrId, String>,
+    pub strings: FastMap<StrId, String>,
     pub textures: Table<TextureObj>,
     pub buffers: Table<BufferObj>,
     pub pipelines: Table<PipelineObj>,
     pub windows: Table<WindowObj>,
-    pub timers: HashMap<u32, TimerObj>,
+    pub timers: FastMap<u32, TimerObj>,
     pub ledger: Ledger,
     pub events: EventQueue,
     pub stats: Stats,
@@ -341,12 +344,12 @@ impl Session {
             dpi: 1.0,
             attached: true,
             closing: false,
-            strings: HashMap::new(),
+            strings: FastMap::default(),
             textures: Table::default(),
             buffers: Table::default(),
             pipelines: Table::default(),
             windows: Table::default(),
-            timers: HashMap::new(),
+            timers: FastMap::default(),
             ledger: Ledger::default(),
             events: EventQueue::new(),
             stats: Stats::default(),
@@ -394,7 +397,7 @@ impl Clock {
 
 /// All sessions.
 pub struct World {
-    sessions: HashMap<u32, Session>,
+    sessions: FastMap<u32, Session>,
     next_session: u32,
     next_host_window: u32,
     pub clock: Clock,
@@ -413,7 +416,7 @@ pub struct World {
     /// who hears of a session's window frames besides itself (its parent for an embedded window,
     /// the host for a window lent by the host): a completion thread wakes them with the owner,
     /// so the news is drained at once and not at the owner's next pump
-    pub listeners: std::sync::Arc<std::sync::Mutex<HashMap<u32, Vec<u32>>>>,
+    pub listeners: std::sync::Arc<std::sync::Mutex<FastMap<u32, Vec<u32>>>>,
     /// sessions to close, children before their parent
     close_queue: Vec<(u32, CloseAs)>,
     /// calls to the registered `DomainHost`, made after the command batch (no lock held)
@@ -492,7 +495,7 @@ impl Default for World {
 
 impl World {
     pub fn new() -> World {
-        let mut sessions = HashMap::new();
+        let mut sessions = FastMap::default();
         sessions.insert(HOST, Session::new(HOST, 0));
         World {
             sessions,
@@ -1136,6 +1139,13 @@ impl World {
     }
 
     /// Creates a window owned by the host that an app may adopt (the spinner window).
+    /// A fresh id for a window of session 0 the session makes itself (a badge: `window_kind::BADGE`).
+    pub fn host_window_id(&mut self) -> Id {
+        let id = Id::new(self.next_host_window, 1);
+        self.next_host_window += 1;
+        id
+    }
+
     pub fn host_window(&mut self, geom: [f32; 4]) -> Id {
         let id = Id::new(self.next_host_window, 1);
         self.next_host_window += 1;
@@ -1197,6 +1207,11 @@ impl World {
             .and_then(|w| w.val.alias_of);
         if let Some(crate::HalEvent::Geom { window, x, y, w, h, dpi, state }) = event.decode(payload) {
             self.window_geom(sid, window, [x as f32, y as f32, w as f32, h as f32], dpi, state);
+        }
+        // the window buttons' rect goes to the host too, like the geometry: the host draws its
+        // run-state view (a caption strip that leaves the native buttons room) in the lent window
+        if let (Some(crate::HalEvent::Chrome { x, y, w, h, topmost, .. }), Some(hid)) = (event.decode(payload), alias) {
+            self.to_session(HOST, |q| q.chrome(hid, x, y, w, h, topmost));
         }
         if let Some(crate::HalEvent::Display { window, dpi, .. }) = event.decode(payload) {
             if let Some(w) = self.session(sid).and_then(|s| s.windows.get(sid, window).ok()) {

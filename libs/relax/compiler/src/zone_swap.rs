@@ -366,11 +366,13 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
         Err(e) => return Outcome::Retry(format!("quiesce: {e}")),
     };
     tl.quiesce = ms(t_all);
-    let hurry = || ms(t_all) > 2500.0 || { let s = GATED_MAIN.load(Ordering::SeqCst); s != 0 && wall_ns().saturating_sub(s) > 250_000_000 };
+    // the main thread waiting at the gate ends the swap at the next step, as in the quiesce (30 ms):
+    // 250 ms here let a swap hold the UI for its encode + restore (the user's Sandbox: 2.1 s swap)
+    let hurry = || ms(t_all) > 2500.0 || { let s = GATED_MAIN.load(Ordering::SeqCst); s != 0 && wall_ns().saturating_sub(s) > 30_000_000 };
 
     // 3. the front images the store does not have yet
     let t = Instant::now();
-    let prepared = owner::call(owner::Class::App, || unsafe { prepare(up) });
+    let prepared = owner::call(owner::Class::Program, || unsafe { prepare(up) });
     let (spill, now) = match prepared {
         Ok(s) => s,
         Err(e) => return abort(format!("prepare: {e}")),
@@ -398,7 +400,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
         trace("the collected image is current: not encoded again");
     } else {
         let t = Instant::now();
-        let encoded = owner::call(owner::Class::App, || unsafe { encode(up, &pre, &extra) });
+        let encoded = owner::call(owner::Class::Program, || unsafe { encode(up, &pre, &extra) });
         let (dest, payload, _) = match encoded {
             Ok(x) => x,
             Err(e) => return abort(format!("encode: {e}")),
@@ -428,6 +430,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
         return abort("an owner request arrived after the quiesce".into());
     };
     trace("statics taken");
+    zone_scan::stale_after_take(crate::zone_alloc::compiler_generation());
     let fresh = {
         let _c = crate::zone_alloc::compiler();
         // live edits after the swap expand the program's derives and macro calls as before it
@@ -463,7 +466,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
     let t = Instant::now();
     // The snapshot owns old-arena pointers: forget it on this thread before commit destroys them.
     taken.forget();
-    let (chunks, touched, specs) = owner::call(owner::Class::App, || unsafe { commit(up, fresh) });
+    let (chunks, touched, specs) = owner::call(owner::Class::Program, || unsafe { commit(up, fresh) });
     tl.commit = ms(t);
     trace("commit done");
     crate::zone_alloc::kept_with(|| {
@@ -485,6 +488,7 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
     eprintln!("makepad-run zone: swap {}->{} at t={:.0} ms (attempt {}): quiesce {:.1} ms, front images {:.1} ms, encode {:.1} ms, store {:.1} ms, restore {:.1} ms (cache {:.1} ms), commit {:.1} ms, total {:.1} ms; destroyed {} chunks ({:.1} MB touched); {} speculative codes moved to the kept heap ({:.1} MB); rss {:.0} -> {:.0} MB",
         old_gen, old_gen + 1, crate::clock::ms_since_start(), n + 1, tl.quiesce, tl.front_images, tl.encode, tl.store, tl.restore, tl.cache, tl.commit, ms(t_all),
         tl.chunks, tl.touched as f64 / 1048576.0, tl.specs.0, tl.specs.1 as f64 / 1048576.0, rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0);
+    crate::inspect::flightrec::event("zone.swap", &format!("gen {}->{}: total {:.0} ms (quiesce {:.0}, encode {:.0}, restore {:.0}, commit {:.0}); rss {:.0} -> {:.0} MB", old_gen, old_gen + 1, ms(t_all), tl.quiesce, tl.encode, tl.restore, tl.commit, rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0), (ms(t_all) * 1e6) as u64, 0);
     Outcome::Done
 }
 
@@ -659,7 +663,7 @@ unsafe fn commit(up: *mut Unit, f: Fresh) -> (usize, usize, (usize, usize)) {
     crate::run::set_diagnostics(u.tcx.dcx.clone());
     // Only commit invalidates TLS; an aborted restore must keep the running state's TLS valid.
     relax_session::gen_local::bump();
-    zone_scan::stale_roots(crate::zone_alloc::compiler_generation().saturating_sub(1));
+    zone_scan::stale_roots(crate::zone_alloc::compiler_generation());
     trace("commit: destroying");
     let (chunks, touched) = crate::zone_alloc::compiler_destroy_older();
     trace("commit: destroyed");

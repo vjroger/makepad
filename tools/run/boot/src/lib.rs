@@ -1,4 +1,6 @@
 //! Session 0's text/pass renderer. No platform client, draw tree, widgets or Cx.
+mod activity;
+mod caption;
 mod document;
 mod dump;
 mod field;
@@ -12,10 +14,11 @@ mod text;
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
+pub use activity::Want as ActivityWant;
 pub use layer::Want as LayerWant;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
-    pass_load, session::HOST, target, usage, window_kind, Attr, CmdWriter, EventBuf, EventQueue,
+    pass_load, session::HOST, target, usage, window_kind, window_state, Attr, CmdWriter, EventBuf, EventQueue,
     FrameMeta, Hal, HalEvent, HalInfo, Id, Pass, RawEvent,
 };
 use makepad_script::{id, LiveId};
@@ -23,7 +26,11 @@ pub use relax_base::{
     diag::Diagnostic,
     run_state::{Mode, State},
 };
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub const DEFAULT_DOCUMENT: &str = include_str!("../resources/boot.splash");
 
@@ -61,6 +68,10 @@ pub enum Action {
     Select(usize),
     /// The window's close button: the run ends, as when the window is asked to close.
     Close,
+    /// The caption's minimise button (`Boot::window_control`).
+    Minimize,
+    /// The caption's maximise / restore button (`Boot::window_control`).
+    Maximize,
 }
 
 #[derive(Clone)]
@@ -126,7 +137,7 @@ struct Card {
     rect: [f32; 4],
     action: Action,
     /// the card's look (document `error_band.accent`): 0 follow-on, 1 root cause or panic,
-    /// 2 a member row of a folded group, 3 a button, 4 the close button
+    /// 2 a member row of a folded group, 3 a button, 4 a window button of the caption
     accent: f32,
     /// the list entries the card shows: it is drawn selected while one of them is
     members: std::ops::Range<usize>,
@@ -168,6 +179,8 @@ struct Renderer {
     clear_errors_on_install: bool,
     icon_aspect: Option<f32>,
     pressed: Option<Action>,
+    /// the caption's window button under the pointer
+    hovered: Option<Action>,
     layout_revision: u64,
     presented_revision: u64,
     presented_scroll: f32,
@@ -198,6 +211,12 @@ pub struct Boot {
     gpu: bool,
     /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
     layers: bool,
+    /// the window system composites badges over the window (`info_flags::WINDOW_BADGES`)
+    badges: bool,
+    /// the JIT activity badge
+    activity: activity::Activity,
+    /// the window's chrome as the platform reports it: the caption strip follows it
+    chrome: caption::Chrome,
 }
 
 impl Boot {
@@ -228,7 +247,16 @@ impl Boot {
             offscreen: false,
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
+            badges: info.flags & info_flags::WINDOW_BADGES != 0,
+            activity: activity::Activity::new(),
+            chrome: caption::Chrome {
+                client: info.flags & info_flags::CLIENT_CHROME != 0,
+                ..Default::default()
+            },
         };
+        if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
+            boot.chrome = chrome;
+        }
         // A backend without a shader dialect has no native HAL window to draw into.
         // In particular Linux/Windows do not manufacture a clear-only fake window.
         if info.backend == backend_id::HEADLESS || info.dialect == dialect::NONE {
@@ -304,6 +332,7 @@ impl Boot {
             clear_errors_on_install,
             icon_aspect: None,
             pressed: None,
+            hovered: None,
             layout_revision: 0,
             presented_revision: 0,
             presented_scroll: 0.0,
@@ -420,6 +449,38 @@ impl Boot {
                 renderer.redraw = true;
             }
         }
+    }
+
+    /// The pointer is at `point` (`None`: it left the window): the caption's window button under
+    /// it shows its hover.
+    pub fn hover(&mut self, point: Option<[f32; 2]>) {
+        let caption = self.caption();
+        if let Some(renderer) = &mut self.renderer {
+            let hovered = point.and_then(|p| caption.button_at(p));
+            if renderer.hovered != hovered {
+                renderer.hovered = hovered;
+                renderer.redraw = true;
+            }
+        }
+    }
+
+    /// The caption's minimise and maximise / restore buttons: the window's state changes.
+    pub fn window_control(&mut self, action: Action) {
+        let Some(window) = self.window else { return };
+        let state = match action {
+            Action::Minimize => window_state::MINIMIZE,
+            Action::Maximize if self.chrome.state == window_state::MAXIMIZE => window_state::RESTORE,
+            Action::Maximize => window_state::MAXIMIZE,
+            _ => return,
+        };
+        let mut writer = CmdWriter::new(HOST);
+        writer.window_state(window, state);
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The caption strip the window has now.
+    fn caption(&self) -> caption::Caption {
+        self.chrome.caption(self.geometry[2], self.environment.touch)
     }
 
     pub fn reload(&mut self, document: Document) {
@@ -668,14 +729,29 @@ impl Boot {
                     w,
                     h,
                     dpi,
-                    ..
+                    state,
                 } if Some(window) == self.window => {
                     self.geometry = [x as f32, y as f32, w as f32, h as f32];
+                    self.chrome.state = state;
                     if dpi.is_finite() && dpi > 0.0 {
                         self.dpi = dpi;
                     }
                     if let Some(renderer) = &mut self.renderer {
                         renderer.dirty = true;
+                    }
+                }
+                HalEvent::Chrome { window, x, y, w, h, .. } if Some(window) == self.window => {
+                    let native = [x as f32, y as f32, w as f32, h as f32];
+                    let native = if native.iter().all(|v| v.is_finite()) { native } else { [0.0; 4] };
+                    let fixed = self.dump.as_ref().is_some_and(|d| d.chrome.is_some());
+                    if self.chrome.native != native && !fixed {
+                        if self.dump.is_some() {
+                            eprintln!("makepad-run: boot window chrome: native window buttons at {native:?}");
+                        }
+                        self.chrome.native = native;
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.dirty = true;
+                        }
                     }
                 }
                 HalEvent::Display { window, dpi, .. } if Some(window) == self.window => {
@@ -828,11 +904,13 @@ impl Boot {
         if !renderer.redraw && !renderer.dirty {
             return;
         }
+        let caption = self.chrome.caption(self.geometry[2], self.environment.touch);
         if renderer.dirty {
             renderer.layout(
                 &self.state,
                 [self.geometry[2], self.geometry[3]],
                 self.environment,
+                &caption,
             );
             renderer.dirty = false;
         }
@@ -853,7 +931,6 @@ impl Boot {
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
-            false,
             -1.0,
             false,
         );
@@ -879,13 +956,15 @@ impl Boot {
             if !card.fixed {
                 rect[1] -= scroll;
             }
-            let selected = !card.fixed && card.members.contains(&renderer.selected);
+            let selected = (!card.fixed && card.members.contains(&renderer.selected))
+                || (card.accent == CAPTION_BUTTON && renderer.hovered == Some(card.action));
             program.pipes[ERROR_BAND].instances.write(
                 &[
                     (id!(rect), &rect),
                     (id!(clip_rect), &bounds),
                     (id!(selected), &[selected as u8 as f32]),
                     (id!(accent), &[card.accent]),
+                    (id!(action), &[button_glyph(card.action)]),
                     (
                         id!(pressed),
                         &[(renderer.pressed == Some(card.action)) as u8 as f32],
@@ -923,7 +1002,7 @@ impl Boot {
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
         let field_frame = frame;
-        let fault = [1.0, 0.0, 0.0, 0.0];
+        let fault = [1.0, 0.0, caption.height, 0.0];
         let mut uniforms = vec![Vec::new(); program.pipes.len()];
         for (i, pipe) in program.pipes.iter().enumerate() {
             pipe.uniforms.write(
@@ -1093,7 +1172,144 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
-    /// The layer has faded out (the ready lift, the JIT loader): the run may take it away.
+    /// Whether frames are dumped (`MAKEPAD_RUN_BOOT_DUMP`): the run looks in at the dump's pace.
+    pub fn dumping(&self) -> bool {
+        self.dump.is_some()
+    }
+
+    /// A dump keeps the running app's frames while no badge and no layer is over them (the HAL's
+    /// snapshot of the window), at the dump's pace.
+    pub fn dump_app(&mut self) {
+        let (Some(window), None, false) = (self.window, self.activity.window, self.layer_on()) else { return };
+        if let Some(req) = self.dump.as_mut().and_then(|d| d.due()) {
+            let mut writer = CmdWriter::new(HOST);
+            writer.snapshot(window, req);
+            Hal::global().submit(&writer.buf());
+        }
+    }
+
+    /// ms on the dump's clock (its frames' file names), when frames are dumped.
+    pub fn dump_ms(&self) -> Option<u128> {
+        self.dump.as_ref().map(|d| d.ms())
+    }
+
+    /// Whether this window can show the JIT activity badge (the window system composites badges).
+    pub fn badges(&self) -> bool {
+        self.badges && self.window.is_some() && self.renderer.as_ref().is_some_and(|r| r.active.is_some())
+    }
+
+    /// The run's wish for the JIT activity badge this turn (`None`: the JIT is idle; a shown badge
+    /// fades out, then goes). Draws the badge's frame when one is due; returns how long until the
+    /// next (`None`: no badge).
+    pub fn activity(&mut self, want: Option<ActivityWant>) -> Option<Duration> {
+        let want = want.filter(|_| self.badges());
+        let window = self.window?;
+        self.activity.set(want);
+        let mut writer = CmdWriter::new(HOST);
+        let place = activity::Activity::place([self.geometry[2], self.geometry[3]]);
+        let badge = match self.activity.window {
+            Some(badge) if self.activity.done() || !self.badges() => {
+                writer.window_close(badge);
+                Hal::global().submit(&writer.buf());
+                self.activity.window = None;
+                return None;
+            }
+            Some(badge) => {
+                if self.activity.placed != place {
+                    writer.window_geom(badge, place);
+                    self.activity.placed = place;
+                }
+                badge
+            }
+            None if self.activity.wanted() => {
+                // one slot for the run's badges, a new generation each time one is made
+                let slot = *self
+                    .activity
+                    .slot
+                    .get_or_insert_with(|| Hal::global().with_world(|w| w.host_window_id()));
+                let badge = Id::new(slot.index, slot.gen);
+                self.activity.slot = Some(Id::new(slot.index, slot.gen.wrapping_add(1).max(1)));
+                writer.window_create(badge, window_kind::BADGE, window, place, false);
+                self.activity.window = Some(badge);
+                self.activity.placed = place;
+                badge
+            }
+            None => return None,
+        };
+        Hal::global().submit(&writer.buf());
+        let now = Instant::now();
+        if now >= self.activity.next_frame {
+            self.present_badge(badge);
+            self.activity.next_frame = now + activity::FRAME;
+        }
+        Some(self.activity.next_frame.saturating_duration_since(Instant::now()))
+    }
+
+    /// One frame of the activity badge: its galaxy, one quad over transparent pixels.
+    fn present_badge(&mut self, badge: Id) {
+        let reduce_motion = self.environment.reduce_motion;
+        let dpi = self.dpi;
+        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(program) = renderer.active.as_ref() else { return };
+        let pipe = &program.pipes[ERROR_BAND];
+        let look = self.activity.look(reduce_motion);
+        let side = activity::SIDE;
+        let viewport = [side, side];
+        let mut uniforms = Vec::new();
+        pipe.uniforms.write(
+            &[
+                (id!(viewport), &viewport),
+                (id!(dpi), &[dpi]),
+                (id!(reduce_motion), &[reduce_motion as u8 as f32]),
+            ],
+            &mut uniforms,
+        );
+        let mut data = Vec::new();
+        pipe.instances.write(
+            &[
+                (id!(rect), &look.rect),
+                (id!(accent), &[ACTIVITY_GALAXY]),
+                (id!(selected), &[look.level]),
+                (id!(block), &[look.block]),
+                (id!(pressed), &[look.opacity]),
+                (id!(action), &[look.spin]),
+                (id!(beat), &[look.beat]),
+            ],
+            &mut data,
+        );
+        self.frame += 1;
+        let mut writer = CmdWriter::new(HOST);
+        writer.frame_begin(
+            self.frame,
+            FrameMeta {
+                build_start_ns: makepad_hal::clock_ns(),
+                ..Default::default()
+            },
+        );
+        writer.pass(Pass {
+            color: [Id::NONE; 4],
+            load: [pass_load::CLEAR; 5],
+            clear: [[0.0; 4]; 4],
+            viewport: [0.0, 0.0, side * dpi, side * dpi],
+            dpi,
+            ..Default::default()
+        });
+        pipe.draw(&mut writer, &data, &uniforms, renderer.text.atlas(), [0.0, 0.0, side * dpi, side * dpi]);
+        writer.frame_set_build_end(makepad_hal::clock_ns());
+        // a dump keeps the app's frame with the badge over it (both read back, put together)
+        let snapshot = match (&mut self.dump, self.window) {
+            (Some(dump), Some(window)) => dump.due().map(|req| (window, req, dump.badge(self.activity.placed, dpi))),
+            _ => None,
+        };
+        writer.frame_end(badge, target::WINDOW | if snapshot.is_some() { target::SNAPSHOT } else { 0 });
+        if let Some((window, app, over)) = snapshot {
+            writer.snapshot(window, app);
+            writer.snapshot(badge, over);
+        }
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The layer has faded out (the ready lift): the run may take it away.
     pub fn layer_done(&mut self) -> bool {
         self.renderer
             .as_mut()
@@ -1105,8 +1321,8 @@ impl Boot {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
         let dpi = self.dpi;
-        let touch = self.environment.touch;
         let reduce_motion = self.environment.reduce_motion;
+        let caption = self.caption();
         let build_start_ns = makepad_hal::clock_ns();
         let renderer = self.renderer.as_mut().unwrap();
         let program = renderer.active.as_ref().unwrap();
@@ -1114,16 +1330,7 @@ impl Boot {
         let time = renderer.began.elapsed().as_secs_f32();
         let layered = renderer.layer.on && program.layer.is_some();
         let look = layered.then(|| renderer.layer.look(reduce_motion));
-        let hud = look.is_none_or(|l| l.hud);
-        let corner = look.is_some_and(|l| l.corner);
-        // the JIT loader: the whole galaxy in a square at the bottom-right corner
-        let region = if corner {
-            let side = layer::LOADER_SIDE.min(viewport[0].min(viewport[1]) * 0.4);
-            let margin = layer::LOADER_MARGIN;
-            [viewport[0] - side - margin, viewport[1] - side - margin, side, side]
-        } else {
-            [0.0, 0.0, viewport[0], viewport[1]]
-        };
+        let region = [0.0, 0.0, viewport[0], viewport[1]];
         renderer.text.begin_layout();
         let frame = renderer.field.frame(
             &mut writer,
@@ -1133,34 +1340,28 @@ impl Boot {
             region,
             reduce_motion,
             false,
-            corner,
             look.map_or(-1.0, |l| l.resolve),
             renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
         );
-        if !hud {
-            renderer.layout.fixed_text.clear();
-            renderer.layout.cards.clear();
-        } else {
-            let mut hint = program.label(layout::phase_key(self.state.phase));
-            let mut status = None;
-            if let Some(look) = look.filter(|l| l.progress >= 0.0) {
-                hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
-                status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
-            }
-            renderer.field.hud(
-                &mut renderer.text,
-                &self.state,
-                &hint,
-                status,
-                viewport,
-                frame.view,
-                frame.params[0],
-                time,
-                !touch && look.is_none(),
-                self.offscreen,
-                &mut renderer.layout,
-            );
+        let mut hint = program.label(layout::phase_key(self.state.phase));
+        let mut status = None;
+        if let Some(look) = look.filter(|l| l.progress >= 0.0) {
+            hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
+            status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
         }
+        renderer.field.hud(
+            &mut renderer.text,
+            &self.state,
+            &hint,
+            status,
+            viewport,
+            frame.view,
+            frame.params[0],
+            time,
+            &caption,
+            self.offscreen,
+            &mut renderer.layout,
+        );
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
@@ -1193,7 +1394,8 @@ impl Boot {
             return;
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
-        let field_layer = look.map_or([0.0; 4], |l| [if l.hud { 1.0 } else { 2.0 }, l.galaxy, l.backdrop, l.progress]);
+        let field_layer = look.map_or([0.0; 4], |l| [1.0, l.galaxy, l.backdrop, l.progress]);
+        let field_fault = [0.0, 0.0, caption.height, 0.0];
         let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
             pipe.uniforms.write(
                 &[
@@ -1206,6 +1408,7 @@ impl Boot {
                     (id!(field_params), &frame.params),
                     (id!(field_fall), &frame.fall),
                     (id!(field_layer), &field_layer),
+                    (id!(field_fault), &field_fault),
                     (id!(radius), &[sdf.radius]),
                     (id!(cutoff), &[sdf.cutoff]),
                 ],
@@ -1216,6 +1419,22 @@ impl Boot {
         common(&program.pipes[FIELD], &mut field_uniforms);
         let mut glyph_uniforms = Vec::new();
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
+        // the caption's window buttons (the field's only cards)
+        let mut buttons = Vec::new();
+        for card in renderer.layout.cards.iter().filter(|c| c.accent == CAPTION_BUTTON) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[
+                    (id!(rect), &card.rect),
+                    (id!(selected), &[(renderer.hovered == Some(card.action)) as u8 as f32]),
+                    (id!(accent), &[card.accent]),
+                    (id!(action), &[button_glyph(card.action)]),
+                    (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
+                ],
+                &mut buttons,
+            );
+        }
+        let mut band_uniforms = Vec::new();
+        common(&program.pipes[ERROR_BAND], &mut band_uniforms);
         self.frame += 1;
         let offscreen = if self.offscreen && !layered {
             let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
@@ -1309,27 +1528,25 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if let Some(look) = look {
-            if look.corner {
-                app(&mut writer, layer::APP, look.sharp, 0.0);
-            }
-            if look.blur {
-                app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
-            }
+        if look.is_some_and(|l| l.blur) {
+            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
         }
         if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
-            // the JIT loader's galaxy stays inside its square
-            let field_scissor = if corner {
-                region.map(|v| v * dpi)
-            } else {
-                scissor
-            };
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
                 field::INSTANCES,
                 frame.count,
                 &field_uniforms,
-                field_scissor,
+                scissor,
+            );
+        }
+        if !buttons.is_empty() {
+            program.pipes[ERROR_BAND].draw(
+                &mut writer,
+                &buttons,
+                &band_uniforms,
+                renderer.text.atlas(),
+                scissor,
             );
         }
         program.pipes[GLYPH].draw(
@@ -1339,7 +1556,7 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
-        if let Some(look) = look.filter(|l| !l.corner) {
+        if let Some(look) = look {
             app(&mut writer, layer::APP, look.sharp, 0.0);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
@@ -1419,6 +1636,21 @@ impl Layout {
         self.cards
             .iter()
             .filter(move |c| c.fixed || (c.rect[1] + c.rect[3] >= top && c.rect[1] <= bottom))
+    }
+}
+
+/// `Card::accent` of a window button of the caption.
+const CAPTION_BUTTON: f32 = 4.0;
+/// `error_band.accent` of the activity badge's galaxy (activity.rs).
+const ACTIVITY_GALAXY: f32 = 5.0;
+
+/// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
+/// 1 maximise / restore, 2 close.
+fn button_glyph(action: Action) -> f32 {
+    match action {
+        Action::Minimize => 0.0,
+        Action::Maximize => 1.0,
+        _ => 2.0,
     }
 }
 

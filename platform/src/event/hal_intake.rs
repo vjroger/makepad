@@ -815,6 +815,12 @@ impl Cx {
                     makepad_hal::profile::credit();
                 }
             }
+            HalEvent::Redraw { window: _, owners } => {
+                if owners {
+                    self.arm_draw_owners();
+                }
+                self.redraw_all();
+            }
             HalEvent::FramePartial { window: _, frame } => {
                 // its pipeline's PipelineReady repaints; an offscreen render asks `frames_partial`
                 let partial = &mut self.textures.1.partial;
@@ -830,7 +836,7 @@ impl Cx {
                     }
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
-                self.hal.frames.frame_done(window, frame);
+                let window_frame = self.hal.frames.frame_done(window, frame);
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
                 let pool = self.task_pool();
@@ -840,11 +846,15 @@ impl Cx {
                 self.poll_texture_lifetimes();
                 self.hal.frames_done += 1;
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
-                    Some(crate::os::hal::HostedDone::Publish(draw)) => Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw)),
+                    Some(crate::os::hal::HostedDone::Publish(draw)) => {
+                        if window_frame { crate::frame_trace::note_presented(); }
+                        Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw))
+                    }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again
                     #[cfg(target_os = "linux")]
                     Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(),
-                    Some(crate::os::hal::HostedDone::Unknown) | None => {}
+                    // the HAL presented the window's frame itself (other targets' frames are passes)
+                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { crate::frame_trace::note_presented() },
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
@@ -1106,8 +1116,8 @@ impl Cx {
         self.fingers.process_touch_update_end(&e.touches);
     }
 
-    /// Signals, actions and script tasks the loop services on a wake and on every beat (the
-    /// work macOS did on its timer-0 beat).
+    /// Signals, actions, script tasks and network events the loop services on a wake and on
+    /// every beat (the work macOS did on its timer-0 beat).
     pub(crate) fn hal_service_signals(&mut self) -> bool {
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
         let ui_signal = SignalToUI::check_and_clear_ui_signal();
@@ -1125,6 +1135,10 @@ impl Cx {
             self.handle_action_receiver();
             did = true;
         }
+        // A network answer wakes the loop (the runtime's wake fn) with no frame to draw: read
+        // here it reaches the app now. Read only on a beat, an idle app (a login page waiting
+        // for its answer) left it unread until something else asked for a frame.
+        self.handle_networking_events();
         self.poll_control_channel();
         self.poll_texture_readbacks();
         self.handle_actions();

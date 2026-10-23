@@ -131,6 +131,19 @@ pub trait Gpu {
         false
     }
     fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]);
+    /// Frame capture ([`crate::framecap`]): a copy of the texture's storage as everything submitted
+    /// so far leaves it, before the frame that follows. Every mip level of every layer, tightly
+    /// packed rows (whole 4x4 blocks for block formats), level-major then layer. `done` runs once
+    /// the GPU has it (on any thread); `None`: no storage yet, or this backend cannot read it.
+    /// Never waits for the GPU.
+    fn capture_texture(&mut self, _s: &mut Session, _id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        done(None)
+    }
+    /// Frame capture: the buffer's bytes as the next frame reads them (`None`: no storage, or this
+    /// backend cannot read it).
+    fn capture_buffer(&mut self, _sid: u32, _id: Id) -> Option<Vec<u8>> {
+        None
+    }
     fn window_copy(&mut self, s: &mut Session, _window: Id, _texture: Id, req: u32) {
         s.events.readback(req, readback::NO_RASTER, [0; 4], &[]);
     }
@@ -145,6 +158,8 @@ pub trait Gpu {
     fn window_overlay(&mut self, s: &mut Session, id: Id, rect: Option<[f32; 4]>, layer: Id, now: u64);
     /// Mobile shells lend their permanent host window even without an explicit adopt flag.
     fn auto_adopt(&self) -> bool { false }
+    /// The window system composites session 0's badges (`window_kind::BADGE`) over its windows.
+    fn badges(&self) -> bool { false }
     /// A command for the window system, validated against the tables. True when the backend's
     /// window system took it and reports the outcome itself (events from the OS).
     fn os(&mut self, _sid: u32, _cmd: OsCmd) -> bool {
@@ -232,6 +247,8 @@ pub fn submit(gpu: &mut dyn Gpu, world: &mut World, sid: u32, view: &CmdView) {
     if let Some(s) = world.session_mut(sid) {
         s.events.set_time(now);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let prof = crate::gpu_prof::submit_begin(sid);
     for cmd in view.cmds {
         match cmd.decode(view.arena) {
             Some(c) => exec(gpu, world, sid, c, view, now),
@@ -242,6 +259,8 @@ pub fn submit(gpu: &mut dyn Gpu, world: &mut World, sid: u32, view: &CmdView) {
             }
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::gpu_prof::submit_end(prof);
 }
 
 /// Fires the due timers of a session (a late pump fires once and re-arms from now).
@@ -386,6 +405,20 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     s.stale();
                 }
                 // The external compositor supplies the first geometry and every frame beat.
+                return;
+            }
+            if kind & 0xff == window_kind::BADGE {
+                // session 0's, on one of its windows, where the window system composites badges
+                let Some(s) = world.session_mut(sid) else { return };
+                if sid != HOST || !gpu.badges() || s.windows.get(HOST, parent).is_err() {
+                    s.bad();
+                    return;
+                }
+                if s.windows.insert(sid, id, sid, WindowObj { kind, parent, geom, dpi: Some(s.dpi), ..Default::default() }).is_err() {
+                    s.stale();
+                    return;
+                }
+                gpu.os(sid, OsCmd::WindowCreate { id, kind, parent, geom });
                 return;
             }
             // a child domain's window is a render target lent to its parent, never an OS window
@@ -608,6 +641,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 if let Some(tex) = tex {
                     s.ledger.touch(Kind::Texture, tex.index, tex.gen, frame, now);
                 }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if crate::framecap::armed() {
+                crate::framecap::on_frame(gpu, s, sid, target, kind, packet, view, now);
             }
             let Some(submitted) = gpu.frame(s, sid, target, kind, packet, view, now) else { return };
             let host = submitted.window.then(||
@@ -1091,7 +1128,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         },
         HalCmd::PipelineCreate { id, dialect, attr, desc } => match PipelineBlob::parse(desc) {
             Some(b) => {
-                let obj = PipelineObj { dialect, desc: b.desc, code_len: b.code.len() };
+                let obj = PipelineObj { dialect, desc: b.desc, blob: desc.into() };
                 match s.pipelines.insert(sid, id, sid, obj) {
                     Ok(old) => {
                         if old.is_some() {

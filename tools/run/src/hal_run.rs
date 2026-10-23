@@ -5,7 +5,7 @@ use crate::boot_progress::{History, Progress};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
 use relax_boot::{
-    Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant,
+    Action, ActivityWant, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant,
 };
 use relax_compiler::{
     diag::Diagnostic,
@@ -69,20 +69,11 @@ static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
-/// wakes, and shows the JIT loader once the waiting is sustained (LOADER_AFTER in LOADER_WINDOW).
+/// wakes, and shows the UI block on the activity badge once the waiting is sustained (BLOCK_AFTER).
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
-/// The JIT loader shows for this much UI-thread JIT waiting within the sliding window (never for
-/// one short hiccup)...
-const LOADER_AFTER: Duration = Duration::from_millis(250);
-const LOADER_WINDOW_NS: u64 = 1_000_000_000;
-/// ...stays at least this long...
-const LOADER_MIN: Duration = Duration::from_millis(1000);
-/// ...and goes once the UI thread waited less than LOADER_TRICKLE in the last LOADER_QUIET_NS
-/// (the trickle of tiny waits a running app always has is quiet). Going, its fade-out holds while
-/// the UI thread waits that much in LOADER_BUSY_NS again (it never fades back in half-way).
-const LOADER_QUIET_NS: u64 = 700_000_000;
-const LOADER_BUSY_NS: u64 = 200_000_000;
-const LOADER_TRICKLE: Duration = Duration::from_millis(40);
+/// A true UI block: no frame for this long with the UI thread in JIT waits most of it (one long
+/// lazy compile, or a load's thousands of short ones; never a short hiccup).
+const BLOCK_AFTER: Duration = Duration::from_millis(200);
 /// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
 /// the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
@@ -93,20 +84,142 @@ fn ui_wait_began() {
     }
 }
 
-/// The JIT loader over the running app (after the warm-up).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Loader {
-    Hidden,
-    /// shown since
-    Shown(Instant),
-    /// fading out (until the layer is done); shown since
-    Going(Instant),
+/// The activity badge shows once the JIT has had work in flight this long (one short build shows
+/// nothing)...
+const ACTIVITY_SHOW_AFTER: Duration = Duration::from_millis(600);
+/// ...and fades out once it has had none this long.
+const ACTIVITY_HIDE_AFTER: Duration = Duration::from_millis(1200);
+/// work in flight (O3 builds + functions built ahead) that reads as a lively level (1 - 1/e)
+const ACTIVITY_WORK: f32 = 48.0;
+/// the run looks at the JIT's queues at most this often (the badge eases between looks)
+const WATCH_EVERY: Duration = Duration::from_millis(100);
+/// how often the run looks at the JIT while the app runs and no badge shows (new work is seen
+/// within this; a UI wait wakes it at once)
+const ACTIVITY_LOOK: Duration = Duration::from_millis(500);
+
+/// Whether this run shows the JIT activity badge: `MAKEPAD_RUN_SETTLE_HUD=0` never, `=1` always,
+/// else not in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, MAKEPAD_RUN_O3_PROGRESS,
+/// MAKEPAD_RUN_BOOT_DUMP).
+fn activity_on() -> bool {
+    match std::env::var("MAKEPAD_RUN_SETTLE_HUD").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => {
+            std::env::var("MAKEPAD_HIDE_WINDOWS").as_deref() != Ok("1")
+                && std::env::var_os("MAKEPAD_RUN_O3_PROGRESS").is_none()
+                && std::env::var_os("MAKEPAD_RUN_BOOT_DUMP").is_none()
+        }
+    }
+}
+
+/// What the run sees of the JIT for the activity badge: the work in flight (O3 builds, functions
+/// built ahead, the UI thread's JIT duty cycle) and a true UI block. Atomics and one lock of the O3
+/// queue a look; the app's threads never wait for it.
+struct Watch {
+    shown: bool,
+    busy_since: Option<Instant>,
+    idle_since: Option<Instant>,
+    /// the last look at the JIT's queues (at most every WATCH_EVERY), what they held then
+    looked: Instant,
+    o3: u64,
+    ahead: u64,
+    wait_ns: u64,
+    duty: f32,
+    /// the UI block shows (for the trace)
+    blocked: bool,
+    trace: bool,
+    traced: Option<Instant>,
+}
+
+impl Watch {
+    fn new(trace: bool) -> Self {
+        Self {
+            shown: false,
+            busy_since: None,
+            idle_since: None,
+            looked: Instant::now(),
+            o3: 0,
+            ahead: 0,
+            wait_ns: relax_compiler::postframe::activity().ui_wait_ns,
+            duty: 0.0,
+            blocked: false,
+            trace,
+            traced: None,
+        }
+    }
+
+    /// The badge's wish now (`None`: the JIT is idle). `clock`: the frame dump's clock (ms), for
+    /// the trace.
+    fn look(&mut self, clock: Option<u128>) -> Option<ActivityWant> {
+        use relax_compiler::postframe::{activity, ui_hang_ns, ui_stall_ns};
+        let now = Instant::now();
+        let dt = now.duration_since(self.looked).as_secs_f32();
+        if dt >= WATCH_EVERY.as_secs_f32() {
+            let a = activity();
+            let waited = a.ui_wait_ns.saturating_sub(self.wait_ns) as f32 / 1e9;
+            self.duty = (waited / dt).clamp(0.0, 1.0);
+            self.wait_ns = a.ui_wait_ns;
+            self.o3 = a.o3;
+            self.ahead = a.ahead;
+            self.looked = now;
+        }
+        let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
+        let block = stalled >= BLOCK_AFTER;
+        let work = self.o3 + self.ahead;
+        if work > 0 || self.duty > 0.02 || block {
+            self.idle_since = None;
+            let since = *self.busy_since.get_or_insert(now);
+            self.shown |= block || now.duration_since(since) >= ACTIVITY_SHOW_AFTER;
+        } else {
+            self.busy_since = None;
+            let since = *self.idle_since.get_or_insert(now);
+            self.shown &= now.duration_since(since) < ACTIVITY_HIDE_AFTER;
+        }
+        if self.trace && block != self.blocked {
+            if block {
+                eprintln!("makepad-run: jit activity: UI block (the UI waited {:.0} ms on the JIT)", stalled.as_secs_f64() * 1000.0);
+            } else {
+                eprintln!("makepad-run: jit activity: UI block over");
+            }
+        }
+        self.blocked = block;
+        let level = (1.0 - (-(work as f32) / ACTIVITY_WORK).exp()).max(self.duty);
+        // the trace: what the badge was told, at most 4 times a second while it shows
+        if self.trace && (self.shown || self.traced.is_some()) && self.traced.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
+            let at = clock.map_or(String::new(), |ms| format!(" @{ms}"));
+            eprintln!(
+                "makepad-run: jit activity{at}: {} level {level:.2} (o3 {}, ahead {}, ui duty {:.2}){}",
+                if self.shown { "shown" } else { "idle" },
+                self.o3,
+                self.ahead,
+                self.duty,
+                if block { " UI BLOCK" } else { "" }
+            );
+            self.traced = self.shown.then_some(now);
+        }
+        self.shown.then_some(ActivityWant { level, block })
+    }
+
+    /// How soon to look again while the UI thread may be heading into a block (its JIT wait began).
+    fn block_wake(&self) -> Option<Duration> {
+        use relax_compiler::postframe::{ui_hang_ns, ui_idle_ns, ui_stall_ns};
+        if !UI_WAIT_ARMED.load(Ordering::Acquire) {
+            return None;
+        }
+        // once the UI thread is not waiting the window disarms (the next wait's hook wakes it)
+        if ui_idle_ns() >= BLOCK_AFTER.as_nanos() as u64 {
+            UI_WAIT_ARMED.store(false, Ordering::Release);
+            return None;
+        }
+        let stalled = Duration::from_nanos(ui_hang_ns().max(ui_stall_ns()));
+        Some(BLOCK_AFTER.saturating_sub(stalled).max(Duration::from_millis(20)))
+    }
 }
 
 /// Where the window layer over the app is in its sequence.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// no layer, or the JIT loader
+    /// no layer (the activity badge may show)
     Running,
     /// the boot field, the app's first frames going under it
     Boot,
@@ -755,11 +868,10 @@ fn pump(
     let mut next_status = Instant::now();
     let mut dirty = true;
     let mut stage = Stage::Running;
-    let mut loader = Loader::Hidden;
-    let mut loader_shows = 0u32;
+    let activity = activity_on();
     let mut warm_up_at: Option<Instant> = None;
-    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT loader's comings and goings too
-    let trace_loader = std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some();
+    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the activity badge's UI blocks too
+    let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
         let (domain, window, relaunch, baseline, pending, stopping, initial_failed) = {
@@ -795,7 +907,6 @@ fn pump(
             match update {
                 Update::Begin { warm } => {
                     stage = Stage::Running;
-                    loader = Loader::Hidden;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
@@ -1064,8 +1175,8 @@ fn pump(
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
-        // after its first present (until the JIT's readiness signal), then the JIT loader for later
-        // sustained UI-thread JIT waiting. An opaque overlay, a failure or a stop takes it away.
+        // after its first present (until the JIT's readiness signal). An opaque overlay, a failure
+        // or a stop takes it away. (Later JIT work shows in the activity badge, below.)
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
         let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
@@ -1103,70 +1214,24 @@ fn pump(
                 Some(LayerWant::WarmUp { done, queued })
             }
             Stage::Lift => Some(LayerWant::Ready),
-            Stage::Running if layers && lent_to_app && !active => {
-                use relax_compiler::postframe::{ui_idle_ns, ui_waited_within};
-                let waited_in = |ns| Duration::from_nanos(ui_waited_within(ns));
-                loader = match loader {
-                    Loader::Hidden => {
-                        let waited = waited_in(LOADER_WINDOW_NS);
-                        if waited >= LOADER_AFTER {
-                            loader_shows += 1;
-                            if trace_loader {
-                                eprintln!(
-                                    "makepad-run: jit loader #{} in ({:.0} ms waited in {} ms)",
-                                    loader_shows,
-                                    waited.as_secs_f64() * 1000.0,
-                                    LOADER_WINDOW_NS / 1_000_000
-                                );
-                            }
-                            Loader::Shown(Instant::now())
-                        } else {
-                            if UI_WAIT_ARMED.load(Ordering::Acquire) {
-                                // look again when the waiting would be sustained; once the UI
-                                // thread is not waiting the window disarms (the next wait's hook
-                                // wakes it)
-                                if ui_idle_ns() > 0 {
-                                    UI_WAIT_ARMED.store(false, Ordering::Release);
-                                } else {
-                                    wake_in = Some(LOADER_AFTER - waited);
-                                }
-                            }
-                            Loader::Hidden
-                        }
-                    }
-                    Loader::Shown(at) if at.elapsed() >= LOADER_MIN && waited_in(LOADER_QUIET_NS) < LOADER_TRICKLE => {
-                        Loader::Going(at)
-                    }
-                    Loader::Going(at) if host.layer_done() => {
-                        if trace_loader {
-                            eprintln!(
-                                "makepad-run: jit loader #{} out after {:.0} ms",
-                                loader_shows,
-                                at.elapsed().as_secs_f64() * 1000.0
-                            );
-                        }
-                        Loader::Hidden
-                    }
-                    loader => loader,
-                };
-                match loader {
-                    Loader::Hidden => None,
-                    Loader::Shown(_) => Some(LayerWant::Loader {
-                        shown: true,
-                        busy: true,
-                    }),
-                    Loader::Going(_) => Some(LayerWant::Loader {
-                        shown: false,
-                        busy: waited_in(LOADER_BUSY_NS) >= LOADER_TRICKLE,
-                    }),
-                }
-            }
-            Stage::Running => {
-                loader = Loader::Hidden;
-                None
-            }
+            Stage::Running => None,
         };
         host.layer(want, app_frames);
+        // the JIT activity badge while the app runs: the JIT's work in flight, a UI block
+        let running = activity && stage == Stage::Running && lent_to_app && !active && !failed && data.parked.is_none();
+        if running && host.badges() {
+            let badge = host.activity(watch.look(host.dump_ms()));
+            for wait in [badge, watch.block_wake(), Some(ACTIVITY_LOOK)].into_iter().flatten() {
+                wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+            }
+        } else if let Some(wait) = host.activity(None) {
+            // a badge fading out
+            wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+        }
+        if running && host.dumping() {
+            host.dump_app();
+            wake_in = Some(wake_in.map_or(ACTIVITY_LOOK, |w: Duration| w.min(ACTIVITY_LOOK)));
+        }
         let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
             progress.tick(&mut data);
@@ -1400,6 +1465,7 @@ fn pump(
                     host.choose(selected);
                 }
                 Some(Action::Close) => close = true,
+                Some(action @ (Action::Minimize | Action::Maximize)) => host.window_control(action),
                 Some(Action::Cancel) if return_entry.is_some() => {
                     return_entry = None;
                     host.input(None);

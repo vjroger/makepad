@@ -15,7 +15,7 @@ use crate::{
     gpu::Pipeline,
     text::Text,
     document::Line,
-    Action, Card, Layout, State, TextLine,
+    Card, Layout, State, TextLine,
 };
 use makepad_hal::{buffer_kind, Attr, CmdWriter, Id};
 use makepad_script::{id, LiveId};
@@ -271,7 +271,6 @@ impl Field {
         region: [f32; 4],
         reduce_motion: bool,
         halted: bool,
-        fit: bool,
         resolve: f32,
         scatter: bool,
     ) -> Frame {
@@ -366,7 +365,7 @@ impl Field {
         let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
-        let (radius, cy) = if halted || fit {
+        let (radius, cy) = if halted {
             // the whole galaxy, scatter included, inside the region
             ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
         } else {
@@ -489,7 +488,8 @@ impl Field {
     }
 
     /// The HUD (corner brackets are drawn by the field itself) as text lines in window points,
-    /// all fixed to the window; and the close button's card.
+    /// all fixed to the window, below the caption strip; the caption's title and its window
+    /// buttons' cards.
     #[allow(clippy::too_many_arguments)]
     pub fn hud(
         &mut self,
@@ -501,7 +501,7 @@ impl Field {
         view: [f32; 4],
         spin: f32,
         time: f32,
-        close: bool,
+        caption: &crate::caption::Caption,
         offscreen: bool,
         layout: &mut Layout,
     ) {
@@ -548,11 +548,22 @@ impl Field {
         }
         let t = if offscreen { time as f64 } else { state.elapsed };
         let clock = format!("T+{:.3}", t);
-        let reserve = if close { 34.0 } else { 0.0 };
+        // the frame (and its brackets) starts below the caption strip
+        let top = caption.height;
         let fixed = &mut layout.fixed_text;
         let top_size = if narrow { 16.0 } else { 18.0 };
-        fixed.push(line(text, &clock, top_size, w - margin - reserve, 32.0, 1.0, INK));
-        if !tiny {
+        fixed.push(line(text, &clock, top_size, w - margin, top + 32.0, 1.0, INK));
+        if caption.height > 0.0 {
+            let style = Line {
+                role: crate::document::Role::App,
+                size: 10.0,
+                height: 13.0,
+                gap: 0.0,
+                color: crate::caption::TITLE,
+                align: 0.0,
+            };
+            fixed.extend(crate::caption::title(text, caption, w, &[(state.app.clone(), style)]));
+        } else if !tiny {
             let name = state.app.to_uppercase();
             fixed.push(line(text, &name, 10.0, margin, 30.0, 0.0, dim));
         }
@@ -575,7 +586,7 @@ impl Field {
                 cut(&state.current, if narrow { 36 } else { 48 })
             };
             let c = if self.hud.swapped || (!self.hud.main && matches!(state.phase, Phase::Resolve | Phase::Parse)) { INK } else { dim };
-            fixed.push(line(text, &s, 9.0, margin, 48.0, 0.0, c));
+            fixed.push(line(text, &s, 9.0, margin, top + 48.0, 0.0, c));
         }
         // fns compiled, bottom left
         let big = if tiny { 16.0 } else if narrow { 22.0 } else { 30.0 };
@@ -644,28 +655,11 @@ impl Field {
                 }
             }
         }
-        if close {
-            let rect = [w - 14.0 - 28.0, 14.0, 28.0, 28.0];
-            let style = Line {
-                role: crate::document::Role::Status,
-                size: 16.0,
-                height: 28.0,
-                gap: 0.0,
-                color: dim,
-                align: 0.5,
-            };
-            let run = text.shape("\u{00d7}", style.size, rect[2], style.height);
-            let x = rect[0] + (rect[2] - run.width).max(0.0) * 0.5;
-            fixed.push(TextLine {
-                run,
-                position: [x, rect[1]],
-                style,
-                fixed: true,
-            });
+        for (action, rect) in &caption.buttons {
             layout.cards.push(Card {
-                rect,
-                action: Action::Close,
-                accent: 4.0,
+                rect: *rect,
+                action: *action,
+                accent: crate::CAPTION_BUTTON,
                 members: 0..0,
                 fixed: true,
             });

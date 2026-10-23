@@ -9,6 +9,11 @@
 //! [`types`], the command and event tables in [`cmds`] and [`events`], the GPU ledger in
 //! [`ledger`]. This crate ships the headless backend; the platform backends come with their phases.
 
+/// The HAL's maps of objects, keyed by small ids ((session, index) pairs, string ids): hashed
+/// with the in-tree FxHash. The per-draw path looks textures, buffers and pipelines up in them
+/// many times a frame, where std's SipHash was ~4% of the main thread's encode samples.
+pub type FastMap<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
+
 pub mod backend;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
@@ -43,11 +48,16 @@ pub mod events;
 pub mod font;
 pub mod ledger;
 pub mod gpu_limits;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gpu_prof;
 pub mod gpu_pressure;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod inspect;
 pub mod media;
 pub mod profile;
+pub mod threadcpu;
 pub mod session;
 pub mod types;
 
@@ -596,6 +606,11 @@ impl Hal {
         lock(&self.state).backend_inits
     }
 
+    /// The backend this Hal runs (`backend_id`) and its shader dialect, once one is open.
+    pub fn backend_info(&self) -> Option<HalInfo> {
+        lock(&self.state).backend.as_ref().map(|(_, b)| b.info())
+    }
+
     /// Executes a batch. The slices in `buf` are read during this call only.
     pub fn submit(&self, buf: &CmdBuf) {
         let sid = buf.session;
@@ -1000,6 +1015,22 @@ pub struct ScreenInfo {
     pub bounds: [f64; 4],
     pub work_area: [f64; 4],
     pub is_primary: bool,
+}
+
+/// The identity a launcher gave this process (MAKEPAD_APP_ID, set by `makepad app <id>` for the
+/// OS entry of an app: its .desktop file names the same id): `nl.makepad.<id>`, which a Linux
+/// window takes as its Wayland app_id and X11 WM_CLASS so the desktop groups it with its entry.
+/// None without one (the window is named after the executable).
+pub fn app_identity() -> Option<String> {
+    app_id().map(|id| format!("nl.makepad.{id}"))
+}
+
+/// The launcher's app id itself (MAKEPAD_APP_ID when it is a valid one): Windows names the
+/// process and its windows `Makepad.<id>`, the AppUserModelID of the app's Start menu entry.
+pub fn app_id() -> Option<String> {
+    let id = std::env::var("MAKEPAD_APP_ID").ok()?;
+    let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    ok.then_some(id)
 }
 
 /// The displays attached right now, as the window system last saw them (readable from any

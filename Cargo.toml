@@ -234,6 +234,7 @@ workspace.members = [
     "tools/run/android_host/fixture",
     "tools/run/web_trace",
     "libs/gpu_trace",
+    "libs/prof_stream",
     "libs/relax/compiler",
     "libs/relax/base",
     "libs/relax/backend",
@@ -245,10 +246,11 @@ workspace.members = [
     "libs/relax/types",
     "tools/run/fixture",
     "libs/relax/lex",
-    "platform/codegen",
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
     "libs/relax/compiler/rwbench",
+    # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
+    "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)
     "widgets/feedback",
     # === tests ===
@@ -421,7 +423,9 @@ relax-types = { path = "libs/relax/types", version = "0.1.0" }
 relax-provided-fixture = { path = "tools/run/fixture", version = "0.1.0" }
 makepad-live-id = { path = "libs/live_id", version = "1.0.0" }
 makepad-remote = { path = "libs/remote", version = "0.1.0" }
+makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
 makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
+makepad-prof-stream = { path = "libs/prof_stream", version = "1.0.0" }
 makepad-relax-api = { path = "libs/relax_api", version = "1.0.0" }
 makepad-relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
 makepad-live-id-macros-impl = { path = "libs/live_id/id_macros_impl", version = "1.0.0" }
@@ -462,6 +466,17 @@ debug = "line-tables-only"
 [profile.release]
 incremental = true
 lto = "off"
+
+# host: the `makepad` JIT binary (Relax + makepad run) built for speed on the machine that runs it.
+# Output goes to target/host/ (or target/<triple>/host/), never over target/release: release stays the
+# distributable build and the build every gate, A/B and timing series uses.
+# local/agent_state/relax-campaign/build-host.sh adds -Ctarget-cpu=native and the PGO profile.
+[profile.host]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+incremental = false
 
 [profile.small]
 inherits = "release"

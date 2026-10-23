@@ -14,13 +14,42 @@ mod boot_probe;
 pub use relax_boot::Environment as BootEnvironment;
 
 /// The `makepad` binary's additions to the runner.
+/// Before anything else runs: the kernel store, and the host providers `makepad inspect
+/// file=<x.mkcap>` needs in this process too (frame captures replay here).
+fn init() {
+    install_kernel_store();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        relax_compiler::inspect::register_host_inspect("cap", makepad_hal::inspect::dispatch);
+        relax_compiler::inspect::register_host_commands(makepad_hal::framecap::COMMANDS);
+    }
+}
+
 pub static HOST: relax_runner::Host = relax_runner::Host {
     provenance: env!("MAKEPAD_RUN_PROVENANCE"),
-    init: install_kernel_store,
+    init: init,
     provide: provided,
     // interactive visual iteration: a bounded compile-ahead of what the UI is about to need
     ahead: relax_compiler::options::AheadLevel::Balanced,
+    default_launch: Some(checkout_runner),
 };
+
+/// `makepad` with no arguments and no `runner` launch record (an installation's entry script
+/// writes one): the runner app of the checkout this binary was built from, when it has one
+/// (apps/commercial/runner), run from that checkout like `makepad run makepad-runner` there.
+fn checkout_runner() -> Option<relax_runner::launch::Launch> {
+    let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().ok()?;
+    if !checkout.join("apps/commercial/runner/Cargo.toml").is_file() {
+        return None;
+    }
+    Some(relax_runner::launch::Launch {
+        id: "runner".to_string(),
+        title: "Makepad".to_string(),
+        cwd: Some(checkout),
+        env: Vec::new(),
+        args: vec!["run".to_string(), "--quiet".to_string(), "makepad-runner".to_string()],
+    })
+}
 
 /// The Android shell forwards its HAL safe area (logical dp), appearance and
 /// accessibility snapshot here, also before session 0 opens. Desktop uses zero
@@ -126,7 +155,7 @@ fn provided() {
                     }
                 }
                 makepad_relax_api::HANDLE => {
-                    types.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.drop));
+                    types.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.drop, e.offsets));
                 }
                 makepad_relax_api::PLAIN => {
                     layouts.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.offsets));
@@ -141,6 +170,11 @@ fn provided() {
     relax_compiler::inspect::set_vm_provider(makepad_script::inspect_registry::summaries);
     relax_compiler::inspect::set_script_stack_provider(makepad_script::inspect_registry::script_stack);
     makepad_script::inspect_registry::set_error_hook(relax_compiler::inspect::script_error_event);
+    // Splash VM queries (src, vm, verbs, script errors): answered on the VM's own thread
+    for (name, _, _) in makepad_script::inspect_query::COMMANDS {
+        relax_compiler::inspect::register_host_inspect(name, script_query);
+    }
+    relax_compiler::inspect::register_host_commands(makepad_script::inspect_query::COMMANDS);
     relax_compiler::run::set_main_host(relax_compiler::run::MainHost {
         domain_zero: cfg!(target_os = "android"),
         run: hal_run::run,
@@ -148,4 +182,21 @@ fn provided() {
         start: hal_run::start,
         relaunch: hal_run::relaunch,
     });
+}
+
+/// makepad inspect's Splash VM commands (makepad_script::inspect_query).
+fn script_query(req: &relax_compiler::inspect::Req, out: &mut relax_compiler::inspect::Out) -> bool {
+    let mut words = vec![req.cmd.clone()];
+    words.extend(req.pos.iter().cloned());
+    let Some(lines) = makepad_script::inspect_query::query(&words, &req.kv) else { return false };
+    for l in lines {
+        if let Some(e) = l.strip_prefix("{\"err\":") {
+            let msg = e.strip_suffix('}').unwrap_or(e);
+            let msg = msg.strip_prefix('"').and_then(|m| m.strip_suffix('"')).unwrap_or(msg);
+            out.err(&msg.replace("\\\"", "\"").replace("\\\\", "\\"));
+        } else {
+            out.line(&l);
+        }
+    }
+    true
 }

@@ -269,9 +269,11 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
     let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| mine.iter().any(|p| e.starts_with(p.as_str()))).cloned().collect();
     u.prog.errors.truncate(e0);
     u.prog.errors.extend(errs.iter().cloned());
-    // imports of the module that did not resolve
-    for im in u.prog.imports.iter().skip(i0) {
-        if !im.done {
+    // imports of the module that did not resolve (a macro import stays open by design: macros
+    // resolve by name at the call)
+    for i in u.prog.open_reportable_imports(i0) {
+        let im = &u.prog.imports[i];
+        {
             let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
             errs.push(format!("{}:{}:{}: unresolved import -- name a crate the module depends on", u.prog.file_paths[im.file as usize], l, c));
         }
@@ -1006,7 +1008,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
         ms.push(Module { name: name.clone(), krate: u32::MAX, file: 0, path: shown.clone(), defs: Vec::new(), gen: 0, alive: false, arena: None, wrapper: None, extra_exports: Vec::new(), skipped: Vec::new() });
         ms.len() - 1
     };
-    let r = crate::owner::call(crate::owner::program_class(), || {
+    let r = crate::owner::call(crate::owner::Class::Program, || {
         let r = if trusted {
             unsafe { load(up, &name, &path, &deps, false) }.map(|(k, f, d)| (k, f, d, None, None, Vec::new()))
         } else {
@@ -1046,7 +1048,7 @@ pub extern "C" fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *
         }
     };
     let up = jit::current_unit();
-    let r = crate::owner::call(crate::owner::program_class(), || {
+    let r = crate::owner::call(crate::owner::Class::Program, || {
         let ready = unsafe { ensure_export(up, idx, m, &name) };
         let u = unsafe { &mut *up };
         ready.and_then(|_| export(u, m, &name)).and_then(|(d, t)| {
@@ -1116,7 +1118,7 @@ pub extern "C" fn __relax_module_unload(h: u64) {
         }
     };
     let up = jit::current_unit();
-    crate::owner::call(crate::owner::program_class(), || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let u = unsafe { &mut *up };
         defs.extend((0..u.prog.defs.len()).filter(|&i| u.prog.defs[i].krate == module_crate).map(|i| DefId(i as u32)));
         defs.sort_unstable_by_key(|d| d.0);

@@ -17,9 +17,9 @@
 
 use crate::{
     cx::Cx,
-    draw_list::DrawListId,
+    draw_list::{CxDrawItem, DrawListId, DrawListUniforms},
     draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
-    draw_shader::{CxDrawShaderCode, DrawShaderBlendOp, DrawShaderColorFormat},
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderBlendOp, DrawShaderColorFormat},
     geometry::GeometryId,
     gpu_ledger::GpuOrigin,
     makepad_live_id::*,
@@ -30,7 +30,7 @@ use crate::{
 use makepad_hal::{
     format, pass_load as load, pipeline_binding as binding, pipeline_blend, usage, Attr, CmdWriter, Draw, FrameMeta, HalInfo, Id, Inst, Pass, PipelineDesc, Slice, StrId,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 struct TexRec {
     id: Id,
@@ -136,6 +136,8 @@ pub(crate) struct FrameBuilder {
     pub(crate) window_frames: Vec<Id>,
     window_submitted: HashMap<Id, u64>,
     window_completed: HashMap<Id, u64>,
+    /// Window frames (target, serial) handed to the HAL to present and not done yet.
+    window_presenting: HashSet<(Id, u64)>,
     /// Packet serial -> (window/repaint group, pass name, closes the presented frame).
     pub(crate) timings: HashMap<u64, (u64, String, bool)>,
     pub(crate) info: HalInfo,
@@ -164,6 +166,9 @@ pub(crate) struct FrameBuilder {
     tex_ids: Vec<Id>,
     /// the owner (string id) of the draw list being walked
     owner: StrId,
+    /// the pass being built: its origin (logical px) and dpi, mapping instance rects to target
+    /// pixels (`Draw::bounds`)
+    pass_px: (f32, f32, f32),
     warned: std::collections::HashSet<&'static str>,
     /// textures already reported as sampled by a pass that draws into them
     feedback_warned: std::collections::HashSet<usize>,
@@ -171,6 +176,40 @@ pub(crate) struct FrameBuilder {
     /// pipeline the HAL is still compiling, or a sample of an unfinished picture, clears it.
     pass_whole: bool,
     pub(crate) stats: BuildStats,
+}
+
+/// The target pixels a 2D draw's instances cover (x, y, w, h): the union of their clipped rects
+/// (`rect_pos` / `rect_size` / `draw_clip`), shifted by the list's scroll. NaN (unknown) for a
+/// shader without a rect, a list with a view transform (3D), or no instance data at hand.
+fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDrawItem, slots: usize, instances: usize, (ox, oy, dpi): (f32, f32, f32)) -> [f32; 4] {
+    let unknown = [f32::NAN; 4];
+    let (Some(rp), Some(rs)) = (m.rect_pos, m.rect_size) else { return unknown };
+    if list.view_transform != crate::makepad_math::Mat4f::identity() || slots == 0 {
+        return unknown;
+    }
+    let Some(data) = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()) else { return unknown };
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for inst in data.chunks_exact(slots).take(instances) {
+        let (mut a, mut b) = (inst[rp], inst[rp + 1]);
+        let (mut c, mut d) = (a + inst[rs], b + inst[rs + 1]);
+        if let Some(k) = m.draw_clip {
+            a = a.max(inst[k]);
+            b = b.max(inst[k + 1]);
+            c = c.min(inst[k + 2]);
+            d = d.min(inst[k + 3]);
+        }
+        if c > a && d > b {
+            x0 = x0.min(a);
+            y0 = y0.min(b);
+            x1 = x1.max(c);
+            y1 = y1.max(d);
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return unknown;
+    }
+    let (sx, sy) = (list.view_shift.x - ox, list.view_shift.y - oy);
+    [(x0 + sx) * dpi, (y0 + sy) * dpi, (x1 - x0) * dpi, (y1 - y0) * dpi]
 }
 
 impl FrameBuilder {
@@ -195,16 +234,19 @@ impl FrameBuilder {
         self.window_completed.get(&window).copied().unwrap_or(0)
     }
 
-    pub(crate) fn frame_done(&mut self, target: Id, serial: u64) {
+    /// Whether `serial` was a window frame submitted to `target` for presenting (a frame on the glass).
+    pub(crate) fn frame_done(&mut self, target: Id, serial: u64) -> bool {
         // Texture targets may reuse a window's numeric id; only a submitted window frame counts.
         if self.window_submitted.get(&target) == Some(&serial) {
             self.window_completed.insert(target, serial);
         }
+        self.window_presenting.remove(&(target, serial))
     }
 
     pub(crate) fn window_closed(&mut self, window: Id) {
         self.window_submitted.remove(&window);
         self.window_completed.remove(&window);
+        self.window_presenting.retain(|(target, _)| *target != window);
     }
 
     /// Logs a gap in the HAL's command set once per reason.
@@ -375,6 +417,7 @@ impl FrameBuilder {
         for (window, serial) in &self.window_submitted {
             self.window_completed.insert(*window, *serial);
         }
+        self.window_presenting.clear();
         inst
     }
 
@@ -793,10 +836,10 @@ impl Cx {
         if fb.geo.get(&slot).is_some_and(|r| r.gen != gen) {
             fb.geometry_destroy(slot);
         }
+        let attr = fb.attr(&self.geometries[gid].origin, 0);
         let rec = fb.geo.entry(slot).or_insert(GeoRec { gen, vb: Id::NONE, ib: Id::NONE, vb_bytes: 0, ib_bytes: 0 });
-        let g = &mut self.geometries[gid];
-        let attr = Attr::default();
         let (mut vb, mut ib, mut vb_bytes, mut ib_bytes) = (rec.vb, rec.ib, rec.vb_bytes, rec.ib_bytes);
+        let g = &mut self.geometries[gid];
         if g.dirty_vertices || vb.is_none() {
             let bytes = g.vertices.as_bytes();
             if bytes.is_empty() {
@@ -988,6 +1031,9 @@ impl Cx {
             }
         }
         self.fb_sweep(fb);
+        if !built.is_empty() {
+            self.draw_owners_frame_done();
+        }
         built
     }
 
@@ -1126,6 +1172,7 @@ impl Cx {
             self.passes[pass_id].paint_dirty = false;
             return None;
         }
+        fb.pass_px = (pass_rect.pos.x as f32, pass_rect.pos.y as f32, dpi as f32);
         // A window's target is its surface: exactly round(inner size * dpi), the size the HAL made it
         // (the pass rect is ceiled in points, which at a fractional scale is up to 2 px more than the surface).
         let size = match window {
@@ -1203,7 +1250,10 @@ impl Cx {
         pass.name = fb.intern(&self.passes[pass_id].debug_name);
         pass.owner = self.draw_lists[list_id].owner.map_or(0, |o| fb.intern(o));
 
-        fb.w.frame_begin(serial, FrameMeta { build_start_ns: build_start, input_ns, ..Default::default() });
+        fb.w.frame_begin(serial, FrameMeta { build_start_ns: build_start, input_ns, phases: self.hal.beat_phases, ..Default::default() });
+        if let Some(o) = self.draw_owners.as_mut().filter(|_| !picking) {
+            o.begin_packet(serial);
+        }
         fb.w.pass(pass);
         let sploded = self.passes[pass_id].sploded.is_some();
         let step = self.passes[pass_id].zbias_step;
@@ -1219,6 +1269,9 @@ impl Cx {
         fb.w.frame_set_build_end(end);
         fb.stats.build_ns += end.saturating_sub(build_start);
         fb.w.frame_end(target, kind | if picking { makepad_hal::target::PICK } else { 0 });
+        if let Some(o) = self.draw_owners.as_mut() {
+            o.end_packet();
+        }
         if !picking {
             self.readback_pass_submitted(pass_id, serial);
             self.hal_texture_readbacks(fb, Some(pass_id));
@@ -1235,6 +1288,9 @@ impl Cx {
             }
             fb.window_frames.push(target);
             fb.window_submitted.insert(target, serial);
+            if !picking {
+                fb.window_presenting.insert((target, serial));
+            }
             if let (Some(window), Some((index, _))) = (window, hosted_target) {
                 self.hal.hosted.as_mut().unwrap().submitted(window, index, serial, [tw as u32, th as u32]);
             }
@@ -1554,7 +1610,7 @@ impl Cx {
             list: list_id.index() as u32,
             item: item_id as u32,
             list_name,
-            bounds: [f32::NAN; 4],
+            bounds: instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px),
         };
         if dump || sh.mapping.flags.debug_draw {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);
@@ -1562,6 +1618,9 @@ impl Cx {
         }
         if !fb.draw_with(pipe_index) {
             return;
+        }
+        if let Some(o) = self.draw_owners.as_mut() {
+            o.draw(list_id.index(), item_id, slots, instances);
         }
         fb.w.draw(draw);
         fb.stats.draws += 1;
